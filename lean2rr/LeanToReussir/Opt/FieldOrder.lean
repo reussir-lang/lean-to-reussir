@@ -6,7 +6,8 @@ import LeanToReussir.PassConfig
 
 Each constructor's relevant fields are placed in its record in decreasing
 alignment, ties in declaration order (translation plan §5.1), so a record
-has no padding between members. The driver turns Reussir's own member
+has no padding between members. The tuple of a join point's arguments (J2,
+`jpTupleOrder`) uses the same order. The driver turns Reussir's own member
 packing off (`--no-pack-record-members`, the workaround for a Reussir bug fixed
 upstream in Reussir #656),
 so lean2rr's order is the layout; the type translation maps each Lean field

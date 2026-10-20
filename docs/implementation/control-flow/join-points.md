@@ -31,12 +31,28 @@ relative to `lean2rr/LeanToReussir/`. Plan
 - **What:** The structured `let` of a J2 join point with several
   parameters produces a generated `[value]` struct `TupleN` (N a fresh
   number; one struct per list of field types), taken apart
-  afterwards.
+  afterwards. Its fields are the parameters in decreasing alignment, ties
+  in parameter order (`jpTupleOrder`, the record order of `field-order`):
+  a jump builds the tuple in that order, and the join point reads
+  parameter `i` from its field. Example: the join point of `'a' ≤ c && c ≤
+  'z'` in a fold that carries a `Nat` takes `(b : Bool) (n : Nat)`
+  (parameters in the order of their first use, `stableJpParams`); its
+  tuple is `Tuple(Nat, bool)`, not `Tuple(bool, Nat)`.
 - **Why:** A Reussir block yields one value; a value struct allocates
-  nothing.
-- **Where:** `LowerBase.lean`: `tupleType`; `Lower/Code.lean`:
-  `lowerCode`.
-- **Remove only if:** never.
+  nothing. The order: with the driver's `--no-pack-record-members`,
+  Reussir lays a member that the next member's alignment pads out as a
+  wider integer (a `bool` before a `Nat`: an `i64`) and stores only the
+  field's own type in it (`store i1`). LLVM then cannot take the struct
+  apart: the `bool` goes through a stack slot, and conditions on it are no
+  longer folded (Strings' `charStats` loop with `Tuple(bool, Nat)`: the
+  whole program ran 3.0% more instructions; issue 17 of `reussir-bugs/`).
+  Without padding between members there is no widened member.
+- **Where:** `LowerBase.lean`: `tupleType`, `jpTupleOrder`;
+  `Lower/Code.lean`: `lowerCode` (`.jp`, `.jmp`); `Lower/Ctx.lean`:
+  `JumpAction.yield`.
+- **Remove only if:** never (the tuple); the order only if Reussir no
+  longer widens a padded member (issue 17) or the driver packs record
+  members again.
 
 ### Join points are sunk before the choice (`jp-sink`)
 

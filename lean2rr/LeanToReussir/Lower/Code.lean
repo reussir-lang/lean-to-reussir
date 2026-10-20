@@ -193,12 +193,12 @@ mutual
           ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, t) }
         let b ← lowerCode ctx' outlined retTy body
         return { b with lets := lets ++ b.lets }
-      | some (.yield tys) =>
+      | some (.yield tys order) =>
         let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
         match vals.size with
         | 0 => return .ofExpr .unitVal
         | 1 => return .ofExpr vals[0]!
-        | _ => return .ofExpr (.ctor (← tupleType tys) none vals)
+        | _ => return .ofExpr (.ctor (← tupleType (order.map (tys[·]!))) none (order.map (vals[·]!)))
       | some (.call fn captured) =>
         let tys := ctx.jpParams.getD j #[]
         let vals ← (taken.zip tys).mapM fun (a, t) => lowerArg ctx a t
@@ -256,19 +256,23 @@ mutual
           lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.inline d.params d.value), jpSingle }
             outlined retTy k
         else
-          -- J2: the scope computes the join point's arguments.
+          -- J2: the scope computes the join point's arguments, two or more
+          -- as a tuple in the order of `jpTupleOrder`.
+          let order ← jpTupleOrder ptys
+          let mut posOf := Array.replicate ptys.size 0
+          for h : k in [:order.size] do posOf := posOf.set! order[k] k
           let resTy ← match ptys.size with
             | 0 => pure RR.Ty.unit
             | 1 => pure ptys[0]!
-            | _ => pure (RR.Ty.named (← tupleType ptys))
-          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys) } outlined resTy k
+            | _ => pure (RR.Ty.named (← tupleType (order.map (ptys[·]!))))
+          let scope ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.yield ptys order) } outlined resTy k
           let r ← fresh "jv"
           let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[(r, some resTy, .block scope)]
           let mut ctx' := { ctx with vars := unitVars ctx.vars }
           for h : i in [:params.size] do
             let p := params[i]
             let x ← fresh "y"
-            let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) i
+            let e := if ptys.size == 1 then RR.Expr.var r else .field (.var r) posOf[i]!
             lets := lets.push (x, some ptys[i]!, e)
             ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId (x, ptys[i]!) }
           let b ← lowerCode ctx' outlined retTy d.value

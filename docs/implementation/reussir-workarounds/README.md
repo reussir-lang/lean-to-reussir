@@ -4,7 +4,7 @@ Everything lean2rr does because of a Reussir issue: a bug, a cost or a
 limitation. The open issues themselves (repro, cause, patch) are
 documented one file each in [`reussir-bugs/`](../../../reussir-bugs/README.md), whose
 column *Kind* says what each is: only a *bug* is erroneous behaviour;
-costs, the missed optimizations (1, 6, 8), the missing features (2, 7,
+costs, the missed optimizations (1, 6, 8, 17), the missing features (2, 7,
 9, 10) and the dependency issue (15, in mimalloc) have correct
 output, and their patches are optimizations or features, not fixes
 ([kinds](../../../reussir-bugs/README.md#kinds)). This directory says
@@ -73,6 +73,7 @@ either way.
 | [9](../../../reussir-bugs/09-drain-end-hook.md) | missing feature | none since switch step 6 ([correctness-bugs.md](correctness-bugs.md#the-drain-end-hook-local-patch-09-a)) | 09-a | n/a: `scripts/l2r.py` requires it |
 | [10](../../../reussir-bugs/10-tagged-ffi-objects.md) | missing feature | none: `Nat` and `Int` are tagged handles ([nat-int.md](../representations/nat-int.md)) | 10-a | n/a: the prelude declares `Nat` and `Int` `tagged` |
 | [15](../../../reussir-bugs/15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7, so free arena memory goes back to the OS at once ([startup/entry.md](../startup/entry.md#free-arena-memory-goes-back-to-the-os-at-once-mimalloc-v218-to-v227)) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | n/a: with a fixed mimalloc the workaround turns itself off; delete it then |
+| [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | a join point's tuple (J2) has its fields in decreasing alignment, as records have (`jpTupleOrder`, `field-order`; [join-points.md](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple)) | none | n/a (no patch) |
 
 Issues 11 to 14 and 16 (a cost of 02-b's stack; three bugs of Reussir's
 runtime and hand-written MLIR; rrc's driver stack under an address-space

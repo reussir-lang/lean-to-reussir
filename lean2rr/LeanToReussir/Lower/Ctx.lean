@@ -19,8 +19,9 @@ inductive JumpAction where
   /-- J1: the join point has a single jump; its body is inlined there. -/
   | inline (params : Array (Param .pure)) (body : Code .pure)
   /-- J2: jumps produce the join point's arguments as the value of the
-  enclosing structured `let`. -/
-  | yield (tys : Array RR.Ty)
+  enclosing structured `let`: with two or more, a tuple whose field `k` is
+  the argument `order[k]` (`jpTupleOrder`). -/
+  | yield (tys : Array RR.Ty) (order : Array Nat)
   /-- J3: jumps call the outlined function with the captured variables
   followed by the arguments. -/
   | call (fn : String) (captured : Array String)

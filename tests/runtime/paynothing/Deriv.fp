@@ -1,7 +1,7 @@
 # Pay-nothing baseline of Deriv (tests/classic/Deriv.lean), arguments '8'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 464348
-bytes 10505072
+allocs 464346
+bytes 10505024
 native-allocs 553749
 native-bytes 12062030
 items 162
@@ -86,10 +86,10 @@ item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
-item l2r_unbox_rest_«T_Expr_#~c0934c0ffd7f» 6412636a2a99
-item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» 22bb5ebb5a3c
-item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 1fa2691f57fa
-item l2r_unbox_rest_«T_Option_#~b05d6063b715» 96cf78641567
+item l2r_unbox_rest_«T_Expr_#~c0934c0ffd7f» 651441939537
+item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
+item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 70b5013cb6e9
+item l2r_unbox_rest_«T_Option_#~b05d6063b715» f7fe3f06511b
 item l2r_zero_# 272126066dab
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 64b17cf5704f

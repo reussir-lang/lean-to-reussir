@@ -1,0 +1,30 @@
+// Issue 17: with --no-pack-record-members, a [value] struct member that the
+// next member's alignment pads out is widened to an integer over the
+// padding (a bool before a u64: an i64 member), but a field store writes
+// only the field's own type (store i1). The whole-struct load then reads
+// 63 bits that no store wrote, so LLVM's SROA cannot take the struct apart:
+// f_bn keeps a stack slot for the bool (alloca, store i1, load i8) and the
+// two tests are not folded; f_nb (bool last, explicit padding after it)
+// folds to four instructions. Build:
+//   rrc bug17-padded-member-widening.rr -o out.ll --emit llvm-ir \
+//       -O aggressive --no-pack-record-members
+struct [value] TBN(bool, u64)
+struct [value] TNB(u64, bool)
+
+pub fn f_bn(c : u32, n : u64) -> u64 {
+    let jv : TBN = {
+        if c > 96 { TBN{c < 123, n} } else { TBN{false, n} }
+    };
+    let b : bool = jv.0;
+    let m : u64 = jv.1;
+    if b { m + 1 } else { m }
+}
+
+pub fn f_nb(c : u32, n : u64) -> u64 {
+    let jv : TNB = {
+        if c > 96 { TNB{n, c < 123} } else { TNB{n, false} }
+    };
+    let m : u64 = jv.0;
+    let b : bool = jv.1;
+    if b { m + 1 } else { m }
+}

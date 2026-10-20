@@ -4,7 +4,7 @@ allocs 50276
 bytes 2214288
 native-allocs 64901
 native-bytes 2546035
-items 266
+items 265
 functions 204
 conversion-fns 0
 conversion-sites 0
@@ -35,29 +35,28 @@ item T_Std_Slice_Internal_SubarrayData_# 761b7c7dd120
 item T_String_Slice_# 74f079416627
 item T_T_# f2d5687ae37e
 item T_U_# 15e694c48c6b
-item Tuple# 0f89ed8754b6
+item Tuple# 18ed7f68edb5
 item Tuple# 1bec48b38b83
 item Tuple# 21c01db35095
+item Tuple# 29872493ec47
 item Tuple# 2c0ad728dbb9
+item Tuple# 34be5b7965fa
+item Tuple# 44a714669d99
 item Tuple# 4873bfc698da
 item Tuple# 4eab69a3cbe8
-item Tuple# 53624feee3df
 item Tuple# 539dc5810481
-item Tuple# 63b839cead06
 item Tuple# 6f19b44cb476
-item Tuple# 73d4c70c23a3
 item Tuple# 7d1ae1a722a1
+item Tuple# 8fc907e9a888
 item Tuple# 914aabebccda
 item Tuple# 91b0405c4172
 item Tuple# a253a5239e06
 item Tuple# a304cd1087de
 item Tuple# b01ecbfe1bf4
-item Tuple# b49ca365c26f
 item Tuple# c3785e5640de
 item Tuple# c4790f2e2b1e
-item Tuple# c48a7f30d386
 item Tuple# d4eee5540d99
-item Tuple# dbde042dde78
+item Tuple# f65785b93149
 item Tuple# fd4a01cee92a
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
@@ -100,7 +99,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 14018a1011a5
+item l2r_main_body ea4c6bbd1c86
 item l2r_main_on_thread 4f4adafe091e
 item l2r_run_main d750382a583f
 item l2r_run_pending_tasks 39049c3ac015
@@ -114,11 +113,11 @@ item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
-item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» 22bb5ebb5a3c
-item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 1fa2691f57fa
-item l2r_unbox_rest_«T_List_#~aeda86a38d96» d9dbcd15424d
-item l2r_unbox_rest_«T_Prod_#~7e6da67e941d» be3b09de0163
-item l2r_unbox_rest_«T_T_#~88c57bff0e39» d25387eaa65a
+item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
+item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 70b5013cb6e9
+item l2r_unbox_rest_«T_List_#~aeda86a38d96» ea800b6cf729
+item l2r_unbox_rest_«T_Prod_#~7e6da67e941d» 0ccf83ea3435
+item l2r_unbox_rest_«T_T_#~88c57bff0e39» 681e2378fef3
 item l2r_zero_# 098354a8ae5a
 item l2r_zero_# 272126066dab
 item l2r_zero_# 4621a50aa2da
@@ -238,7 +237,7 @@ item l_balanceR___l2r_#_ 21c3f9ab9317
 item l_big___l2r_#_ 02e7ea360cae
 item l_instInhabitedT___l2r_#_ 919cf2f1fce1
 item l_instInhabitedT___l2r_#__init 3d349762b8ec
-item l_main___l2r_#_ b162ea091fcd
+item l_main___l2r_#_ 588cd29bf192
 item l_main___l2r_#____closed__0 b4520b0b59ff
 item l_main___l2r_#____closed__0_init fd656884f724
 item l_main___l2r_#____closed__1 93452f96e265

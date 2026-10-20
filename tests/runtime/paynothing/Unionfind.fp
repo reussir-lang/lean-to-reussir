@@ -2,8 +2,8 @@
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 175036
 bytes 6301408
-native-allocs 2956306
-native-bytes 61730385
+native-allocs 2956318
+native-bytes 61730561
 items 165
 functions 123
 conversion-fns 0
@@ -31,15 +31,15 @@ item T_StdGen_# 066265cc92ad
 item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item T_nodeData_# 88ed8d1098d1
+item Tuple# 0ab47e5cb421
 item Tuple# 125ac5ac7938
 item Tuple# 1bec48b38b83
 item Tuple# 380acfa4c4fa
-item Tuple# 3ed520d2c9a9
-item Tuple# 472d31466d81
+item Tuple# 46b6fa8dc68a
 item Tuple# 8eb2a268a8c6
+item Tuple# 9385adc1151a
 item Tuple# c5a2b743be01
 item Tuple# d4eee5540d99
-item Tuple# d72cfea8d060
 item Tuple# d895e58c720b
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
@@ -74,7 +74,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 6ababb33ed75
+item l2r_main_body a6439c0da7a7
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
@@ -90,10 +90,10 @@ item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
-item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» 22bb5ebb5a3c
-item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 1fa2691f57fa
-item l2r_unbox_rest_«T_Option_#~b05d6063b715» 96cf78641567
-item l2r_unbox_rest_«T_nodeData_#~00dac59e9030» 80b5b8bed5bc
+item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
+item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 70b5013cb6e9
+item l2r_unbox_rest_«T_Option_#~b05d6063b715» f7fe3f06511b
+item l2r_unbox_rest_«T_nodeData_#~00dac59e9030» fedb70b49c4c
 item l2r_zero_# 272126066dab
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 64b17cf5704f
@@ -155,25 +155,25 @@ item l_findEntryAux___l2r_#____closed__1 89b1810586ad
 item l_findEntryAux___l2r_#____closed__1_init 7b7a071314b1
 item l_findEntryAux___l2r_#____closed__3 bb2b973f0d21
 item l_findEntryAux___l2r_#____closed__3_init 2a9984909e9e
-item l_findEntryAux___l2r_#____l2r__flat bd5d51f5a434
-item l_findEntry___l2r_#____l2r__flat 9514cca21ac1
-item l_find___l2r_#____l2r__flat b07fb3079641
-item l_main___l2r_#_ f9c6a0040b91
+item l_findEntryAux___l2r_#____l2r__flat 70d6ad58d0aa
+item l_findEntry___l2r_#____l2r__flat 11f0549a92e1
+item l_find___l2r_#____l2r__flat 3648b2615880
+item l_main___l2r_#_ 2e24cca0a963
 item l_main___l2r_#____closed__0 6b532880bb0f
 item l_main___l2r_#____closed__0_init b47dc1074bf4
-item l_mergePackAux___l2r_#____l2r__flat 10fa47ec3a18
-item l_mergePack___l2r_#____l2r__flat e80f32f41f43
+item l_mergePackAux___l2r_#____l2r__flat 525d2693c2a6
+item l_mergePack___l2r_#____l2r__flat 4b40d52e8ff9
 item l_mkNodes___l2r_#____closed__0 b7b7a775bb7a
 item l_mkNodes___l2r_#____closed__0_init f36994d3f10c
-item l_mkNodes___l2r_#____l2r__flat a3dd3c68b4bb
+item l_mkNodes___l2r_#____l2r__flat 8fdd6a6e762d
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat b08dfeda83c3
 item l_mk___l2r_#____l2r__flat a337340d9ff6
-item l_numEqsAux___l2r_#____l2r__flat 97bdd1dac414
-item l_numEqs___l2r_#____l2r__flat 0aecea73fc70
+item l_numEqsAux___l2r_#____l2r__flat 1264b6b42c1a
+item l_numEqs___l2r_#____l2r__flat 1f36b6332248
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item l_test___l2r_#____closed__1 09b35add0804
 item l_test___l2r_#____closed__1_init eb529a2375d1
-item l_test___l2r_#____l2r__flat b98db8b61e0d
-item l_union___l2r_#____l2r__flat 3911f85ab038
+item l_test___l2r_#____l2r__flat ef37767d2196
+item l_union___l2r_#____l2r__flat 4aeb143cbdb9
 item lean_main_entry cfcc2a3788db

@@ -2,8 +2,8 @@
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 109621
 bytes 2284280
-native-allocs 229952
-native-bytes 4374339
+native-allocs 229964
+native-bytes 4374515
 items 193
 functions 135
 conversion-fns 0
@@ -40,22 +40,22 @@ item T_String_Slice_# 74f079416627
 item T_Tally_# 323356c6c92f
 item T_W_# e9ab9b769a5e
 item T_oat_Model_UnpackedFloat_ExtendedMantissa_# 579cbb1db395
+item Tuple# 14cd12a91513
 item Tuple# 1bec48b38b83
-item Tuple# 26494edbc991
-item Tuple# 2ead774b3ae7
 item Tuple# 380acfa4c4fa
 item Tuple# 413795818de2
 item Tuple# 421dc49b8b53
-item Tuple# 50a175ccbeef
+item Tuple# 4b3eeb9824b1
+item Tuple# 566ce1576869
+item Tuple# 5ba4fcb55c39
 item Tuple# 67ef8e6d8cee
-item Tuple# 9db495484c99
-item Tuple# b5d8dca907e5
-item Tuple# c099f6db7c53
+item Tuple# 921cbfa2ca97
 item Tuple# cb1b0c98b410
 item Tuple# d4eee5540d99
 item Tuple# d895e58c720b
-item Tuple# ef2e9972a76a
 item Tuple# f3eb70457158
+item Tuple# f6392972497e
+item Tuple# f8b863d56368
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 1361951c2d6f
@@ -95,7 +95,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» ac9bbf5bb595
-item l2r_main_body 1337ca1fd1c7
+item l2r_main_body 6574264d06d7
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
@@ -110,9 +110,9 @@ item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
-item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» 22bb5ebb5a3c
-item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 1fa2691f57fa
-item l2r_unbox_rest_«T_Option_#~b05d6063b715» 96cf78641567
+item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
+item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» 70b5013cb6e9
+item l2r_unbox_rest_«T_Option_#~b05d6063b715» f7fe3f06511b
 item l2r_zero_# 098354a8ae5a
 item l2r_zero_# 272126066dab
 item l2r_zero_# 3cb3d04ef333
@@ -189,9 +189,9 @@ item l_addParenHeuristic___l2r_#____closed__0 1107ed4a2e22
 item l_addParenHeuristic___l2r_#____closed__0_init 5d200319dac5
 item l_addParenHeuristic___l2r_#____lam__0 bd87390da478
 item l_loop___l2r_#____closed__4 3534f69ed940
-item l_loop___l2r_#____l2r__flat ccbc4b5e3fdf
-item l_loop___l2r_#____l2r__flat_sm d683ebef0d32
-item l_main___l2r_#_ dfe53ba5d076
+item l_loop___l2r_#____l2r__flat a7fc60f5df65
+item l_loop___l2r_#____l2r__flat_sm f8cd41e0bd19
+item l_main___l2r_#_ 056746be3b2a
 item l_main___l2r_#____closed__0 271aabf60790
 item l_main___l2r_#____closed__0_init 6e4078aa0b4d
 item l_main___l2r_#____closed__1 152d197b6926

@@ -180,8 +180,9 @@ Other rules:
   box. `Option Nat` and `Option α` are one type, and a value goes from one
   to the other as it is.
 - **Field order.** Fields are sorted by decreasing alignment, so records
-  have no padding (pass `field-order`). Reussir's own member packing is
-  off.
+  have no padding (pass `field-order`). The tuple that carries a join
+  point's arguments is sorted the same way. Reussir's own member packing
+  is off.
 - **Recursive and mutual types** refer to each other's types.
 - **Computed fields** (`Lean.Name`): the implementation type `T._impl`, as
   in Lean's runtime.
@@ -230,7 +231,7 @@ with examples, and what it costs.
   target. A wrong word is a panic, never a wrong read. At a program type,
   the test for a pointer of the target's number and the take are in line;
   the rest (an immediate, another number) is a call of one function per
-  target type, `l2r_unbox_rest_T`. With the optional pass `conv-liveness`,
+  target type, `l2r_unbox_rest_T`, which rrc puts back in line. With the optional pass `conv-liveness`,
   an unboxing function has arms only for the types that live code boxes.
 - In a program that casts, a box can hold any word. The unboxing then
   reads an immediate as native Lean reads that word: a `Bool` is its low

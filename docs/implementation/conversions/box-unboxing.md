@@ -102,9 +102,10 @@ to `lean2rr/LeanToReussir/`. Plan
   immediates read as natively, in the generated cast function itself,
   `genUnbox`) and `l2r_unbox_rest_T_c` (in a program that casts: anything
   else goes to `l2r_unbox_T`). Its body is the in-line match it replaces,
-  minus the pointer test. The functions are kept out of rrc's MLIR inliner
-  (`#[transform_anchor]`, `anchoredFns`); LLVM inlines the small ones (an
-  enumeration's immediates). A round trip (unboxed and boxed again at once)
+  minus the pointer test. The functions are not anchored
+  (`anchoredFns`): rrc's MLIR inliner puts each one back at its sites, so
+  the `.rr` text is smaller and the compiled code has the whole test in
+  line, the pointer case first. A round trip (unboxed and boxed again at once)
   is still folded into the box (`boxUnboxed?`: the block starts with the
   word). The field of a `[value]` struct over a program type takes the
   same form, except in a program that casts, where its fallback is the
@@ -126,10 +127,19 @@ to `lean2rr/LeanToReussir/`. Plan
   lean-zip −8 %, lean-regex −5 %. rrc's peak memory −1 to −2 % (cedar
   2.37 → 2.34 GB, lean-zip 0.75 → 0.73 GB); its time changed within the
   noise of a loaded machine (lean-zip 36 → 32 s, cedar 100 → 111 s with a
-  warm texture cache).
+  warm texture cache). Not anchored: the first version kept the functions
+  out of rrc's inliner (`#[transform_anchor]`), and LLVM left them as
+  calls (MonadicInterp's machine code kept 40 calls, 11 of them for
+  `Signal`, whose `brk` and `cont` are immediates, and 3 for `Option`),
+  which changed the register allocation of the functions around them:
+  MonadicInterp's `eval` ran 4 % more instructions, the whole program
+  1.9 % (cachegrind, n = 30000, 22.51 → 22.94 billion). With the functions
+  inlined by rrc it runs 21.95 billion (with the J2 tuple order of
+  `field-order`); with this change alone, E10's kernel is the same machine
+  code as before the outlining. rrc's peak memory is unchanged (cedar
+  2.377 → 2.379 GB, lean-zip 0.859 → 0.860 GB).
 - **Where:** `LowerBase.lean`: `ownUnboxName`, `boxUnboxWith` (`.prog`,
-  `outline`, `slowKey`), `boxUnbox`, `LowerState.ownUnboxFns`;
-  `Lower/Finish.lean`: `anchoredFns`; `runtime/prelude.rr`:
+  `outline`, `slowKey`), `boxUnbox`; `runtime/prelude.rr`:
   `l2r_any_raw_is_num`.
 - **Remove only if:** rrc's cost per line of code drops enough that the
   copies cost nothing.

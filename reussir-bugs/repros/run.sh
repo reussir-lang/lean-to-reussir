@@ -9,7 +9,7 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
-# line here: 1 to 8 and 12. Entries 9 and 10 (missing features) have no
+# line here: 1 to 8, 12 and 17. Entries 9 and 10 (missing features) have no
 # repro: their patches carry their own tests; 11 is a run-time cost of
 # entry 2's stack; 13 needs a 32-bit target, 14 MLIR written by hand, and
 # 15 is shown by lean2rr's runtime test RtArenaPurge. Entry 2's Miri test
@@ -32,7 +32,8 @@
 # lean2rr build (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds
 # the runtime crate leanrt for the checkout once, under runtime/leanrt/target/.
 # Entries 3 and 4 compare the sizes of two outputs (--emit mlir-llvm,
-# --emit mlir); entry 6 counts the calls left in its LLVM IR; entry 8
+# --emit mlir); entries 6 and 17 read their LLVM IR (the calls left, the
+# stack slots left); entry 8
 # counts the cells its program allocates (Reussir's allocation entry points
 # wrapped at link time); entry 12 is a Rust test of the checkout's runtime
 # sources, compiled with RUSTC. Everything takes seconds, except entry 2's
@@ -320,8 +321,23 @@ bug12() {
         say_line REPRODUCES 12 "Nullable::as_ref: $fails of 2 tests fail (the reference points to a dead copy)"
     else say_line OTHER 12 "$(tail -1 "$d/out")"; fi
 }
+bug17() {
+    # The LLVM IR of two functions that pass a two-field [value] struct out
+    # of an `if`: f_bn with a bool before a u64, f_nb with the bool last.
+    local d=$WORK/out/17 n m
+    mkdir -p "$d"
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug17-padded-member-widening.rr" -o "$d/out.ll" --emit llvm-ir -O aggressive \
+        --no-pack-record-members) > "$d/log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 17 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive --no-pack-record-members"; return; fi
+    n=$(awk '/^define .*@_RC4f_bn\(/{p=1} p && /= alloca/{c++} p && /^}/{exit} END{print c+0}' "$d/out.ll")
+    m=$(awk '/^define .*@_RC4f_nb\(/{p=1} p && /= alloca/{c++} p && /^}/{exit} END{print c+0}' "$d/out.ll")
+    if [ "$m" != 0 ]; then say_line OTHER 17 "f_nb keeps $m stack slots (expected 0)" "-O aggressive --no-pack-record-members"
+    elif [ "$n" -gt 0 ]; then say_line REPRODUCES 17 "f_bn (bool before u64) keeps $n stack slots for its bool; f_nb (bool last) none" "-O aggressive --no-pack-record-members"
+    else say_line FIXED 17 "neither function keeps a stack slot" "-O aggressive --no-pack-record-members"; fi
+}
 
-ALL="01 02 03 04 05 06 07 08 12"
+ALL="01 02 03 04 05 06 07 08 12 17"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

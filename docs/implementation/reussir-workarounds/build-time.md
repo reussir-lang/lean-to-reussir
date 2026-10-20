@@ -52,10 +52,10 @@ lean2rr's files.
   `Box`). Reussir keeps a transform anchor out of its MLIR inliner (there
   are no transform scripts); LLVM still inlines it afterwards where its
   own threshold allows. (The same set, `anchoredFns`, also holds the
-  once-cell computations `<name>_init`, the literal cache's slow path and
-  the ends of unboxings at a program payload type: those are out of line
-  for code size, not for this issue; see `cafAccessor`, `strLitCached`
-  and `boxUnboxWith`.)
+  once-cell computations `<name>_init` and the literal cache's slow path:
+  those are out of line for code size, not for this issue; see
+  `cafAccessor` and `strLitCached`. The ends of unboxings at a program
+  payload type are not anchored, `boxUnboxWith`.)
 - **Why:** These functions call each other through wrapper variants and
   `Box` payloads, and polymorphic recursion through monad transformers
   makes hundreds of representations: an 8-line `StateT` tower used at `IO`

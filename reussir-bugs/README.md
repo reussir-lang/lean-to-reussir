@@ -33,7 +33,7 @@ only in part).
 
 ## Names
 
-- **Entry numbers** run from 1 to 16. The next free number is 17. (Old
+- **Entry numbers** run from 1 to 17. The next free number is 18. (Old
   number 37 was reserved for another track's patch, value records across
   the FFI boundary; that track takes the next free number.)
 - **A patch file** is named `NN-x-slug.patch`. NN is the number of its
@@ -93,6 +93,7 @@ files in the series, or "none", or a parked patch
 | [11](11-drop-run.md) | cost (run time) | a host frees one cell through 02-b's stack with a deferral and a drain: three calls, a push and a pop | yes, speed (about 5% of monadic-interp's instructions) | none possible | none (parked: [11-a](patches/parked/11-a-drop-run.patch)) | n/a: upstream has no such stack |
 | [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | not rechecked |
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | still reproduces (checked) |
+| [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (join-point tuples with a `bool` first) | join-point tuples in decreasing alignment (`jpTupleOrder`) | none | found on 7954a367 with the series; not reported |
 | [8](08-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias, never freed) as the donor | no longer | a field put back into a rebuilt node is boxed again | none | still reproduces (checked) |
 | [2](02-native-drop-order.md) | missing feature (partly fixed upstream) | drop glue does not release in native Lean's order and has no stack a host can share | yes: release order of resources; leanrt needs the stack to build | none | [02-a](patches/02-a-release-chains-in-loop.patch), [02-b](patches/02-b-pending-release-stack.patch), [02-c](patches/02-c-cheaper-pending-stack.patch), [02-d](patches/02-d-defer-nullable-member.patch), [02-e](patches/02-e-last-field-order.patch) | the stack depth is fixed (#677 to #679, another design, first field first); the order and the shared stack are not |
 | [7](07-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address | yes: the one-word `Box` needs it | none | [07-a](patches/07-a-tagged-top-bits.patch) | not fixed |
@@ -100,7 +101,7 @@ files in the series, or "none", or a parked patch
 | [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the one-word `Nat` and `Int` need it | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed |
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44; checked) |
 
-**Counts.** 16 entries: 5 bugs, 3 costs, 3 missed optimizations, 4
+**Counts.** 17 entries: 5 bugs, 3 costs, 4 missed optimizations, 4
 missing features, 1 dependency issue. 5 entries have patches in the
 series, 9 patch files in all (five for entry 2, one each for 5, 7, 9 and
 10): 1 bug fix and 8 features. 5 parked patches lie outside the series

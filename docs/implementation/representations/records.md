@@ -155,7 +155,8 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   decreasing alignment, ties in declaration order; `CtorLayout` maps each
   Lean field to its record position, and constructions, patterns,
   projections and conversions go through it. The driver turns Reussir's own
-  member packing off.
+  member packing off. A J2 join point's tuple orders its fields the same
+  way ([join points](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple)).
 - **Why:** Records without padding (rbtree memory 1.17x → 1.00x native,
   7860807); and Reussir's in-place variant reuse with packed layouts skips
   stores of fields packing moves (a Reussir bug, fixed upstream in #656;

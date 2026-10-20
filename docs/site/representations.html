@@ -330,8 +330,9 @@ extension.</p>
   box. <code>Option Nat</code> and <code>Option α</code> are one type, and a value goes from one
   to the other as it is.</li>
 <li><strong>Field order.</strong> Fields are sorted by decreasing alignment, so records
-  have no padding (pass <code>field-order</code>). Reussir's own member packing is
-  off.</li>
+  have no padding (pass <code>field-order</code>). The tuple that carries a join
+  point's arguments is sorted the same way. Reussir's own member packing
+  is off.</li>
 <li><strong>Recursive and mutual types</strong> refer to each other's types.</li>
 <li><strong>Computed fields</strong> (<code>Lean.Name</code>): the implementation type <code>T._impl</code>, as
   in Lean's runtime.</li>
@@ -372,7 +373,7 @@ with examples, and what it costs.</p>
   target. A wrong word is a panic, never a wrong read. At a program type,
   the test for a pointer of the target's number and the take are in line;
   the rest (an immediate, another number) is a call of one function per
-  target type, <code>l2r_unbox_rest_T</code>. With the optional pass <code>conv-liveness</code>,
+  target type, <code>l2r_unbox_rest_T</code>, which rrc puts back in line. With the optional pass <code>conv-liveness</code>,
   an unboxing function has arms only for the types that live code boxes.</li>
 <li>In a program that casts, a box can hold any word. The unboxing then
   reads an immediate as native Lean reads that word: a <code>Bool</code> is its low

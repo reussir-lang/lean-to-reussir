@@ -357,9 +357,6 @@ structure LowerState where
   `L2RConstCell` (`onceCell`), by variant number, and the number of each. -/
   constCellTys : Array RR.Ty := #[]
   constCellIdx : Std.HashMap RR.Ty Nat := {}
-  /-- The generated ends of unboxings at a program payload type
-  (`ownUnboxName`): kept out of rrc's MLIR inliner (`anchoredFns`). -/
-  ownUnboxFns : Array String := #[]
   /-- First of the three cell slots holding the current standard streams
   (stdin, stdout, stderr), and the stream record type, once used. -/
   stdSlots : Option Nat := none
@@ -1187,11 +1184,14 @@ bit, a match of the immediates, a test of the payload number and the take,
 about 17 lines. With `outline`, only the test that the word is a pointer
 of `t`'s number (`l2r_any_raw_is_num`) and the take stay in line, the
 common case; the rest is a call of a function generated once per type and
-kind (`ownUnboxName`; `slowKey` names the function `slow` calls), kept
-out of rrc's MLIR inliner (`anchoredFns`). LLVM inlines the small ones
-(an enumeration's immediates); one that builds a cached placeholder (a
-record's `box(0)`) can stay a call, on a path that only a placeholder
-takes. -/
+kind (`ownUnboxName`; `slowKey` names the function `slow` calls). The
+`.rr` text stays small; rrc's MLIR inliner puts the rest back at each site
+(the function is not anchored, `anchoredFns`), where LLVM lays it out with
+the code around it. Anchored, it stayed a call that LLVM did not inline
+(MonadicInterp's machine code kept 40 such calls, 11 of them for `Signal`,
+whose `brk` and `cont` are immediates, and 3 for `Option`), and the calls
+changed the register allocation of the functions around them:
+MonadicInterp's `eval` ran 4% more instructions, the whole program 1.9%. -/
 partial def boxUnboxWith (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
     (fnUnbox : RR.Ty → LowerM String) (slow : Option (RR.Expr → LowerM RR.Expr)) (native : Bool)
     (outline : Bool := true) (slowKey : Option String := none) :
@@ -1318,9 +1318,7 @@ partial def boxUnboxWith (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR
       if let some fname := ownUnboxName t native slowKey then
         unless ← hasFn fname do
           let body := RR.Expr.ite (isImm "w") (← immBlock "w") (← otherwise "w")
-          modify fun s => { s with
-            fns := s.fns.push (.fn fname #[("w", u64)] t (.ofExpr body)),
-            ownUnboxFns := s.ownUnboxFns.push fname }
+          modify fun s => { s with fns := s.fns.push (.fn fname #[("w", u64)] t (.ofExpr body)) }
         return ← boxWithWord b fun w => do
           let m ← fresh "bm"
           return .block ⟨#[(m, some u64, .atom (toString n))],
@@ -1569,6 +1567,20 @@ def fieldAlign (t : RR.Ty) : LowerM Nat := do
     | some info => if info.shape == .enumLike then return (if info.ctorOrder.size ≤ 256 then 1 else 2) else return 8
     | none => return 8
   | _ => return 8
+
+/-- The order of the fields of the tuple that carries a join point's
+arguments of types `tys` (J2; `JumpAction.yield`): field `k` is argument
+`order[k]`. As for a record's fields (`fieldOrder`; Opt/FieldOrder:
+decreasing alignment, ties in parameter order), so the tuple has no
+padding between members. With the driver's `--no-pack-record-members`,
+Reussir widens a member to the alignment of the next one (a `bool` before
+a `Nat`: an `i64` member) and stores only the field's own bits (`store
+i1`), so LLVM keeps the tuple on the stack and loads the `bool` back from
+it: Strings' `charStats` loop ran 3% more instructions with a `(bool, Nat)`
+tuple than with `(Nat, bool)`. -/
+def jpTupleOrder (tys : Array RR.Ty) : LowerM (Array Nat) := do
+  if tys.size < 2 then return Array.range tys.size
+  return (← read).fieldOrder (← tys.mapM fieldAlign)
 
 /-- A `[value]` struct type carrying several values: the arguments of a
 join point (J2), or a result of optimization `flatten-structs`
