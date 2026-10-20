@@ -83,7 +83,7 @@ files in the series, or "none", or a parked patch
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Upstream |
 |---|---|---|---|---|---|---|
-| [5](05-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes without the workaround | `scripts/l2r.py` passes `--relocation-mode pic` | [05-a](patches/05-a-pic-by-default.patch) | not fixed (no pull request) |
+| [5](05-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes without the workaround | `scripts/l2r.py` passes `--relocation-mode pic` | [05-a](patches/05-a-pic-by-default.patch) | not fixed (pull request #758 open) |
 | [12](12-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling) | no: nothing calls it | - | none | unchanged; repro fails (checked) |
 | [13](13-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there | no: 64-bit targets only | - | none | unchanged (checked) |
 | [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | not rechecked |

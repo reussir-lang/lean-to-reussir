@@ -115,7 +115,7 @@ against `RLIMIT_AS`, so under `ulimit -v 1250000` the spawn succeeds and
 the compilation then aborts (`std::bad_alloc`, exit 134); under
 `ulimit -v 1600000` LLVM's thread pool cannot start a thread
 (`pthread_create failed`, exit 134). rrc before #686 compiles in both
-cases. Fix (branch `pr/deep-expression-stack`): a 256 MiB stack, and the
-driver stays on the main thread under any finite `RLIMIT_AS` or
-`RLIMIT_DATA`, under an unlimited or large `RLIMIT_STACK`, or when a
-limit cannot be read.
+cases. Fix (parked patch 16-a): keep the 1 GiB stack, and keep the
+driver on the main thread when a finite `RLIMIT_AS` or `RLIMIT_DATA` is
+below 2 GiB, when `RLIMIT_STACK` is unlimited or at least 1 GiB, or when
+a limit cannot be read.

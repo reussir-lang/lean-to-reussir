@@ -8,7 +8,7 @@ since 2026-10-04 (`l2r-local` commit `e0c500b7`; made on branch
 `l2r-final` cc8e5aa5); reviewed, no defect. lean2rr works around it: its
 driver passes `--relocation-mode pic` (below).
 
-**Upstream (2026-10-19):** Not fixed upstream (no pull request opened). 05-a stays in the series on 7954a367 (it applies unchanged).
+**Upstream (2026-10-19):** Not fixed upstream; pull request #758 (05-a's change) is open. 05-a stays in the series on 7954a367 (it applies unchanged).
 
 **Verdict: bug.** `rrc --emit executable` (and `--emit dynlib`) links
 through rustc, whose products are a position-independent executable (PIE)
