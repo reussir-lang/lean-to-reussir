@@ -271,7 +271,7 @@ def reussir_path():
     s = SVG("rrc", 900, 170, "What rrc does with prog.rr",
             "<code>scripts/l2r.py</code> runs <code>rrc</code> with "
             "<code>-O aggressive --no-pack-record-members --reuse-across-call "
-            "--no-closure-wpd --relocation-mode pic</code>.")
+            "--relocation-mode pic</code>.")
     s.box(10, 40, 120, 60, ["prog.rr", "with prelude"], "b-l2r")
     s.arrow(130, 70, 160, 70)
     s.box(165, 30, 150, 80, ["Reussir front end", "parse, types,", "textures (Rust FFI)"], "b-rr")

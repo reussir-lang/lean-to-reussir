@@ -1261,7 +1261,8 @@ application appears.
   on such programs grew far faster than the programs (superlinearly; an
   8-line `StateT` tower used at `IO` did not build within 30 minutes or
   15 GB; a Reussir cost, whose cause was found later, fixed upstream in
-  Reussir #674). Out of
+  Reussir #674; with #674 the towers build without the anchors, but in
+  2 to 4 times the time and memory). Out of
   line, a conversion, an unboxing, or the application of a wrapped value or of
   a value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.
@@ -3101,15 +3102,16 @@ Each item says what differs and when.
   Polymorphic recursion through type functions (monad transformer towers)
   makes hundreds of representations of a few function types, with
   conversions between them, and several rrc costs grow superlinearly on
-  such code. The driver turns closure devirtualization off
-  (`--no-closure-wpd`: it prints each closure's result type, every named
-  type expanded, at every vtable and indirect call site; no classic
-  benchmark changes by more than 1%, since lean2rr dispatches function
-  values itself; a Reussir cost, fixed upstream in Reussir #668), and
-  lean2rr keeps the
+  such code. The driver turned closure devirtualization off until the
+  move to Reussir `7954a367` (`--no-closure-wpd`: it printed each
+  closure's result type, every named type expanded, at every vtable and
+  indirect call site; a Reussir cost, fixed upstream in Reussir #668; on
+  that base the large benchmark programs build to the same bytes with and
+  without it), and lean2rr keeps the
   conversions, unboxings and the applications of wrapped and uniform
   function values out of rrc's MLIR inliner (§5.3; a Reussir cost, fixed
-  upstream in Reussir #674). The
+  upstream in Reussir #674, after which the towers still take 2 to 4
+  times the rrc time and memory without the anchors). The
   towers of the adversarial rounds then build in 15 s to 2.5 minutes and at
   most 3 GB, the whole build (a single `StateT` tower used at `IO`: 21 s,
   0.4 GB, where it did not build in 30 minutes; five towers in one program:
@@ -3138,11 +3140,13 @@ Each item says what differs and when.
   it covers and expands, in each copy, the release of every value the arm
   holds as an in-line match over its variants; a two-scrutinee match on an
   inductive with N constructors (a derived `BEq`, `DecidableEq` or `Ord`)
-  became N^3 code (40 constructors: a 9-minute build). So such an arm
-  releases the values of wide enums (8 or more constructors) that it holds
-  and does not use through one out-of-line call (`l2r_sink`, kept out of
-  rrc's inliner): the same release at the same point (40 constructors: 27
-  s). A 2000-line `main` builds in about two minutes and
+  became N^3 code (40 constructors: a 9-minute build). Until the move to
+  Reussir `7954a367` such an arm released the values of wide enums that
+  it held through one out-of-line call (`l2r_sink`); Reussir #673 merges
+  the equal copies again before it expands the releases (adv6
+  P42BigEnum, a 30-constructor inductive with fields and derived `BEq`
+  and a 60-constructor enumeration, builds in 12 s and 0.4 GB). A
+  2000-line `main` builds in about two minutes and
   2 GB, a recursive IO function of 2000 statements in about 70 s and
   1.5 GB, a recursive function with a 3000-arm match in 80 s. rrc
   compiles each generic runtime function instantiated at a type with its

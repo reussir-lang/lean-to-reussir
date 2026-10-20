@@ -665,7 +665,6 @@ Listed in `Opt/Registry.lean` (`required`); `--disable-opt` rejects them.
 | `closed-chains` | [startup/constants.md](startup/constants.md#a-closed-term-used-once-by-another-constant-is-not-cached) |
 | `stage3-types` | [types/type-recovery.md](types/type-recovery.md) |
 | `outline` | [control-flow/outline.md](control-flow/outline.md) |
-| `wildcard-sinks` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code) |
 | `inline-anchors` | [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-20-cost-the-inliner-multiplies-conversion-code) |
 
 Stage 2's edits of Lean's pass lists (two passes replaced, `extractClosed`

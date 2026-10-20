@@ -174,11 +174,11 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
     (List.range (j - k)).toArray.map fun i => (RR.Expr.var as[k + i]!, doms[k + i]!)
   -- The value `e` of the first `k` arguments (at `fnResult t k`), applied to
   -- the others.
-  -- `rest` (and so the `raw` arm) and the sink arms below take the arguments
-  -- at `doms`, the run-time types. That is correct only because they never
-  -- convert an argument: each one is at its own parameter type here, so
-  -- `applyExprs`'s conversions are the identity and `l2r_sink` releases at
-  -- the declared type. Do not add a conversion from `doms[i]` there: a
+  -- `rest` (and so the `raw` arm) takes the arguments at `doms`, the
+  -- run-time types. That is correct only because it never converts an
+  -- argument: each one is at its own parameter type here, so
+  -- `applyExprs`'s conversions are the identity. Do not add a conversion
+  -- from `doms[i]` there: a
   -- function type in `doms` has lost its phantom domains (see the `.part`
   -- arm). The `.part` and `.wrap` arms take each argument at the variant's
   -- own domain.
@@ -262,17 +262,9 @@ def genApply (t : RR.Ty) (j : Nat) : LowerM Unit := do
             if r < j then rest e r else pure e
         pure ((List.range m).toArray.map fun i => some s!"l2rx{i}", body)
     arms := arms.push { ty := tn, ctor := some (fnVariantName v), binders, body := .ofExpr body }
-  -- `conv-liveness`: the variants no live code builds are unreachable. rrc
-  -- copies the wildcard into each of them, so the arguments are released
-  -- out of line (`l2r_sink`, as `sinkWildcardHeld`), not each in line, a
-  -- match over its type's variants, in every copy.
+  -- `conv-liveness`: the variants no live code builds are unreachable.
   if skipped then
-    let mut sinks := #[]
-    for (a, aty) in as.zip doms do
-      if aty matches .named "u8" | .named "u16" | .named "u32" | .named "u64" | .named "i8" | .named "i16"
-          | .named "i32" | .named "i64" | .named "f32" | .named "f64" | .named "bool" | .named "L2RUnit" then continue
-      sinks := sinks.push (s!"us{a}", some (RR.Ty.named "u64"), RR.Expr.call "l2r_sink" #[aty] #[.var a])
-    arms := arms.push { ty := tn, ctor := none, binders := #[], body := ⟨sinks, .call "l2r_unreachable" #[resJ] #[]⟩ }
+    arms := arms.push { ty := tn, ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[resJ] #[]) }
   let name := applyFnName t j
   let params := #[("l2rf", t)] ++ as.zip (doms.extract 0 j)
   let item := RR.Item.fn name params resJ (.ofExpr (.mtch (.var "l2rf") arms))
@@ -384,7 +376,9 @@ memory grow far faster than the program (superlinearly in the number of
 representations; the mechanism inside rrc is not narrowed down, and the
 growth was not measured as exponential: an 8-line `StateT` tower used at
 `IO` did not build within 30 minutes or 15 GB; a Reussir cost, fixed
-upstream in Reussir #674); with the application functions of uniform
+upstream in Reussir #674, after which the towers still took 2 to 4 times
+the rrc time and memory without these anchors, measured on Reussir
+`7954a367`); with the application functions of uniform
 types inlinable, four towers in one program (`Cn3PolyScalar`) still took
 4.5 GB, 2 GB without. Out of line, they cost a call each (LLVM, which runs
 after Reussir's passes, still inlines them where it pays): the unboxing of

@@ -112,15 +112,6 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 - **Where:** `Opt/SinkProj.lean`: `sinkHere`, `Block.sinkProj`.
 - **Remove only if:** the pass is off.
 
-### Wildcard arms release wide values out of line
-
-- **What:** A wildcard arm covering two or more constructors releases the
-  values of wide enums (8 or more constructors) it holds and does not use
-  through one out-of-line call, `l2r_sink`.
-- **Why/Where:** see
-  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code).
-- **Remove only if:** see the linked entry.
-
 ### A scrutinee that ends with a brace is parenthesized
 
 - **What:** The printer puts a `match` scrutinee or an `if` condition in

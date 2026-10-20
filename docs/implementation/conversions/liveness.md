@@ -91,14 +91,14 @@ are relative to `lean2rr/LeanToReussir/`. Plan
 ### An application function with variants left out ends in a wildcard
 
 - **What:** When `conv-liveness` leaves variants out of `l2r_ap<j>_T`, its
-  match ends in `_ => l2r_unreachable`, whose arguments are released out
-  of line first (`l2r_sink<T>(a)` for every argument that is not a
-  scalar or unit). The unboxing functions and the conversions of function
-  values already end in a wildcard.
+  match ends in `_ => l2r_unreachable`. The unboxing functions and the
+  conversions of function values already end in a wildcard.
 - **Why:** Reussir rejects a match that is not exhaustive. rrc copies the
-  wildcard into every variant it covers and would release each argument
-  in line there, a match over its type's variants (`Box` has one per boxed
-  type: the shape of a Reussir cost, fixed upstream in #673).
+  wildcard into every variant it covers, and since Reussir #673 merges the
+  equal copies again before it expands the releases of the arguments
+  there (until the move to Reussir `7954a367`, lean2rr released them out
+  of line first, `l2r_sink`:
+  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code)).
 - **Where:** `Lower/Finish.lean`: `genApply` (`skipped`).
 - **Remove only if:** the pass is off.
 

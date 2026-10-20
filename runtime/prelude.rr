@@ -305,14 +305,6 @@ fn l2r_unreachable<T>() -> T {
     core::intrinsic::panic::panic<T>()
 }
 
-// Releases `x` out of line. A wildcard arm that rrc copies into several
-// constructors releases the values of wide enums it holds with it
-// (Lower/Code, sinkWildcardHeld), where rrc would expand each release in
-// line, a match over the variants, in every copy. Kept out of rrc's
-// inliner, which would put the expansion back.
-#[transform_anchor]
-fn l2r_sink<T>(x : T) -> u64 { 0 }
-
 // Releases `x` here, in line: a use that keeps `x` alive until this point
 // (Reussir releases a value that one branch does not use at the start of
 // that branch). `get!` releases its default after the read's take with it.

@@ -71,7 +71,7 @@ cmd = ([str(l2r.REUSSIR / "build" / "bin" / "rrc"), os.path.abspath("prog.rr"), 
         "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps), "--polyffi-libdir", tl,
         "--polyffi-libdir", str(rlib.parent), "--link-lib", str(rlib)]
        + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
-       + ["--link-lib", str(l2r.gmp_archive()), "--no-pack-record-members", "--no-closure-wpd",
+       + ["--link-lib", str(l2r.gmp_archive()), "--no-pack-record-members",
           "--relocation-mode", "pic", "--reuse-across-call",
           "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")] + sys.argv[4:])
 with tempfile.TemporaryDirectory(dir=".") as tmp:

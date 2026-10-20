@@ -8,7 +8,7 @@ repeat: each entry gives the gist and links to the plan's section.
 
 **How to use and maintain these files.** To find out why lean2rr does
 something, search these files for the function name, the generated name
-(`l2r_sink`, `L2RStep_k`), the review finding (RV6J-03, IO6-14, PF4-10) or
+(`l2r_consume`, `L2RStep_k`), the review finding (RV6J-03, IO6-14, PF4-10) or
 the Reussir issue number, or start from the area list below. Every change
 that adds, removes or changes a trick updates its entry here **in the same
 commit**: add an entry for a new special case, delete the entry of one that

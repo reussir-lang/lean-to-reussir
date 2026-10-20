@@ -63,61 +63,6 @@ def dropUnusedConvs (lets : ArmLets) (convs : Std.HashSet String) (body : RR.Blo
   let free := rrFreeVars.blockFreeVars body {} {}
   lets.filter fun (y, _, _) => !convs.contains y || free.contains y
 
-/-- The number of constructors from which the release of an inductive's
-value is wide: rrc expands every release of an enum in line into a match
-over its variants. -/
-def wideReleaseCtors : Nat := 8
-
-/-- Whether rrc's release of a value of type `t` is wide: `t` is an
-inductive with constructors that hold fields, at least `wideReleaseCtors` of
-them. -/
-def hasWideRelease (t : RR.Ty) : LowerM Bool := do
-  let .named n := t | return false
-  let some info := (← get).typeInfos[n]? | return false
-  return info.shape == .enum && info.ctorOrder.size ≥ wideReleaseCtors
-
-/-- The wildcard arm of a `match` that covers two or more constructors
-releases out of line (`let us = l2r_sink<T>(v);`, `l2r_sink` in the
-prelude, kept out of rrc's inliner) the values of wide release
-(`hasWideRelease`) that the other arms use and it does not.
-
-Why: rrc copies a wildcard arm into every constructor it covers, and in
-each copy releases the values the other arms use, each in line, a match
-over the variants of its type. A derived `BEq`, `DecidableEq` or `Ord` on
-an inductive with N constructors matches `y` inside each of the N arms of a
-match on `x`, with an unreachable wildcard (the constructor indices were
-compared first), while the fields of `x` are held; a hand-written
-two-scrutinee equality has the same shape with a `_, _ => false` arm. That
-is N arms, N - 1 copies each, an N-variant release of each held field of
-the inductive's type in every copy: N^3 code, over which rrc's SCCP then
-takes superlinear time (40 constructors: a 9-minute build, round-6 finding
-PRG6-02). Out of line, a copy makes one call per such value. The value is
-released at the arm's entry as before, only by the call; the other arms are
-unchanged (they use the value as before), and so is the scrutinee, whose
-release in a copy knows its constructor and is small. -/
-def sinkWildcardHeld (ctx : CodeCtx) (scrut : String) (nCtors : Nat) (arms : Array RR.Arm) :
-    LowerM (Array RR.Arm) := do
-  let some w := arms.findIdx? (·.ctor.isNone) | return arms
-  let some wild := arms[w]? | return arms
-  -- Constructors the wildcard covers: rrc's copies of it.
-  if nCtors - (arms.size - 1) < 2 then return arms
-  let varTys : Std.HashMap String RR.Ty := ctx.vars.fold (fun m _ (n, t) => m.insert n t) {}
-  let freeIn (a : RR.Arm) (acc : Std.HashSet String) : Std.HashSet String :=
-    rrFreeVars.blockFreeVars a.body (a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) {}) acc
-  let own := freeIn wild {}
-  -- In the order of their first use in the other arms (not by name, see
-  -- `rrFreeVarsInOrder`).
-  let used := rrFreeVarsInOrder ((arms.zipIdx.filter (·.2 != w)).map fun (a, _) =>
-    (a.body, a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) {}))
-  let mut sinks := #[]
-  for n in used do
-    if n == scrut || own.contains n then continue
-    let some t := varTys[n]? | continue
-    unless ← hasWideRelease t do continue
-    sinks := sinks.push (← fresh "us", some (RR.Ty.named "u64"), RR.Expr.call "l2r_sink" #[t] #[.var n])
-  if sinks.isEmpty then return arms
-  return arms.set! w { wild with body := { wild.body with lets := sinks ++ wild.body.lets } }
-
 /-- Whether constant `f`'s value is a literal that a box holds as an
 immediate: its code returns a `UInt8`/`UInt16`/`UInt32` literal or a
 `UInt64`/`USize` literal below 2^63, possibly through other such constants
@@ -489,7 +434,7 @@ mutual
             | some k => lowerAlt ctx outlined retTy k
             | none => pure (.ofExpr (.call "l2r_unreachable" #[retTy] #[]))
           arms := arms.push { ty := tn, ctor := none, binders := #[], body }
-        return .mtch (.var scrut) (← sinkWildcardHeld ctx scrut info.ctorOrder.size arms)
+        return .mtch (.var scrut) arms
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 
   /-- Lower the code of an alternative, after its fields are bound (a hook

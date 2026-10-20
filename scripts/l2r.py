@@ -550,15 +550,6 @@ def main():
                # the packed record layout moves (RcCreateFusion copy
                # avoidance): keep declaration-order layouts until that is fixed.
                + ["--no-pack-record-members"]
-               # -O aggressive enables closure devirtualization, which prints
-               # each closure's result type at every vtable and indirect call
-               # site. Before Reussir #668 it expanded every named type there
-               # (out of memory at 16 GB on polymorphic recursion through
-               # monad transformers). The flag stays: devirtualization changes
-               # no classic benchmark by more than 1% (lean2rr dispatches
-               # function values itself), and unnamed closure result types
-               # are still printed again at each site.
-               + ["--no-closure-wpd"]
                # rrc compiles with LLVM's static relocation model unless told
                # otherwise, but links a position-independent executable, so
                # read-only data with absolute addresses (closure vtables) needs

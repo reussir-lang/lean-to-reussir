@@ -1,7 +1,9 @@
 /-! Derived `BEq`, `DecidableEq` and `Ord` and a hand-written two-scrutinee
-equality on a recursive inductive with 10 constructors: their wildcard arms
-release the held fields out of line (`l2r_sink`; round 6 PRG6-02, Reussir
-cost 22). Results, and the release of the values, as natively. -/
+equality on a recursive inductive with 10 constructors: rrc copies their
+wildcard arms into every constructor they cover, with the releases of the
+held fields (round 6 PRG6-02, old Reussir cost 22; lean2rr released them
+out of line, `l2r_sink`, until Reussir #673 merged the copies). Results,
+and the release of the values, as natively. -/
 
 inductive E where
   | c0 (s : String) | c1 (a : E) (b : E) | c2 (n : Int) | c3 (xs : List E)

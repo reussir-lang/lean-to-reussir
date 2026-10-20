@@ -90,13 +90,13 @@ numbers; the details are in [correctness-bugs.md](correctness-bugs.md),
 | 4 | bug | #654 | driver retries rrc without `--reuse-across-call` | kept as a fallback for unknown crashes |
 | 5 | bug | #655 | runtime diagnostics through a C trampoline | removable after the move to Reussir 7954a367 (cheap; may stay) |
 | 6 | bug | #661 | none; the runtime skips immediates when it frees or copies arrays of records | the skips stay: #661 keeps immediates from being freed |
-| 10 | cost | #668 | `--no-closure-wpd` | removable after the move to Reussir 7954a367 |
+| 10 | cost | #668 | `--no-closure-wpd` | removed: the executables of the large benchmark programs are byte-identical with and without it, at the same rrc time and memory ([build-time.md](build-time.md#old-issue-10-cost-closure-devirtualization-printed-types-exponentially)) |
 | 16, 17 | costs | #672, #670 | `Outline` | removable after the move to Reussir 7954a367 as a workaround; kept for now (it also bounds the `.rr` text) |
 | 18 | bug (build system) | #684 | build Reussir's default target | removable after the move to Reussir 7954a367 |
 | 19 | bug | #666, #681 | no `[value]` record in a cell: references hold a `Box`, once-cells an `ElemBox` | removable after the move to Reussir 7954a367 |
-| 20 | cost | #674 | `#[transform_anchor]` on conversion code | removable after the move to Reussir 7954a367 (measure memory first: 3.5x without the anchors on the old stack, with its local patch) |
+| 20 | cost | #674 | `#[transform_anchor]` on conversion code | kept: measured again on Reussir 7954a367, the monad-transformer towers take 2.2 to 4 times the rrc time and 2 to 2.9 times the memory without the anchors ([build-time.md](build-time.md#old-issue-20-cost-the-inliner-multiplies-conversion-code)) |
 | 21 | bug | #657 | `[` escaped in the string literal table | removable after the move to Reussir 7954a367 (free; may stay) |
-| 22 | cost | #673 | `l2r_sink` in wildcard arms | removable after the move to Reussir 7954a367 |
+| 22 | cost | #673 | `l2r_sink` in wildcard arms | removed: instruction counts unchanged, `.text` up to 0.7% larger on programs with wide enums ([build-time.md](build-time.md#old-issue-22-cost-a-wildcard-arm-over-a-wide-enum-cost-n3-code)) |
 | 31 (partly: see [issue 16](../../../reussir-bugs/16-driver-stack-address-limit.md)) | bug | #686 (the stack overflow; the rest is issue 16) | `Outline` bounds nesting | removable after the move to Reussir 7954a367 (see old 16, 17) with #686's code; if the parked fix 16-a (or its upstream form) lands, rrc under a finite `ulimit -v` runs on the 8 MiB main thread again, and the bound is needed again |
 | 35 | cost | #690 | none; `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR`, which #690's cache also reads | keep the variable |
 

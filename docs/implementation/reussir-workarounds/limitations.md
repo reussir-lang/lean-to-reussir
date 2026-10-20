@@ -200,8 +200,10 @@ files, `runtime/` and `scripts/` from the repository root.
 
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
   `--no-reuse-across-call` (with the retry for old bug 4);
-  `--no-pack-record-members` (old bug 2); `--no-closure-wpd` (old issue
-  10, a cost); `L2R_RRC_FLAGS` appends flags for experiments. rrc runs
+  `--no-pack-record-members` (old bug 2); closure devirtualization stays
+  on (old issue 10's `--no-closure-wpd` is removed,
+  [build-time.md](build-time.md#old-issue-10-cost-closure-devirtualization-printed-types-exponentially));
+  `L2R_RRC_FLAGS` appends flags for experiments. rrc runs
   with `REUSSIR_FFI_CACHE_DIR` set, for rrc's texture cache (old issue
   35, a cost,
   [build-time.md](build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
