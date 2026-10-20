@@ -26,7 +26,11 @@ binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
 optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
 around the names are ignored; `lean2rr --list-opts` lists them),
 L2R_LEANRT_RUSTFLAGS (extra rustc flags for leanrt and lean-runtime, split
-on spaces; e.g. `--cfg leanrt_count_bigs`), L2R_LEAN_RUNTIME (another
+on spaces; e.g. `--cfg leanrt_count_bigs`), L2R_TEXTURE_RUSTFLAGS (extra
+rustc flags for the textures rrc compiles, after the native ones, split on
+spaces; e.g. `-C target-feature=-sve,-sve2,-dotprod` with the same in
+L2R_LEANRT_RUSTFLAGS and L2R_RRC_FLAGS for a build valgrind can run),
+L2R_LEAN_RUNTIME (another
 lean-runtime checkout, e.g. a branch under review; default: the submodule
 third_party/lean-runtime, whose checked-out commit must be the pinned one),
 L2R_LEAN_RUNTIME_FEATURES (comma-separated lean-runtime features to add, to
@@ -81,7 +85,7 @@ def rt_dirs():
 
 
 def rustc_wrapper(rlib, lr):
-    """A rustc wrapper script adding NATIVE_FLAGS (rrc takes one executable)
+    """A rustc wrapper script adding NATIVE_FLAGS and L2R_TEXTURE_RUSTFLAGS (rrc takes one executable)
     and `leanrt` as an extern crate (and edition 2018 when rrc gives none,
     so that `::leanrt` resolves without `extern crate`): the drop hooks Reussir generates for
     the prelude's opaque types have no prelude block, and name the runtime's
@@ -98,7 +102,7 @@ def rustc_wrapper(rlib, lr):
     and cargo's build of lean-runtime puts its rlibs in none of them."""
     w = rlib.parent / "rustc-native"
     flags = "%s --extern leanrt='%s'%s%s" % (
-        " ".join(NATIVE_FLAGS), rlib, "".join(" --extern '%s'" % e for e in lr.externs),
+        " ".join(NATIVE_FLAGS + TEXTURE_FLAGS), rlib, "".join(" --extern '%s'" % e for e in lr.externs),
         "".join(" -L dependency='%s'" % d for d in lr.dirs))
     text = ("#!/bin/sh\n# lean-runtime build %s\n"
             "case \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
@@ -118,6 +122,14 @@ def rustc_wrapper(rlib, lr):
 # agree between them). rustc runs in the crate's directory (`build_locked`):
 # a relative path in these flags is relative to it.
 LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
+
+# Extra rustc flags for the textures rrc compiles (L2R_TEXTURE_RUSTFLAGS,
+# split on spaces), added after NATIVE_FLAGS in the rustc wrapper rrc runs
+# (`rustc_wrapper`): L2R_LEANRT_RUSTFLAGS does not reach the textures, and a
+# build for valgrind needs `-C target-feature=-sve,-sve2,-dotprod` in both.
+# The wrapper's text names them, so rrc's texture cache keeps such builds
+# apart.
+TEXTURE_FLAGS = os.environ.get("L2R_TEXTURE_RUSTFLAGS", "").split()
 
 # The features of lean-runtime lean2rr builds: `io` (leanrt's files,
 # streams, processes, system queries, startup and exit glue call
