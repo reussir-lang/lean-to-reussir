@@ -51,9 +51,31 @@ pub struct LInt(*mut u8);
 pub const INT_MIN: i64 = i32::MIN as i64;
 pub const INT_MAX: i64 = i32::MAX as i64;
 
+// The encoding, in one place for leanrt (the prelude has its own copy, in
+// its Nat and Int sections, and lean2rr's literal rules know the small
+// range, `NatEncoding.lean`): `is_small`, `nat_of_small_word`,
+// `small_word`, `int_of_small_word`, `LNat::small`, `LInt::small`, the
+// small ranges (below 2^63; `INT_MIN..=INT_MAX`) and `ptr_of`/`word_of`
+// between a word and a handle, all in this file. The rest of leanrt
+// (`index_word`, `any::of_nat`, ...) reads and makes words through them.
+
+/// Whether word `w` is a small value (odd).
 #[inline(always)]
 pub fn is_small(w: u64) -> bool {
     w & 1 == 1
+}
+
+/// The value of a small `Nat` word.
+#[inline(always)]
+pub fn nat_of_small_word(w: u64) -> u64 {
+    w >> 1
+}
+
+/// The word of a small value: `lean_box(v)` (`v` below 2^63; for an `Int`,
+/// its 32-bit pattern zero-extended).
+#[inline(always)]
+fn small_word(v: u64) -> u64 {
+    (v << 1) | 1
 }
 
 #[inline(always)]
@@ -130,7 +152,7 @@ impl LNat {
     #[inline(always)]
     pub fn small(v: u64) -> LNat {
         debug_assert!(v >> 63 == 0);
-        LNat(ptr_of((v << 1) | 1))
+        LNat(ptr_of(small_word(v)))
     }
 
     #[inline(always)]
@@ -160,7 +182,7 @@ impl LNat {
     #[inline(always)]
     pub fn low_u64(&self) -> u64 {
         let w = self.word();
-        if is_small(w) { w >> 1 } else { big::low_limb(unsafe { big_ref(&w) }) }
+        if is_small(w) { nat_of_small_word(w) } else { big::low_limb(unsafe { big_ref(&w) }) }
     }
 }
 
@@ -189,7 +211,7 @@ pub extern "C" fn nat_big_of_u64(v: u64) -> LNat {
 /// The rules' view of a `Nat` word: its value, or the big number it owns.
 #[inline(always)]
 unsafe fn nat_view(w: u64) -> sem::nat::Nat<GNat> {
-    if is_small(w) { sem::nat::Nat::Small(w >> 1) } else { sem::nat::Nat::Big(GNat(big_of_word(w))) }
+    if is_small(w) { sem::nat::Nat::Small(nat_of_small_word(w)) } else { sem::nat::Nat::Big(GNat(big_of_word(w))) }
 }
 
 /// A `Nat` the rules computed, as a normalized handle.
@@ -426,7 +448,7 @@ impl LInt {
     #[inline(always)]
     pub fn small(v: i64) -> LInt {
         debug_assert!((INT_MIN..=INT_MAX).contains(&v));
-        LInt(ptr_of(((v as i32 as u32 as u64) << 1) | 1))
+        LInt(ptr_of(small_word(v as i32 as u32 as u64)))
     }
 
     #[inline(always)]
@@ -657,7 +679,7 @@ mod tests {
     fn val(x: &LNat) -> u128 {
         let w = x.word();
         if is_small(w) {
-            (w >> 1) as u128
+            nat_of_small_word(w) as u128
         } else {
             let b = unsafe { big_ref(&w) };
             assert!(big::limbs(b).len() <= 2);

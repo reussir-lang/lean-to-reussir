@@ -59,6 +59,17 @@ equal to a big one. So the equality of a small and a big `Int` does not
 call the runtime. Builds with debug assertions check the rule where the
 runtime makes a big `Int` and where it reads one.
 
+One small set of prelude helpers knows the encoding. They test a word
+(`l2r_nat_word_is_small`), read the value of a small word
+(`l2r_nat_word_val`) and make a small value (`l2r_nat_small`), with the
+same helpers for `Int`. The other prelude functions and the generated code
+use only these helpers. They never use bit operations on a `Nat` or `Int`
+word. Only the prelude's `Nat` and `Int` functions also calculate on the
+words, for speed. The runtime has its own copy of the helpers. The
+translator knows only which values are small (a `Nat` below 2^63, an
+`Int` in the `int32` range). A different representation of numbers
+changes only these places.
+
 {{svg:bigblock}}
 
 A two-limb number takes 32 bytes here, and 56 bytes natively. A million

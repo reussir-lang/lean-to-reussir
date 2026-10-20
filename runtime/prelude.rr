@@ -386,6 +386,23 @@ fn lean_sorry<T>(b : bool) -> T { l2r_internal_panic_at<T>(5) }
 // (which consumes its words), or `l2r_nat_drop_raw`. A function that takes
 // a `Nat` turns it into its word once: no reference counting at all on its
 // small path.
+//
+// The encoding is known in one place. The helpers from here to
+// `l2r_nat_of_u64` (and the first block of the Int section) build, test
+// and decode words; the rest of the prelude and every call that lean2rr
+// generates use only them and the functions of these two sections, never
+// a bit operation on a `Nat` or `Int` word. The other functions of the two
+// sections compute on the words directly (`x + (y - 1)` is the word of the
+// sum of two small values), also where a helper would do: Reussir's MLIR
+// inliner limits the size of a callee it inlines (256 operations) and
+// counts each inlined helper's constants before they are folded, so
+// helper calls in these hot functions would change which program
+// functions it inlines.
+// leanrt has its own copy (`leanrt::nat`: `is_small`, `nat_of_small_word`,
+// `LNat::small`, `LInt::small`, `int_of_small_word`), and lean2rr's
+// literal rules have theirs (`NatEncoding.lean`: which values are small).
+// A new representation changes these places only (docs:
+// representations/nat-int.md, "The encoding is known in one place").
 
 #[ffi(import)]
 fn l2r_nat_raw(n : Nat) -> u64 [{ n.into_raw() }];
@@ -395,15 +412,23 @@ fn l2r_nat_of_raw(w : u64) -> Nat [{ unsafe { leanrt::nat::LNat::from_raw(w) } }
 #[ffi(import)]
 fn l2r_nat_drop_raw(w : u64) -> u64 [{ { drop(unsafe { leanrt::nat::LNat::from_raw(w) }); 0 } }];
 
+// Whether word `w` is a small value (odd).
+fn l2r_nat_word_is_small(w : u64) -> bool { (w & 1) == 1 }
+// The value of a small word.
+fn l2r_nat_word_val(w : u64) -> u64 { w >> 1 }
+// Whether value `v` has a small word (`v` below 2^63), and that word.
+fn l2r_nat_val_is_small(v : u64) -> bool { (v >> 63) == 0 }
+fn l2r_nat_small_word(v : u64) -> u64 { (v << 1) | 1 }
+
 // A value below 2^63.
-fn l2r_nat_small(x : u64) -> Nat { l2r_nat_of_raw((x << 1) | 1) }
+fn l2r_nat_small(x : u64) -> Nat { l2r_nat_of_raw(l2r_nat_small_word(x)) }
 
 #[ffi(import)]
 fn l2r_nat_big_of_u64(x : u64) -> Nat [{ leanrt::nat::nat_big_of_u64(x) }];
 
 // `lean_usize_to_nat`: any word.
 fn l2r_nat_of_u64(x : u64) -> Nat {
-    if (x >> 63) == 0 { l2r_nat_small(x) } else { l2r_nat_big_of_u64(x) }
+    if l2r_nat_val_is_small(x) { l2r_nat_small(x) } else { l2r_nat_big_of_u64(x) }
 }
 
 // A big `Nat` literal (lean2rr emits it for values >= 2^63, see
@@ -672,8 +697,9 @@ fn l2r_replicate_len(n : Nat) -> u64 {
 // 32-bit two's complement pattern zero-extended, shifted and tagged (so a
 // `Nat` below 2^31 and the `Int` of the same value have the same word); an
 // even word is a reference to a big number (any value outside `int32`).
-// `l2r_int_val` reads a small word (`lean_scalar_to_int64`). Ownership of
-// words as for `Nat`.
+// `l2r_int_word_val` reads a small word (`lean_scalar_to_int64`). Ownership
+// of words as for `Nat`. The helpers from here to `l2r_int_of_i64` are the
+// `Int` part of the encoding's one place (see the Nat section).
 
 #[ffi(import)]
 fn l2r_int_raw(i : Int) -> u64 [{ i.into_raw() }];
@@ -682,20 +708,24 @@ fn l2r_int_of_raw(w : u64) -> Int [{ unsafe { leanrt::nat::LInt::from_raw(w) } }
 #[ffi(import)]
 fn l2r_int_drop_raw(w : u64) -> u64 [{ { drop(unsafe { leanrt::nat::LInt::from_raw(w) }); 0 } }];
 
-// The value of a small word.
-fn l2r_int_val(w : u64) -> i64 { (((w >> 1) as u32) as i32) as i64 }
-
-// Whether `v` is in the small range, `int32`.
-fn l2r_int_is_tag_small(v : i64) -> bool { ((v + 2147483648) as u64) < 4294967296 }
+// Whether word `w` is a small value (odd).
+fn l2r_int_word_is_small(w : u64) -> bool { (w & 1) == 1 }
+// The 32-bit pattern of a small word (the boxed scalar `lean_unbox` reads),
+// and its value.
+fn l2r_int_word_bits(w : u64) -> u64 { w >> 1 }
+fn l2r_int_word_val(w : u64) -> i64 { ((l2r_int_word_bits(w) as u32) as i32) as i64 }
+// Whether value `v` has a small word (the `int32` range), and that word.
+fn l2r_int_val_is_small(v : i64) -> bool { ((v + 2147483648) as u64) < 4294967296 }
+fn l2r_int_small_word(v : i64) -> u64 { (((v as u32) as u64) << 1) | 1 }
 
 // A value in the `int32` range.
-fn l2r_int_small(v : i64) -> Int { l2r_int_of_raw((((v as u32) as u64) << 1) | 1) }
+fn l2r_int_small(v : i64) -> Int { l2r_int_of_raw(l2r_int_small_word(v)) }
 
 #[ffi(import)]
 fn l2r_int_big_of_i64(v : i64) -> Int [{ leanrt::nat::int_big_of_i64(v) }];
 
 fn l2r_int_of_i64(v : i64) -> Int {
-    if l2r_int_is_tag_small(v) { l2r_int_small(v) } else { l2r_int_big_of_i64(v) }
+    if l2r_int_val_is_small(v) { l2r_int_small(v) } else { l2r_int_big_of_i64(v) }
 }
 
 #[ffi(import)]
@@ -744,7 +774,7 @@ fn lean_int_neg_succ_of_nat(n : Nat) -> Int {
 
 fn lean_int_neg(a : Int) -> Int {
     let x = l2r_int_raw(a);
-    if (x & 1) == 1 { l2r_int_of_i64(0 - l2r_int_val(x)) } else { l2r_int_neg_raw(x) }
+    if (x & 1) == 1 { l2r_int_of_i64(0 - l2r_int_word_val(x)) } else { l2r_int_neg_raw(x) }
 }
 
 // On two small values the i64 arithmetic cannot overflow (as `lean_int_add`
@@ -752,19 +782,19 @@ fn lean_int_neg(a : Int) -> Int {
 fn lean_int_add(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) + l2r_int_val(y)) } else { l2r_int_add_raw(x, y) }
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_word_val(x) + l2r_int_word_val(y)) } else { l2r_int_add_raw(x, y) }
 }
 
 fn lean_int_sub(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) - l2r_int_val(y)) } else { l2r_int_sub_raw(x, y) }
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_word_val(x) - l2r_int_word_val(y)) } else { l2r_int_sub_raw(x, y) }
 }
 
 fn lean_int_mul(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_val(x) * l2r_int_val(y)) } else { l2r_int_mul_raw(x, y) }
+    if (x & y & 1) == 1 { l2r_int_of_i64(l2r_int_word_val(x) * l2r_int_word_val(y)) } else { l2r_int_mul_raw(x, y) }
 }
 
 // `Int.div` (T-division, C's `/`); `x / 0 = 0`.
@@ -772,8 +802,8 @@ fn lean_int_div(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
     if (x & y & 1) == 1 {
-        let j = l2r_int_val(y);
-        if j == 0 { l2r_int_small(0) } else { l2r_int_of_i64(l2r_int_val(x) / j) }
+        let j = l2r_int_word_val(y);
+        if j == 0 { l2r_int_small(0) } else { l2r_int_of_i64(l2r_int_word_val(x) / j) }
     } else { l2r_int_div_raw(x, y) }
 }
 
@@ -784,8 +814,8 @@ fn lean_int_mod(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
     if (x & y & 1) == 1 {
-        let j = l2r_int_val(y);
-        if j == 0 { l2r_int_of_raw(x) } else { l2r_int_small(l2r_int_val(x) % j) }
+        let j = l2r_int_word_val(y);
+        if j == 0 { l2r_int_of_raw(x) } else { l2r_int_small(l2r_int_word_val(x) % j) }
     } else { l2r_int_mod_raw(x, y) }
 }
 
@@ -794,8 +824,8 @@ fn lean_int_ediv(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
     if (x & y & 1) == 1 {
-        let n = l2r_int_val(x);
-        let d = l2r_int_val(y);
+        let n = l2r_int_word_val(x);
+        let d = l2r_int_word_val(y);
         if d == 0 { l2r_int_small(0) } else {
             let q = n / d;
             let r = n % d;
@@ -809,8 +839,8 @@ fn lean_int_emod(a : Int, b : Int) -> Int {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
     if (x & y & 1) == 1 {
-        let n = l2r_int_val(x);
-        let d = l2r_int_val(y);
+        let n = l2r_int_word_val(x);
+        let d = l2r_int_word_val(y);
         if d == 0 { l2r_int_of_raw(x) } else {
             let r = n % d;
             if r < 0 { if d > 0 { l2r_int_of_i64(r + d) } else { l2r_int_of_i64(r - d) } } else { l2r_int_small(r) }
@@ -837,24 +867,24 @@ fn lean_int_dec_eq(a : Int, b : Int) -> bool {
 fn lean_int_dec_lt(a : Int, b : Int) -> bool {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { l2r_int_val(x) < l2r_int_val(y) } else { l2r_int_cmp_raw(x, y) < 0 }
+    if (x & y & 1) == 1 { l2r_int_word_val(x) < l2r_int_word_val(y) } else { l2r_int_cmp_raw(x, y) < 0 }
 }
 
 fn lean_int_dec_le(a : Int, b : Int) -> bool {
     let x = l2r_int_raw(a);
     let y = l2r_int_raw(b);
-    if (x & y & 1) == 1 { l2r_int_val(x) <= l2r_int_val(y) } else { l2r_int_cmp_raw(x, y) <= 0 }
+    if (x & y & 1) == 1 { l2r_int_word_val(x) <= l2r_int_word_val(y) } else { l2r_int_cmp_raw(x, y) <= 0 }
 }
 
 fn lean_int_dec_nonneg(a : Int) -> bool {
     let x = l2r_int_raw(a);
-    if (x & 1) == 1 { l2r_int_val(x) >= 0 } else { !l2r_int_is_neg_raw(x) }
+    if (x & 1) == 1 { l2r_int_word_val(x) >= 0 } else { !l2r_int_is_neg_raw(x) }
 }
 
 // The value modulo 2^64 in two's complement (`Int64.ofInt`, ...).
 fn l2r_int_low_twos(a : Int) -> u64 {
     let x = l2r_int_raw(a);
-    if (x & 1) == 1 { l2r_int_val(x) as u64 } else { l2r_int_low_twos_raw(x) }
+    if (x & 1) == 1 { l2r_int_word_val(x) as u64 } else { l2r_int_low_twos_raw(x) }
 }
 
 // `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`): a
@@ -874,7 +904,7 @@ fn l2r_int_of_word(w : u64) -> Int { l2r_int_small(((w as u32) as i32) as i64) }
 fn lean_nat_abs(a : Int) -> Nat {
     let x = l2r_int_raw(a);
     if (x & 1) == 1 {
-        let i = l2r_int_val(x);
+        let i = l2r_int_word_val(x);
         if i < 0 { l2r_nat_small((0 - i) as u64) } else { l2r_nat_small(i as u64) }
     } else { l2r_int_nat_abs_raw(x) }
 }
@@ -1374,7 +1404,7 @@ fn lean_float32_scaleb(a : f32, b : Int) -> f32 { l2r_float32_scaleb(a, l2r_int_
 // `i64::MAX` by its sign.
 fn l2r_int_sat_i64(b : Int) -> i64 {
     let x = l2r_int_raw(b);
-    if (x & 1) == 1 { l2r_int_val(x) } else { if l2r_int_is_neg_raw(x) { 0 - 9223372036854775807 - 1 } else { 9223372036854775807 } }
+    if l2r_int_word_is_small(x) { l2r_int_word_val(x) } else { if l2r_int_is_neg_raw(x) { 0 - 9223372036854775807 - 1 } else { 9223372036854775807 } }
 }
 
 // libm functions under their C names (the extern symbols of `Float.sin`,
@@ -1581,7 +1611,7 @@ fn l2r_string_get_byte(s : LStr, i : u64) -> u8 [{ { let r = sem::string::get_by
 // `u64::MAX` for a big one (past the end of every string).
 fn l2r_pos_of_nat(p : Nat) -> u64 {
     let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { x >> 1 } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
+    if l2r_nat_word_is_small(x) { l2r_nat_word_val(x) } else { let d = l2r_nat_drop_raw(x); 18446744073709551615 }
 }
 
 // `l2r_pos_of_nat` of a position's word, for a read: no call, so nothing
@@ -1589,7 +1619,7 @@ fn l2r_pos_of_nat(p : Nat) -> u64 {
 // decrement (a big position's release, a call, rejoining the read kept
 // both); the read releases a big position afterwards (`l2r_nat_drop_raw`).
 fn l2r_pos_of_word(x : u64) -> u64 {
-    if (x & 1) == 1 { x >> 1 } else { 18446744073709551615 }
+    if l2r_nat_word_is_small(x) { l2r_nat_word_val(x) } else { 18446744073709551615 }
 }
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
@@ -1626,14 +1656,14 @@ fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast_wor
 // `Nat`; for a big position C computes `p + 1` on the `Nat`, as here.
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_nat_of_u64(l2r_string_next(s, x >> 1)) } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
+    if l2r_nat_word_is_small(x) { l2r_nat_of_u64(l2r_string_next(s, l2r_nat_word_val(x))) } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast_word(s, l2r_nat_raw(p))) }
 
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_nat_small(l2r_string_prev(s, x >> 1)) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
+    if l2r_nat_word_is_small(x) { l2r_nat_small(l2r_string_prev(s, l2r_nat_word_val(x))) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
 
 fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
@@ -1665,7 +1695,7 @@ fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
 
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
     let x = l2r_nat_raw(p);
-    if (x & 1) == 1 { l2r_string_set(s, x >> 1, c) } else { let d = l2r_nat_drop_raw(x); s }
+    if l2r_nat_word_is_small(x) { l2r_string_set(s, l2r_nat_word_val(x), c) } else { let d = l2r_nat_drop_raw(x); s }
 }
 
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, lean_usize_of_nat(i)) }
@@ -1823,7 +1853,7 @@ fn lean_mk_empty_array<T>() -> RVec<T> { l2r_array_empty<T>() }
 // the native element size (for Lean's allocation-size checks).
 fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
     let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { l2r_array_with_capacity<T>(x >> 1, elem) } else { let d = l2r_nat_drop_raw(x); l2r_array_empty<T>() }
+    if l2r_nat_word_is_small(x) { l2r_array_with_capacity<T>(l2r_nat_word_val(x), elem) } else { let d = l2r_nat_drop_raw(x); l2r_array_empty<T>() }
 }
 
 fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_capacity<T>(n, 8) }
@@ -1844,7 +1874,7 @@ fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) 
 // index as its word instead (`l2r_array_get_word`).
 fn l2r_index_of_nat(i : Nat) -> u64 {
     let x = l2r_nat_raw(i);
-    if (x & 1) == 1 { x >> 1 } else { l2r_unreachable<u64>() }
+    if l2r_nat_word_is_small(x) { l2r_nat_word_val(x) } else { l2r_unreachable<u64>() }
 }
 
 // A read at the word `x` of a `Nat` index that a proof keeps in bounds
@@ -1855,7 +1885,7 @@ fn l2r_index_of_nat(i : Nat) -> u64 {
 fn l2r_array_get_word<T>(v : RVec<T>, x : u64) -> T {
     let p = l2r_array_give<T>(v);
     let n = l2r_view_size(p);
-    if l2r_word_index_ok(x, n) { l2r_view_take<T>(p, x >> 1) } else { l2r_index_fail<T>(x, n) }
+    if l2r_word_index_ok(x, n) { l2r_view_take<T>(p, l2r_nat_word_val(x)) } else { l2r_index_fail<T>(x, n) }
 }
 
 // The failing branch of a read at an index proved in bounds (never taken
@@ -1863,7 +1893,7 @@ fn l2r_array_get_word<T>(v : RVec<T>, x : u64) -> T {
 // the read's former messages: a big index is unreachable code, a small one
 // the read's `index_bug`.
 fn l2r_index_fail<T>(x : u64, n : u64) -> T {
-    if (x & 1) == 1 { l2r_array_index_bug<T>(x >> 1, n) } else { l2r_unreachable<T>() }
+    if l2r_nat_word_is_small(x) { l2r_array_index_bug<T>(l2r_nat_word_val(x), n) } else { l2r_unreachable<T>() }
 }
 
 // `Array.get!Internal`: out of bounds, panic ("index out of bounds") and
@@ -1887,7 +1917,7 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<T>(v);
     if l2r_word_index_ok(x, l2r_view_size(p)) {
-        let r = l2r_view_take<T>(p, x >> 1);
+        let r = l2r_view_take<T>(p, l2r_nat_word_val(x));
         let d = l2r_consume<T>(dflt);
         r
     } else {
@@ -1916,24 +1946,15 @@ fn l2r_view_take_as<T>(p : u64, i : u64) -> T [{ {
         #[inline(always)]
         fn take(a: &leanrt::any::LAny) -> u64 { a.word() }
     }
-    // A big number: copied out of line (the texture stays small enough
-    // for LLVM to inline at a cold call site).
-    #[cold]
-    #[inline(never)]
-    fn big<B>(a: &leanrt::any::LAny, num: u64) -> B { leanrt::any::as_(a.clone(), num) }
+    // An immediate without a count, a big number copied out of line
+    // (`leanrt::any::nat_of_ref`).
     impl Take for leanrt::nat::LNat {
         #[inline(always)]
-        fn take(a: &leanrt::any::LAny) -> Self {
-            let w = a.word();
-            if w & 1 == 1 { unsafe { leanrt::nat::LNat::from_raw(w) } } else { big(a, leanrt::any::NUM_NAT) }
-        }
+        fn take(a: &leanrt::any::LAny) -> Self { leanrt::any::nat_of_ref(a) }
     }
     impl Take for leanrt::nat::LInt {
         #[inline(always)]
-        fn take(a: &leanrt::any::LAny) -> Self {
-            let w = a.word();
-            if w & 1 == 1 { unsafe { leanrt::nat::LInt::from_raw(w) } } else { big(a, leanrt::any::NUM_INT) }
-        }
+        fn take(a: &leanrt::any::LAny) -> Self { leanrt::any::int_of_ref(a) }
     }
     let o = (p & !1) as *mut leanrt::drop::Hdr;
     let r = <[:T:] as Take>::take(unsafe { &*leanrt::drop::elems::<leanrt::any::LAny>(o).add(i as usize) });
@@ -1969,7 +1990,7 @@ fn l2r_array_get_as<T>(v : RVec<LAny>, i : u64) -> T {
 fn l2r_array_get_word_as<T>(v : RVec<LAny>, x : u64) -> T {
     let p = l2r_array_give<LAny>(v);
     let n = l2r_view_size(p);
-    if l2r_word_index_ok(x, n) { l2r_view_take_as<T>(p, x >> 1) } else { l2r_index_fail<T>(x, n) }
+    if l2r_word_index_ok(x, n) { l2r_view_take_as<T>(p, l2r_nat_word_val(x)) } else { l2r_index_fail<T>(x, n) }
 }
 
 fn lean_array_fget_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_word_as<T>(v, l2r_nat_raw(i)) }
@@ -1983,7 +2004,7 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<LAny>(v);
     if l2r_word_index_ok(x, l2r_view_size(p)) {
-        let r = l2r_view_take_as<T>(p, x >> 1);
+        let r = l2r_view_take_as<T>(p, l2r_nat_word_val(x));
         let d = l2r_consume<LAny>(dflt);
         r
     } else {
@@ -2001,7 +2022,7 @@ fn lean_array_uset<T>(v : RVec<T>, i : u64, x : T) -> RVec<T> { l2r_array_set(v,
 // `Array.set!`: out of bounds, panic and return the array unchanged.
 fn lean_array_set<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> {
     let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else {
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, l2r_nat_word_val(w), x) } else {
         let d = l2r_nat_drop_raw(w);
         let ignored = l2r_panic_code(0);
         v
@@ -2022,7 +2043,7 @@ fn lean_array_swap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     let n = l2r_array_size(v);
     let x = l2r_nat_raw(i);
     let y = l2r_nat_raw(j);
-    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_array_swap(v, x >> 1, y >> 1) } else {
+    if l2r_word_index_ok(x, n) && l2r_word_index_ok(y, n) { l2r_array_swap(v, l2r_nat_word_val(x), l2r_nat_word_val(y)) } else {
         let d = l2r_nat_drop_raw(x) + l2r_nat_drop_raw(y);
         v
     }
@@ -2048,7 +2069,7 @@ fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get_word(v, l2r
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<u8>(v);
-    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<u8>(p, x >> 1) } else {
+    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<u8>(p, l2r_nat_word_val(x)) } else {
         let e = l2r_view_end<u8>(p);
         let d = l2r_nat_drop_raw(x);
         0
@@ -2060,7 +2081,7 @@ fn lean_byte_array_fset(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> { l2r_array_s
 // `ByteArray.set!`: unchanged out of bounds.
 fn lean_byte_array_set(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> {
     let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, l2r_nat_word_val(w), x) } else { let d = l2r_nat_drop_raw(w); v }
 }
 #[ffi(import)]
 fn lean_byte_array_hash(v : RVec<u8>) -> u64 [{ { let r = sem::hash::byte_array_hash(leanrt::array::as_slice(&v)); leanrt::array::release(v); r } }];
@@ -2113,7 +2134,7 @@ fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get_word(v, 
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<f64>(v);
-    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<f64>(p, x >> 1) } else {
+    if l2r_word_index_ok(x, l2r_view_size(p)) { l2r_view_take<f64>(p, l2r_nat_word_val(x)) } else {
         let e = l2r_view_end<f64>(p);
         let d = l2r_nat_drop_raw(x);
         0.0
@@ -2124,7 +2145,7 @@ fn lean_float_array_uset(v : RVec<f64>, i : u64, x : f64) -> RVec<f64> { l2r_arr
 fn lean_float_array_fset(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> { l2r_array_set(v, l2r_index_of_nat(i), x) }
 fn lean_float_array_set(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> {
     let w = l2r_nat_raw(i);
-    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, w >> 1, x) } else { let d = l2r_nat_drop_raw(w); v }
+    if l2r_word_index_ok(w, l2r_array_size(v)) { l2r_array_set(v, l2r_nat_word_val(w), x) } else { let d = l2r_nat_drop_raw(w); v }
 }
 
 // ===========================================================================
@@ -3186,7 +3207,7 @@ fn l2r_addr_fresh() -> u64 [{ leanrt::fresh_addr() }];
 // `2n+1`, a big one the pointer to its object; either way, its word.
 fn l2r_addr_nat(n : Nat) -> u64 {
     let x = l2r_nat_raw(n);
-    if (x & 1) == 1 { x } else { let d = l2r_nat_drop_raw(x); x }
+    if l2r_nat_word_is_small(x) { x } else { let d = l2r_nat_drop_raw(x); x }
 }
 
 // An `Int` is represented as natively: a small one (the `int32` range) is
@@ -3194,7 +3215,7 @@ fn l2r_addr_nat(n : Nat) -> u64 {
 // word.
 fn l2r_addr_int(i : Int) -> u64 {
     let w = l2r_int_raw(i);
-    if (w & 1) == 1 { w } else { let d = l2r_int_drop_raw(w); w }
+    if l2r_int_word_is_small(w) { w } else { let d = l2r_int_drop_raw(w); w }
 }
 
 // A heap value's handle pointer, whatever its count: the address is the

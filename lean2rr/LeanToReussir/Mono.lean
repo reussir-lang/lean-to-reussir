@@ -4,6 +4,7 @@ import LeanToReussir.Relevance
 import LeanToReussir.Passes
 import LeanToReussir.CompileRecord
 import LeanToReussir.Env
+import LeanToReussir.NatEncoding
 
 /-!
 # Stage 1: monomorphization
@@ -1043,7 +1044,7 @@ where
       let computes ← match d.value with
         | .erased | .proj .. => pure false
         | .lit (.str _) => pure true
-        | .lit (.nat n) => pure (n ≥ 2 ^ 63)
+        | .lit (.nat n) => pure !(natIsSmall n)
         | .lit _ => pure false
         | .fvar _ args => pure !args.isEmpty
         | .const f _ args _ =>

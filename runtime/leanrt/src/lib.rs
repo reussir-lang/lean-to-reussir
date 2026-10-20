@@ -241,8 +241,8 @@ pub extern "C" fn unreachable_code() -> ! {
 /// keeps in bounds; a big one is unreachable code (`unreachable_code`).
 #[inline(always)]
 pub fn index_word(x: u64) -> u64 {
-    if (x & 1) == 1 {
-        x >> 1
+    if nat::is_small(x) {
+        nat::nat_of_small_word(x)
     } else {
         unreachable_code()
     }

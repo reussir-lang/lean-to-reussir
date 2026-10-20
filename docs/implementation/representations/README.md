@@ -6,7 +6,8 @@ the special cases behind those choices. The type table is in plan
 is in [`runtime/README.md`](../../../runtime/README.md).
 
 - [nat-int.md](nat-int.md): `Nat` and `Int` as one word in Lean's encoding
-  (tagged handles, Reussir patch 10-a), fast paths, normalization and the
+  (tagged handles, Reussir patch 10-a), the named helpers that are the one
+  place that knows the encoding, fast paths, normalization and the
   call-free equality of a small and a big `Int`, big numbers in one
   block (header and limbs), literals, printing.
 - [records.md](records.md): generated types for inductives: unit, value

@@ -421,7 +421,13 @@ compute small results inline, and call `leanrt::nat`'s slow paths
 (`nat_add`, ... taking owned words, every small/big combination: each
 views its words as lean-runtime's `Nat`/`Int`, runs lean-runtime's rule
 and normalizes the result) for the rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
-releases one. The slow paths normalize: a `Nat` below 2^63 (an `Int` in
+releases one. The encoding is known in one place: the helpers at the start
+of the Nat and Int sections (`l2r_nat_word_is_small`, `l2r_nat_word_val`,
+`l2r_nat_small`, `l2r_int_word_val`, `l2r_int_small`, ...) and the fast
+paths of those two sections; the rest of the prelude and lean2rr's
+generated code use only the helpers, and leanrt has its own copy in
+`leanrt::nat` (docs/implementation/representations/nat-int.md, "The
+encoding is known in one place"). The slow paths normalize: a `Nat` below 2^63 (an `Int` in
 `int32`) is always small, so two small words are equal exactly when the
 values are, and a small `Int` never equals a big one: `lean_int_dec_eq`
 answers a small and a big word `false` without a call (releasing the big

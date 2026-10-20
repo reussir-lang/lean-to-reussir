@@ -5,6 +5,7 @@ import LeanToReussir.Retype
 import LeanToReussir.Specialize
 import LeanToReussir.Stats
 import LeanToReussir.Mono
+import LeanToReussir.NatEncoding
 import LeanToReussir.CompileRecord
 import LeanToReussir.ExtractClosedK
 import LeanToReussir.Pipeline

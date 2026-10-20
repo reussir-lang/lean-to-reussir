@@ -847,13 +847,13 @@ pub unsafe fn raw_take<T>(w: u64) -> T {
 #[inline(always)]
 pub fn of_nat(n: LNat) -> LAny {
     let w = n.into_raw();
-    if is_imm(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_NAT) } }
+    if crate::nat::is_small(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_NAT) } }
 }
 
 #[inline(always)]
 pub fn of_int(i: LInt) -> LAny {
     let w = i.into_raw();
-    if is_imm(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_INT) } }
+    if crate::nat::is_small(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_INT) } }
 }
 
 #[inline(always)]
@@ -876,6 +876,32 @@ unsafe fn int_of_word(w: u64) -> LInt {
         mismatch(w, NUM_INT);
     }
     unsafe { LInt::from_raw(w & ADDR_MASK) }
+}
+
+/// A copy of the `Nat` that box `a` holds, read through a reference (the
+/// prelude's `l2r_view_take_as`: an element of an array of boxes read at
+/// `Nat`): an immediate is the small `Nat`'s own word, taken without a
+/// count; a big one is copied as `as_` copies it (`copy_big`).
+#[inline(always)]
+pub fn nat_of_ref(a: &LAny) -> LNat {
+    let w = a.word();
+    if is_imm(w) { unsafe { LNat::from_raw(w) } } else { copy_big(a, NUM_NAT) }
+}
+
+/// `nat_of_ref` at `Int`.
+#[inline(always)]
+pub fn int_of_ref(a: &LAny) -> LInt {
+    let w = a.word();
+    if is_imm(w) { unsafe { LInt::from_raw(w) } } else { copy_big(a, NUM_INT) }
+}
+
+/// The pointer case of `nat_of_ref`/`int_of_ref`, out of line: the
+/// prelude's texture stays small enough for LLVM to inline it at a cold
+/// call site.
+#[cold]
+#[inline(never)]
+fn copy_big<B>(a: &LAny, num: u64) -> B {
+    as_(a.clone(), num)
 }
 
 /// A `Float` in a box: a cell, as natively.

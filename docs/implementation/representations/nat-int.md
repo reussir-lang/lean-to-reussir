@@ -29,6 +29,86 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   does not constrain lean2rr's layouts while the C FFI is parked) or
   Reussir gains a native tagged-integer type.
 
+### The encoding is known in one place
+
+- **What:** A small set of named helpers builds, tests and decodes the
+  words:
+
+  | Helper | Gives |
+  |---|---|
+  | `l2r_nat_raw(n)`, `l2r_nat_of_raw(w)`, `l2r_nat_drop_raw(w)` | the word of a handle (the word then owns the reference), the handle of a word, the release of a word |
+  | `l2r_nat_word_is_small(w)` | whether a word is a small value (`w & 1`) |
+  | `l2r_nat_word_val(w)` | the value of a small word (`w >> 1`) |
+  | `l2r_nat_val_is_small(v)`, `l2r_nat_small_word(v)`, `l2r_nat_small(v)` | whether a `u64` value has a small word (below 2^63), that word (`2v+1`), its handle |
+  | `l2r_nat_of_u64(v)` | the `Nat` of any `u64` (small or big) |
+  | `l2r_int_raw`, `l2r_int_of_raw`, `l2r_int_drop_raw`, `l2r_int_word_is_small` | as for `Nat` |
+  | `l2r_int_word_bits(w)`, `l2r_int_word_val(w)` | the 32-bit pattern of a small word (the boxed scalar), its signed value |
+  | `l2r_int_val_is_small(v)`, `l2r_int_small_word(v)`, `l2r_int_small(v)`, `l2r_int_of_i64(v)` | the `int32` range test, the word, the handle; the `Int` of any `i64` |
+
+  They are at the start of the prelude's Nat and Int sections. The rest
+  of the prelude (strings, arrays, `Float.scaleB`, `ptrAddrUnsafe`, the
+  fixed-width integers) and every call that lean2rr generates use only
+  these helpers and the functions of the two sections (`lean_nat_*`,
+  `lean_int_*`, `l2r_nat_low`, `l2r_word_index_ok`, `l2r_int_word`, ...).
+  They never use a bit operation on a `Nat` or `Int` word.
+
+  The other functions of the two sections compute on the words directly:
+  for example `x + (y - 1)` (the word of a sum), `x - y + 1`,
+  `(x ^ y) | 1`, comparisons of words, and the tests `x & 1` and
+  `(x >> 32) == 0`. They are the code of the representation, as the
+  helpers are.
+
+  Two other places know the representation:
+  - leanrt has its own copy in `leanrt::nat`: `is_small`,
+    `nat_of_small_word`, `small_word`, `int_of_small_word`, `LNat::small`,
+    `LInt::small`, and the small ranges. The rest of leanrt
+    (`index_word`, `any::of_nat`, `any::of_int`) uses them. A box holds a
+    small `Nat` or `Int` as its own word (an immediate): `leanrt::any`
+    knows this (`of_nat`, `nat_of_word`, `nat_of_ref`, and the `Int`
+    forms). The prelude's texture `l2r_view_take_as` calls `nat_of_ref`
+    and `int_of_ref`.
+  - lean2rr's own rules know only which values are small, not the words.
+    `NatEncoding.lean` has `natIsSmall` (below 2^63) and `intIsSmall` (the
+    `int32` range), and `natLiteral`, the optimization `cheap-consts` and
+    `constComputes` (Mono) use them. lean2rr emits only helper calls:
+    `l2r_nat_small(k)` for a literal, `l2r_nat_small(0)` and
+    `l2r_int_small(0)` for placeholders, `l2r_int_word`, `l2r_int_of_word`,
+    `lean_usize_of_nat`, `lean_usize_to_nat` and `l2r_int_cast_nat` for
+    casts, `l2r_addr_nat` and `l2r_addr_int` for `ptrAddrUnsafe`,
+    `l2r_nat_sat` for a priority.
+- **Why:** A later change of the representation (for example, `Nat` and
+  `Int` on Reussir's coming builtin big integer) then changes the helpers,
+  the other functions of the two sections, `leanrt::nat` and the two
+  definitions of `NatEncoding.lean`, and nothing else.
+  The functions of the two sections keep their bit operations. They call
+  only the helpers that were functions before (`l2r_nat_small`,
+  `l2r_nat_of_u64`, `l2r_int_small`, `l2r_int_of_i64`, `l2r_int_word_val`),
+  because of Reussir's MLIR inliner (`reussir-default-inliner`). It
+  inlines a callee only if the callee has at most 256 operations, and it
+  counts a callee after the inlining into it but before the folding. Each inlined helper
+  brings its own constants (the `1` of `w & 1`), so a helper call can add
+  an operation where the written-out expression shares a constant. The
+  functions of the two sections are inlined into most program functions.
+  With more helper calls in them, a program function could cross the
+  limit and stop being inlined into its callers. As written, these
+  functions have the same operations as before the helpers.
+  The helper calls in the other sections add at most two operations to a
+  string or array function. Result: the machine code of every Reussir
+  function of L11, E01, E09, X04, X13 and L10 is the same as before, except
+  `IO.Error.toString`. That function is in every program (the message of
+  an uncaught `IO.Error`) and it is cold. Its callees `fopenErrorToString`
+  and `otherErrorToString` (string operations) now go past the limit, so
+  they are not inlined into its 8 call sites. The text is 16 KB smaller
+  in each program.
+- **Where:** `runtime/prelude.rr`: the first blocks of the Nat and Int
+  sections; `runtime/leanrt/src/nat.rs`: the block above `is_small`;
+  `runtime/leanrt/src/any.rs`: `of_nat`, `nat_of_ref`;
+  `lean2rr/LeanToReussir/NatEncoding.lean`.
+- **Remove only if:** never (an organization rule). Lean's own copy of its
+  closed-term extraction (`ExtractClosedK.lean`: a literal of 2^63 or more
+  is extracted) keeps Lean's rule, which does not depend on lean2rr's
+  representation.
+
 ### Reussir counts only the even words (tagged opaque handles, patch 10-a)
 
 - **What:** The prelude declares `#[ffi(rust = "::leanrt::nat::LNat",
@@ -161,7 +241,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `leanrt::nat`, which runs lean-runtime's rules (next entry).
 - **Why:** Native Lean's small arithmetic is a tag test and the operation;
   so is this.
-- **Where:** `prelude.rr`: `lean_nat_*`, `lean_int_*`, `l2r_int_val`.
+- **Where:** `prelude.rr`: `lean_nat_*`, `lean_int_*`, `l2r_int_word_val`.
 - **Remove only if:** the encoding changes.
 
 ### The slow paths are lean-runtime's rules on lean2rr's numbers
@@ -396,14 +476,15 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
-- **What:** A `Nat` literal below 2^63 is `l2r_nat_small(k)` (the word
-  `2k+1`); a bigger one is
+- **What:** A `Nat` literal below 2^63 (`natIsSmall`) is
+  `l2r_nat_small(k)` (the word `2k+1`); a bigger one is
   `l2r_nat_of_decimal_lstr(s)`, with `s` the decimal digits in the string
   literal table.
 - **Why:** 2^63 is the small range. A nested arithmetic expression per
   limb overflowed rrc's stack at about 20000 digits and cost quadratic time
   (adv2 N1, fbf37e8).
-- **Where:** `Lower/Values.lean`: `natLiteral`; `prelude.rr`: `l2r_nat_small`, `l2r_nat_of_decimal_lstr`;
+- **Where:** `Lower/Values.lean`: `natLiteral`; `NatEncoding.lean`:
+  `natIsSmall`; `prelude.rr`: `l2r_nat_small`, `l2r_nat_of_decimal_lstr`;
   `leanrt/src/nat.rs`: `nat_of_decimal`.
 - **Remove only if:** the encoding changes; the flat call is cheaper
   anyway. Plan [§5.4](../../translation-plan.md#54-let-return-literals).

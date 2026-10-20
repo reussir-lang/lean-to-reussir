@@ -10,11 +10,11 @@ once-cell (`cafAccessor`); for a constant that only builds unboxed values
 from small literals, constructors and total scalar conversions, reading the
 once-cell costs more than computing the value, so it is recomputed at every
 use instead (translation plan §5.12). Every `Nat` or `Int` such a constant
-builds must be a small, one-word value (a `Nat` below 2^63, an `Int` in the
-`int32` range): a bigger one is a heap big number, which recomputing would
-allocate at every use (RV8N-01). Such a constant cannot panic, trace or
-allocate, so the change is unobservable. Without this pass every constant
-is cached.
+builds must be a small, one-word value (`natIsSmall`, `intIsSmall`: a
+`Nat` below 2^63, an `Int` in the `int32` range): a bigger one is a heap
+big number, which recomputing would allocate at every use (RV8N-01). Such
+a constant cannot panic, trace or allocate, so the change is unobservable.
+Without this pass every constant is cached.
 -/
 
 namespace LeanToReussir
@@ -47,7 +47,7 @@ partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) (known : Std.HashMap
     -- `none`: not cheap; `some v`: cheap, with the value `v` if known.
     let val : Option (Option Int) ← match d.value with
       | .lit (.str _) => pure none
-      | .lit (.nat n) => pure (if n < 2 ^ 63 then some (some n) else none)
+      | .lit (.nat n) => pure (if natIsSmall n then some (some n) else none)
       | .lit _ => pure (some none)
       | .erased => pure (some none)
       | .const f _ args =>
@@ -81,15 +81,15 @@ where
     if f == ``Nat.zero then some (some 0)
     else if f == ``Nat.succ then
       match arg with
-      | some k => if k + 1 < 2 ^ 63 then some (some (k + 1)) else none
+      | some k => if natIsSmall (k + 1).toNat then some (some (k + 1)) else none
       | none => none
     else if f == ``Int.ofNat then
       match arg with
-      | some k => if k < 2 ^ 31 then some (some k) else none
+      | some k => if intIsSmall k then some (some k) else none
       | none => none
     else if f == ``Int.negSucc then
       match arg with
-      | some k => if k < 2 ^ 31 then some (some (-(k + 1))) else none
+      | some k => if intIsSmall (-(k + 1)) then some (some (-(k + 1))) else none
       | none => none
     else some none
   isScalarConversion (f : Name) : Bool :=
