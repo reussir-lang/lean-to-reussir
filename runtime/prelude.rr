@@ -607,6 +607,25 @@ fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
     } else { l2r_nat_shiftr_raw(x, y) }
 }
 
+// `x % 2^w`, the low `w` bits of `x`, without making `2^w`: lean2rr's rule
+// for `Nat.mod x (Nat.pow 2 w)`, `x % (1 <<< w)` and `x` modulo a literal
+// `2^k` (`Opt/ModPow2`; every `BitVec.ofNat`). Two small words inline (the
+// word `2v+1` keeps its low `w + 1` bits); the rest is leanrt's
+// (`leanrt::nat::nat_truncate_bits`: a big `x` keeps its block when it has
+// at most `w` bits).
+#[ffi(import)]
+fn l2r_nat_truncate_bits_raw(a : u64, w : u64) -> Nat [{ leanrt::nat::nat_truncate_bits(a, w) }];
+
+fn l2r_nat_truncate_bits(a : Nat, b : Nat) -> Nat {
+    let x = l2r_nat_raw(a);
+    let y = l2r_nat_raw(b);
+    if (x & y & 1) == 1 {
+        let s = y >> 1;
+        let two : u64 = 2;
+        if s < 63 { l2r_nat_of_raw(x & ((two << s) - 1)) } else { l2r_nat_of_raw(x) }
+    } else { l2r_nat_truncate_bits_raw(x, y) }
+}
+
 #[ffi(import)]
 fn l2r_nat_log2_big(a : u64) -> Nat [{ leanrt::nat::nat_log2(a) }];
 

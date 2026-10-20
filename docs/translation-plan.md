@@ -3720,12 +3720,20 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   too big`, whatever the base. lean2rr gives `0 ^ e = 0` and `1 ^ e = 1`
   for any `e`, and another base's power while `bit_len(a) * e` (exactly
   `j e + 1` bits for a base `2^j`) is at most `MAX_BITS` (LB-05), with
-  native's message above it. Tests `RtInternalPanic`, `RtLiftedLimits`.
+  native's message above it. `x % 2 ^ w` gives its value for every `w`:
+  the optimization `mod-pow2` computes it as the low `w` bits of `x`
+  without the power (when the power is made in the same declaration as
+  the `%`, as in `BitVec.ofNat`), so for a `w` above `MAX_BITS` it gives
+  `x` (which has fewer bits), and for a `w` of 2^32 or more no message,
+  where natively the power ends the process. Tests `RtInternalPanic`, `RtLiftedLimits`; for
+  the truncation, the unit test `nat::tests::truncate_bits` (`w` of 2^32,
+  2^63 and 2^64 + 1).
 - *LB-12, `Nat.shiftLeft` by 2^32 or more*: natively `INTERNAL PANIC:
   Nat.shiftl exponent is too big` for a nonzero value; lean2rr computes the
   shift while the result fits `MAX_BITS`, with native's message above it
   (lean-runtime's rows `nat/shiftl*`, through `rows-check.sh`: the results
-  have 2^32 bits, 512 MiB).
+  have 2^32 bits, 512 MiB). As for LB-11, `x % (1 <<< w)` gives `x` there
+  (`mod-pow2` makes no `1 <<< w`).
 - *LB-04, `Nat.shiftRight` of a huge value by 2^32 or more*: natively
   `INTERNAL PANIC: Nat.shiftr exponent is too big` for an operand of 2^32
   bits or more; lean2rr computes the quotient (lean-runtime's rows

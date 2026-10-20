@@ -321,6 +321,31 @@ pub extern "C" fn nat_shiftr(a: u64, b: u64) -> LNat {
     of_nat_view(sem::nat::shiftr(unsafe { nat_view(a) }, unsafe { nat_view(b) }))
 }
 
+/// `a % 2^w`, the low `w` bits of `a` (`l2r_nat_truncate_bits`: lean2rr's
+/// rule for `Nat.mod x (Nat.pow 2 w)`, `x % (1 <<< w)` and `x` modulo a
+/// literal `2^k`, as in every `BitVec.ofNat`), without making `2^w`. For
+/// every `a` and `w` the value of `a % 2 ^ w`, also where natively `2 ^ w`
+/// ends the process (`w >= 2^32`: `Nat.pow exponent is too big`) or the
+/// power would have more than `big::MAX_BITS` bits: a `w` of 2^63 or more
+/// (a big word) is more bits than any number has, so `a` is the result.
+/// The prelude computes two small words in line; this is the rest.
+#[cold]
+#[inline(never)]
+pub extern "C" fn nat_truncate_bits(a: u64, w: u64) -> LNat {
+    if !is_small(w) {
+        unsafe { release_word(w) };
+        return unsafe { LNat::from_raw(a) };
+    }
+    let w = nat_of_small_word(w);
+    if is_small(a) {
+        if w >= 63 {
+            return unsafe { LNat::from_raw(a) };
+        }
+        return LNat::small(nat_of_small_word(a) & ((1 << w) - 1));
+    }
+    LNat::of_big(big::nat_truncate_bits(unsafe { big_of_word(a) }, w))
+}
+
 #[cold]
 #[inline(never)]
 pub extern "C" fn nat_log2(a: u64) -> LNat {
@@ -719,6 +744,23 @@ mod tests {
                 assert_eq!(val(&nat_lor(n(a).into_raw(), n(b).into_raw())), a | b);
                 assert_eq!(val(&nat_xor(n(a).into_raw(), n(b).into_raw())), a ^ b);
                 assert!(canonical(&nat_xor(n(a).into_raw(), n(b).into_raw())));
+            }
+        }
+    }
+
+    /// `a % 2^w` (`nat_truncate_bits`) at the edges of the small range and of
+    /// the limbs, `w` small and big (2^63 and up: `a`), against `u128`.
+    #[test]
+    fn truncate_bits() {
+        let edges: [u128; 11] = [0, 1, 5, (1 << 62) - 1, 1 << 62, (1 << 63) - 1, 1 << 63, (1 << 64) - 1, 1 << 64,
+                                 (1 << 64) + 5, u128::MAX];
+        let ws: [u128; 13] = [0, 1, 2, 31, 62, 63, 64, 65, 127, 128, 1 << 32, 1 << 63, (1 << 64) + 1];
+        for &a in &edges {
+            for &w in &ws {
+                let r = nat_truncate_bits(n(a).into_raw(), n(w).into_raw());
+                let e = if w >= 128 { a } else { a & ((1u128 << w) - 1) };
+                assert_eq!(val(&r), e, "{a} % 2^{w}");
+                assert!(canonical(&r));
             }
         }
     }

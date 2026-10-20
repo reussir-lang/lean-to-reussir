@@ -6,6 +6,7 @@ import LeanToReussir.Opt.FloatLits
 import LeanToReussir.Opt.SinkProj
 import LeanToReussir.Opt.CheapConsts
 import LeanToReussir.Opt.PreludeRepr
+import LeanToReussir.Opt.ModPow2
 import LeanToReussir.Opt.JpSink
 import LeanToReussir.Opt.JpSmall
 import LeanToReussir.Opt.LazyFields
@@ -92,6 +93,7 @@ def optimizations : Array OptPass := #[
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
+  ⟨"mod-pow2", true, "x % 2^w (Nat.mod x (Nat.pow 2 w), x % (1 <<< w), x modulo a literal 2^k with k >= 63; every BitVec.ofNat) computed as the low w bits of x by the runtime (l2r_nat_truncate_bits), without making 2^w; the power's let goes when nothing else uses it (the same value for every x and w)", ModPow2.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (own body at most 40 nodes, a copy expanding to at most 480 with the join points inlined into it, the copies beyond the first adding at most 2000, 4000 for a loop's continuation) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
   ⟨"state-machines", true, "a loop's state machine (J4) entered and re-entered without allocation: every variant nullary, the parameters and join points' values passed in parameter slots (placeholders in the slots a jump does not fill)", StateMachines.install⟩,

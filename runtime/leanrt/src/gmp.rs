@@ -60,6 +60,7 @@ extern "C" {
     pub fn __gmpz_mul_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
     pub fn __gmpz_tdiv_q_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
     pub fn __gmpz_fdiv_q_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
+    pub fn __gmpz_fdiv_r_2exp(r: *mut Mpz, a: *const Mpz, k: u64);
     pub fn __gmpz_init_set_ui(x: *mut Mpz, v: u64);
     pub fn __gmpz_init_set_si(x: *mut Mpz, v: i64);
     pub fn __gmpz_init_set_str(x: *mut Mpz, s: *const u8, base: i32) -> i32;

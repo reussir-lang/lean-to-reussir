@@ -517,13 +517,75 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   wide `BitVec` operation that makes a value computes `x % 2^w`
   (`BitVec.ofNat`), mostly for an `x < 2^w`. Z03b's `b ||| (1#w <<< i)` did so once per bit set:
   about a third of its instructions after the bitwise loop's
-  vectorization.
+  vectorization. With `mod-pow2` (below) these `x % 2^w` make no division;
+  the early return stays for every other division.
 - **Where:** `leanrt/src/big.rs`: `div`; unit tests
   `big::tests::against_mpz` and `mixed_ownership` (the four divisions on
   operands of equal and of different lengths, signed, unique, shared and
   roomy, against GMP's `mpz` divisions).
 - **Remove only if:** never (the result is the same; the test is a
   limb-count comparison, and `mpn_cmp` only for equal counts).
+
+### `x % 2^w` is the low `w` bits of `x`, without `2^w` (`mod-pow2`)
+
+- **What:** The optional pass `mod-pow2` (`Opt/ModPow2.lean`, after Stage 3)
+  rewrites `Nat.mod x p` where `p` is bound in the same declaration to
+  `Nat.pow 2 w`, to `Nat.shiftLeft 1 w`, or to the literal `2^k` with
+  `k ≥ 63` (also a read of a constant whose code is that literal: Lean
+  folds `2 ^ 64` to a literal, which Stage 2 extracts as a closed term).
+  The call becomes `L2RNat.truncateBits x w` (with a `let` of the literal
+  `k`), an extern the pass adds (`@[extern "l2r_nat_truncate_bits"]`, in
+  the environment a definition whose value is the rule,
+  `fun x w => Nat.mod x (Nat.pow 2 w)`, and a declaration of the program;
+  not an axiom: the whole-program check `programCasts` reads an axiom of
+  the program as a possible cast, which turned Cedar's casts on). The
+  `L2R*` namespaces are lean2rr's: a `L2RNat.truncateBits` already in the
+  environment that is not that extern at `Nat → Nat → Nat` (a program's
+  own definition of the name) is an internal error, never called in its
+  place. The `let` of `p`, and that of the literal 2 or 1 it took,
+  go when nothing else uses them. The prelude's `l2r_nat_truncate_bits`
+  computes two small words in line (the word `2v+1` keeps its low `w + 1`
+  bits; `w ≥ 63` keeps `x`); the rest is `leanrt::nat::nat_truncate_bits`:
+  a big `w` (2^63 or more) keeps `x`; a big `x` goes to
+  `big::nat_truncate_bits`, which returns `x` itself when it has at most
+  `w` bits, zero in `x`'s block for `w = 0`, and else the `w / 64` low limbs
+  and the masked next one, in `x`'s block when it is unique, in a new block
+  when it is shared. Example: `BitVec.ofNat w x` (every `BitVec` `+`, `*`,
+  `<<<`, `1#w`) was `let p := Nat.pow 2 w; Nat.mod x p` and is now
+  `L2RNat.truncateBits x w`.
+- **Why:** `Nat.pow 2 w` made a number of `w / 64 + 1` limbs on every wide
+  `BitVec` operation (zeroed, then the top bit set), and the division then
+  compared it with `x`. lean-regex's backtracker (Z03b) sets one bit of a
+  vector of states times positions per step (`b ||| (1#w <<< i)`: three
+  truncations): 42% of its instructions were the `memset` of these powers
+  after the runtime's fixes of its bitwise operations and divisions.
+  Natively GMP does the same work (`mpz_pow_ui`, 41% of native's
+  instructions there). Cachegrind (SVE-free builds), Z03b: on dev 09c72f68
+  (with the boxed error messages of `flatten-structs`) 65.76 → 38.58
+  billion instructions (−41.3%); on the runtime's branch with its fixes of
+  `big::bitwise` and `big::div` (f458773c) 27.94 → 14.09 billion (−49.6%).
+  Cedar (Z06g, whose `Int64` arithmetic goes through `BitVec.ofNat 64`)
+  the same; the other measured programs (L08, X12, L15, E05, L10, L11,
+  E09) have no such call and the same code. The value is `x % 2 ^ w` for
+  every `x` and `w`.
+  Natively `2 ^ w` ends the process from `w = 2^32` (`Nat.pow exponent is
+  too big`), and in lean2rr without the pass above `big::MAX_BITS` bits;
+  the truncation needs no power, so it gives the value there too, as
+  lean-runtime lifts native's limits where the result can be computed
+  (LB-11). A literal divisor below 2^63 is a small word, whose `%` the
+  prelude computes in line (LLVM makes it an `and`); the rule leaves it.
+- **Where:** `Opt/ModPow2.lean` (`rewrite`, `dropUnused`, `literalPows`,
+  `truncDecl`); `Opt/Registry.lean` (`mod-pow2`); `prelude.rr`:
+  `l2r_nat_truncate_bits`, `l2r_nat_truncate_bits_raw`;
+  `leanrt/src/nat.rs`: `nat_truncate_bits`; `leanrt/src/big.rs`:
+  `nat_truncate_bits`; unit tests `nat::tests::truncate_bits` (small and
+  big `x` and `w`, `w` of 2^32, 2^63 and 2^64 + 1), `big::tests::against_mpz`
+  and `big::tests::mixed_ownership` (against GMP's `mpz_fdiv_r_2exp`,
+  unique, shared and roomy, `w` at the limb edges, around the bit length,
+  2^40 and 2^64 - 1); runtime test `RtNatModPow2` (with
+  `RtNatModPow2.l2r-debug`: calls rewritten, and `program casts: no`).
+- **Remove only if:** Lean computes `BitVec.ofNat` without `2 ^ w`; else
+  never (speed only).
 
 ### Literals: small below 2^63, big ones parsed from their decimal text
 

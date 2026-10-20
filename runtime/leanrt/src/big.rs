@@ -1241,6 +1241,43 @@ pub fn nat_shr(a: LBig, s: u64) -> LBig {
     }
 }
 
+/// `a % 2^w` (a `Nat`): its low `w` bits, without making `2^w` (lean2rr's
+/// rule for `x % 2 ^ w`, `nat::nat_truncate_bits`). `a` itself when it has
+/// at most `w` bits (`x < 2^w`: a `BitVec` operation whose value is in
+/// range); zero in `a`'s block when `w = 0`; else the kept limbs, the top
+/// one masked, in `a`'s block when it is unique (`set` then drops zero top
+/// limbs and shrinks a block left mostly unused), or in a new block of at
+/// most `w / 64 + 1` limbs.
+#[inline(never)]
+pub fn nat_truncate_bits(a: LBig, w: u64) -> LBig {
+    debug_assert!(!a.neg());
+    if w >= bit_len(&a) {
+        return a;
+    }
+    // `w < bit_len(a) <= 64 * len`: the kept limbs are below `len`.
+    let bits = (w % 64) as u32;
+    let need = (w / 64) as usize + (bits != 0) as usize;
+    if need == 0 {
+        return zero_of(a);
+    }
+    let mask = if bits == 0 { u64::MAX } else { (1u64 << bits) - 1 };
+    unsafe {
+        if a.is_unique() {
+            let mut r = a;
+            *r.ptr().add(need - 1) &= mask;
+            r.set(need, false);
+            r
+        } else {
+            let mut r = alloc(need);
+            ptr::copy_nonoverlapping(a.ptr(), r.ptr(), need);
+            *r.ptr().add(need - 1) &= mask;
+            drop(a);
+            r.set(need, false);
+            r
+        }
+    }
+}
+
 /// The number of significant bits of the magnitude: 0 for zero,
 /// `log2 |a| + 1` otherwise (`mpz_sizeinbase(a, 2)`).
 #[inline]
@@ -1837,6 +1874,17 @@ mod tests {
                         assert_eq!(dec(&nat_shr(x(), s)), dec(&of_mpz(&t.0)));
                     }
                 }
+                // `a % 2^w` (`nat_truncate_bits`), unique and shared, at the
+                // limb edges and around `a`'s bit length.
+                let n = bit_len(a);
+                for w in [0u64, 1, 63, 64, 65, 127, 128, 129, 200, n - 1, n, n + 1, n + 64, 1 << 40, u64::MAX] {
+                    for shared in [false, true] {
+                        let x = || if shared { a.clone() } else { fresh(a) };
+                        let mut t = OwnedMpz::new();
+                        unsafe { __gmpz_fdiv_r_2exp(t.ptr(), &view(a), w) };
+                        assert_eq!(dec(&nat_truncate_bits(x(), w)), dec(&of_mpz(&t.0)), "trunc {} {w} {shared}", dec(a));
+                    }
+                }
                 for y in [0u64, 1, 2, 3, u64::MAX, 1 << 63] {
                     for shared in [false, true] {
                         let x = || if shared { a.clone() } else { fresh(a) };
@@ -1971,6 +2019,16 @@ mod tests {
                         assert_eq!(dec(&nat_shl(roomy(a, extra), s)), dec(&of_mpz(&t.0)), "shl {} {s} {extra}", dec(a));
                         unsafe { __gmpz_tdiv_q_2exp(t.ptr(), &view(a), s) };
                         assert_eq!(dec(&nat_shr(roomy(a, extra), s)), dec(&of_mpz(&t.0)), "shr {} {s} {extra}", dec(a));
+                    }
+                }
+                // `nat_truncate_bits` in a roomy block (a unique result that
+                // `set` may shrink).
+                let n = bit_len(a);
+                for w in [0u64, 1, 63, 64, 65, 127, 128, 129, n - 1, n] {
+                    for extra in [0usize, 1, 8, 40, 200] {
+                        let mut t = OwnedMpz::new();
+                        unsafe { __gmpz_fdiv_r_2exp(t.ptr(), &view(a), w) };
+                        assert_eq!(dec(&nat_truncate_bits(roomy(a, extra), w)), dec(&of_mpz(&t.0)), "trunc {} {w} {extra}", dec(a));
                     }
                 }
             }

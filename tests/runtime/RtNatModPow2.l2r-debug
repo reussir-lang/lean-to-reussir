@@ -1,0 +1,2 @@
+lean2rr: program casts: no
+! lean2rr: mod-pow2: 0 Nat.mod
