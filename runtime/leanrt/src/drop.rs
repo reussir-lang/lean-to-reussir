@@ -83,8 +83,9 @@ pub fn run(p: usize, step: Step) {
 
 /// Release `x`, a value a reference or a task cell gave up (the prelude's
 /// `l2r_rc_set_ref`, `l2r_ref_set`, `l2r_lcell_set`), as native `lean_dec`
-/// does. A shared value is only decremented. The last reference to a
-/// record is freed inside a free the runtime starts (`free_record`): its members go
+/// does. A shared runtime value is only decremented. A record is released
+/// inside a free the runtime starts (`free_unique`), shared or not: if it
+/// is freed, its members go
 /// on the stack of pending work (Reussir's glue releases the first cell of
 /// a free it starts itself in field order), so what it holds is released
 /// in Lean's order, its last field first, and the promises it drops
@@ -98,10 +99,8 @@ pub fn release<T>(x: T) {
     ReleaseValue::release_value(x)
 }
 
-/// `release` of the last reference to `x`, for `array::release_last`: on
-/// aarch64 the caller has found a record's count at 1 and the record no
-/// immediate, so it is freed without testing them again (`free_unique`).
-/// Any other value, or any record on other targets: `release`.
+/// `release` of `x` for `array::release_last` (a record that a set or a pop
+/// removes, shared or not; the record's own release decides).
 #[inline(always)]
 pub(crate) unsafe fn release_unique<T>(x: T) {
     ReleaseValue::release_unique(x)
@@ -125,22 +124,22 @@ impl<T> ReleaseValue for T {
 
 /// The smallest count of the dummy box of a Reussir immediate (a nullary
 /// variant) under the `immortal` encoding of nullary variants: its count
-/// starts at 3 * 2^30 and Reussir never changes it (a real box's count never
-/// gets there). The default encoding on aarch64, `tbi`, marks an immediate
-/// with a nonzero top byte instead; `--nullary-variant-encoding
-/// arch-independent` (an experimental `L2R_RRC_FLAGS` setting) selects the
-/// `immortal` one there too. So the in-line count updates on records
-/// (`Bridge`) here and in `array` skip both: a pointer with a nonzero top
-/// byte, and a count of `IMMORTAL` or more (as `any`'s `into_any` tells
-/// them apart). They decremented the dummy's count under the `immortal`
-/// encoding until, after about 2^30 releases, it was no longer immortal
-/// (review HRT-04). `lib::is_shared` and the prelude's textures that read a
-/// record's count (`l2r_ref_wait`, `l2r_ref_take_mark`, `l2r_ptr_addr_rec`)
-/// use the same bound.
+/// starts at 3 * 2^30 and Reussir never changes it. Only `lib::is_shared`
+/// (`dbgTraceIfShared`, `isExclusive`) still reads a record's count; the
+/// releases and copies of records go through the record's own
+/// `<record>_ffi_release` and `_ffi_acquire` (`Bridge`'s `Drop` and
+/// `Clone`), which know Reussir's encodings.
 pub const IMMORTAL: u32 = 0x8000_0000;
 
-/// A record (`Bridge<Inner>`: a pointer to its cell, whose 32-bit count is
-/// at offset 0, see `ReleaseElems`).
+/// A record (`Bridge<Inner>`): its release is the record's own
+/// `<record>_ffi_release`, which decrements the record's count or frees it
+/// (and leaves a nullary variant as it is). Whether the reference is the
+/// last one is not read here (Reussir's layout and encodings are its own),
+/// so every release runs inside a free that the runtime starts
+/// (`free_unique`: one pending cell, then the drain): if it frees the
+/// record, the runtime objects its glue reaches are pushed and released in
+/// Lean's order, as when the count was read; a shared record is only
+/// decremented there.
 impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     fn release_value(self) {
@@ -148,50 +147,17 @@ impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
             return drop(self);
         }
         let p: usize = unsafe { std::mem::transmute_copy(&self) };
-        if cfg!(target_arch = "aarch64") {
-            // An immediate (never freed: Reussir #661) changes nothing:
-            // a nonzero top byte, or a dummy's count (`IMMORTAL`). A shared
-            // cell is decremented in line.
-            if p >> 56 != 0 {
-                std::mem::forget(self);
-                return;
-            }
-            let c = count(p);
-            if c != 1 {
-                if c < IMMORTAL {
-                    unsafe { *(p as *mut u32) = c.wrapping_sub(1) };
-                }
-                std::mem::forget(self);
-                return;
-            }
-        }
         std::mem::forget(self);
-        free_record::<X>(p);
+        unsafe { free_unique::<X>(p) };
     }
     #[inline(always)]
     unsafe fn release_unique(self) {
-        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == std::mem::size_of::<usize>()) {
-            return self.release_value();
-        }
-        let p: usize = std::mem::transmute_copy(&self);
-        std::mem::forget(self);
-        free_unique::<X>(p);
+        self.release_value()
     }
 }
 
-/// Free the record `p` (`release_value`): on aarch64 `free_unique`, on
-/// other targets (the immortal encoding: the count is not tested, so it
-/// may be shared) a step that runs the record's release (`run`).
-#[cold]
-#[inline(never)]
-fn free_record<X>(p: usize) {
-    if cfg!(target_arch = "aarch64") {
-        return unsafe { free_unique::<X>(p) };
-    }
-    run(p, step_record::<X>);
-}
-
-/// Free the record `p`, whose count is 1 and which is no immediate. The
+/// Release the record `p` (`release_value`; it may be shared, or a nullary
+/// variant: its release then only decrements, or does nothing). The
 /// record goes on the stack of pending work as one deferred cell
 /// (`__reussir_drop_defer`, which does not write the cell), and the drain
 /// releases it (`__reussir_drop_drain`; `free_deferred`). Outside a free
@@ -241,12 +207,6 @@ pub(crate) unsafe fn free_deferred(p: usize, release: unsafe extern "C" fn(*mut 
 pub(crate) unsafe fn free_deferred_wide(p: usize, release: unsafe extern "C" fn(*mut u8)) {
     reussir_rt::drop::__reussir_drop_defer_wide(p as *mut u8, release);
     reussir_rt::drop::__reussir_drop_drain();
-}
-
-/// Release the record whose handle is `p` (its `<record>_ffi_release`).
-unsafe fn step_record<X>(p: usize) -> bool {
-    drop(std::mem::transmute_copy::<usize, reussir_rt::bridge::Bridge<X>>(&p));
-    true
 }
 
 /// The release function of a record deferred by `free_unique`: its
@@ -487,16 +447,14 @@ trait ReleaseElems: Sized {
     /// kept ones in index order at the front of the block (`len`: their
     /// number), for `release_from_end`; answers whether none is kept. The
     /// counts of the kept elements stay 1 until they are released: each is
-    /// the array's only reference. Boxes (`LAny`) on every target; Reussir
-    /// records (`Bridge`) only on aarch64 with 8-byte handles, where the
-    /// nullary variants are immediates with a nonzero top byte (or, under
-    /// the immortal encoding, dummy boxes whose count, `IMMORTAL` or more,
-    /// is left alone) and the count of every other handle is read. (For element types whose counts
-    /// are not read here, records on other targets included, nothing: the
-    /// block stays as it is, and its elements are released from the last
-    /// one, each completely. lean2rr's arrays of Lean values hold boxes,
-    /// `LAny`; the other element types are scalars, whose release does
-    /// nothing, and strings, whose order is not seen.)
+    /// the array's only reference. Boxes (`LAny`, leanrt's own encoding).
+    /// (For other element types the counts are not read here: the block
+    /// stays as it is, and its elements are released by
+    /// `release_from_end`: records (`Bridge`) all in index order inside the
+    /// free, the others from the last one, each completely. lean2rr's
+    /// arrays of Lean values hold boxes, `LAny`, or records; the other
+    /// element types are scalars, whose release does nothing, and strings,
+    /// whose order is not seen.)
     unsafe fn scan(o: *mut Hdr) -> bool;
     /// After a first pass outside a free (`free_vec`) that kept some
     /// elements: free the block and its one kept element without a step,
@@ -538,81 +496,36 @@ impl<T> ReleaseElems for T {
     }
 }
 
-/// A Reussir record (`Bridge<Inner>`, see `array::CloneInto`): its
-/// `Drop` is the compiler-emitted `<record>_ffi_release`, an out-of-line
-/// call per element, which decrements the 32-bit count at offset 0 (not
-/// stored for an immediate, whose top byte is a tag under the aarch64
-/// encoding of nullary variants) and frees the box when the count was 1.
-/// Here the first pass (`scan`) decrements a shared element inline, as
-/// `lean_del` does natively, and skips an immediate (its release changes
-/// nothing: Reussir never frees one, Reussir #661; a nonzero top byte,
-/// or a dummy's count of `IMMORTAL` or more under the immortal encoding,
-/// which `--nullary-variant-encoding arch-independent` selects on aarch64
-/// too); only an element whose count is 1 goes through
-/// `<record>_ffi_release`, which frees it, last first. On other targets
-/// (the immortal encoding of nullary variants, whose counts are not read)
-/// the generic loop releases every element from the last.
+/// A Reussir record (`Bridge<Inner>`): its `Drop` is the record's own
+/// `<record>_ffi_release`, which decrements the record's count or frees it
+/// (a nullary variant stays as it is). The counts are not read here, so
+/// the first pass keeps every element (`scan`), and the step releases them
+/// all in index order, each with its `Drop` (`release_from_end`). The step
+/// runs inside a free, so a record freed there has its runtime objects
+/// pushed, and the pops release them last first, after the step: the
+/// order of native Lean's two passes for an element held twice (freed at
+/// its last index) and for one that a later element also holds (freed
+/// inside that element's release). Not for a member that two elements
+/// share: the first element's release only decrements it, and the second
+/// frees it at its place, where natively both decrements come first and
+/// the dead elements go from the last (a deviation; lean2rr makes no array
+/// of records today, clean step B1 will; the exact order needs a release
+/// that decrements or, at the last reference, defers: a Reussir entry
+/// point, parked).
 impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
-    unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {
-        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
-            return release_from_end_each::<Self>(o, depth);
-        }
+    unsafe fn release_from_end(o: *mut Hdr, _depth: usize) -> bool {
         let e = elems::<Self>(o);
-        let mut n = (*o).len;
-        while n > 0 {
-            let p = *(e.add(n - 1) as *const usize);
-            if p >> 56 != 0 {
-                n -= 1;
-                (*o).len = n;
-                continue;
-            }
-            let c = *(p as *const u32);
-            if c != 1 {
-                if c < IMMORTAL {
-                    *(p as *mut u32) = c.wrapping_sub(1);
-                }
-                n -= 1;
-                (*o).len = n;
-                continue;
-            }
-            n -= 1;
-            (*o).len = n;
-            drop(std::ptr::read(e.add(n)));
-            if n == 0 {
-                break;
-            }
-            if reussir_rt::drop::depth() != depth {
-                return false;
-            }
+        let n = (*o).len;
+        (*o).len = 0;
+        for i in 0..n {
+            drop(std::ptr::read(e.add(i)));
         }
         true
     }
     #[inline(always)]
     unsafe fn scan(o: *mut Hdr) -> bool {
-        if !(cfg!(target_arch = "aarch64") && std::mem::size_of::<Self>() == 8) {
-            return (*o).len == 0;
-        }
-        let e = elems::<usize>(o);
-        let n = (*o).len;
-        let mut k = 0;
-        for i in 0..n {
-            let p = *e.add(i);
-            if p >> 56 != 0 {
-                continue;
-            }
-            let c = *(p as *const u32);
-            if c != 1 {
-                if c < IMMORTAL {
-                    *(p as *mut u32) = c.wrapping_sub(1);
-                }
-                continue;
-            }
-            *e.add(k) = p;
-            k += 1;
-        }
-        (*o).len = k;
-        k == 0
+        (*o).len == 0
     }
     #[inline(always)]
     unsafe fn free_single(_: *mut Hdr) -> bool {
@@ -890,9 +803,9 @@ mod tests {
         count(unsafe { *(c as *const Cell<T> as *const usize) })
     }
 
-    /// A record cell as Reussir lays it out for `free_record`: the 32-bit
-    /// count at offset 0. `id` is logged when the cell is freed, and the
-    /// members are released then, in field order, as Reussir's glue does.
+    /// A record cell of the tests: the 32-bit count at offset 0. `id` is
+    /// logged when the cell is freed, and the members are released then, in
+    /// field order, as Reussir's glue does.
     #[repr(C)]
     struct TCell {
         count: u32,
@@ -902,8 +815,9 @@ mod tests {
 
     /// A record handle (`Bridge<TRec>`): its drop is the record's
     /// `<record>_ffi_release` (a count of 1 frees the cell, else a
-    /// decrement). Inside a free a member is released through `release`,
-    /// so a member freed goes on the stack, as the glue defers it.
+    /// decrement). As Reussir's glue, the free decrements a shared member in
+    /// place and releases a member whose count is 1 through `release`, so
+    /// that a member freed goes on the stack, as the glue defers it.
     struct TRec(*mut TCell);
 
     type B = reussir_rt::bridge::Bridge<TRec>;
@@ -924,7 +838,11 @@ mod tests {
             LOG.with(|l| l.borrow_mut().push(if active() { c.id } else { 1000 + c.id }));
             let cell = unsafe { Box::from_raw(self.0) };
             for m in cell.members {
-                release(B::new(m));
+                if unsafe { (*m.0).count } == 1 {
+                    release(B::new(m));
+                } else {
+                    drop(m);
+                }
             }
         }
     }
@@ -946,89 +864,62 @@ mod tests {
         true
     }
 
-    /// An array of records whose elements are shared inside it is freed in
-    /// native Lean's two passes, as one of boxes
-    /// (`any::tests::box_array_free_shared_inside`): a record the array
-    /// holds twice is released at its last index, one that a later element
-    /// also holds inside that element's release; outside a free and inside
-    /// one. aarch64 only: on other targets the first pass does not read a
-    /// record's count (`Bridge`'s `scan`), and the order is from the last
-    /// element.
+    /// An array of records whose elements are shared inside it releases
+    /// what they hold in native Lean's order (as one of boxes,
+    /// `any::tests::box_array_free_shared_inside`): a record the array holds
+    /// twice at its last index, one that a later element also holds inside
+    /// that element's release; outside a free and inside one. The step
+    /// releases the elements in index order (`Bridge`'s `release_from_end`);
+    /// what a freed record holds goes on the stack (each record's member
+    /// `10 * id` here, released through `release`), and the pops give the
+    /// order. Only the members are observable (a record's own free shows
+    /// nothing; the log keeps the members, 10 and up).
     #[test]
-    #[cfg(target_arch = "aarch64")]
     fn record_array_free_shared_inside() {
+        let el = |id: u32| rec(id, vec![rec(10 * id, vec![])]);
         let dup = || {
-            let x = B::new(rec(2, vec![]));
-            [B::new(rec(1, vec![])), x.clone(), B::new(rec(3, vec![])), x, B::new(rec(4, vec![]))]
+            let x = B::new(el(2));
+            [B::new(el(1)), x.clone(), B::new(el(3)), x, B::new(el(4))]
                 .into_iter()
                 .fold(crate::array::empty::<B>(), crate::array::push)
         };
         let holder = || {
-            let x = rec(5, vec![]);
-            [B::new(x.clone()), B::new(rec(6, vec![])), B::new(rec(7, vec![x]))]
+            let x = el(5);
+            [B::new(x.clone()), B::new(el(6)), B::new(rec(7, vec![x, rec(70, vec![])]))]
                 .into_iter()
                 .fold(crate::array::empty::<B>(), crate::array::push)
         };
+        let members = || take_log().into_iter().filter(|&i| i >= 10).collect::<std::vec::Vec<_>>();
         drop(dup());
-        assert_eq!(take_log(), vec![4, 2, 3, 1]);
+        assert_eq!(members(), vec![40, 20, 30, 10]);
         drop(holder());
-        assert_eq!(take_log(), vec![7, 5, 6]);
+        assert_eq!(members(), vec![70, 50, 60]);
+        // A member shared by two elements (`[R0{X, H0}, R1{X, H1}]`, `X{G}`):
+        // natively H1 H0 G (both decrements first, then the dead from the
+        // last); here R0's release only decrements X, R1's frees it after
+        // H1 went on the stack: H1 G H0. A deviation, reached by no program
+        // today (lean2rr makes no array of records); the exact order needs a
+        // release that decrements or, at the last reference, defers (a
+        // Reussir entry point: parked).
+        let shared = || {
+            let x = rec(9, vec![rec(90, vec![])]);
+            [B::new(rec(1, vec![x.clone(), rec(10, vec![])])), B::new(rec(2, vec![x, rec(20, vec![])]))]
+                .into_iter()
+                .fold(crate::array::empty::<B>(), crate::array::push)
+        };
+        drop(shared());
+        assert_eq!(members(), vec![20, 90, 10]);
         HELD.with(|h| *h.borrow_mut() = Some(dup()));
         run(0, step_drop_held);
-        assert_eq!(take_log(), vec![4, 2, 3, 1]);
+        assert_eq!(members(), vec![40, 20, 30, 10]);
         HELD.with(|h| *h.borrow_mut() = Some(holder()));
         run(0, step_drop_held);
-        assert_eq!(take_log(), vec![7, 5, 6]);
+        assert_eq!(members(), vec![70, 50, 60]);
         assert!(!active());
         assert_eq!(reussir_rt::drop::depth(), 0);
     }
 
-    /// The dummy box of an immediate under the `immortal` encoding of
-    /// nullary variants (`--nullary-variant-encoding arch-independent`: the
-    /// immediate is the dummy's plain address, `[count 3 * 2^30, tag]`): no
-    /// in-line path changes its count (review HRT-04). A release
-    /// (`ReleaseValue`), a copy-on-write set (`array::CloneInto`, then
-    /// `array::ReleaseElem` on the replaced element), a pop
-    /// (`ReleaseElem`), both passes of an array's free (`scan`,
-    /// `release_from_end`). `TRec`'s own drop would decrement it and its
-    /// clone increment it. aarch64 only: elsewhere these paths call the
-    /// record's own release and copy.
-    #[test]
-    #[cfg(target_arch = "aarch64")]
-    fn immortal_dummy_count_unchanged() {
-        const START: u32 = 3 << 30;
-        let dummy: &'static mut [u32; 2] = Box::leak(Box::new([START, 1]));
-        let p = dummy.as_mut_ptr() as *mut TCell;
-        let imm = || B::new(TRec(p));
-        let count = || unsafe { *(p as *const u32) };
-        let arr = |n: usize| (0..n).map(|_| imm()).fold(crate::array::empty::<B>(), crate::array::push);
-        release(imm());
-        assert_eq!(count(), START, "release_value");
-        let a = arr(3);
-        let b = crate::array::set(a.clone(), 0, imm());
-        assert_eq!(count(), START, "clone_to and release_elem (a shared array's set)");
-        let b = crate::array::pop(b);
-        assert_eq!(count(), START, "release_elem (a pop)");
-        drop(b);
-        drop(a);
-        assert_eq!(count(), START, "an array's free");
-        let c = arr(4);
-        unsafe {
-            assert!(<B as ReleaseElems>::scan(c.hdr()), "scan keeps no immediate");
-            assert_eq!((*c.hdr()).len, 0);
-        }
-        drop(c);
-        let d = arr(4);
-        unsafe {
-            assert!(<B as ReleaseElems>::release_from_end(d.hdr(), reussir_rt::drop::depth()));
-            assert_eq!((*d.hdr()).len, 0);
-        }
-        drop(d);
-        assert_eq!(count(), START, "scan and release_from_end");
-        assert!(take_log().is_empty());
-    }
-
-    /// `free_record` releases a record inside a free: its members in Lean's
+    /// `release` frees a record inside a free: its members in Lean's
     /// order (the last first, a member's members before the members that
     /// precede it), a shared member only decremented; the free is over when
     /// `release` returns.
@@ -1077,7 +968,7 @@ mod tests {
         true
     }
 
-    /// Inside a free, `free_record` only pushes the record: it is released
+    /// Inside a free, `release` only pushes the record: it is released
     /// after the step that released it, before the work pushed earlier.
     #[test]
     fn record_free_inside_a_free() {

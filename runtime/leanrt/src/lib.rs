@@ -118,6 +118,29 @@ pub fn last_shared() -> bool {
     LAST_SHARED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+struct NotedAddr(std::cell::UnsafeCell<u64>);
+
+unsafe impl Sync for NotedAddr {}
+
+/// The handle word noted by the prelude's `l2r_ptr_pass` (`ptrAddrUnsafe`
+/// of a shared Reussir record, lean2rr's `recordAddr`), read back by
+/// `l2r_ptr_passed` right after, with nothing in between: the value is
+/// kept until the read, and Lean code runs on one thread at a time (as
+/// `task::TASKS` assumes). A plain static, not an atomic: LLVM then folds
+/// the caller's increment with Reussir's release of the value given back
+/// around it (with a relaxed atomic in between it kept the pair).
+static NOTED_ADDR: NotedAddr = NotedAddr(std::cell::UnsafeCell::new(0));
+
+#[inline(always)]
+pub fn note_addr(w: u64) {
+    unsafe { *NOTED_ADDR.0.get() = w }
+}
+
+#[inline(always)]
+pub fn noted_addr() -> u64 {
+    unsafe { *NOTED_ADDR.0.get() }
+}
+
 /// A fresh "address" for `ptrAddrUnsafe` of a value whose handle is not one
 /// word (`l2r_ptr_addr_obj`) and of a Reussir type lean2rr's `addrOf` does
 /// not know (a `Nat` or `Int` answers its own word, as natively): never

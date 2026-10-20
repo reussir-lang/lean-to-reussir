@@ -55,5 +55,5 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   records (each unboxed first).
 - **Why:** All aliases share one record.
 - **Where:** `Lower/Externs.lean`: `refGlue` (the `addr` operation);
-  `runtime/prelude.rr`: `l2r_ptr_addr_rec`.
+  `LowerBase.lean`: `recordAddr` (`l2r_ptr_pass`, `l2r_ptr_passed`).
 - **Remove only if:** never.

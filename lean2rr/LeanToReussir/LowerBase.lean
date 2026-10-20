@@ -308,6 +308,10 @@ structure LowerState where
   /-- Function types whose nullary variants an unboxing builds by index
   (`l2r_fn_of_index_T`, generated with the program's box item). -/
   fnIndexReqs : Array RR.Ty := #[]
+  /-- Payload types with nullary variants (shared enums, function values)
+  whose boxing is the generated `l2r_box_T` (`boxOfFn`, generated with the
+  program's box item). -/
+  boxOfReqs : Array RR.Ty := #[]
   /-- Types of constants whose value is traversed for tasks when it is
   first computed (`persistCall`); the traversals are generated at the end,
   once all variants of function types and `Box` are known
@@ -542,7 +546,8 @@ each payload type, `l2r_any_rel_<n>`, its trampoline and the table that
 installs them in leanrt). Outside it only
 `Lower/Live` reads the encoding: it recognizes the payloads live code
 builds by the number a box construction passes (`l2r_any_of<T>(x, n)`,
-`l2r_any_of_fn<T>(x, n)`: the payload `b<n>`, `boxPayload`); and the
+`l2r_any_of_ptr<T>(x, n)`, `l2r_box_T(x, n)`: the payload `b<n>`,
+`boxPayload`); and the
 runtime's generic `l2r_ptr_addr_rec` and `l2r_persist_box` take a box as
 one counted handle (the prelude's `l2r_ptr_addr_rec` answers
 `LAny::addr` for a box). -/
@@ -831,8 +836,9 @@ inductive BoxKind where
   around a type that cannot cross the FFI boundary (`wrapped`), else the
   type itself. `nullary`: the variants without fields of a shared enum, by
   index (Reussir represents them as immediates, which the box keeps as the
-  immediate of the index); `isFn`: a function value (`l2r_any_of_fn`:
-  its nullary variants keep their type, `(num << 32) | index`). -/
+  immediate of the index); `isFn`: a function value (its nullary variants
+  keep their type, `(num << 32) | index`). Both box through the generated
+  `l2r_box_T` (`boxOfFn`), which matches the nullary variants. -/
   | prog (num : Nat) (store : RR.Ty) (wrapped : Bool) (nullary : Array (Nat × String)) (isFn : Bool)
 
 /-- The number of the first leaf payload type (`LEAF_BIT` in
@@ -1076,6 +1082,19 @@ partial def boxAllocates (t : RR.Ty) : LowerM Bool := do
   | .prog _ _ wrapped _ _ => return wrapped
   | _ => return false
 
+/-- The function `l2r_box_T(x, num)` boxes a value of payload type `t`, a
+shared enum with nullary variants or a function value (`BoxKind.prog`),
+as payload `num`: a nullary variant (a Reussir immediate) as the
+immediate of its index (a function value's: `(num << 32) | index`, which
+keeps its type), any other value as a pointer (`l2r_any_of_ptr`). It is a
+`match` in Reussir code, generated once per type with the box item
+(`boxTypeItems`), when every variant of a function type is known: leanrt
+decodes no Reussir immediate. -/
+def boxOfFn (t : RR.Ty) : LowerM String := do
+  unless (← getPart (·.boxOfReqs)).contains t do
+    modify fun s => { s with boxOfReqs := s.boxOfReqs.push t }
+  return s!"l2r_box_{t.enc}"
+
 /-- `e : t` boxed (`t` is not `Box` itself). -/
 partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   let _ ← boxPayload t
@@ -1103,10 +1122,13 @@ partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
   | .leanrt n => return .call "l2r_any_of" #[t] #[e, .atom (toString n)]
   | .prog n st wrapped nullary isFn =>
     let v := if wrapped then (match st with | .named sn => RR.Expr.ctor sn none #[e] | _ => e) else e
-    -- Without nullary variants the handle is always a pointer: no test for
-    -- a nullary variant's immediate (`l2r_any_of_ptr`).
-    let f := if isFn then "l2r_any_of_fn" else if nullary.isEmpty then "l2r_any_of_ptr" else "l2r_any_of"
-    return .call f #[st] #[v, .atom (toString n)]
+    -- A type with nullary variants (a shared enum's, a function value's)
+    -- boxes through its generated `l2r_box_T`, which matches them in
+    -- Reussir code; otherwise the handle is always a pointer
+    -- (`l2r_any_of_ptr`).
+    if isFn || !nullary.isEmpty then
+      return .call (← boxOfFn st) #[] #[v, .atom (toString n)]
+    return .call "l2r_any_of_ptr" #[st] #[v, .atom (toString n)]
 
 /-- The value of type `t` a pointer word `w` (owning its reference) of
 payload `t` holds: `l2r_any_raw_take` (the number was checked). -/
@@ -1167,7 +1189,7 @@ program that casts) or unreachable (the box released first). A function
 type (`t` itself, or the field of a `[value]` struct) is unboxed by the
 generated function `fnUnbox t` (`unboxFnFn`: it reads every
 representation of the function type and the typed immediates of
-`l2r_any_of_fn`).
+`l2r_box_T`).
 
 In a program that casts (`slow`; `native` for the immediates that the
 generated function itself reads, `genUnbox`), a box can hold any word, and
@@ -1437,8 +1459,26 @@ def boxSink (b : RR.Expr) : String × Option RR.Ty × RR.Expr :=
 word (`l2r_any_addr`). -/
 def boxAddr (b : RR.Expr) : RR.Expr := .call "l2r_any_addr" #[] #[b]
 
+/-- `ptrAddrUnsafe` (and `ptrEq`, `ST.Ref.ptrEq`) of `e`, a shared Reussir
+record of type `t` (a generated struct or enum, a function value, the
+reference record): its handle's word. `l2r_ptr_pass` notes the word and
+gives the value back, and Reussir's own release drops it (`l2r_consume`,
+in line, which LLVM folds with the caller's increment when the value lives
+on); `l2r_ptr_passed` reads the word noted. The value is kept until after
+the read, so its release (which may run Lean code: a promise's
+dependents) cannot come between the note and the read; nothing else runs
+there. Before clean step A1 the texture `l2r_ptr_addr_rec` decremented a
+shared record's count in line itself (`ptrEq` in a traversal: 40% of the
+time in an out-of-line release). -/
+def recordAddr (t : RR.Ty) (e : RR.Expr) : LowerM RR.Expr := do
+  let (p, w, k) := (← fresh "pp", ← fresh "pw", ← fresh "pk")
+  let u64 := RR.Ty.named "u64"
+  return .block ⟨#[(p, some t, .call "l2r_ptr_pass" #[t] #[e]),
+    (w, some u64, .call "l2r_ptr_passed" #[] #[]),
+    (k, some u64, .call "l2r_consume" #[t] #[.var p])], .var w⟩
+
 /-- The function `l2r_fn_of_index_T` builds the nullary variant of index
-`i` of function type `t` (a typed immediate's index, `l2r_any_of_fn`);
+`i` of function type `t` (a typed immediate's index, `l2r_box_T`);
 generated with the box item (`boxTypeItems`), when every variant of `t` is
 known. -/
 def boxFnOfIndex (t : RR.Ty) : LowerM String := do

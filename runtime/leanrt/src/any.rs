@@ -61,14 +61,14 @@
 //! 2^48) and x86-64 (47 bits; 5-level paging gives more only on request),
 //! and mimalloc's address hints lie between 2 and 32 TiB.
 //!
-//! Nullary variants. Reussir represents a nullary constructor of a shared
-//! enum as an immediate that points at a static dummy box: on aarch64 (the
-//! `tbi` encoding) with the top byte set to `tag + 1`, elsewhere (the
-//! `immortal` encoding) with a dummy count of at least 2^31. `of` turns
-//! both into the immediate of the variant's index (Lean's `lean_box(i)` for
-//! a nullary constructor); unboxing an immediate at an enum type is the
-//! program's code (a constructor by index), since only Reussir can make
-//! the dummy's handle.
+//! Nullary variants. A nullary constructor of a shared enum is boxed as the
+//! immediate of its variant's index (Lean's `lean_box(i)` for a nullary
+//! constructor; a function value's as `(num << 32) | index`), by the
+//! program's own code: lean2rr's generated `l2r_box_T` matches the nullary
+//! variants in Reussir code and gives every other value to `of_ptr`.
+//! Unboxing an immediate at an enum type is the program's code too (a
+//! constructor by index). leanrt never reads Reussir's representation of a
+//! nullary variant: a box of a Reussir type is always a pointer here.
 
 use crate::big::LBig;
 use crate::nat::{LInt, LNat};
@@ -549,38 +549,6 @@ impl<T> Payload for T {
     }
 }
 
-/// A Reussir record or enum (`Bridge<Inner>`, a pointer to its box). A
-/// nullary variant (a Reussir immediate, see the module comment) is boxed
-/// as the immediate of its index; it cannot be unboxed here (the program
-/// makes it), so `from_any_word` takes pointers only.
-impl<X> Payload for reussir_rt::bridge::Bridge<X> {
-    #[inline(always)]
-    fn into_any(self, num: u64) -> LAny {
-        let p = word_of(self);
-        // `tbi`: the top byte is `tag + 1`.
-        if p >> 56 != 0 {
-            return LAny::imm((p >> 56) - 1);
-        }
-        // `immortal`: the dummy's count is at least 2^31 (a real box's never
-        // is), and its tag the next `u32`.
-        let c = unsafe { *(ptr_of(p) as *const u32) };
-        if c >= crate::drop::IMMORTAL {
-            return LAny::imm(unsafe { *(ptr_of(p) as *const u32).add(1) } as u64);
-        }
-        unsafe { of_ptr(p, num) }
-    }
-    #[inline(always)]
-    unsafe fn from_any_word(w: u64, num: u64) -> Self {
-        if is_imm(w) || num_of(w) != num {
-            if w == 1 {
-                unit_at_program_type(num);
-            }
-            mismatch(w, num);
-        }
-        unsafe { take_word(w) }
-    }
-}
-
 /// `box(0)` met by the generic unbox at a program type: the program, not
 /// leanrt, makes that type's zero, so a generated unbox must split
 /// immediates first. A line on descriptor 2 that names the rule, then
@@ -770,22 +738,6 @@ impl Payload for LAny {
     unsafe fn from_any_word(w: u64, _num: u64) -> Self {
         unsafe { LAny::from_raw(w) }
     }
-}
-
-/// A function value (a lean2rr function-value enum) boxed as payload
-/// `num` (`l2r_any_of_fn<T>`): a nullary variant becomes the immediate
-/// `(num << 32) | index`, which keeps its type (the index means nothing at
-/// another representation of the function type, which lean2rr's unboxing
-/// converts from); `box(0)` stays the immediate 0. Other values: `of`.
-#[inline(always)]
-pub fn of_typed<T>(x: T, num: u64) -> LAny {
-    let a = x.into_any(num);
-    if a.is_imm() {
-        let v = a.imm_value();
-        forget(a);
-        return LAny::imm((num << 32) | v);
-    }
-    a
 }
 
 /// The bytes of a boxed `ByteArray`, borrowed from the box (`box(0)`: none):
@@ -1618,6 +1570,7 @@ mod tests {
         // The persistent mark of another block of the kind, through its
         // box (`persist::mark_box`).
         let m = of(crate::array::from_slice(&x), num);
+        let _g = crate::persist::test_lock();
         assert!(!crate::persist::box_is_persistent(&m));
         crate::persist::mark_box(m.clone());
         assert!(crate::persist::box_is_persistent(&m) && !m.is_exclusive());
@@ -1744,15 +1697,6 @@ mod tests {
         let out = run("reverse", "L2R_ANY_DEBUG");
         let err = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success() && err.contains("at payload 9"), "{err}");
-    }
-
-    #[test]
-    fn function_values_keep_their_type_in_an_immediate() {
-        // Not a Reussir record here: `of_typed` of an immediate box.
-        let a = of_typed(LAny::imm(2), 40);
-        assert_eq!(a.imm_value(), (40 << 32) | 2);
-        let s = of_typed(crate::string::from_bytes(b"f"), 40);
-        assert_eq!(s.num(), NUM_STR);
     }
 
     #[test]

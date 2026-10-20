@@ -60,12 +60,12 @@ partial def addrOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
         let some layout := info.ctors.find? info.ctorOrder[0]! | return ← evalThen (← u64Lit 1)
         let some ft := layout.posTys[0]? | return ← evalThen (← u64Lit 1)
         return ← withVar "pv" t e fun v => addrOf (.field v 0) ft
-      return .call "l2r_ptr_addr_rec" #[t] #[e]
+      return ← recordAddr t e
     | none =>
       if ← isBoundaryTy t then return .call "l2r_ptr_addr_obj" #[t] #[e]
       evalThen (.call "l2r_addr_fresh" #[] #[])
   | .app "RVec" _ | .app "LRef" _ | .app "LCell" _ => return .call "l2r_ptr_addr_obj" #[t] #[e]
-  | .fn .. => return .call "l2r_ptr_addr_rec" #[t] #[e]
+  | .fn .. => recordAddr t e
   | _ => evalThen (.call "l2r_addr_fresh" #[] #[])
 
 end LeanToReussir

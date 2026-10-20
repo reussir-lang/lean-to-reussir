@@ -36,8 +36,15 @@ start with `runtime/`.
   a4a04e8, 0f2f1e7, c5eaca5).
 - **Where:** `Lower/Identity.lean`: `addrOf`; `Lower/Values.lean`:
   `lowerConstApp` (the `lean_ptr_addr` case); `runtime/prelude.rr`:
-  `l2r_ptr_addr_obj`, `l2r_ptr_addr_rec` (which gives the reference it
-  received back inline: 66edbfb), `l2r_addr_word`, `l2r_addr_nat`,
+  `l2r_ptr_addr_obj`, and for a shared Reussir record `recordAddr`
+  (`LowerBase.lean`: `l2r_ptr_pass` notes the handle's word and gives the
+  value back to Reussir's own release, `l2r_consume`, which LLVM folds with
+  the caller's increment; `l2r_ptr_passed` reads the word, before the
+  value's release, with nothing in between: Lean code runs on one thread
+  at a time; until clean step A1 the texture `l2r_ptr_addr_rec` decremented
+  a shared record's count in line itself: 66edbfb, `ptrEq` in a traversal
+  spent 40% of its time in an out-of-line release before),
+  `l2r_addr_word`, `l2r_addr_nat`,
   `l2r_addr_int`, `l2r_addr_fresh`; `runtime/leanrt/src/lib.rs`:
   `fresh_addr`. Tests `RtPtrSound`, `RtPtrAddr`.
 - **Remove only if:** never. Answers that differ from native (a value

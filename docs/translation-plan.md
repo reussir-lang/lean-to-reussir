@@ -2911,7 +2911,7 @@ Answered (Lean):
   answers:
   - a heap value (a record, a function value, a `Box`, a string, an
     array, a reference, a thunk or task, a runtime handle):
-    the address of its cell, whatever its count (`l2r_ptr_addr_rec`,
+    the address of its cell, whatever its count (lean2rr's `recordAddr`,
     `l2r_ptr_addr_obj`); a nullary constructor of a shared enum: its
     immediate;
   - a `Nat` or `Int`: its own word, which is native Lean's (§5.1): the
@@ -2965,7 +2965,7 @@ Answered (Lean):
   values that cross representations) can take more steps than natively.
   `ST.Ref.ptrEq` (`IO.Ref.ptrEq`) stays real identity: a reference is never
   converted (§5.1), and it compares the addresses of the references'
-  records (`l2r_ptr_addr_rec`), whatever representation each side is seen
+  records (`recordAddr`), whatever representation each side is seen
   at. Sharing is not emulated either: `isExclusiveUnsafe` answers `false`,
   `shareCommon` shares nothing, and `dbgTraceIfShared` reads the cell's
   count, which conversions and lean2rr's own copies can make differ from

@@ -112,11 +112,11 @@ runtime.
   after the set, so when the set is its last use the old value goes
   first, then the reference, which frees the new value.
   `l2r_lcell_set` (thunk, task and promise cells) does the same in Rust.
-  Both release with `leanrt::drop::release`, as `lean_dec`: a shared value
-  (or an immediate) is only decremented, in line; the last reference to a
-  record is freed inside a free the runtime starts (`drop::free_record`:
+  Both release with `leanrt::drop::release`, as `lean_dec`: a shared
+  runtime value (or a box's immediate) is only decremented, in line; a
+  record is released inside a free the runtime starts (`drop::free_unique`:
   the record is one pending cell, see
-  [below](#the-last-reference-to-a-record-is-freed-as-one-pending-cell)), so its
+  [below](#a-record-is-released-as-one-pending-cell)), so if it is freed, its
   members go on the pending stack and are released last field first, and
   the `sync` dependents of the promises it drops run when that free ends,
   before the caller goes on. Other values are dropped (the runtime's
@@ -141,7 +141,7 @@ runtime.
 - **Where:** `runtime/prelude.rr`: `l2r_rc_set_ref`, `l2r_release_value_then`,
   `l2r_lcell_set` (`l2r_ref_set` too, but `LRef` is no longer used);
   `runtime/leanrt/src/drop.rs`: `release`, `ReleaseValue`,
-  `free_record`, `free_unique`, `free_deferred`, `release_record`;
+  `free_unique`, `free_deferred`, `release_record`;
   `Lower/Externs.lean`: `refCellOpPlain`.
 - **Remove only if:** the `l2r_release_value_then` detour in
   `l2r_rc_set_ref` can go if Reussir's `cell::set` stores before it
@@ -189,15 +189,26 @@ runtime.
 
 ### Arrays are freed in native Lean's two passes
 
-- **What:** The free of an array of boxes (on every target) or of
-  Reussir records (on aarch64 with 8-byte handles: elsewhere the immortal
-  encoding of nullary variants is not told apart, and the generic loop
-  releases every element from the last) (`drop::free_vec`, `step_vec`)
+- **What:** The free of an array of boxes (`drop::free_vec`, `step_vec`)
   first decrements every element in index order (`ReleaseElems::scan`): an immediate is skipped, a shared element
   is decremented in line, and an element whose count is 1 is kept, moved
   to the front of the block (`len`: the number kept). Then the kept
   elements are released from the last one (`release_from_end`), each with
-  what it pushes done before the one before it. Outside a running free the
+  what it pushes done before the one before it. An array of Reussir
+  records (`Bridge` elements; lean2rr makes none today: an array holds
+  boxes or scalars, `arrayStorage`) is released by its step in index
+  order, every element with its own `<record>_ffi_release`, inside the
+  free: the counts are not read (clean step A1), the runtime objects a
+  freed record holds are pushed, and the pops give native's order for an
+  element held twice (freed at its last index) and one that a later
+  element also holds (freed inside that element's release). A member that
+  two elements share is freed at the second element's place (natively
+  after the elements before it: `[R0{X, H0}, R1{X, H1}]`, `X{G}` gives H1 G
+  H0, natively H1 H0 G), a deviation that no program reaches today and
+  that clean step B1 (typed arrays of records) must settle: the exact
+  order needs a release that decrements or, at the last reference, defers
+  (a Reussir entry point, parked); leanrt's
+  `drop::tests::record_array_free_shared_inside`. Outside a running free the
   first pass runs in `free_vec`, and an array that keeps no element is
   freed without the stack; inside one the array is pushed, and both passes
   run when it is popped. A step may run several times (it stops when a
@@ -223,32 +234,12 @@ runtime.
 - **Where:** `runtime/leanrt/src/drop.rs`: `free_vec`, `step_vec`,
   `SCANNED`, `ReleaseElems` (`scan`, `release_from_end`) for `LAny` and
   `Bridge`; tests leanrt's `any::tests::box_array_free_shared_inside`,
-  `drop::tests::record_array_free_shared_inside` (aarch64 only),
+  `drop::tests::record_array_free_shared_inside`,
   `RtArrayDupFreeOrder`,
   `RtArrayDeepSharedFree`. Other element types (scalars, which have no
   release, and strings, whose order is not seen) keep one pass from the
   last element (`release_from_end_each`).
 - **Remove only if:** never (native's order).
-
-### Arrays of records release shared elements inline
-
-- **What:** Freeing an array of Reussir records (`Bridge` elements)
-  decrements a shared element's count inline and skips nullary-constructor
-  immediates (aarch64, 8-byte elements), in the first pass (above); only
-  an element whose last reference goes takes the record's out-of-line
-  `_ffi_release` and the stack. Outside a running free, an array none of
-  whose elements is freed is freed without the stack at all.
-- **Why:** One out-of-line glue call per element: `hash-map-heavily-shared`
-  1.79x → 1.05x native, `hash-map-shared` 1.33x → 0.84x (perf5, 1dc63c6).
-  Inside a free the array is still pushed: a later field of the record
-  being freed may hold one of its elements. An immediate is never freed
-  (Reussir #661; a local patch on the old stack), so skipping it changes
-  nothing.
-- **Where:** `runtime/leanrt/src/drop.rs`: `ReleaseElems`,
-  `release_from_end`, `scan`, `free_vec`.
-- **Remove only if:** never (speed only); the immediate skip depends on
-  Reussir #661 (a Reussir bug fixed upstream; a local patch on the old
-  stack).
 
 ### Arrays of boxes skip immediates and decrement shared payloads inline
 
@@ -324,8 +315,7 @@ runtime.
     work before it runs the step again. When the release pushed nothing,
     the drain runs the step again at once, and the step goes on with the
     element before. So the same releases come in the same order, each
-    with the same stack under it (leanrt's `Bridge` loop calls a record's
-    `<record>_ffi_release` the same way). The last kept element stays
+    with the same stack under it. The last kept element stays
     deferred: the block is then freed first, as natively (`lean_del_core`
     frees the array, then pops its elements), and the element is released
     after the step's entry is gone. (A leaf payload is released at once,
@@ -374,106 +364,85 @@ runtime.
   either changes, the deferral (`any::release_last` in the step) and the
   step (`run`) are the fallback.
 
-### Array copies skip the increments of immediates
+### Array copies of records use the records' own copy
 
-- **What:** Copying an array of records (copy-on-write) increments real
-  boxes inline, as `rc.inc` does, and skips
-  immediates (aarch64 only; elsewhere the generic clone). An immediate is
-  a pointer with a nonzero top byte (`tbi`, the default encoding) or one
-  to a dummy box whose count is 2^31 or more (`immortal`, which
-  `--nullary-variant-encoding arch-independent` selects on aarch64 too):
-  both are skipped, here and in the in-line releases of records
-  (`drop::ReleaseValue`, `ReleaseElems`, `array::ReleaseElem`), as
-  `any`'s `into_any` tells them apart (review HRT-04: the `immortal`
-  dummy's count was changed, and after about 2^30 releases it was no
-  longer immortal; `drop::IMMORTAL`).
-- **Why:** Under Reussir's aarch64 (TBI) encoding of nullary variants,
-  which Reussir #661 keeps (a local patch on the old stack), an immediate's increment is unguarded: every
-  `nil` bucket of a hash map incremented the one static dummy of `nil`, a
-  serial chain through one word (Pf4HashPersist 1.04 → 0.80 s; adv4
-  PF4-11, fe483fe).
-- **Where:** `runtime/leanrt/src/array.rs` (`ExtendCloned`, the copy
+- **What:** Copying an array of records (copy-on-write) clones each
+  element with its `Clone`, the record's `<record>_ffi_acquire`; leanrt
+  reads no count and decodes no nullary variant (clean step A1). lean2rr
+  makes no array of records today (an array holds boxes or scalars,
+  `arrayStorage`), so only the runtime's own code reaches this path.
+- **Why:** No reliance on Reussir's cell layout or its encodings of
+  nullary variants (owner, 2026-10-19). Before step A1 the copy
+  incremented real boxes in line and skipped immediates (aarch64): under
+  Reussir's `tbi` encoding every `nil` bucket of a hash map incremented
+  the one static dummy of `nil`, a serial chain through one word
+  (Pf4HashPersist 1.04 → 0.80 s; adv4 PF4-11, fe483fe, when arrays held
+  records). Typed arrays of records (clean step B1) bring the cost back:
+  measure it there.
+- **Where:** `runtime/leanrt/src/array.rs` (`CloneInto`, the copy
   paths).
-- **Remove only if:** never (speed only).
+- **Remove only if:** never.
 - **Boxes:** an array of boxes (`LAny` elements) is copied with one
   `memcpy` of its words, and then each pointer's payload count goes up
   (`CloneInto for LAny`); an immediate needs nothing. The generic loop
   cloned and stored each box in turn. Test: leanrt's
   `any::tests::box_array_copy`.
 
-### A set releases a replaced record with its decrement in line
+### A set releases a replaced record inside a free
 
 - **What:** An array set (`leanrt::array::set`, the texture
   `l2r_array_set`, behind `Array.set`, `set!`, `uset`, `fset`) releases
   the element it replaces first, then stores the new one, as
   `lean_array_uset`; a pop (`array::pop`) releases the element it removes,
-  as `lean_array_pop`. For a Reussir record (`Bridge` elements, aarch64,
-  8 bytes) only the decrement is in line, as `rc.dec` does it: an
-  immediate is skipped and a count above 1 is decremented, as the array
-  free does (`drop::ReleaseElems`). The last reference goes to
-  `array::release_last` (`#[cold] #[inline(never)] extern "C"`), which
-  frees the record as `lean_dec` does (`drop::release_unique`, which does
-  not test the count again; the record is one pending cell, see
-  [below](#the-last-reference-to-a-record-is-freed-as-one-pending-cell)): inside a free the
-  runtime starts, so its fields go in Lean's order, the last one first,
-  and the `sync` dependents of the promises it drops unresolved run when
-  that free ends, before the set returns. Other element types are dropped
-  in line as before (a handle's decrement, its free out of line). The
-  array of a Lean type holds boxes (`LAny`, rule 1), so a record replaced
-  in it is a boxed one: the box's drop has only its decrement in line too
-  (`LAny::drop`: an immediate skipped, a count above 1 decremented), and
-  the last reference goes to `any::release_last`, which frees a program
-  payload as one pending cell as well (next section).
-- **Why:** With the record's whole release in line (its fields' tagged
-  decrements, `big::free`, `__reussir_deallocate`), the set texture was
-  too big for LLVM to inline into Reussir code: unionfind's
-  `l2r_array_set<nodeData>` stayed a call at all five sites (6.9% of its
-  instructions, 29 per call, about 12 of them the call's own cost, in an
-  instruction-count profile of the classic programs); now none is. That
-  in-line release also freed the record through its own release, which
-  frees the first cell's fields in field order: a structure of two handles
-  `{a, b}` replaced by a set (or removed by a pop) closed `a b`, natively
-  `b a` (review RS10-01 of switch step 10; dev had it too; tests
-  `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`). `extern "C"`:
-  the free may unwind, and a Rust call is then an invoke with a landing
-  pad in the texture, which stayed a call at six sites of `RtArraySets`.
-  Cost (cachegrind, small sizes): a set that frees the replaced record
-  pays for the free the runtime starts, about 74 instructions since
-  switch step 11 (about 140 at step 10, when the record was a step: next
-  section), the same per-free cost as a reference set that frees its old
-  value (`l2r_rc_set`). Unionfind (174,000 freeing sets of
-  `{find, rank : Nat}`) runs 0.8% more instructions than dev d39294a
-  (step 10: 5.0% more than d39294a). Against dev 9a2ddf6 (step 10's
-  micro baseline): a micro loop of 300,000 sets each freeing a record of
-  five `UInt64`s runs 63% more (step 10: 118%), one with a record of two
-  strings too 19% more (step 10: 50%). A set whose replaced record is
-  shared only decrements it in line (step 10, against dev 9a2ddf6):
-  liasolver 3.9% fewer instructions (the sets of a hash map's buckets),
-  monadic-interp 0.6%. The immediate test costs 2 instructions per set of a record.
-  `tests/runtime/ffi-inline-check.sh` builds `RtArraySets` (sets of
+  as `lean_array_pop`. A Reussir record (`Bridge` elements) goes to
+  `array::release_last` (`#[inline(never)] extern "C"`), shared or not,
+  which releases it as `lean_dec` does (`drop::release_unique`; the
+  record is one pending cell, see
+  [below](#a-record-is-released-as-one-pending-cell)): inside a free the
+  runtime starts, so if its `<record>_ffi_release` frees it, its fields go
+  in Lean's order, the last one first, and the `sync` dependents of the
+  promises it drops unresolved run when that free ends, before the set
+  returns. Other element types are dropped in line as before (a handle's
+  decrement, its free out of line). The array of a Lean type holds boxes
+  (`LAny`, rule 1), so a record replaced in it is a boxed one: the box's
+  drop has only its decrement in line (`LAny::drop`: an immediate
+  skipped, a count above 1 decremented), and the last reference goes to
+  `any::release_last`, which frees a program payload as one pending cell
+  as well (next section).
+- **Why:** The record's own release, called directly, frees the first
+  cell's fields in field order: a structure of two handles `{a, b}`
+  replaced by a set (or removed by a pop) closed `a b`, natively `b a`
+  (review RS10-01 of switch step 10; tests `RtArraySetFreeOrder`,
+  `RtArrayPopFreeOrder`). With the record's whole release in line, the
+  set texture was too big for LLVM to inline into Reussir code
+  (unionfind's `l2r_array_set<nodeData>`, when arrays held records: 6.9%
+  of its instructions). `extern "C"`: the free may unwind, and a Rust call
+  is then an invoke with a landing pad in the texture, which stayed a call
+  at six sites of `RtArraySets`. Before clean step A1 a shared record was
+  decremented in line (an immediate skipped), and only the last reference
+  went out of line (`#[cold]`); now leanrt reads no record's count. A set
+  that frees the replaced record pays for the free the runtime starts,
+  about 74 instructions (cachegrind, switch step 11), and a set whose
+  replaced record is shared now pays it too. lean2rr makes no array of
+  records today; typed arrays of records (clean step B1) bring the cost
+  back. `tests/runtime/ffi-inline-check.sh` builds `RtArraySets` (sets of
   every element representation in loops) to LLVM IR and fails when a
-  set's texture or function stays a call; dev's runtime kept the two sets
-  of the structure there. At a call site that LLVM judges cold (deep in
-  branches) every set texture, of any element type, is still a call: the
-  uniqueness test with its copy, the bounds check with its panic and the
-  store are above LLVM's cold-site threshold (Reussir issue 6, not
-  patched: its patch 06-a, which made every such texture `alwaysinline`,
-  is parked).
+  set's texture or function stays a call. At a call site that LLVM judges
+  cold (deep in branches) every set texture, of any element type, is
+  still a call (Reussir issue 6, not patched).
 - **Where:** `runtime/leanrt/src/array.rs`: `ReleaseElem`,
   `release_last`, `set_in`, `pop_in`; `runtime/leanrt/src/drop.rs`:
   `release`; tests `RtArraySets`, `RtArraySetFreeOrder`,
   `RtArrayPopFreeOrder`, `tests/runtime/ffi-inline-check.sh`.
-- **Remove only if:** never; the immediate skip depends on Reussir #661, as
-  the array free's. The record's own release for element types with no
-  observable release, or a cheaper drain of one cell in Reussir's
-  runtime, would remove the rest of the cost.
+- **Remove only if:** never.
 
-### The last reference to a record is freed as one pending cell
+### A record is released as one pending cell
 
 - **What:** `drop::release` (reference and cell sets) and
-  `drop::release_unique` (`array::release_last`: a set or a pop that
-  removes the last reference) free a record whose count is 1 (aarch64,
-  8-byte `Bridge`) with `drop::free_unique`: `drop::free_deferred` calls
+  `drop::release_unique` (`array::release_last`: a set or a pop) release
+  a record (`Bridge`) with `drop::free_unique`, shared or not: leanrt does
+  not read a record's count or decode Reussir's nullary variants (clean
+  step A1). `drop::free_deferred` calls
   `__reussir_drop_defer(p, release_record::<X>)`, which puts the record on
   the thread's pending stack as one deferred cell (a deferral that is not
   `_wide` writes nothing into the cell), and `__reussir_drop_drain()`
@@ -485,10 +454,11 @@ runtime.
   `__reussir_drop_drained` (patch 09-a: the promise resolutions put off,
   `task::drained`). Inside a free the drain returns at once: the cell is
   only pushed (above the run on top, which moves to the vector) and is
-  released when the free pops it. `release_unique` does not test the
-  count again (its caller did). On other targets (the immortal encoding:
-  the count is not tested) the record's release is a step (`drop::run`,
-  `step_record`). The last reference to a box's program payload is freed
+  released when the free pops it. The record's `<record>_ffi_release`
+  frees it, or only decrements a shared one, or leaves a nullary variant
+  as it is. Before step A1 a shared record was decremented in line and an
+  immediate skipped (aarch64), and only the last reference took this
+  path. The last reference to a box's program payload is freed
   the same way, on every target (`LAny`'s count is always tested):
   `any::release_last` gives the payload's cell (the box's word without its
   number) to `drop::free_deferred` with `release`, the program's release
@@ -525,8 +495,8 @@ runtime.
   -2.52%), a gain too small for a local Reussir patch (owner,
   2026-10-07).
 - **Where:** `runtime/leanrt/src/drop.rs`: `release`, `release_unique`,
-  `ReleaseValue`, `free_record`, `free_unique`, `free_deferred`,
-  `release_record`, `step_record`, `free_deferred_wide`;
+  `ReleaseValue`, `free_unique`, `free_deferred`, `release_record`,
+  `free_deferred_wide`;
   `runtime/leanrt/src/array.rs`: `release_last`;
   `runtime/leanrt/src/any.rs`: `release_last`; Reussir's
   `reussir_rt::drop` (`__reussir_drop_defer`, `__reussir_drop_defer_wide`,

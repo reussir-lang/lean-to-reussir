@@ -52,9 +52,10 @@ form:
 - replaces a payload number of `Box` by the label of its type (the program's
   release of each payload type, the item `fn l2r_any_rel_17(x : T) -> unit`,
   gives each number's type): where a box is made or taken apart (the last
-  argument of `l2r_any_of<T>(e, 17)`, `l2r_any_of_fn`, `l2r_any_of_ptr`,
-  `l2r_any_as`, `l2r_any_raw_as`, also when the call spans lines, as
-  `l2r_any_of<T>({` ... `}, 17)` does), where an unboxing compares a
+  argument of `l2r_any_of<T>(e, 17)`, `l2r_any_of_ptr`, `l2r_any_as`,
+  `l2r_any_raw_as`, and of a generated boxing `l2r_box_T(e, 17)`, also
+  when the call spans lines, as `l2r_any_of<T>({` ... `}, 17)` does),
+  where an unboxing compares a
   word's number with it (`let bm12 : u64 = 17;`), in an arm of a `match`
   on a box's number (`let bn5 : u64 = l2r_any_raw_num(w); match bn5 {
   17 => ...`), in the names of the releases and their trampolines
@@ -83,8 +84,9 @@ values of unknown type has few, all from the runtime's own startup code):
   and their uses in the other items: the values taken out of a `Box` at a
   program type;
 - `box-sites`: values put into a `Box` (a call of `l2r_any_of`,
-  `l2r_any_of_fn`, `l2r_any_of_ptr`, `l2r_any_of_<scalar>` or `l2r_any_imm`) in the items
-  other than conversion helpers;
+  `l2r_any_of_ptr`, `l2r_any_of_<scalar>`, `l2r_any_imm` or a generated
+  boxing `l2r_box_T`) in the items other than conversion helpers and those
+  boxings themselves;
 - `box-variants`: the program's pointer payload types of `Box` (the items
   `l2r_any_rel_N`, one per type);
 - `items`, `functions`: the generated items, and the functions among them.
@@ -128,11 +130,15 @@ KEPT = re.compile(r"\x00(\d+)\x00")
 REL_DEF = re.compile(r"^fn l2r_any_rel_(\d+)\(x : (.*)\) -> unit")
 REL_TOK = re.compile(r"\bl2r_any_rel_(\d+)(_c)?\b")
 REL_ARG = re.compile(r"(leanrt::any::Rel\()(\d+)(,)")
-BOX_SITE = re.compile(r"\bl2r_any_(?:of|of_fn|of_ptr|of_u8|of_u16|of_u32|of_bool|of_f32|of_u64|of_f64|imm)\s*[<(]")
+BOX_SITE = re.compile(r"\b(?:l2r_any_(?:of|of_ptr|of_u8|of_u16|of_u32|of_bool|of_f32|of_u64|of_f64|imm)|l2r_box_\w+)\s*[<(]")
 # The prelude's functions whose last argument is a payload number:
-# `l2r_any_of<T>(x : T, num : u64)`, `l2r_any_of_fn`, `l2r_any_of_ptr`,
-# `l2r_any_as<T>(a : LAny, num : u64)`, `l2r_any_raw_as<T>(w : u64, num : u64)`.
-PAYLOAD_CALL = re.compile(r"\bl2r_any_(?:of|of_fn|of_ptr|as|raw_as)(?=<)")
+# `l2r_any_of<T>(x : T, num : u64)`, `l2r_any_of_ptr`,
+# `l2r_any_as<T>(a : LAny, num : u64)`, `l2r_any_raw_as<T>(w : u64, num : u64)`;
+# and the program's boxings of the types with nullary variants,
+# `l2r_box_T(x : T, num : u64)` (no type arguments).
+PAYLOAD_CALL = re.compile(r"\bl2r_any_(?:of|of_ptr|as|raw_as)(?=<)")
+BOX_FN_CALL = re.compile(r"\bl2r_box_\w+(?=\()")
+BOX_FN = re.compile(r"^l2r_box_")
 LAST_NUM = re.compile(r",\s*(\d+)\s*$")
 NUM_LET = re.compile(r"(let bm\d+ : u64 = )(\d+)(;)")
 # A box's number, bound to a name that a `match` takes apart (`boxDispatch`).
@@ -193,6 +199,10 @@ def payload_spans(text):
             a = LAST_NUM.search(text, i + 1, bracket(text, i)[0])
             if a:
                 spans.add(a.span(1))
+    for m in BOX_FN_CALL.finditer(text):
+        a = LAST_NUM.search(text, m.end() + 1, bracket(text, m.end())[0])
+        if a:
+            spans.add(a.span(1))
     bound = set(NUM_BIND.findall(text))
     for m in MATCH.finditer(text):
         if bound and m.group(1) in bound:
@@ -409,6 +419,8 @@ class Program:
                 unbox_fns += 1
             if kind == "fn" and REL_DEF.match(raws[name]):
                 box_variants += 1
+                continue
+            if kind == "fn" and BOX_FN.match(name):
                 continue
             raw = raws[name]
             conv_sites += sum(1 for m in IDENT.finditer(raw) if m.group(0) in conv_names)

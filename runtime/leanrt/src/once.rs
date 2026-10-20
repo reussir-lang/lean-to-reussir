@@ -391,6 +391,13 @@ pub fn set_raw(slot: u64, raw: usize) {
 mod tests {
     use super::*;
 
+    /// The slots are one global record without a lock (lean2rr runs Lean
+    /// code on one thread at a time); unit tests run on several threads,
+    /// so the tests that set slots take this lock (`fast_table` and
+    /// `put_field_word` raced on the record's vectors: an index out of
+    /// bounds, in most runs of the combined unit tests).
+    static SLOT_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn back<T: Copy>(w: usize) -> T {
         unsafe { std::mem::transmute_copy::<usize, T>(&w) }
     }
@@ -412,6 +419,7 @@ mod tests {
     // Slots far above any test's others (the tables and record are global).
     #[test]
     fn fast_table() {
+        let _g = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let s = (FAST_SLOTS - 10) as u64;
         assert!(!ready(s) && !has(s));
         set_raw(s, word_of(5u16));
@@ -448,6 +456,7 @@ mod tests {
     // it gets the word after the 8-byte header (count, tag).
     #[test]
     fn put_field_word() {
+        let _g = SLOT_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         #[repr(C, align(8))]
         struct Cell {
             count: u32,

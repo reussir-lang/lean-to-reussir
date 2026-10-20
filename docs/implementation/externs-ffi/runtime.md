@@ -841,7 +841,7 @@ Paths are relative to the repository root.
   generated code are unchanged by the pin. The same step frees the last
   reference to a record that a set, a pop or a reference or cell set
   gives up as one pending cell of Reussir's stack instead of a step
-  ([../ownership.md](../ownership.md#the-last-reference-to-a-record-is-freed-as-one-pending-cell)).
+  ([../ownership.md](../ownership.md#a-record-is-released-as-one-pending-cell)).
 - **Why:** The pin: a one-shot watcher started in a dependent of another
   one-shot watcher's promise got a second signal that natively the reset
   discards, a stopped last watcher between the loop's wake-up and the

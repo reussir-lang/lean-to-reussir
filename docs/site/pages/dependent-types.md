@@ -826,13 +826,13 @@ enum Fn_Op {                          // a function value: List -> Nat
 fn ops_tail() -> List {               // the constant [ops_lam]
     let nil : List = List::c_nil{};
     let f : Fn_Op = Fn_Op::ops_lam{};
-    List::c_cons{l2r_any_of_fn<Fn_Op>(f, 16), nil}
+    List::c_cons{l2r_box_Fn_Op(f, 16), nil}
 }
 
 fn ops_init() -> List {
     let tail : List = ops_tail();
     let g : Fn_Op = Fn_Op::List_length{};
-    List::c_cons{l2r_any_of_fn<Fn_Op>(g, 16), tail}
+    List::c_cons{l2r_box_Fn_Op(g, 16), tail}
 }
 ```
 
@@ -843,7 +843,9 @@ fn ops_init() -> List {
   constant of its own (`ops_tail`).
 - Each element is a function value in a box. A function value without
   captured values is an immediate: its type number (16) and its variant.
-  It allocates nothing.
+  It allocates nothing. `l2r_box_Fn_Op` is a generated function: a
+  `match` on the variants without fields makes the immediates, and any
+  other value goes into the box as a pointer.
 
 ## One layout for a shared tree
 

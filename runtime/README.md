@@ -374,12 +374,12 @@ drop is out of line; together with `#[inline(always)]` fast paths and
 get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
 (checked with `rrc --emit llvm-ir`; `tests/runtime/ffi-inline-check.sh`
 checks reads and sets). An array set (and a pop) releases the element it
-removes with only its decrement in line when it is a Reussir record
-(`array::ReleaseElem`) or a box (`LAny::drop`; the array of a Lean type
-holds boxes): the record's whole release in line kept the set
-texture out of line (unionfind). The last reference is released out of
-line by `array::release_last` (a box's by `any::release_last`), inside a
-free the runtime starts, as one pending cell (a record's by
+removes with only its decrement in line when it is a box (`LAny::drop`;
+the array of a Lean type holds boxes); a Reussir record (`array::ReleaseElem`)
+goes out of line to `array::release_last`, shared or not (leanrt reads no
+record's count, clean step A1). The last reference to a box is released
+out of line by `any::release_last`, inside a free the runtime starts, as
+one pending cell, and so is every released record (a record's by
 `drop::free_unique`; both through `drop::free_deferred`: Reussir's
 `__reussir_drop_defer`, then its drain, which outside a free pops the
 cell at once), so its fields go in Lean's order, the last one first, as `lean_dec` frees them in
@@ -504,7 +504,9 @@ consecutive cells through their headers; a leaf payload, numbered with
 `LEAF_BIT`, released directly). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
 mismatch panics); `l2r_any_raw`/`l2r_any_raw_as<T>` split an immediate
 from a pointer first where the type has nullary variants;
-`l2r_any_of_fn<T>` keeps a function value's nullary variant typed. Rules:
+a type with nullary variants boxes through lean2rr's generated `l2r_box_T`,
+which matches them in Reussir code (a function value's keep their type;
+leanrt never decodes a Reussir immediate). Rules:
 docs/implementation/representations/box-and-uniform.md.
 
 ## Calling convention
@@ -1252,8 +1254,9 @@ lean2rr's dev branch (the tests pass with it).
     (`ElemBox{x}`, function-value wrappers) measured the temporary wrapper,
     whose memory the next wrapper can reuse. lean2rr now takes the value in
     its own representation (not converted for the call): a heap value's
-    handle goes to `l2r_ptr_addr_obj`/`l2r_ptr_addr_rec`, which answer the
-    pointer whatever the count (`ptrEq a b` may release `a`'s last other
+    handle goes to `l2r_ptr_addr_obj` or, for a record, through
+    `l2r_ptr_pass`/`l2r_ptr_passed` (lean2rr's `recordAddr`), which answer
+    the pointer whatever the count (`ptrEq a b` may release `a`'s last other
     reference before `b`'s address is taken), and a `[value]` struct
     answers its field's (translation plan §9; tests `RtPtrAddr`,
     `RtPtrSound`).
@@ -1336,8 +1339,9 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   `Nat`s) never reports sharing; nor of a task that one reference holds
   (natively a task that `Task.spawn` made is multi-threaded and reported). Pointer identity is not emulated (translation
   plan §9): `ptrAddrUnsafe` answers the handle pointer of a heap value in
-  its own representation (`l2r_ptr_addr_obj`, `l2r_ptr_addr_rec`, which
-  give the reference back inline), the boxed scalar `2n+1` for
+  its own representation (`l2r_ptr_addr_obj`; a record's through
+  `l2r_ptr_pass`/`l2r_ptr_passed`, lean2rr's `recordAddr`, its release
+  Reussir's own), the boxed scalar `2n+1` for
   `UInt8/16/32`, `Char`, `Bool`, enumerations and `Unit` (`l2r_addr_word`),
   a `Nat` or `Int` its own word, which is native Lean's (`l2r_addr_nat`,
   `l2r_addr_int`: the boxed scalar when small, else its big number's
@@ -1377,11 +1381,10 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
   documentation of handles says), where natively the initializers' values
   are persistent and the handle stays open, its buffer unwritten, until
   the exit (plan §10, "Runtime"; hunt HSG-02).
-- The persistent mark adds 2^30 to a cell's count, and a count of 2^31
-  (`drop::IMMORTAL`) or more is a nullary variant's dummy box for leanrt
-  (`any::of` boxes such a record as an immediate): a marked cell gets
-  there at 2^30 references to it (8 GiB of pointers, as
-  `Array.replicate (2^30) x` of a marked `x`), an unmarked one at 2^31.
+- The persistent mark keeps one reference to each marked cell for the
+  rest of the run and remembers the cell's address in a set
+  (`leanrt::persist`); the set is never emptied (the marked cells are
+  never freed either).
 - `getLine` reports only its own call's error (LB-41, plan §10): natively
   a handle's sticky error indicator makes it fail with whatever `errno`
   holds, which was the only way a Lean program could read a stale

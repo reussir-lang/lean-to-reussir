@@ -317,10 +317,11 @@ native Lean marks it when its module starts.</p>
 <li>The walk is a loop over a work list, not a recursion. So a value 300000
   cells deep is no problem.</li>
 <li>The walk marks each cell that it visits: a record, an array, a function
-  value, a thunk or task, a reference, a promise. The mark adds 2^30 to the
-  cell's count. So the count never comes back to 1: the cell is never
-  freed, and an update copies it.</li>
-<li>The walk does not look into a cell that has the mark. So it visits each
+  value, a thunk or task, a reference, a promise. The mark keeps one
+  reference to the cell until the program stops, and it puts the address
+  of the cell in a set. So the cell is never freed, and an update copies
+  it. The runtime does not read or write the count of the cell.</li>
+<li>The walk does not look into a cell that is in the set. So it visits each
   cell once, also in a DAG with 2^40 paths. And a later walk does not read
   again a reference or a thunk that an earlier walk visited.</li>
 <li>The walk looks into a box when it meets it. If the value in the box can
@@ -502,11 +503,11 @@ call. Each step passed lean2rr's full suite before its merge.</p>
 <li><strong>String equality.</strong> Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.</li>
-<li><strong>Array sets and pops of records.</strong> A set decrements the record that it
-  replaces in line, so LLVM inlines the set into the loop. A set or pop
-  that frees the last reference to a record releases its fields last
-  first, as Lean does. The record goes on the pending stack as one cell
-  (step 11). This costs about 74 instructions per freed record. An array
+<li><strong>Array sets and pops of records.</strong> A set or pop releases the record
+  that it removes on the pending stack as one cell (step 11), so the
+  record's fields are released last first, as Lean does. The runtime does
+  not read the count of the record: the release of the record decrements
+  it or frees it. This costs about 74 instructions per record. An array
   of a Lean type holds boxes: the last reference to a boxed record goes on
   the pending stack as one cell in the same way.</li>
 <li><strong><code>ByteArray.data</code> and <code>ByteArray.mk</code></strong> (and those of <code>FloatArray</code>).

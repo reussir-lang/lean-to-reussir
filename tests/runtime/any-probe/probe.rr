@@ -133,6 +133,10 @@ fn probe_install() -> u64 [{ {
 } }];
 
 // ---- box / unbox per type ----
+// The box shape for program types with nullary variants (lean2rr's
+// generated `l2r_box_T`): a nullary variant is matched in Reussir code and
+// boxed as the immediate of its index; any other value is a pointer
+// (`l2r_any_of_ptr`). leanrt decodes no Reussir immediate.
 fn box_pt(p : Pt) -> LAny { l2r_any_of<Pt>(p, 1016) }
 // The unbox shape for program types (the prelude's rule): an immediate is
 // a nullary variant by index or, for index 0 (box(0)), the type's zero.
@@ -142,21 +146,36 @@ fn unbox_pt(a : LAny) -> Pt {
         if l2r_any_raw_imm(w) == 0 { Pt{0, 0} } else { l2r_unreachable<Pt>() }
     } else { l2r_any_raw_as<Pt>(w, 1016) }
 }
-fn box_tree(t : Tree) -> LAny { l2r_any_of<Tree>(t, 1017) }
+fn box_tree(t : Tree) -> LAny {
+    match t {
+        Tree::leaf => { l2r_any_imm(0) },
+        _ => { l2r_any_of_ptr<Tree>(t, 1017) }
+    }
+}
 fn unbox_tree(a : LAny) -> Tree {
     let w : u64 = l2r_any_raw(a);
     if l2r_any_raw_is_imm(w) {
         if l2r_any_raw_imm(w) == 0 { Tree::leaf{} } else { l2r_unreachable<Tree>() }
     } else { l2r_any_raw_as<Tree>(w, 1017) }
 }
-fn box_fnv(f : FnV) -> LAny { l2r_any_of<FnV>(f, 1018) }
+fn box_fnv(f : FnV) -> LAny {
+    match f {
+        FnV::z => { l2r_any_imm(0) },
+        _ => { l2r_any_of_ptr<FnV>(f, 1018) }
+    }
+}
 fn unbox_fnv(a : LAny) -> FnV {
     let w : u64 = l2r_any_raw(a);
     if l2r_any_raw_is_imm(w) {
         if l2r_any_raw_imm(w) == 0 { FnV::z{} } else { l2r_unreachable<FnV>() }
     } else { l2r_any_raw_as<FnV>(w, 1018) }
 }
-fn box_alist(l : AList) -> LAny { l2r_any_of<AList>(l, 1024) }
+fn box_alist(l : AList) -> LAny {
+    match l {
+        AList::nil => { l2r_any_imm(0) },
+        _ => { l2r_any_of_ptr<AList>(l, 1024) }
+    }
+}
 fn unbox_alist(a : LAny) -> AList {
     let w : u64 = l2r_any_raw(a);
     if l2r_any_raw_is_imm(w) {
@@ -172,6 +191,20 @@ fn mk_mx(i : u64) -> Mx {
 }
 fn mk_col(i : u64) -> Col {
     if i == 0 { Col::r{} } else { if i == 1 { Col::g{} } else { Col::bl{} } }
+}
+fn box_mx(m : Mx) -> LAny {
+    match m {
+        Mx::b => { l2r_any_imm(1) },
+        Mx::c => { l2r_any_imm(2) },
+        _ => { l2r_any_of_ptr<Mx>(m, 1025) }
+    }
+}
+fn box_col(c : Col) -> LAny {
+    match c {
+        Col::r => { l2r_any_imm(0) },
+        Col::g => { l2r_any_imm(1) },
+        Col::bl => { l2r_any_imm(2) }
+    }
 }
 fn unbox_mx(a : LAny) -> Mx {
     let w : u64 = l2r_any_raw(a);
@@ -206,17 +239,17 @@ fn col_code(c : Col) -> u64 {
 // enum (immediates of their indices, under both nullary encodings).
 #[transform_anchor]
 fn s_variants() -> u64 {
-    let w0 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025)) >> 48;
-    let w1 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(1)), 1025));
-    let w2 : u64 = probe_word(l2r_any_of<Mx>(mk_mx(probe_opaque(2)), 1025));
-    let c0 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(0)), 1026));
-    let c1 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(1)), 1026));
-    let c2 : u64 = probe_word(l2r_any_of<Col>(mk_col(probe_opaque(2)), 1026));
-    let r0 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025)));
-    let r1 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(1)), 1025)));
-    let r2 : u64 = mx_code(unbox_mx(l2r_any_of<Mx>(mk_mx(probe_opaque(2)), 1025)));
-    let q0 : u64 = col_code(unbox_col(l2r_any_of<Col>(mk_col(probe_opaque(0)), 1026)));
-    let q2 : u64 = col_code(unbox_col(l2r_any_of<Col>(mk_col(probe_opaque(2)), 1026)));
+    let w0 : u64 = probe_word(box_mx(mk_mx(probe_opaque(0)))) >> 48;
+    let w1 : u64 = probe_word(box_mx(mk_mx(probe_opaque(1))));
+    let w2 : u64 = probe_word(box_mx(mk_mx(probe_opaque(2))));
+    let c0 : u64 = probe_word(box_col(mk_col(probe_opaque(0))));
+    let c1 : u64 = probe_word(box_col(mk_col(probe_opaque(1))));
+    let c2 : u64 = probe_word(box_col(mk_col(probe_opaque(2))));
+    let r0 : u64 = mx_code(unbox_mx(box_mx(mk_mx(probe_opaque(0)))));
+    let r1 : u64 = mx_code(unbox_mx(box_mx(mk_mx(probe_opaque(1)))));
+    let r2 : u64 = mx_code(unbox_mx(box_mx(mk_mx(probe_opaque(2)))));
+    let q0 : u64 = col_code(unbox_col(box_col(mk_col(probe_opaque(0)))));
+    let q2 : u64 = col_code(unbox_col(box_col(mk_col(probe_opaque(2)))));
     let k0 : u64 = probe_say("Mx a: number (1025); b, c words (3, 5)", w0 * 10000 + w1 * 100 + w2);
     let k1 : u64 = probe_say("Col r, g, bl words (1, 3, 5)", c0 * 10000 + c1 * 100 + c2);
     let k2 : u64 = probe_say("round trips a, b, c (41, 1000, 2000); r, bl (1, 3)", r0 + r1 + r2 + q0 * 10 + q2);
@@ -365,7 +398,7 @@ fn s_unit_at_record() -> u64 {
 // internal panic, exit 1).
 #[transform_anchor]
 fn s_mismatch() -> u64 {
-    let p : Pt = l2r_any_as<Pt>(l2r_any_of<Mx>(mk_mx(probe_opaque(0)), 1025), 16);
+    let p : Pt = l2r_any_as<Pt>(box_mx(mk_mx(probe_opaque(0))), 16);
     p.0
 }
 

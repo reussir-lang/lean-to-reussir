@@ -1,7 +1,7 @@
 /-! Runtime test: function values that capture nothing, boxed as typed
 immediates (rule 1 boxes a list's and an array's elements; the one-word
 box keeps a function value's nullary variant as `(num << 32) | index`,
-`l2r_any_of_fn`), among them partial applications `tagT Nat`, `two Nat
+the generated `l2r_box_T`), among them partial applications `tagT Nat`, `two Nat
 String` whose erased parameters the target does not take (rule 4: `p<j>`
 with `j > 0` and no field), at a type with a phantom domain
 (`(β : Type) → Nat → Nat`) and at the same type without it: the enum they

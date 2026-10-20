@@ -231,12 +231,13 @@ runtime. Plan
   out its step): making a literal has no effect, and its first read makes
   it. The cache does not mark the string persistent; it needs no mark, as
   the slot's reference keeps the string alive and not unique for the run.
-  The string can get the persistent bit later, through
+  The string can be marked persistent later, through
   `persist::mark_box` (`runtime/leanrt/src/persist.rs`): when a walk for
   tasks (`l2r_persist_T`) meets it as the payload of a box, or when
-  `Runtime.markPersistent` takes it. That is harmless: the bit keeps a
-  cell from being freed and from being unique, which the slot's reference
-  does already, and no walk looks into a string (no task can be in one).
+  `Runtime.markPersistent` takes it. That is harmless: the mark keeps a
+  cell from being freed and from being unique (one more reference), which
+  the slot's reference does already, and no walk looks into a string (no
+  task can be in one).
   A once-cell keeps a string constant the same way (by its reference).
   The table holds each text once, so two
   constants with equal text share one slot: their reads give one object
@@ -420,11 +421,15 @@ runtime. Plan
   function values, thunks (their computation or value, without forcing
   them), references (their value), promises (their task, `result?`) and
   `Box` payloads. The walk also marks each cell it visits persistent
-  (`l2r_persist_mark`, `leanrt::persist::mark`: the cell's `u32` count
-  goes up by 2^30): a record, an array, a function value, a thunk or task,
-  a reference, a promise. A persistent cell is never freed (its count
-  never comes back to 1) and never unique, and no walk looks into it
-  again: a walk that reaches it goes on with the rest, without a wait.
+  (`l2r_persist_mark`, `leanrt::persist::mark`): a record, an array, a
+  function value, a thunk or task, a reference, a promise. The mark keeps
+  the reference the call received for the rest of the run (never
+  released: its count never comes back to 1; leanrt reads and writes no
+  count, clean step A1) and puts the cell's handle word in a set of marked
+  cells. A persistent cell is never freed and never unique, and no walk
+  looks into it again (its word is in the set; its address is never
+  reused, as the cell is never freed): a walk that reaches it goes on with
+  the rest, without a wait.
   The walk marks a cell when it reaches it, before it waits for the cell
   or looks into it. A `Box` is looked into where the walk meets it
   (`l2r_persist_x_LAny`), never pushed: a payload whose type can hold a
@@ -435,14 +440,14 @@ runtime. Plan
   it holds and a handle stays open; an immediate is nothing. The mark
   takes only the counted handle types (`leanrt::persist::Counted`:
   Reussir's records and enums, its `Rc`, leanrt's arrays and thunk or
-  task cells); a box is marked through its word. The last value pushed is
+  task cells); a box is marked through its word (the payload's address in
+  the set, the box's reference kept). The last value pushed is
   visited next: when it has the cell's own type (a list's tail, a tree's
   last child) the expansion calls itself on it, a tail call, and the step
   over an array of boxes loops over the elements that push nothing, so a
-  `List Nat` or `Array Nat` constant makes no work-list cell. A count of
-  2^31 (`drop::IMMORTAL`) or more is a nullary variant's dummy box for
-  leanrt: a marked cell gets there at 2^30 references to it (8 GiB of
-  pointers), an unmarked one at 2^31. The walk runs for a program constant at startup
+  `List Nat` or `Array Nat` constant makes no work-list cell. Before step
+  A1 the mark added 2^30 to the cell's count (a bit that the next visit
+  read); a nullary variant was told apart by its encoding. The walk runs for a program constant at startup
   (forced there, [order.md](order.md)), for an `[init]` declaration's
   result right after its initializer (`initPutFn`), for a closed term or
   a toolchain constant at its first evaluation, and in
@@ -541,7 +546,7 @@ runtime. Plan
   `persistCell`, `PersistGen`, `genPersist`, `finishPersistFns`,
   `variantCount`, `persistExpName`; `runtime/prelude.rr`:
   `l2r_persist_mark`, `l2r_persist_box`; `runtime/leanrt/src/persist.rs`:
-  `Counted`, `mark`, `mark_box`, `PERSISTENT`. Plan §5.14 (*Closed
+  `Counted`, `mark`, `mark_box`, `MARKED`. Plan §5.14 (*Closed
   terms*), §10 (*Tasks*, *Runtime*).
 - **Remove only if:** never.
 

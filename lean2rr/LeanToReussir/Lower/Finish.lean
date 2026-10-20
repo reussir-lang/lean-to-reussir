@@ -38,7 +38,7 @@ program that casts reads it (`boxUnbox` with `native`: a word as native
 Lean reads it, an index, `box(0)` as `t`'s zero; such a function exists
 only in a program that casts, `unboxFn`); at a
 function type it is `box(0)` or a function payload's nullary variant by
-index (`l2r_any_of_fn`), converted. Other payloads are unreachable. -/
+index (`l2r_box_T`), converted. Other payloads are unreachable. -/
 def genUnbox (fname : String) (t : RR.Ty) : LowerM Unit := do
   let u64 := RR.Ty.named "u64"
   let mut arms : Array BoxArm := #[]
@@ -718,7 +718,12 @@ payload type and every variant of a function type is known):
   (`leanrt::any::init_releases`); `leanrt::any::release_last` then defers
   the last reference of a payload as its cell with that release;
 - the functions that build a function type's nullary variant from its
-  index (`boxFnOfIndex`, for the typed immediates of `l2r_any_of_fn`). -/
+  index (`boxFnOfIndex`, for the typed immediates of `l2r_box_T`);
+- the boxing of each payload type with nullary variants (`boxOfFn`):
+  `l2r_box_T(x, num)` matches them (a shared enum's as the immediate of
+  the variant's index, a function value's as `(num << 32) | index`) and
+  boxes any other value as a pointer (`l2r_any_of_ptr`); with
+  `conv-liveness`, only for the types live code boxes. -/
 def boxTypeItems : LowerM RR.Item := do
   let u64 := RR.Ty.named "u64"
   let mut seen : Std.HashSet Nat := {}
@@ -756,6 +761,36 @@ def boxTypeItems : LowerM RR.Item := do
         iarms := iarms.push (RR.Arm.lit (k + 2) (.ofExpr (.ctor tn (some (fnVariantName vs[k])) #[])))
     iarms := iarms.push { ty := "", ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[t] #[]) }
     let f := RR.Item.fn s!"l2r_fn_of_index_{t.enc}" #[("i", u64)] t (.ofExpr (.mtch (.var "i") iarms))
+    text := text ++ f.render ++ "\n"
+  for t in ← getPart (·.boxOfReqs) do
+    let name := s!"l2r_box_{t.enc}"
+    if (← read).convLiveness && !(← getPart (·.live.names.contains name)) then continue
+    let .prog _ _ _ nullary isFn ← boxKind t | continue
+    let imm (v : String) : RR.Block := .ofExpr (.call "l2r_any_imm" #[] #[.atom v])
+    let mut arms : Array RR.Arm := #[]
+    let mut total := 0
+    if isFn then
+      -- The variants of the enum of `t`'s run-time type, at their positions
+      -- (`fnTypeItems`: `z`, `raw`, then these), typed: `(num << 32) | index`
+      -- (`num` is `t`'s number, `n`, at every call).
+      let tn := RR.fnTypeName t
+      arms := arms.push { ty := tn, ctor := some "z", binders := #[], body := imm "num << 32" }
+      let vs := (← getPart (·.fnVariants)).getD t.rt #[]
+      for h : k in [:vs.size] do
+        if (← fnVariantFields vs[k]).isEmpty then
+          arms := arms.push { ty := tn, ctor := some (fnVariantName vs[k]), binders := #[], body := imm s!"(num << 32) | {k + 2}" }
+      total := vs.size + 2
+    else
+      let .named tn := t | continue
+      for (i, v) in nullary do
+        arms := arms.push { ty := tn, ctor := some v, binders := #[], body := imm (toString i) }
+      total := match (← get).typeInfos[tn]? with
+        | some info => info.ctorOrder.size
+        | none => nullary.size + 1
+    if arms.size < total then
+      let ptr : RR.Block := .ofExpr (.call "l2r_any_of_ptr" #[t] #[.var "x", .var "num"])
+      arms := arms.push { ty := "", ctor := none, binders := #[], body := ptr }
+    let f := RR.Item.fn name #[("x", t), ("num", u64)] RR.Ty.box (.ofExpr (.mtch (.var "x") arms))
     text := text ++ f.render ++ "\n"
   return .raw text
 

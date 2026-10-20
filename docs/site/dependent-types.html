@@ -813,13 +813,13 @@ fn List_length_aux(xs : List, acc : Nat) -&gt; Nat {
 fn ops_tail() -&gt; List {               // the constant [ops_lam]
     let nil : List = List::c_nil{};
     let f : Fn_Op = Fn_Op::ops_lam{};
-    List::c_cons{l2r_any_of_fn&lt;Fn_Op&gt;(f, 16), nil}
+    List::c_cons{l2r_box_Fn_Op(f, 16), nil}
 }
 
 fn ops_init() -&gt; List {
     let tail : List = ops_tail();
     let g : Fn_Op = Fn_Op::List_length{};
-    List::c_cons{l2r_any_of_fn&lt;Fn_Op&gt;(g, 16), tail}
+    List::c_cons{l2r_box_Fn_Op(g, 16), tail}
 }
 </code></pre>
 <ul>
@@ -830,7 +830,9 @@ fn ops_init() -&gt; List {
   constant of its own (<code>ops_tail</code>).</li>
 <li>Each element is a function value in a box. A function value without
   captured values is an immediate: its type number (16) and its variant.
-  It allocates nothing.</li>
+  It allocates nothing. <code>l2r_box_Fn_Op</code> is a generated function: a
+  <code>match</code> on the variants without fields makes the immediates, and any
+  other value goes into the box as a pointer.</li>
 </ul>
 <h2 id="one-layout-for-a-shared-tree">One layout for a shared tree</h2>
 <p>Rule 1 gives <code>Tree Nat</code> and <code>Tree α</code> one layout. So a tree goes from typed

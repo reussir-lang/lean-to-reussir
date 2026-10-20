@@ -110,45 +110,6 @@ impl<T: Clone> CloneInto for T {
     }
 }
 
-/// A Reussir record crossing the boundary is `Bridge<Inner>`, a pointer to
-/// its box, and `Clone` is the compiler-emitted `<record>_ffi_acquire`, an
-/// `rc.inc` (inlined into the copy loop). Under the aarch64 encoding of
-/// nullary variants (TBI) a nullary constructor is an immediate whose top
-/// byte is a tag and whose address is a static dummy box shared by all of
-/// them, and `rc.inc` increments its count unguarded: copying an array full
-/// of `nil`s (hash map buckets) made all those increments one serial chain
-/// through a single word. The dummy's count is never decremented (Reussir
-/// steers decrements of immediates away) and never frees, so these
-/// increments are skipped here; real boxes are incremented as `rc.inc` does
-/// (the 32-bit count at offset 0; these records are not atomic). The
-/// `immortal` encoding (other targets, and aarch64 under
-/// `--nullary-variant-encoding arch-independent`) makes an immediate the
-/// plain address of its dummy, whose count is `drop::IMMORTAL` or more and
-/// stays as it is, as Reussir's own increment leaves it (review HRT-04): the
-/// loop adds `c < IMMORTAL` to the count it loads, without a branch, and so
-/// stores a dummy's count back unchanged (the dummy is a writable global).
-/// Other targets: the generic clone.
-impl<X: Clone> CloneInto for reussir_rt::bridge::Bridge<X> {
-    #[inline(always)]
-    unsafe fn clone_to(src: &[Self], dst: *mut Self) {
-        if cfg!(target_arch = "aarch64") && size_of::<Self>() == 8 {
-            let mut scratch: u32 = 0;
-            for x in src {
-                let p = std::mem::transmute_copy::<Self, *mut u32>(x);
-                let q = if (p as usize) >> 56 == 0 { p } else { &mut scratch as *mut u32 };
-                let c = *q;
-                *q = c + (c < crate::drop::IMMORTAL) as u32;
-            }
-            std::hint::black_box(scratch);
-            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-        } else {
-            for (i, x) in src.iter().enumerate() {
-                std::ptr::write(dst.add(i), x.clone());
-            }
-        }
-    }
-}
-
 /// A box (`any::LAny`): the words are copied as they are (`memcpy`), then
 /// each pointer's payload count goes up, as `LAny`'s `Clone` does it; an
 /// immediate needs nothing. (The generic loop cloned and stored each box in
@@ -478,23 +439,17 @@ extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
 /// How a set or a pop releases the element it removes, as `lean_dec` does
 /// natively (`lean_array_uset`, `lean_array_pop`): by default the element's
 /// own drop, in line (a handle's decrement, its free out of line). A Reussir
-/// record (`Bridge`, see `CloneInto`) has only its decrement in line, as
-/// `rc.dec` does it: a count above 1 is decremented here, and the last
-/// reference goes to `release_last`, out of line, which frees the record
-/// as `drop::release` does (`drop::release_unique`, without testing the
-/// count again): inside a free the runtime starts, so its
-/// fields go in Lean's order, its last field first, and the `sync`
-/// dependents of the promises it drops unresolved run when that free ends,
-/// before the set returns (the record's own `_ffi_release`, which the set
-/// called before, releases the first cell's fields in field order; review
-/// RS10-01: a structure of two handles closed them in the opposite order to
-/// native's). The decrement is `rc.dec`'s, as the increments of
-/// `CloneInto` are `rc.inc`'s and the array free's decrements are
-/// (`drop::ReleaseElems`): the 32-bit count at offset 0 (these records are
-/// not atomic); an immediate (a nullary constructor under the aarch64
-/// encoding, a nonzero top byte) has no count of its own and is never
-/// decremented (`rc.dec` steers away from it). On other targets (the
-/// immortal encoding) every record goes to `release_last`.
+/// record (`Bridge`) goes to `release_last`, out of line, shared or not:
+/// whether a reference is a record's last is not read here (Reussir's
+/// layout and encodings are its own), so the record is released as
+/// `drop::release` does (`drop::release_unique`): inside a free the runtime
+/// starts, where its `<record>_ffi_release` frees it with its fields in
+/// Lean's order, its last field first, and the `sync` dependents of the
+/// promises it drops unresolved run when that free ends, before the set
+/// returns (the record's own `_ffi_release` called directly releases the
+/// first cell's fields in field order; review RS10-01: a structure of two
+/// handles closed them in the opposite order to native's), or only
+/// decrements a shared record, or leaves a nullary variant as it is.
 ///
 /// With the record's release in the texture (its fields' decrements and
 /// frees, `__reussir_deallocate`), the set texture was too big for LLVM to
@@ -518,38 +473,24 @@ impl<T> ReleaseElem for T {
     }
 }
 
+/// A record (`Bridge<Inner>`): whether this is its last reference is not
+/// read (Reussir's layout and encodings are its own), so every record a
+/// set or a pop removes is released inside a free the runtime starts
+/// (`release_last`, `drop::release_unique`): its `<record>_ffi_release`
+/// then frees it with its runtime objects released in Lean's order, or
+/// only decrements a shared one, or leaves a nullary variant as it is.
 impl<X> ReleaseElem for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     unsafe fn release_elem(x: Self) {
-        if cfg!(target_arch = "aarch64") && size_of::<Self>() == 8 {
-            let p = std::mem::transmute_copy::<Self, *mut u32>(&x);
-            if (p as usize) >> 56 != 0 {
-                // An immediate (`tbi`).
-                std::mem::forget(x);
-                return;
-            }
-            let c = *p;
-            if c != 1 {
-                // Shared; an immediate's dummy (`immortal`) stays as it is
-                // (`drop::IMMORTAL`).
-                if c < crate::drop::IMMORTAL {
-                    *p = c - 1;
-                }
-                std::mem::forget(x);
-                return;
-            }
-        }
         release_last(x)
     }
 }
 
-/// The last reference to an element that a set or a pop removes (or any
-/// record on a target without the aarch64 encoding): freed inside a free
-/// the runtime starts (`drop::release_unique`: the count, found at 1 by
-/// `ReleaseElem`, is not tested again). `extern "C"`: the free may unwind,
-/// and a Rust call would be an invoke with a landing pad in the texture,
-/// which then stayed a call at six sites of `RtArraySets`.
-#[cold]
+/// A record that a set or a pop removes, released inside a free the
+/// runtime starts (`drop::release_unique`). `extern "C"`: the free may
+/// unwind, and a Rust call would be an invoke with a landing pad in the
+/// texture, which then stayed a call at six sites of `RtArraySets`. Not
+/// `#[cold]`: every removed record comes here, shared or not.
 #[inline(never)]
 extern "C" fn release_last<T>(x: T) {
     unsafe { crate::drop::release_unique(x) }

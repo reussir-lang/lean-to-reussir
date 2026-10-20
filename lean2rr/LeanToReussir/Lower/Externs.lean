@@ -724,7 +724,7 @@ def refGlue (orig : Name) (params : Array Expr) (ret : Expr)
   | ``ST.Prim.Ref.ptrEq =>
     let (x, y) := (← fresh "ra", ← fresh "ra")
     let u64 := RR.Ty.named "u64"
-    let addr (i : Nat) : LowerM RR.Expr := handle i fun h => pure (.call "l2r_ptr_addr_rec" #[rt] #[h])
+    let addr (i : Nat) : LowerM RR.Expr := handle i fun h => recordAddr rt h
     return some (← wrapIOResult resTy
       (.block ⟨#[(x, some u64, ← addr 0), (y, some u64, ← addr 1)], .atom s!"{x} == {y}"⟩) .bool)
   | _ => return none

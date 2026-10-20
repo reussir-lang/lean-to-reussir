@@ -174,7 +174,9 @@ fn l2r_any_of_f64(x : f64) -> LAny [{ leanrt::any::of_f64(x) }];
 fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
 
 // A counted value boxed as payload `num`: a Reussir record or enum (a
-// nullary variant becomes the immediate of its index), an opaque type of
+// pointer: lean2rr boxes a type with nullary variants through its generated
+// `l2r_box_T`, which makes a nullary variant the immediate of its index;
+// leanrt does not decode Reussir's immediates), an opaque type of
 // this prelude (`LStr`, `RVec`, `LCell`, `LHandle`, `LPromise`), a `Nat` or `Int` (their
 // own words). leanrt's own kinds keep their fixed numbers whatever `num`
 // says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, the arrays of scalars
@@ -186,16 +188,11 @@ fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
 // `l2r_any_of_f64` do. The address is checked (48 bits).
 #[ffi(import)]
 fn l2r_any_of<T>(x : T, num : u64) -> LAny [{ leanrt::any::of(x, num) }];
-// A function value (a generated function-value enum): a nullary variant
-// becomes the immediate `(num << 32) | index`, which keeps its type.
-#[ffi(import)]
-fn l2r_any_of_fn<T>(x : T, num : u64) -> LAny [{ leanrt::any::of_typed(x, num) }];
 // A counted value whose handle is always a pointer, boxed as payload `num`:
-// a Reussir record, an enum without nullary variants, an opaque handle
-// (lean2rr's `boxValue` picks it). As `l2r_any_of`, without the tests for
-// a nullary variant's immediate (the `tbi` top byte, the `immortal`
-// dummy's count) that `leanrt::any::of` makes for a Reussir type. The
-// handle's word is read as a pointer and exposed, as `leanrt::any` does.
+// a Reussir record, an enum without nullary variants, an opaque handle,
+// and the values other than nullary variants of a type that has some
+// (lean2rr's `boxValue` and its generated `l2r_box_T`). The handle's word
+// is read as a pointer and exposed, as `leanrt::any` does.
 #[ffi(import)]
 fn l2r_any_of_ptr<T>(x : T, num : u64) -> LAny [{ {
     const { assert!(std::mem::size_of::<[:T:]>() == 8) };
@@ -2251,39 +2248,29 @@ fn l2r_ref_write_point() -> bool [{ leanrt::refs::write_point() }];
 #[ffi(import)]
 fn l2r_ref_swap_point() -> bool [{ leanrt::refs::swap_point() }];
 
-// The address of reference record `r` (as `l2r_ptr_addr_rec`, which gives
-// the reference the call received back inline), then the wait: `store` 1
-// for `set` and `swap`. Returns 0.
+// The address of reference record `r` (its handle's word, as
+// `l2r_ptr_addr_rec`), then the wait: `store` 1 for `set` and `swap`; the
+// reference the call received is released after the wait (the record's
+// own release). Returns 0.
 #[ffi(import)]
 fn l2r_ref_wait<R>(r : R, store : u64) -> u64 [{
     {
         let p = unsafe { *(&r as *const [:R:] as *const usize) };
-        if (p >> 56) == 0 {
-            let c = unsafe { *(p as *const u32) };
-            if c > 1 && c < leanrt::drop::IMMORTAL {
-                unsafe { *(p as *mut u32) = c - 1 };
-                ::std::mem::forget(r);
-            }
-        }
         leanrt::refs::wait(p, store != 0);
+        drop(r);
         0
     }
 }];
 
 // `take`: the reference is taken by the running thread (after waiting for
-// another thread's store). Returns 0.
+// another thread's store); the reference the call received is released
+// after. Returns 0.
 #[ffi(import)]
 fn l2r_ref_take_mark<R>(r : R) -> u64 [{
     {
         let p = unsafe { *(&r as *const [:R:] as *const usize) };
-        if (p >> 56) == 0 {
-            let c = unsafe { *(p as *const u32) };
-            if c > 1 && c < leanrt::drop::IMMORTAL {
-                unsafe { *(p as *mut u32) = c - 1 };
-                ::std::mem::forget(r);
-            }
-        }
         leanrt::refs::take(p);
+        drop(r);
         0
     }
 }];
@@ -3237,15 +3224,12 @@ fn l2r_ptr_addr_obj<T>(a : T) -> u64 [{
 }];
 
 // The same for a shared Reussir record (a generated struct or enum, a
-// function value, a `Box`). The reference the call received is given back
-// inline when others remain (a record's count is the `u32` at its address;
-// static cells and immediates, tagged in the top byte or with an immortal
-// count, and a last reference go through the record's release), so that
-// the call costs no out-of-line release: `ptrEq` in a traversal
-// (`Expr.replace`) spent 40% of its time there. A one-word box (`LAny`,
-// an opaque type whose word is not an address) answers `l2r_any_addr`'s
-// address and is released as a box (lean2rr's `addrOf` and `boxSink` call
-// this texture at `Box`).
+// function value, a `Box`): its handle's word. The reference the call
+// received goes through the record's own release (`<record>_ffi_release`,
+// which knows Reussir's count and its encodings of nullary variants). A
+// one-word box (`LAny`, an opaque type whose word is not an address)
+// answers `l2r_any_addr`'s address and is released as a box (lean2rr's
+// `addrOf` and `boxSink` call this texture at `Box`).
 #[ffi(import)]
 fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
     {
@@ -3257,17 +3241,28 @@ fn l2r_ptr_addr_rec<T>(a : T) -> u64 [{
             r
         } else {
             let p = unsafe { *(&a as *const [:T:] as *const usize) };
-            if (p >> 56) == 0 {
-                let c = unsafe { *(p as *const u32) };
-                if c > 1 && c < leanrt::drop::IMMORTAL {
-                    unsafe { *(p as *mut u32) = c - 1 };
-                    ::std::mem::forget(a);
-                }
-            }
+            drop(a);
             p as u64
         }
     }
 }];
+
+// `ptrAddrUnsafe` of a shared Reussir record (lean2rr's `recordAddr`):
+// `l2r_ptr_pass` notes the handle's word (`leanrt::note_addr`) and gives
+// the value back, for Reussir's own release (`l2r_consume`, in line);
+// `l2r_ptr_passed` answers the word noted. lean2rr reads it right after
+// the note and keeps the value until then, so nothing runs in between
+// (Lean code runs on one thread at a time).
+#[ffi(import)]
+fn l2r_ptr_pass<T>(a : T) -> T [{
+    {
+        leanrt::note_addr(unsafe { *(&a as *const [:T:] as *const usize) } as u64);
+        a
+    }
+}];
+
+#[ffi(import)]
+fn l2r_ptr_passed() -> u64 [{ leanrt::noted_addr() }];
 
 // The release, after a call, of an argument the callee only borrows
 // natively (lean2rr's Lower/Borrow): an effectful FFI call, so it stays

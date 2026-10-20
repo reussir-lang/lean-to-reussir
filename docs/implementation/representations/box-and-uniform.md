@@ -66,15 +66,14 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     16` for a leaf type, `boxIsLeaf`: a record or enum whose fields are
     all scalars), wrapped in an `ElemBox` when it cannot cross the FFI
     boundary. A shared enum's nullary variant is the immediate of its
-    index (Reussir represents it as an immediate; `leanrt::any` turns it
-    into the index). A function value boxes with `l2r_any_of_fn`, whose
-    nullary variants keep their type: `(num << 32) | index`. A type
-    without nullary variants (a record, an enum whose constructors all
-    have fields, an `ElemBox`, a reference, a cell, a handle, a promise) boxes with
-    `l2r_any_of_ptr`: its handle is always a pointer, so the box is the
-    word with the number (`leanrt::any::of_ptr`'s check of the address
-    only), without `l2r_any_of`'s tests for a nullary variant's immediate
-    (the top byte under `tbi`, the dummy's count under `immortal`).
+    index; a function value's nullary variant keeps its type,
+    `(num << 32) | index`. A type with nullary variants (such an enum, a
+    function type) boxes through its generated `l2r_box_T(x, num)` (next
+    entry). A type without them (a record, an enum whose constructors
+    all have fields, an `ElemBox`, a reference, a cell, a handle, a
+    promise) boxes with `l2r_any_of_ptr`: its handle is always a pointer,
+    so the box is the word with the number (`leanrt::any::of_ptr`'s check
+    of the address only).
 - **Why:** One word per generic field and array element, as natively; a
   cell only for `Float`, large `UInt64` and values that need one. An
   immediate is untyped, as natively: a word read at another word type
@@ -129,7 +128,7 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
 - **Why:** `box(0)` reaches typed positions (an erased argument at a type
   with data, rule 4e), and only the program can make a record's zero or a
   nullary variant. A function value has several representations and typed
-  immediates (`l2r_any_of_fn`), which only the generated function reads: a
+  immediates (`l2r_box_T`), which only the generated function reads: a
   recursive structure whose one field is a function
   (`inductive G | mk : (Nat → Option (Nat × G)) → G`, a `[value]` struct)
   stopped lean2rr at its first unboxing, "boxUnbox at function type
@@ -431,20 +430,36 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
   `any::tests::scalar_cells_read_shared_and_last`.
 - **Remove only if:** `Float` and large `UInt64` stop going into cells.
 
-### A nullary variant is boxed as the immediate of its index
+### A nullary variant is boxed as the immediate of its index, by generated code
 
-- **What:** `leanrt::any::of` turns a Reussir nullary-variant immediate
-  (top byte `tag + 1` under the `tbi` encoding; a dummy count of at least
-  2^31 under the `immortal` one) into the box immediate of its variant
-  index. Unboxing an immediate at an enum type is the program's code: it
-  splits on the low bit (`l2r_any_raw_is_imm`) and builds the variant from
-  the index (index 0 also serves `box(0)`).
-- **Why:** The top bits of a box hold the type number, and only Reussir can
-  make a nullary variant's handle (the dummy box's address). As natively:
-  Lean boxes a nullary constructor as `lean_box(i)`.
-- **Where:** `runtime/leanrt/src/any.rs`: `Payload for Bridge<X>`.
-- **Remove only if:** Reussir stops encoding nullary variants as
-  immediates.
+- **What:** A payload type with nullary variants (a shared enum that has
+  some, a function value's enum) boxes through a function lean2rr
+  generates once per type with the box item, `l2r_box_T(x, num)`: a
+  `match` on `x` whose arms make each nullary variant the box immediate
+  of its variant index (`l2r_any_imm(i)`; a function value's keeps its
+  type, `l2r_any_imm((num << 32) | i)`), and whose other arm boxes `x` as
+  a pointer (`l2r_any_of_ptr`). A shared enum whose variants are all
+  nullary has no other arm. `boxValue` calls it with the payload number
+  as its last argument, which liveness reads as the payload made
+  (`exprRefs`), as for `l2r_any_of_ptr`. Unboxing an immediate at an enum
+  type is the program's code too: it splits on the low bit
+  (`l2r_any_raw_is_imm`) and builds the variant from the index (index 0
+  also serves `box(0)`). leanrt never reads Reussir's representation of a
+  nullary variant: a box of a Reussir type is a pointer there.
+- **Why:** As natively: Lean boxes a nullary constructor as `lean_box(i)`.
+  The top bits of a box hold the type number, and only Reussir can make a
+  nullary variant's handle. Reussir's encodings of an immediate (the top
+  byte `tag + 1` under `tbi`, a dummy box with a count of 2^31 or more
+  under `immortal`) belong to Reussir (the owner's direction of
+  2026-10-19, clean-integration step A1); leanrt's `Payload for Bridge`
+  decoded them before. One function per type, not a `match` at each
+  boxing: rrc expands a `match` into one region per variant.
+- **Where:** `LowerBase.lean`: `boxOfFn`, `boxValue`; `Lower/Finish.lean`:
+  `boxTypeItems`; `Lower/Live.lean`: `exprRefs`; `runtime/prelude.rr`:
+  `l2r_any_imm`, `l2r_any_of_ptr`. Tests: any-probe (its boxings of
+  `Tree`, `FnV`, `AList`, `Mx`, `Col` have this shape), `RtErasedBoxedImm`,
+  `RtValueStructFnBox`.
+- **Remove only if:** the box becomes a Reussir-level type (step C).
 
 ### `box(0)` unboxes to the zero of every type
 
