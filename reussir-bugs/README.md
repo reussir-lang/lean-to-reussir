@@ -87,7 +87,7 @@ files in the series, or "none", or a parked patch
 | [12](12-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling) | no: nothing calls it | - | none | unchanged; repro fails (checked) |
 | [13](13-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there | no: 64-bit targets only | - | none | unchanged (checked) |
 | [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | not rechecked |
-| [16](16-driver-stack-address-limit.md) | bug (under `ulimit -v`) | rrc's 1 GiB driver stack (#686) counts against an address-space limit: under `ulimit -v` 1250000 or 1600000 rrc aborts where it compiled before | no: lean2rr sets no such limit | - | none (parked: 16-a, file to come) | open: #686 is the old 31-a; the follow-up pull request is queued |
+| [16](16-driver-stack-address-limit.md) | bug (under `ulimit -v`) | rrc's 1 GiB driver stack (#686) counts against an address-space limit: under `ulimit -v` 1250000 or 1600000 rrc aborts where it compiled before | no: lean2rr sets no such limit | - | none (parked: [16-a](patches/parked/16-a-driver-stack-rlimit.patch)) | open: #686 is the old 31-a; no pull request planned |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | still reproduces (checked) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | still reproduces (checked) |
 | [11](11-drop-run.md) | cost (run time) | a host frees one cell through 02-b's stack with a deferral and a drain: three calls, a push and a pop | yes, speed (about 5% of monadic-interp's instructions) | none possible | none (parked: [11-a](patches/parked/11-a-drop-run.patch)) | n/a: upstream has no such stack |
@@ -173,7 +173,7 @@ why it is parked and describes the patch.
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
 | [11-a](patches/parked/11-a-drop-run.patch) | [11](11-drop-run.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | applies with the series |
-| 16-a (file to come) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug; the fix goes upstream as a pull request | being rebased onto `7954a367` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `7954a367` and `l2r-base3` |
 
 The parked files 01-a, 06-a, 06-b and 11-a are against the stacks they
 were made on (`ef922049` plus earlier patches of the old series); 16-a
@@ -250,8 +250,8 @@ Lean repro needs leanrt, which does not build there.
   triggers it or works around it.
 - Only bug fixes and major items stay in the series (owner, 2026-10-07):
   the bug fixes (05-a) and the features lean2rr needs (02-a to 02-e, 07-a,
-  09-a and 10-a). A fix of a bug that lean2rr does not reach, with an
-  upstream pull request on the way, is parked (16-a).
+  09-a and 10-a). A fix of a bug that lean2rr does not reach is parked (16-a); no
+  upstream pull requests after #758 (owner, 2026-10-19).
 - A patch that only buys a small run-time gain on a few programs is
   parked, not kept (01-a, 06-a with 06-b, 11-a). Costs whose removal would
   be a redesign (3, 4) and missed optimizations stay unpatched, with the

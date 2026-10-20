@@ -11,8 +11,9 @@ comes near ([lean2rr](#lean2rr)).
 **Upstream (2026-10-19):** Open in upstream 7954a367. Upstream #686
 (`3e34334f`) is our old patch 31-a, which fixed the stack overflow on
 deep expressions (old entry 31); this entry is the part of old 31 that
-remains. A follow-up pull request with 16-a is queued after the pull
-request for 05-a.
+remains. No pull request is planned (owner, 2026-10-19: no more
+upstream pull requests after #758); the entry and the parked patch
+document it.
 
 **Verdict: bug.** Since #686, rrc runs its driver on a thread with a
 1 GiB stack. The stack is reserved address space, and an address-space
@@ -74,31 +75,25 @@ No effect in practice:
 - The local `bin/l2r` wrapper sets `ulimit -v 16000000` (16 GB). rrc's
   virtual size on a lean2rr program is about 1.9 GB.
 
-With 16-a (or its upstream form), an rrc under a finite `ulimit -v`, as
-under `bin/l2r`, runs on the 8 MiB main thread again. Deep nesting then
-overflows rrc's stack as before #686, and `Outline`'s bound on nesting
-is needed again
-([reussir-workarounds](../docs/implementation/reussir-workarounds/README.md),
-old issue 31).
+With 16-a, an rrc under `bin/l2r`'s `ulimit -v 16000000` keeps the
+1 GiB driver thread: 16-a returns to the main thread only under a
+finite limit below 2 GiB. A sum of 8000 terms still compiles there.
 
 ## Parked option: 16-a
 
-Patch file: to come (the rebase of the reworked patch onto `7954a367` is
-in progress; it will be `patches/parked/16-a-*.patch`). No build applies
-it.
+Patch file:
+[`patches/parked/16-a-driver-stack-rlimit.patch`](patches/parked/16-a-driver-stack-rlimit.patch)
+(on `7954a367`; it applies to `l2r-base3` too). No build applies it.
 
-The reworked patch (commit `26fe23ec` on the branch
-`pr/deep-expression-stack` of the local pull-request checkout, made on
-the old base) replaces #686's code:
+The patch changes #686's code in `crates/reussir-compiler/src/main.rs`:
 
-- The driver thread has a 256 MiB stack, not 1 GiB (about 160000 nested
-  `+` at the measured 1.6 KiB per level).
+- The driver thread keeps #686's 1 GiB stack.
 - A new function `keep_main_thread()` keeps the driver on the main
   thread, as before #686, when
   - `RLIMIT_AS` (`ulimit -v`) or `RLIMIT_DATA` (`ulimit -d`) has a finite
-    soft limit (both count the reserved stack; `RLIMIT_DATA` since
-    Linux 4.7);
-  - `RLIMIT_STACK` (`ulimit -s`) is unlimited or at least 256 MiB (the
+    soft limit below 2 GiB (both count the reserved stack;
+    `RLIMIT_DATA` since Linux 4.7);
+  - `RLIMIT_STACK` (`ulimit -s`) is unlimited or at least 1 GiB (the
     user's deeper main stack stays);
   - a limit cannot be read.
   On other targets it returns false.

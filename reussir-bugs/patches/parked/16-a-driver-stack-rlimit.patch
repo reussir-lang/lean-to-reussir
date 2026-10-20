@@ -1,0 +1,271 @@
+From 4160240223e3ac60a702548110d7e59081a1820d Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Mon, 19 Oct 2026 16:45:34 -0400
+Subject: [PATCH] l2r-local: issue 16: keep the driver on the main thread under
+ memory limits
+
+#686 runs rrc's driver on a thread with a 1 GiB stack. It runs the
+driver on the main thread only if the thread cannot be created. The
+stack is a private writable mapping, so an address-space limit
+(ulimit -v) and a data-size limit (ulimit -d) count all of it. When
+such a limit is a bit larger than the stack, the thread is created,
+and the build gets only what is left. rrc then aborts where an older
+main, before #686, compiled:
+
+- A normal build of a two-line program aborts under ulimit -v 1250000
+  (std::bad_alloc), and in most runs under 1400000 and 1600000
+  ("LLVM ERROR: pthread_create failed").
+- Under ulimit -d 1081344 (1 GiB + 32 MiB), rrc cannot read a source
+  with a 32 MiB comment ("failed to read ...: out of memory"). On the
+  main thread, this build needs about 66 MiB of data.
+
+On Unix, rrc now keeps the driver on the main thread, as before #686,
+in these cases:
+
+- RLIMIT_AS (ulimit -v) or RLIMIT_DATA (ulimit -d) has a finite soft
+  limit below 2 GiB, twice the stack. Both limits count the whole
+  stack (RLIMIT_DATA since Linux 4.7), and any reservation can break a
+  build that is near its limit. Under such a limit, rrc needs the same
+  memory as before #686 and has the old depth limit. A limit of 2 GiB
+  or more keeps the 1 GiB thread: the stack takes at most half of the
+  limit and leaves at least 1 GiB for the rest of rrc.
+- RLIMIT_STACK (ulimit -s) is unlimited or at least 1 GiB. The user's
+  deeper main stack stays.
+- A limit cannot be read.
+
+If the thread cannot be created, rrc still runs the driver on the main
+thread. The stack stays at 1 GiB. Its doc comment said that only
+touched pages are committed. glibc makes the whole stack writable, so
+Linux charges all of it to the commit total, and the comment now says
+so.
+
+Tests: frontend/driver_stack_address_limit.rr (now fails on main),
+frontend/driver_stack_generous_limit.rr (new: the 1 GiB thread under
+ulimit -v 16000000 and ulimit -d 4194304), frontend/deep_expression.rr
+(comment only).
+---
+ Cargo.lock                                    |  1 +
+ crates/reussir-compiler/Cargo.toml            |  5 ++
+ crates/reussir-compiler/src/main.rs           | 60 +++++++++++++++++--
+ .../integration/frontend/Inputs/pad_source.py | 15 +++++
+ tests/integration/frontend/deep_expression.rr |  5 +-
+ .../frontend/driver_stack_address_limit.rr    | 33 +++++++---
+ .../frontend/driver_stack_generous_limit.rr   | 15 +++++
+ 7 files changed, 118 insertions(+), 16 deletions(-)
+ create mode 100644 tests/integration/frontend/Inputs/pad_source.py
+ create mode 100644 tests/integration/frontend/driver_stack_generous_limit.rr
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 6c5b103c..6da0d2fa 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -3643,6 +3643,7 @@ dependencies = [
+ name = "reussir-compiler"
+ version = "0.1.0"
+ dependencies = [
++ "libc",
+  "llvm-sys",
+  "melior",
+  "mlir-sys",
+diff --git a/crates/reussir-compiler/Cargo.toml b/crates/reussir-compiler/Cargo.toml
+index 999e688a..1c6c7a00 100644
+--- a/crates/reussir-compiler/Cargo.toml
++++ b/crates/reussir-compiler/Cargo.toml
+@@ -46,6 +46,11 @@ tempfile = "3"
+ tracing.workspace = true
+ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ 
++# `getrlimit`: `rrc`'s `main` reads the resource limits that decide whether
++# the driver runs on a thread with a large stack (see src/main.rs).
++[target.'cfg(unix)'.dependencies]
++libc.workspace = true
++
+ [dev-dependencies]
+ # Auto-cleaned scratch directories for the driver integration tests.
+ tempfile = "3"
+diff --git a/crates/reussir-compiler/src/main.rs b/crates/reussir-compiler/src/main.rs
+index 4bc90175..9e603c9d 100644
+--- a/crates/reussir-compiler/src/main.rs
++++ b/crates/reussir-compiler/src/main.rs
+@@ -6,12 +6,16 @@ use std::process::ExitCode;
+ /// Stack of the thread the driver runs on. The parser grows its own stack
+ /// (`stacker`), but the stages after it walk expression trees recursively
+ /// too — elaboration, lowering, the syntax tree's drop in `cstree` — at
+-/// about a kilobyte per nesting level: the process's 8 MiB main thread
+-/// overflowed on a chain of 8000 `+`. Only touched pages are committed, but
+-/// the reservation counts against an address-space limit (`ulimit -v`).
++/// about 1.8 KiB per nesting level: the process's 8 MiB main thread
++/// overflowed on a chain of 8000 `+`. The resident memory follows the touched
++/// pages, but the whole stack is reserved address space and, on Linux, counts
++/// in full towards the commit total (see `keep_main_thread` for the limits).
+ const DRIVER_STACK_SIZE: usize = 1024 * 1024 * 1024;
+ 
+ fn main() -> ExitCode {
++    if keep_main_thread() {
++        return reussir_compiler::driver::main();
++    }
+     // Named `main` so diagnostics (a panic, a stack overflow) read as before.
+     let spawned = std::thread::Builder::new()
+         .name("main".into())
+@@ -24,9 +28,53 @@ fn main() -> ExitCode {
+             // panicking main thread would.
+             Err(panic) => std::panic::resume_unwind(panic),
+         },
+-        // The stack is reserved address space, so a tight address-space
+-        // limit (`ulimit -v`) can refuse it: run the driver here, on the
+-        // main thread's stack, as rrc did before.
++        // The thread could not be created: run the driver here, on the main
++        // thread's stack, as rrc did before.
+         Err(_) => reussir_compiler::driver::main(),
+     }
+ }
++
++/// Whether to run the driver on the main thread, as before, instead of on a
++/// thread with a `DRIVER_STACK_SIZE` stack:
++///
++/// - under a finite soft limit on the address space (`RLIMIT_AS`,
++///   `ulimit -v`) or on the data size (`RLIMIT_DATA`, `ulimit -d`) below
++///   twice `DRIVER_STACK_SIZE`. Both limits count the whole stack (the second
++///   since Linux 4.7, as the stack is a private writable mapping), and any
++///   reservation can break a build that is near its limit: the thread is
++///   created, and a later allocation fails where rrc compiled before. With
++///   this rule the stack takes at most half of a limit and leaves at least
++///   1 GiB for the rest of rrc;
++/// - when the main thread's own stack limit (`RLIMIT_STACK`, `ulimit -s`) is
++///   unlimited or at least `DRIVER_STACK_SIZE`: the user's deeper stack stays.
++///
++/// A limit that cannot be read counts as set.
++#[cfg(unix)]
++fn keep_main_thread() -> bool {
++    // The soft limit on `resource`, or `None` if it cannot be read.
++    let soft_limit = |resource| {
++        let mut limit = libc::rlimit {
++            rlim_cur: 0,
++            rlim_max: 0,
++        };
++        // SAFETY: `getrlimit` only writes the `rlimit` that the valid,
++        // exclusive pointer `&mut limit` names.
++        let status = unsafe { libc::getrlimit(resource, &mut limit) };
++        (status == 0).then_some(limit.rlim_cur)
++    };
++    let stack = DRIVER_STACK_SIZE as libc::rlim_t;
++    // Whether a memory limit leaves less than one more stack beside the stack.
++    let tight = |limit: Option<libc::rlim_t>| {
++        limit.is_none_or(|limit| limit != libc::RLIM_INFINITY && limit < 2 * stack)
++    };
++    tight(soft_limit(libc::RLIMIT_AS))
++        || tight(soft_limit(libc::RLIMIT_DATA))
++        || soft_limit(libc::RLIMIT_STACK)
++            .is_none_or(|limit| limit == libc::RLIM_INFINITY || limit >= stack)
++}
++
++/// Other targets have no such limits to check.
++#[cfg(not(unix))]
++fn keep_main_thread() -> bool {
++    false
++}
+diff --git a/tests/integration/frontend/Inputs/pad_source.py b/tests/integration/frontend/Inputs/pad_source.py
+new file mode 100644
+index 00000000..07972200
+--- /dev/null
++++ b/tests/integration/frontend/Inputs/pad_source.py
+@@ -0,0 +1,15 @@
++#!/usr/bin/env python3
++"""pad_source.py IN.rr OUT.rr MIB: copy IN.rr to OUT.rr after a comment line
++of MIB MiB.
++
++rrc reads the whole source into memory, so OUT.rr needs at least MIB MiB more
++heap to compile than IN.rr. The comment adds almost no compile time.
++"""
++import sys
++
++src, out, mib = sys.argv[1], sys.argv[2], int(sys.argv[3])
++with open(src) as f:
++    text = f.read()
++with open(out, "w") as f:
++    f.write("// " + "x" * (mib << 20) + "\n")
++    f.write(text)
+diff --git a/tests/integration/frontend/deep_expression.rr b/tests/integration/frontend/deep_expression.rr
+index edc80f86..cb8f61fa 100644
+--- a/tests/integration/frontend/deep_expression.rr
++++ b/tests/integration/frontend/deep_expression.rr
+@@ -3,7 +3,10 @@
+ // recurse once per nesting level; on the 8 MiB main thread a chain of 8000
+ // `+` overflowed in the elaborator, and 100000 nested parentheses as well.
+ // rrc runs its driver on a thread with a 1 GiB stack. The program is
+-// generated (Inputs/deep_expression.py); this file only drives it.
++// generated (Inputs/deep_expression.py); this file only drives it. Under an
++// address-space or data-size limit below 2 GiB (`ulimit -v`, `ulimit -d`), rrc
++// keeps the driver on the main thread (driver_stack_address_limit.rr), so this
++// test needs no such limit, as on CI runners.
+ 
+ // RUN: %python %S/Inputs/deep_expression.py %t.rr
+ // RUN: %rrc %t.rr -o %t.o --relocation-mode pic
+diff --git a/tests/integration/frontend/driver_stack_address_limit.rr b/tests/integration/frontend/driver_stack_address_limit.rr
+index 402dde36..6ac6eaff 100644
+--- a/tests/integration/frontend/driver_stack_address_limit.rr
++++ b/tests/integration/frontend/driver_stack_address_limit.rr
+@@ -1,15 +1,30 @@
+ // REQUIRES: linux
+ // rrc runs its driver on a thread with a 1 GiB stack (deep_expression.rr).
+-// The stack is reserved address space, which an address-space limit counts:
+-// under `ulimit -v 1000000` (about 1 GB) the thread cannot be created, and
+-// rrc must then run the driver on the main thread as before, not panic
+-// ("failed to spawn the driver thread", exit 101). The backend runs
+-// single-threaded here so that its thread pool's stacks, also reserved
+-// address space, do not depend on the machine's core count.
++// The stack is reserved address space and a private writable mapping, so an
++// address-space limit (`ulimit -v`) and a data-size limit (`ulimit -d`) both
++// count all of it. If the stack fits under such a limit, the build only gets
++// what is left. So under either limit below 2 GiB, rrc runs the driver on the
++// main thread, as before (driver_stack_generous_limit.rr checks a larger
++// limit). Here the program gets a 32 MiB comment (Inputs/pad_source.py), so
++// the build needs about 66 MiB of data:
++//
++// - `ulimit -d 1081344` is 1 GiB + 32 MiB. A 1 GiB driver stack fits under it
++//   and leaves about 30 MiB, so rrc failed to read the source ("failed to
++//   read ...: out of memory").
++// - `ulimit -v 1250000` is a smoke test of the address-space case. This limit
++//   also counts the mapped code of rrc, so whether a 1 GiB stack would leave
++//   too little depends on the build.
++//
++// The backend runs single-threaded here so that its thread pool's stacks,
++// also reserved address space, do not depend on the machine's core count.
+ 
+-// RUN: bash -c 'ulimit -v 1000000 && exec %rrc %s -o %t.o --relocation-mode pic --disable-backend-multithreading'
+-// RUN: %cc %t.o %S/driver_stack_address_limit.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
+-// RUN: %t.exe
++// RUN: %python %S/Inputs/pad_source.py %s %t.rr 32
++// RUN: bash -c 'ulimit -d 1081344 && exec %rrc %t.rr -o %t.data.o --relocation-mode pic --disable-backend-multithreading'
++// RUN: %cc %t.data.o %S/driver_stack_address_limit.c -o %t.data.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.data.exe
++// RUN: bash -c 'ulimit -v 1250000 && exec %rrc %t.rr -o %t.as.o --relocation-mode pic --disable-backend-multithreading'
++// RUN: %cc %t.as.o %S/driver_stack_address_limit.c -o %t.as.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.as.exe
+ 
+ pub fn answer(x : u64) -> u64 { x * 6 + 0 }
+ 
+diff --git a/tests/integration/frontend/driver_stack_generous_limit.rr b/tests/integration/frontend/driver_stack_generous_limit.rr
+new file mode 100644
+index 00000000..ed3def36
+--- /dev/null
++++ b/tests/integration/frontend/driver_stack_generous_limit.rr
+@@ -0,0 +1,15 @@
++// REQUIRES: linux
++// Under an address-space or data-size limit of 2 GiB or more, rrc still runs
++// its driver on the thread with a 1 GiB stack (deep_expression.rr): the stack
++// then takes at most half of the limit. Such generous limits are common as a
++// guard for the host. The program of deep_expression.rr needs the big stack;
++// on the 8 MiB main thread it overflows. Both limits are set, so the test
++// fails if either one makes rrc stay on the main thread
++// (driver_stack_address_limit.rr checks a smaller limit). The backend runs
++// single-threaded here so that its thread pool's stacks, also reserved address
++// space, do not depend on the machine's core count.
++
++// RUN: %python %S/Inputs/deep_expression.py %t.rr
++// RUN: bash -c 'ulimit -v 16000000 && ulimit -d 4194304 && exec %rrc %t.rr -o %t.o --relocation-mode pic --disable-backend-multithreading'
++// RUN: %cc %t.o %S/deep_expression.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
+-- 
+2.43.0
+
