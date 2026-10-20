@@ -100,25 +100,35 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
 - **What:** An inductive with no relevant field anywhere is an
   `enum [value]` (no allocation); one constructor is a `struct`; anything
   else is a shared `enum`. An inductive with no constructors gets a single
-  variant `c_impossible`. The only `[value]` enums lean2rr emits are these
-  field-less enumerations and the step enums of outlined recursive
-  functions whose layout a guard checks
-  ([../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value-when-their-layout-is-safe-to-move))
-  (a state machine whose variants are all nullary
-  has an integer entry point, not an enum:
-  [../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-point-of-nullary-variants-is-an-integer-state-machines))
-  (`Nat`/`Int` are one-word tagged handles,
-  [nat-int.md](nat-int.md)); multi-field value records are `[value]` structs
-  (join-point tuples), whose padding is explicit.
-- **Why:** Reussir moves a `[value]` enum as its tag plus one
-  representative arm, so bytes of another arm that fall on padding or on a
-  `bool` are lost (a Reussir bug, fixed upstream in #663; the old stack
-  has a local patch for it).
+  variant `c_impossible`. The program's types are `[value]` enums only
+  when they have no fields. Two of lean2rr's own enums, whose values only
+  pass from a call to a match, are `[value]` with fields too: the step
+  enums of outlined recursive functions
+  ([../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value))
+  and the entry enum of a `state-machines` state machine whose variant
+  keeps a field (a state machine whose variants are all nullary has an
+  integer entry point, not an enum:
+  [../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-point-of-nullary-variants-is-an-integer-state-machines));
+  the core form's J4 entry enum is shared, for its cost
+  ([../control-flow/state-machines.md](../control-flow/state-machines.md#a-loop-through-outlined-join-points-is-one-state-machine)).
+  `Nat`/`Int` are one-word tagged handles
+  ([nat-int.md](nat-int.md)); multi-field value records are `[value]`
+  structs (join-point tuples), whose padding is explicit.
+- **Why:** A value of an inductive with fields is one heap object, as
+  natively (one `lean_object*`): a copy is a count, it goes into a `Box`
+  field without a new cell, and a matched cell can be reused in place. A
+  recursive inductive (`List`, `Tree`) cannot be a `[value]` type. Until
+  2026-10-19 lean2rr's own multi-arm enums were shared too (except the
+  step enums whose layout a guard checked): Reussir lost bytes of `[value]`
+  enums whose arms differ (old bug 1,
+  [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#old-bug-1-value-enum-payloads-were-lost-when-moved)),
+  fixed in lean2rr's base. That bug does not limit the program's types
+  any more; a `[value]` representation for them would be a change of
+  representation (boxing, conversions, reuse), not the removal of a
+  workaround.
 - **Where:** `LowerBase.lean`: `nominalType` (`Shape`), `tupleType`;
   plan [§9](../../translation-plan.md#9-open-items).
-- **Remove only if:** removable after the move to Reussir 7954a367, which
-  fixes the bug; then multi-arm value enums and value J4 entry enums with
-  fields become possible.
+- **Remove only if:** never (the representation of the program's types).
 
 ### One-field structures are value structs
 

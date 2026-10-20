@@ -41,12 +41,11 @@ for a call `g(…)` in tail position. The cut point becomes
 returns, and the tail call is made by the function itself, so a loop that
 LLVM turns into a jump stays one (a cycle of tail calls through the parts
 would not always be a sibling call and would use stack per iteration). A
-step value is a `[value]` enum, so it needs no heap cell, when its layout
-is safe to move (`stepItem`); otherwise it is shared, a heap cell per
-iteration, only in functions this long. A step value goes only from a
-part's result to the match at the cut point (through the chain of parts
-that return it): it is never stored in a field, an array, a `Cell` or a
-`Box`, and no conversion exists for it (this pass runs after lowering).
+step value is a `[value]` enum (`stepItem`), so it needs no heap cell. A
+step value goes only from a part's result to the match at the cut point
+(through the chain of parts that return it): it is never stored in a
+field, an array, a `Cell` or a `Box`, and no conversion exists for it
+(this pass runs after lowering).
 
 A block is outlined only if every variable it uses has a known type: the
 parameters, typed `let`s and the fields of matched variants (from the type
@@ -137,35 +136,19 @@ def Env.bind (env : Env) (x : String) (t : Option Ty) : Env := env.insert x (t, 
 
 /-! ## Step values: their layout
 
-A step enum is `[value]` (returned in registers or the caller's frame, no
-heap cell) when Reussir moves its values without losing bytes. Reussir moves
-a `[value]` enum as the LLVM struct of one arm, its *representative*: the
-last arm with the largest alignment. Another arm's bytes survive the move
-only where the representative's own type carries every byte: an integer or
-a pointer does; a `bool` (an `i1`, one bit of its byte) does not (a Reussir
-bug, fixed upstream in Reussir #663, which makes every move carry all
-bytes; lean2rr's output also stays right without it).
-Floating-point values and padding are conservatively not counted as carried
-(Reussir lays a record's padding out as bytes, Opt/FieldOrder; the guard
-relies neither on that nor on how a move copies a floating-point value). So
-`stepItem` makes the enum `[value]` only when the layout model below knows
-every field type, and every other arm's bytes lie in the prefix of the
-representative that it carries; otherwise the enum stays shared, as
-before. The model follows Reussir's layout of a record's members in
-declaration order (the driver always passes `--no-pack-record-members`):
-each member at the next multiple of its alignment. -/
-
-/-- A field type's storage in a step arm, as far as the guard needs it:
-size and alignment in bytes, and the length of the prefix of its bytes that
-a move of a value of this type carries for sure (`carried = size`: all). -/
-structure FieldLayout where
-  size : Nat
-  align : Nat
-  carried : Nat
-  deriving Inhabited, Repr
+A step enum is `[value]`: a step value is returned in registers or in the
+caller's frame, without a heap cell. Any field type is allowed: a step
+value goes only from a part's result to the match at the cut point, never
+into a field, an array, a `Cell` or a `Box`, and no step enum contains
+itself (`done` holds the function's result type, a call variant the
+callee's parameter types, all types of the program before outlining).
+Reussir moves a `[value]` enum with all the bytes of every arm (Reussir
+#663: the payload is an array of integers when one arm's struct does not
+carry another arm's bytes). The fields of a call variant are in decreasing
+alignment (`stepFieldOrder`), so the variant has no padding between them. -/
 
 /-- The generated and prelude type declarations by name (`.enum` and
-`.struct` items), for `fieldLayout`. -/
+`.struct` items), for `fieldAlign?`. -/
 abbrev TypeTable := Std.HashMap String Item
 
 def typeTable (items : Array Item) : TypeTable :=
@@ -173,81 +156,45 @@ def typeTable (items : Array Item) : TypeTable :=
     | .enum n .. | .struct n .. => m.insert n it
     | _ => m
 
-/-- The members `fs` laid out in order, each at the next multiple of its
-alignment: (alignment, end of the last member, carried prefix). -/
-def compoundLayout (fs : Array FieldLayout) : Nat × Nat × Nat := Id.run do
-  let mut off := 0
-  let mut align := 1
-  let mut carried := 0
-  let mut open_ := true
-  for f in fs do
-    let o := (off + f.align - 1) / f.align * f.align
-    if open_ then
-      if o == carried then
-        carried := o + f.carried
-        open_ := f.carried == f.size
-      else open_ := false
-    off := o + f.size
-    align := max align f.align
-  return (align, off, carried)
-
-/-- The storage of a value of type `t` in a step arm, or `none` if the
-model does not know it (the step enum then stays shared). Pointer-sized,
-all bytes carried: what Reussir stores as a pointer or one tagged word (a
-shared record or enum, a function value, a closure, an opaque runtime type:
-`rrAlign8` in LowerBase lists them). A `[value]` struct is its fields in
-order; a `[value]` enumeration without fields, such as `L2RUnit`, is its
-tag (8 bits up to 256 variants, then 16, then 32: Reussir's `getTagType`). A
-`[value]` enum with fields (a step enum) is unknown. -/
-partial def fieldLayout (types : TypeTable) (t : Ty) (fuel : Nat := 8) : Option FieldLayout :=
-  let word : FieldLayout := ⟨8, 8, 8⟩
+/-- The alignment in bytes of a value of type `t` in a step variant, or
+`none` if the type table does not know it (the variant then keeps the
+parameter order). Pointer-sized: what Reussir stores as a pointer or one
+tagged word (a shared record or enum, a function value, a closure, an
+opaque runtime type: `rrAlign8` in LowerBase lists them). A `[value]`
+struct or enum: the largest alignment of its members and, for an enum, of
+its tag (8 bits up to 256 variants, then 16, then 32: Reussir's
+`getTagType`). -/
+partial def fieldAlign? (types : TypeTable) (t : Ty) (fuel : Nat := 8) : Option Nat :=
+  let maxAlign (init : Nat) (fs : Array Ty) : Option Nat :=
+    fs.foldlM (init := init) fun a f => return max a (← fieldAlign? types f (fuel - 1))
   match t with
   | .named n =>
     match n with
-    | "u8" | "i8" => some ⟨1, 1, 1⟩
-    | "u16" | "i16" => some ⟨2, 2, 2⟩
-    | "u32" | "i32" => some ⟨4, 4, 4⟩
-    | "u64" | "i64" => some word
-    | "bool" => some ⟨1, 1, 0⟩
-    | "f32" => some ⟨4, 4, 0⟩
-    | "f64" => some ⟨8, 8, 0⟩
-    | "Nat" | "Int" | "LStr" | "LHandle" | "LAny" => some word
-    | "L2RUnit" => some ⟨1, 1, 1⟩
+    | "u8" | "i8" | "bool" | "L2RUnit" => some 1
+    | "u16" | "i16" => some 2
+    | "u32" | "i32" | "f32" => some 4
+    | "u64" | "i64" | "f64" | "Nat" | "Int" | "LStr" | "LHandle" | "LAny" => some 8
     | _ =>
       match types[n]? with
-      | some (.enum _ false _) | some (.struct _ false _) => some word
+      | some (.enum _ false _) | some (.struct _ false _) => some 8
       | some (.enum _ true vs) =>
-        if !vs.all (·.2.isEmpty) then none
-        else if vs.size ≤ 256 then some ⟨1, 1, 1⟩
-        else if vs.size ≤ 65536 then some ⟨2, 2, 2⟩
-        else some ⟨4, 4, 4⟩
-      | some (.struct _ true fs) =>
-        if fuel == 0 then none else do
-        let ls ← fs.mapM (fieldLayout types · (fuel - 1))
-        let (align, dataEnd, carried) := compoundLayout ls
-        let size := (dataEnd + align - 1) / align * align
-        some ⟨size, align, carried⟩
+        if fuel == 0 then none else
+        let tag := if vs.size ≤ 256 then 1 else if vs.size ≤ 65536 then 2 else 4
+        vs.foldlM (init := tag) fun a (_, fs) => maxAlign a fs
+      | some (.struct _ true fs) => if fuel == 0 then none else maxAlign 1 fs
       | _ => none
-  | .app n _ => if n ∈ ["RVec", "LRef", "LCell", "Cell"] then some word else none
-  | .fn .. | .cls .. => some word
+  | .app n _ => if n ∈ ["RVec", "LRef", "LCell", "Cell"] then some 8 else none
+  | .fn .. | .cls .. => some 8
 
 /-- The order of a step variant's fields (indices into the callee's
-parameters `ps`): decreasing alignment, the fields that carry all their
-bytes first, ties in parameter order. So the variant has no padding between
-fields (like a record with optimization `field-order`, and the order of
-fields that the workaround for a Reussir bug, fixed upstream in Reussir
-#656, needs), and its carried prefix is
-as long as it can be. Parameter order if a type is unknown. -/
+parameters `ps`): decreasing alignment, ties in parameter order, so the
+variant has no padding between fields (like a record with optimization
+`field-order`). Parameter order if a type is unknown. -/
 def stepFieldOrder (types : TypeTable) (ps : Array Ty) : Array Nat :=
-  match ps.mapM (fieldLayout types ·) with
+  match ps.mapM (fieldAlign? types ·) with
   | none => (List.range ps.size).toArray
-  | some ls =>
-    (List.range ps.size).toArray.qsort fun i j =>
-      let a := ls[i]!
-      let b := ls[j]!
-      let fa := a.carried == a.size
-      let fb := b.carried == b.size
-      a.align > b.align || (a.align == b.align && ((fa && !fb) || (fa == fb && i < j)))
+  | some as =>
+    (List.range ps.size).toArray.qsort fun i j => as[i]! > as[j]! || (as[i]! == as[j]! && i < j)
 
 /-- A function of the cycle that a part calls in tail position: its step
 variant `c<k>` holds its arguments. -/
@@ -271,28 +218,11 @@ structure StepInfo where
   calls : Array StepCall := #[]
   deriving Inhabited
 
-/-- The item of step enum `info`: `[value]` when its layout is safe to move
-(see "Step values: their layout"), with its representative, the arm with
-the largest alignment and of those the longest carried prefix, declared
-last; otherwise shared, with its variants in order. -/
-def stepItem (types : TypeTable) (info : StepInfo) : Item := Id.run do
-  let arms : Array (String × Array Ty) := #[("done", #[info.ret])] ++
-    info.calls.mapIdx fun i c => (s!"c{i}", c.order.map (c.params[·]!))
-  let shared := Item.enum info.name false arms
-  let some lays := arms.mapM (fun (_, fs) => fs.mapM (fieldLayout types ·)) | return shared
-  let shapes := lays.map compoundLayout
-  -- The representative: largest alignment, then longest carried prefix,
-  -- then the last.
-  let mut r := 0
-  for h : i in [1:shapes.size] do
-    let (a, _, c) := shapes[i]
-    let (ar, _, cr) := shapes[r]!
-    if a > ar || (a == ar && c ≥ cr) then r := i
-  let (_, _, carried) := shapes[r]!
-  for h : i in [:shapes.size] do
-    let (_, dataEnd, _) := shapes[i]
-    if i != r && dataEnd > carried then return shared
-  return .enum info.name true ((arms.eraseIdx! r).push arms[r]!)
+/-- The item of step enum `info`, a `[value]` enum (see "Step values: their
+layout"): `done`, then the call variants in order. -/
+def stepItem (info : StepInfo) : Item :=
+  .enum info.name true (#[("done", #[info.ret])] ++
+    info.calls.mapIdx fun i c => (s!"c{i}", c.order.map (c.params[·]!)))
 
 /-- The function being cut and its cycle. -/
 structure FnCtx where
@@ -312,7 +242,7 @@ structure Ctx where
   variants : Std.HashMap (String × String) (Array Ty)
   /-- Parameter types of every function of the program. -/
   params : Std.HashMap String (Array Ty)
-  /-- The type declarations, for the layout of step variants. -/
+  /-- The type declarations, for the field order of step variants. -/
   types : TypeTable := {}
 
 structure St where
@@ -706,7 +636,7 @@ def outlineFns (limits : Limits) (variants : Std.HashMap (String × String) (Arr
       out := out.push (.fn name ps ret body) ++ st'.out
       st := st'
     | _ => out := out.push it
-  return (out, st.stepOrder.map fun f => stepItem types st.steps[f]!)
+  return (out, st.stepOrder.map fun f => stepItem st.steps[f]!)
 
 /-- Every function name of the program: the prelude's (`preludeFns`) and
 those of `fns` (including the functions of raw items). -/

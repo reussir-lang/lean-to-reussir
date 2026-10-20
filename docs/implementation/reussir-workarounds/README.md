@@ -84,7 +84,7 @@ numbers; the details are in [correctness-bugs.md](correctness-bugs.md),
 
 | Old issue | Kind | Fixed upstream in Reussir | lean2rr workaround | Status |
 |---|---|---|---|---|
-| 1 | bug | #663 | only field-less `[value]` enums, and step enums whose representative arm carries the other arms' bytes | removable after the move to Reussir 7954a367 |
+| 1 | bug | #663 | none since 2026-10-19 (it was: only field-less `[value]` enums, and step enums whose representative arm carries the other arms' bytes); step enums, and `state-machines` entry enums with a kept field, are `[value]` | removed |
 | 2 | bug | #652 (structures), #656 (variants) | `--no-pack-record-members`; fields ordered by alignment | the flag: removable after the move to Reussir 7954a367; `field-order` stays (records without padding) |
 | 3 | cost (the 16-byte alignment is intended) | #667 | runtime allocates its objects with `mi_malloc` | kept: the runtime's objects need only 8-byte alignment, and its blocks stay smaller |
 | 4 | bug | #654 | driver retries rrc without `--reuse-across-call` | kept as a fallback for unknown crashes |

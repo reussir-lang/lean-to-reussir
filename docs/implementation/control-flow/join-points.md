@@ -33,8 +33,7 @@ relative to `lean2rr/LeanToReussir/`. Plan
   number; one struct per list of field types), taken apart
   afterwards.
 - **Why:** A Reussir block yields one value; a value struct allocates
-  nothing (and is not a multi-arm value enum, which lost bytes on the old
-  Reussir stack: a Reussir bug fixed upstream in #663).
+  nothing.
 - **Where:** `LowerBase.lean`: `tupleType`; `Lower/Code.lean`:
   `lowerCode`.
 - **Remove only if:** never.

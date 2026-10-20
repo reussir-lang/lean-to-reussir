@@ -14,28 +14,46 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 
 ### Old bug 1: `[value]` enum payloads were lost when moved
 
-- **What:** lean2rr emits only `[value]` enums that are unaffected:
-  field-less enumerations (`Nat`/`Int` are tagged handles since patch
-  10-a, not `[value]` enums), and Outline's step enums whose
-  representative arm surely carries every byte of the other arms (a layout
-  model checks it; otherwise the step enum is shared:
-  [../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value-when-their-layout-is-safe-to-move)).
-  Everything else with several arms is a shared enum
-  (J4 entry enums with fields included: the core form's, and the
-  `state-machines` form's when a field has no slot; with only nullary
-  variants that form's entry point is an integer, not an enum);
-  multi-field value records are `[value]` structs.
-- **Why:** Reussir moves a `[value]` enum as one representative arm's
-  struct, so another arm's bytes on its padding or on an `i1` were lost
-  (fixed upstream in Reussir #663, commit `823a7b29`; formerly a local
-  patch).
-- **Where:** `LowerBase.lean`: `nominalType`, `tupleType`;
-  `Lower/StateMachine.lean`: `emitStateMachine`;
-  `Opt/StateMachines.lean`: `emitStateMachineAlongside`;
-  `Outline.lean`: `stepItem`, `fieldLayout`.
-- **Remove only if:** removable after the move to Reussir 7954a367.
-  Without the workaround, J4 entry enums with fields and multi-arm value
-  types could be `[value]`.
+- **What:** No workaround since 2026-10-19. Outline's step enums are
+  `[value]` whatever their field types
+  ([../control-flow/outline.md](../control-flow/outline.md#step-enums-are-value)),
+  and so is the entry enum of a `state-machines` state machine whose
+  variant keeps a field
+  ([../control-flow/state-machines.md](../control-flow/state-machines.md)).
+  Before, lean2rr emitted only `[value]` enums that the bug did not affect
+  (field-less enumerations, and step enums whose representative arm surely
+  carried every byte of the other arms, by a layout model of the field
+  types); the other enums were shared, a heap cell per value. The core
+  form's J4 entry enum stays shared for its cost: token reuse gives it
+  the matched variant's cell, and a `[value]` enum, measured, ran more
+  instructions
+  ([../control-flow/state-machines.md](../control-flow/state-machines.md#a-loop-through-outlined-join-points-is-one-state-machine)).
+- **Why:** Reussir moved a `[value]` enum as one representative arm's
+  struct, so another arm's bytes on its padding or on an `i1` were lost.
+  Reussir #663 (commit `823a7b29`, formerly a local patch) fixes it:
+  `opaquePayloadType` in `lib/Conversion/TypeConverter/TypeConverter.cpp`
+  makes the payload an array of alignment-sized integers when a move of
+  the representative would lose another arm's bytes. lean2rr's base
+  `7954a367` has it, and `scripts/l2r.py` stops on a Reussir checkout
+  without lean2rr's series on that base (patch 02-a's switch, which plain
+  upstream and the old base lack). Checked on `l2r-base3` (2026-10-19)
+  with a minimal program: a `[value]` enum of six arms of different sizes
+  (`f64`, `bool`, `u8`, `u16`, padding, a counted pointer, a nested
+  `[value]` struct with padding and a nested `[value]` enum), moved
+  through two loops (self tail calls), calls, a `[value]` struct's field,
+  a shared record's field and matches, at `-O none`, `default` and
+  `aggressive`, with and without `--no-pack-record-members`: every result
+  right, and 3000000 iterations on a 1 MiB stack at `-O default` and
+  `aggressive`. The enum's LLVM type is `{ i8, [5 x i64] }`.
+- **Where:** `Outline.lean`: `stepItem`; `Opt/StateMachines.lean`:
+  `emitStateMachineAlongside` (`Lower/StateMachine.lean`:
+  `emitStateMachine` keeps its shared enum, for its cost). Tests:
+  `RtOutlineValueSteps` (`fmix`, `floaty`), `RtSmGuard`
+  (`tests/runtime/sm-slots-check.sh`).
+- **Remove only if:** n/a: nothing is left to remove. The core form's
+  entry enum and the program's own inductives with fields stay shared for
+  other reasons
+  ([../representations/records.md](../representations/records.md#three-shapes-and-value-enums-only-without-fields)).
 
 ### Old bug 2: in-place reuse skipped a field store
 

@@ -15,8 +15,7 @@
 #   inflate loop), and a `[value]` enum is a struct in LLVM, which LLVM's
 #   DFAJumpThreading does not follow through the loop's phi;
 # - the entry point of a state machine with a variant that keeps a field
-#   is a `[value]` enum, not a shared one (Reussir bug 1: it loses bytes of
-#   `[value]` enums whose arms differ);
+#   is a shared enum, not a `[value]` one (a heap cell per call and jump);
 # - the match of a state machine with an integer entry point is not one arm
 #   per variant, the literals 0, 1, ... in order, then a wildcard arm that
 #   is `l2r_unreachable` at the function's result type;
@@ -43,7 +42,7 @@
 # whose arms pass a slot on, or an IR function of none of them; in RtSmU32
 # no state machine of more than 256 variants whose function is in the IR,
 # or none of at most 256; in
-# RtSmGuard no state machine whose entry point is a shared enum with a
+# RtSmGuard no state machine whose entry point is a `[value]` enum with a
 # variant that keeps a field. It then checks itself on mutations, each of
 # which must fail: of RtSmDecode's .rr and IR, its entry point made a
 # `[value]` enum, one passed-on slot replaced by its placeholder, one
@@ -51,7 +50,7 @@
 # replaced by the arm's live variable of that slot, the wildcard arm taken
 # away, the IR's entry point made a struct, and the IR's threaded blocks
 # renamed; RtSmU32's `u32` entry point made a `u8`; RtSmGuard's enum made
-# `[value]`.
+# shared.
 #   tests/runtime/sm-slots-check.sh
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
@@ -144,7 +143,7 @@ def check(rr, ll, threaded):
     """The errors; the state machines with an integer entry point, the
     slots passed on, those found in the IR; the variant count of each
     integer entry point and whether its function is in the IR (not
-    inlined); the state machines whose entry point is a shared
+    inlined); the state machines whose entry point is a [value]
     enum with a variant that keeps a field; the calls that pass on a step."""
     errs, nsm, npass, nll, sizes, nkept, nstep = [], 0, 0, 0, [], 0, 0
     enums = {}
@@ -159,9 +158,9 @@ def check(rr, ll, threaded):
             if nullary:
                 errs.append(f'{fn}: its variants are all nullary, but its entry point is '
                             f'{"a [value]" if value else "a shared"} enum ({mode}), not an integer')
-            elif value:
-                errs.append(f'{fn}: a variant keeps a field, but its entry point is a [value] enum ({mode}), '
-                            f'not a shared one (Reussir bug 1)')
+            elif not value:
+                errs.append(f'{fn}: a variant keeps a field, but its entry point is a shared enum ({mode}), '
+                            f'not a [value] one (a heap cell per call and jump)')
             else:
                 nkept += 1
             continue
@@ -243,13 +242,13 @@ if name == 'RtSmU32':
         sys.exit(1)
 if name == 'RtSmGuard':
     if nkept == 0:
-        print(f'FAIL {name}: vacuous (no state machine whose entry point is a shared enum with a variant '
+        print(f'FAIL {name}: vacuous (no state machine whose entry point is a [value] enum with a variant '
               f'that keeps a field)')
         sys.exit(1)
-    # Mutation: that enum made [value].
-    em = re.search(r'^enum (\w+_mode) \{', rr, re.M)
-    if em is None or not check(rr[:em.start()] + 'enum [value] ' + rr[em.start() + len('enum '):], ll, threaded)[0]:
-        print(f'FAIL {name}: the check does not catch a mutation (the enum made [value])')
+    # Mutation: that enum made shared.
+    em = re.search(r'^enum \[value\] (\w+_mode) \{', rr, re.M)
+    if em is None or not check(rr[:em.start()] + 'enum ' + rr[em.start() + len('enum [value] '):], ll, threaded)[0]:
+        print(f'FAIL {name}: the check does not catch a mutation (the enum made shared)')
         sys.exit(1)
 if name == 'RtSmDecode':
     if nsm == 0 or npass == 0 or nll == 0:
@@ -304,7 +303,7 @@ if name == 'RtSmDecode':
             sys.exit(1)
 print(f'ok {name}: {nsm} state machines with an integer entry point (variants: '
       f'{", ".join(str(n) + (" in the IR" if ir else "") for n, ir in sorted(sizes))}); {npass} slots passed on; {nll} in the IR'
-      + (f'; {nkept} with a shared enum entry point whose variant keeps a field' if nkept else '')
+      + (f'; {nkept} with a [value] enum entry point whose variant keeps a field' if nkept else '')
       + (f'; {nstep} calls that pass on a step of an outlined part' if nstep else '')
       + ('; the loop threaded' if threaded else ''))
 PY

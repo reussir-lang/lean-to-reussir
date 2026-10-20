@@ -3,8 +3,9 @@ reached (docs/implementation/control-flow/state-machines.md). A join point
 of the state machine of `loop` captures `x : Inf`, a type whose only
 constructor needs a value of itself, so it has no finite value and no
 placeholder (`zeroFinite`). That field gets no slot and stays in its
-variant, so the entry point of `loop`'s state machine is a shared enum,
-not an integer (the fallback); the other fields are in slots as usual.
+variant, so the entry point of `loop`'s state machine is a `[value]`
+enum, not an integer (the fallback); the other fields are in slots as
+usual.
 `Inf` has no value, so the `some x` arm never runs; `mkOpt` hides that
 from Lean (`@[noinline]`). `jp-small` is off (RtSmGuard.opts): it would
 copy the small join points to their jumps, and no state machine would be

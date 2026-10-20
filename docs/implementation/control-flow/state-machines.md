@@ -19,10 +19,20 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Why:** Without it, a loop through an outlined join point was mutually
   recursive and used stack per iteration (the classic Sieve and Strings
   overflowed a 1 GiB stack at their medium size with the join-point passes
-  off; 3597a31). Reussir has no guaranteed tail calls. The enum is shared
-  because Reussir loses bytes of `[value]` enums whose arms differ (a
-  Reussir bug fixed upstream in #663; the old stack still has it); its
-  reuse makes the cell cheap. The "inlined into it" case was a loop of
+  off; 3597a31). Reussir has no guaranteed tail calls. The enum is
+  shared because Reussir's token reuse gives the matched value's cell to
+  the variant of the next call or jump, which then only stores its fields.
+  A `[value]` enum (possible since Reussir's old bug 1 is fixed in
+  lean2rr's base,
+  [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#old-bug-1-value-enum-payloads-were-lost-when-moved))
+  moves the whole variant at every jump. Measured with `state-machines`
+  off (2026-10-19, cachegrind with SVE off, and the allocation counter;
+  shared to `[value]`): `RtSmDecode` at size 200000 239.2 to 370.0
+  million instructions (its state machine 116.5 to 251.3 million;
+  allocations 42,835 to 135), `RtJpSlots` 119.1 to 126.7 million
+  (291,440 to 109,621 allocations), `RtStateMachines` 983.5 to 853.9
+  million (5,172,954 to 2,504,832 allocations). The default form (next
+  entry) allocates nothing either way. The "inlined into it" case was a loop of
   `Std.Http` that stayed mutually recursive (5585f99).
 - **Where:** `Lower/StateMachine.lean`: `stateMachinePlan`,
   `hasSelfTailCall`, `outlinedBodies`, `withInlinedJps`,
@@ -46,12 +56,15 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   runtime's one shared empty string), never a live value. Soundness guard,
   checked on every state machine: a type without a finite placeholder
   (`zeroFinite`: a type without a finite value, such as `Empty`) gets no
-  slot, and its fields stay in their variant, allocated as in the core
-  form. Jumps and self calls are
+  slot, and its fields stay in their variant: the entry point is then a
+  `[value]` enum of the fields without a slot (no heap cell; its other
+  variants are nullary, so its values are small).
+  Jumps and self calls are
   lowered before every variant is known, so they are put in slots when the
   state machine is emitted.
 - **Why:** The core form allocates a variant at every call and jump (104
-  to 232 bytes in round 7's LwOutSelf and LwSmPerf). Passing a live value
+  to 232 bytes in round 7's LwOutSelf and LwSmPerf), unless token reuse
+  gives it the matched variant's cell. Passing a live value
   in a slot would keep it referenced across the jump, so an array updated
   before the jump was shared and copied at every iteration (probes
   J4Arr/J4For quadratic; Sieve with only `field-order` and
@@ -82,7 +95,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   literals `0`, `1`, ..., one arm per variant, and then has a wildcard arm
   `_ => { l2r_unreachable<R>() }` (`R` is its result type), which no call
   reaches. A variant that keeps a field (the soundness guard above) makes
-  the entry point a shared enum, as in the core form (test `RtSmGuard`).
+  the entry point a `[value]` enum (test `RtSmGuard`; until 2026-10-19 a
+  shared enum, because of Reussir's old bug 1).
 
   ```
   fn f_sm(s1 : Nat, s2 : RVec<u8>, m : u8) -> R {
@@ -138,7 +152,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   Test: `tests/runtime/sm-slots-check.sh` (with `RtSmDecode`,
   `RtStateMachines`, `RtJpSlots`; `RtSmU32`, a state machine of 261
   variants, whose entry point is a `u32`; `RtSmGuard`, whose entry point
-  is a shared enum because a variant keeps a field; it also checks that
+  is a `[value]` enum because a variant keeps a field; it also checks that
   LLVM threads RtSmDecode's loop). `RtSmU32` and `RtSmGuard` turn
   `jp-small` off (`.opts`): it would copy their small join points to the
   jumps, and no state machine would be left.

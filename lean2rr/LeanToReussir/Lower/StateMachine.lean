@@ -101,9 +101,12 @@ its own variant with its parameters `params`; and the entry-point enum. -/
 def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
   let arms ← getPart (·.smArms)
-  -- A shared enum: Reussir miscompiles `[value]` enums whose arms have
-  -- different layouts (translation plan §9); Reussir reuses the cell of
-  -- the matched value.
+  -- A shared enum: Reussir reuses the cell of the matched value for the
+  -- variant of the next call or jump (token reuse), so a jump stores its
+  -- fields into that cell. A `[value]` enum would move the whole variant at
+  -- every jump, which ran more instructions where the variants are wide
+  -- (RtSmDecode with `state-machines` off, 2026-10-19: 239 to 370 million,
+  -- though 42,835 to 135 allocations).
   let mode := RR.Item.enum sm.mode false
     (#[(sm.entry, params.map (·.2))] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
   let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=

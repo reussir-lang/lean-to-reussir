@@ -47,8 +47,8 @@ threads the loop: a jump goes straight to the arm it enters, without the
 Soundness guard (checked on every state machine): a slot's placeholder is
 evaluated at every jump that does not fill it, so a type without a finite
 placeholder (`zeroFinite`: a type without a finite value, such as `Empty`)
-gets no slot: such a field stays in its variant, which is then allocated as
-in the core form.
+gets no slot: such a field stays in its variant, and the entry point is
+then a `[value]` enum of the fields without a slot (no heap cell).
 
 Jumps and self tail calls are lowered before every variant is known, so
 they are emitted as `fn(values…, mode::v)` and put in slots when the state
@@ -190,8 +190,8 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
   -- entry point is an integer, variant `i` the literal `i` (see the module
   -- comment: no pointer to a static cell as for a shared enum's nullary
   -- variant, no struct-typed phi as for a `[value]` enum, so LLVM threads
-  -- the loop). Otherwise a shared enum: Reussir miscompiles `[value]` enums
-  -- whose arms have different layouts (translation plan §9).
+  -- the loop). Otherwise a `[value]` enum of the fields without a slot: no
+  -- heap cell per call or jump.
   let modeVariants := variants.map fun (v, fs) => (v, (kept v fs).map (·.2))
   let scalar := modeVariants.all (·.2.isEmpty)
   let lay := if scalar then { lay with tags := some (variants.zipIdx.foldl (fun m ((v, _), i) => m.insert v i) {}) }
@@ -235,7 +235,7 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
   let slotParams := lay.slots.map fun (n, t, _) => (n, t)
   let enter ← smCall sm lay sm.entry params (params.map fun (n, _) => RR.Expr.var n)
   modify fun s => { s with
-    typeItems := if scalar then s.typeItems else s.typeItems.push (RR.Item.enum sm.mode false modeVariants)
+    typeItems := if scalar then s.typeItems else s.typeItems.push (RR.Item.enum sm.mode true modeVariants)
     fns := s.fns
       |>.push (.fn sm.fn (slotParams.push (m, modeTy)) ret (.ofExpr (.mtch (.var m) matchArms)))
       |>.push (.fn (fnName d.name) params ret (.ofExpr enter))

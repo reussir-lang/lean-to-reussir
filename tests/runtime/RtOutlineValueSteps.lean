@@ -3,10 +3,10 @@ self-recursive function whose body is deeper than Outline's trigger (32
 levels) is cut into parts; a part that holds a tail call of the function
 returns a step value (`L2RStep_k`: `done(v)`, or a variant with the call's
 arguments), and the function matches it and makes the call. The step enum is
-`[value]` when its layout is safe to move (no heap cell per iteration), and
-shared otherwise. Each case runs its loop at the size given (`CASE N`);
+`[value]` (no heap cell per iteration).
+Each case runs its loop at the size given (`CASE N`);
 without arguments every case runs. RtOutlineValueSteps.alloc pins the
-allocations per iteration of the `[value]` cases to native's (none);
+allocations per iteration to native's (none);
 RtOutlineValueSteps.pipe also runs `mixed` and `ping` for 3000000 steps with
 a 1 MiB stack (`LEAN_STACK_SIZE_KB=1024`): a `[value]` step must not cost
 stack per iteration.
@@ -15,16 +15,19 @@ stack per iteration.
 - `mixed`: a `Bool`, a `UInt8`, a `String`, an `Array Nat` updated in place
   (a copy per iteration would show if the step value took a reference) and
   a `UInt64`: the variant's fields are reordered (words first);
-- `floaty`: only `Float`s, whose bytes the guard does not count as carried
-  by a move, so the step enum stays shared;
+- `floaty`: only `Float`s (shared until 2026-10-19: a guard against a
+  Reussir bug, fixed upstream in #663, did not count their bytes as
+  carried by a move);
+- `fmix`: a counter, a `Float`, a `UInt8` and a `Bool`, the result a
+  `Float × Bool` (shared until 2026-10-19, as `floaty`);
 - `pairLoop`: a pair result (the step's `done` holds a tuple or a record);
 - `ping`/`pong`: mutual recursion, each step enum with a variant for both
-  functions (the one with the longest carried prefix declared last);
+  functions;
 - `pred`, `bp` (case `narrow`): a `done` arm narrower than a word, a `Bool`
   and a `Bool × UInt8` result (from the review of the change, ValStepNarrow);
-- `tupC` (case `tupc`): the `done` arm, a tuple `(u64, u64, u8)`, is the
-  representative, declared after the variant `c0(Nat, u64, bool)` (from the
-  review, ValStepTie).
+- `tupC` (case `tupc`): the `done` arm, a tuple `(u64, u64, u8)`, is
+  larger than the variant `c0(Nat, u64, bool)` (from the review,
+  ValStepTie).
 -/
 set_option maxRecDepth 100000
 set_option maxHeartbeats 0
@@ -454,6 +457,54 @@ partial def floaty (x y : Float) : Float :=
   | 39 => floaty (x * 1.0391 + 39.5) (y * 0.5 + x / 41.0)
   | _ => floaty (x * 1.5 + 1.0) (y + 2.0)
 
+/-- A step with an `f64`, a `bool` and padding: `done` holds the pair
+`Float × Bool`, `c0` the counter, `x`, `t` and `b` (no step value
+allocates). -/
+partial def fmix (k : Nat) (x : Float) (t : UInt8) (b : Bool) : Float × Bool :=
+  if k == 0 then (x + t.toFloat, b) else
+  match k % 41 with
+  | 0 => fmix (k - 1) (x * 0.75 + (if b then 0.5 else 0.125)) (t + 0) (b != (x < 0.0))
+  | 1 => fmix (k - 1) (x * 0.75 + (if b then 1.5 else 0.125)) (t + 1) (b != (x < 1.0))
+  | 2 => fmix (k - 1) (x * 0.75 + (if b then 2.5 else 0.125)) (t + 2) (b != (x < 2.0))
+  | 3 => fmix (k - 1) (x * 0.75 + (if b then 3.5 else 0.125)) (t + 3) (b != (x < 3.0))
+  | 4 => fmix (k - 1) (x * 0.5 + 4.25) (t ^^^ 4) (!b)
+  | 5 => fmix (k - 1) (x * 0.75 + (if b then 5.5 else 0.125)) (t + 5) (b != (x < 5.0))
+  | 6 => fmix (k - 1) (x * 0.75 + (if b then 6.5 else 0.125)) (t + 6) (b != (x < 6.0))
+  | 7 => fmix (k - 1) (x * 0.75 + (if b then 7.5 else 0.125)) (t + 7) (b != (x < 7.0))
+  | 8 => fmix (k - 1) (x * 0.75 + (if b then 8.5 else 0.125)) (t + 8) (b != (x < 8.0))
+  | 9 => fmix (k - 1) (x * 0.75 + (if b then 9.5 else 0.125)) (t + 9) (b != (x < 9.0))
+  | 10 => fmix (k - 1) (x * 0.75 + (if b then 10.5 else 0.125)) (t + 10) (b != (x < 10.0))
+  | 11 => fmix (k - 1) (x * 0.75 + (if b then 11.5 else 0.125)) (t + 11) (b != (x < 11.0))
+  | 12 => fmix (k - 1) (x * 0.75 + (if b then 12.5 else 0.125)) (t + 12) (b != (x < 12.0))
+  | 13 => fmix (k - 1) (x * 0.5 + 13.25) (t ^^^ 13) (!b)
+  | 14 => fmix (k - 1) (x * 0.75 + (if b then 14.5 else 0.125)) (t + 14) (b != (x < 14.0))
+  | 15 => fmix (k - 1) (x * 0.75 + (if b then 15.5 else 0.125)) (t + 15) (b != (x < 15.0))
+  | 16 => fmix (k - 1) (x * 0.75 + (if b then 16.5 else 0.125)) (t + 16) (b != (x < 16.0))
+  | 17 => fmix (k - 1) (x * 0.75 + (if b then 17.5 else 0.125)) (t + 17) (b != (x < 17.0))
+  | 18 => fmix (k - 1) (x * 0.75 + (if b then 18.5 else 0.125)) (t + 18) (b != (x < 18.0))
+  | 19 => fmix (k - 1) (x * 0.75 + (if b then 19.5 else 0.125)) (t + 19) (b != (x < 19.0))
+  | 20 => fmix (k - 1) (x * 0.75 + (if b then 20.5 else 0.125)) (t + 20) (b != (x < 20.0))
+  | 21 => fmix (k - 1) (x * 0.75 + (if b then 21.5 else 0.125)) (t + 21) (b != (x < 21.0))
+  | 22 => fmix (k - 1) (x * 0.5 + 22.25) (t ^^^ 22) (!b)
+  | 23 => fmix (k - 1) (x * 0.75 + (if b then 23.5 else 0.125)) (t + 23) (b != (x < 23.0))
+  | 24 => fmix (k - 1) (x * 0.75 + (if b then 24.5 else 0.125)) (t + 24) (b != (x < 24.0))
+  | 25 => fmix (k - 1) (x * 0.75 + (if b then 25.5 else 0.125)) (t + 25) (b != (x < 25.0))
+  | 26 => fmix (k - 1) (x * 0.75 + (if b then 26.5 else 0.125)) (t + 26) (b != (x < 26.0))
+  | 27 => fmix (k - 1) (x * 0.75 + (if b then 27.5 else 0.125)) (t + 27) (b != (x < 27.0))
+  | 28 => fmix (k - 1) (x * 0.75 + (if b then 28.5 else 0.125)) (t + 28) (b != (x < 28.0))
+  | 29 => fmix (k - 1) (x * 0.75 + (if b then 29.5 else 0.125)) (t + 29) (b != (x < 29.0))
+  | 30 => fmix (k - 1) (x * 0.75 + (if b then 30.5 else 0.125)) (t + 30) (b != (x < 30.0))
+  | 31 => fmix (k - 1) (x * 0.5 + 31.25) (t ^^^ 31) (!b)
+  | 32 => fmix (k - 1) (x * 0.75 + (if b then 32.5 else 0.125)) (t + 32) (b != (x < 32.0))
+  | 33 => fmix (k - 1) (x * 0.75 + (if b then 33.5 else 0.125)) (t + 33) (b != (x < 33.0))
+  | 34 => fmix (k - 1) (x * 0.75 + (if b then 34.5 else 0.125)) (t + 34) (b != (x < 34.0))
+  | 35 => fmix (k - 1) (x * 0.75 + (if b then 35.5 else 0.125)) (t + 35) (b != (x < 35.0))
+  | 36 => fmix (k - 1) (x * 0.75 + (if b then 36.5 else 0.125)) (t + 36) (b != (x < 36.0))
+  | 37 => fmix (k - 1) (x * 0.75 + (if b then 37.5 else 0.125)) (t + 37) (b != (x < 37.0))
+  | 38 => fmix (k - 1) (x * 0.75 + (if b then 38.5 else 0.125)) (t + 38) (b != (x < 38.0))
+  | 39 => fmix (k - 1) (x * 0.75 + (if b then 39.5 else 0.125)) (t + 39) (b != (x < 39.0))
+  | _ => fmix (k - 1) x t b
+
 partial def pairLoop (n a b : Nat) : Nat × Nat :=
   if n == 0 then (a, b) else
   match n % 41 with
@@ -682,7 +733,7 @@ partial def bp (k : Nat) (a : UInt64) : Bool × UInt8 :=
   | 39 => bp (k - 1) (a * 7 + 39 + a / 3)
   | _ => bp (k - 1) a
 
-/-- From the review (ValStepTie): the `done` tuple is the representative. -/
+/-- From the review (ValStepTie): the `done` tuple is the largest arm. -/
 partial def tupC (k : Nat) (a : UInt64) (b : Bool) : UInt64 × UInt64 × UInt8 :=
   if k == 0 then (a, (if b then 1 else 2), 201) else
   match k % 41 with
@@ -733,6 +784,9 @@ def runCase (c : String) (n : Nat) : IO Unit :=
   | "loop" => IO.println s!"loop {n}: {loop n 1 2 3}"
   | "mixed" => IO.println s!"mixed {n}: {mixed true 7 "m" (Array.range 16) n 5}"
   | "floaty" => IO.println s!"floaty {n}: {(floaty (n.toFloat / 7.0) 1.0 / 1.0e290).floor.toUInt64}"
+  | "fmix" =>
+    let (x, b) := fmix n 1.5 7 true
+    IO.println s!"fmix {n}: {(x * 1000.0).floor.toUInt64} {b}"
   | "pair" => IO.println s!"pair {n}: {pairLoop n 1 2}"
   | "ping" => IO.println s!"ping {n}: {ping n "start"}"
   | "narrow" =>
@@ -748,6 +802,6 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | [c, n] => runCase c (n.toNat?.getD 0)
   | _ =>
-    for c in ["loop", "mixed", "floaty", "pair", "ping", "narrow", "tupc"] do
+    for c in ["loop", "mixed", "floaty", "fmix", "pair", "ping", "narrow", "tupc"] do
       for n in [0, 1, 2, 3, 40, 41, 44, 1000, 30001] do runCase c n
   pure 0

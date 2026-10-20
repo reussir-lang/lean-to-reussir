@@ -1572,9 +1572,12 @@ jump needs travels in its variant, so nothing is kept alive by being passed
 along. J4 is used only when an outlined join point makes a self tail call,
 in its body or in a join point inlined into it (J1, J1'); other calls back
 into the declaration are ordinary calls. The enum is a
-shared (heap) type: Reussir miscompiles `[value]` enums with fields of
-mixed layout (§9), so in this core form every call and every jump
-allocates a variant.
+shared (heap) type: Reussir's token reuse gives the matched variant's
+cell to the next call's or jump's variant, which then only stores its
+fields (a `[value]` enum moves the whole variant at every jump, and ran
+more instructions where the variants are wide), so in this core form a
+call or a jump needs a heap cell for its variant, which token reuse
+often takes from the matched variant.
 
 The optional pass `state-machines` makes every variant nullary: the
 values travel as parameters of the function instead, in *slots*, one per
@@ -1609,8 +1612,8 @@ cheap: a constant (`0`, a constructor without fields), a value built once
 and kept in a once-cell (§5.1), and for a string one shared empty string
 of the runtime. A type without a finite placeholder (a type without a
 finite value, such as `Empty`, §5.1) gets no slot: such a field stays in
-its variant, which is then allocated as in the core form (and the entry
-point is the core form's shared enum). The pass checks
+its variant, and the entry point is then a `[value]` enum of the fields
+without a slot (its other variants are nullary). The pass checks
 this on every state machine. So a jump costs a jump and the moves of its slots, and no
 allocation (test `RtJpSlots`).
 
@@ -2865,18 +2868,19 @@ Probe results (Reussir at the pinned commit):
   at every optimization level.
 - **Stacks.** The main thread has 8 MiB; the program body runs on a 1 GiB
   thread (§5.11).
-- **Known Reussir bug (fixed upstream in Reussir #663).** A `[value]` enum
+- **Old Reussir bug (fixed upstream in Reussir #663).** A `[value]` enum
   was lowered to LLVM as its tag plus one representative arm's struct, and
   moved as that aggregate, so bytes of another arm that fall on the
   representative's padding or on a `bool` field were lost (`enum [value] M { A(u8), B(bool) }` read `A(42)`
-  back as 0; fixed in Reussir `7954a367`, lean2rr's base). lean2rr still only emits `[value]` enums that are unaffected:
-  enumerations without fields, and `Outline`'s step enums whose
-  representative arm (the last arm with the largest alignment, which
-  lean2rr chooses by the arms' order) carries every byte of the other arms
-  in a prefix of integers and pointers, by a layout model of the field
-  types (otherwise the step enum is shared). Everything else with several arms is a shared enum (J4
-  entry points, §5.6); multi-field value records are `[value]` structs,
-  whose padding is explicit. The restriction is removable now (one change, with its test).
+  back as 0). Reussir `7954a367`, lean2rr's base, has the fix, and since
+  2026-10-19 lean2rr no longer avoids the shape: `Outline`'s step enums
+  are `[value]` whatever their fields (before, they were shared unless a
+  layout model showed that the representative arm carried every byte of
+  the other arms), and so is the entry enum of a `state-machines` state
+  machine whose variant keeps a field (§5.6). The core form's J4 entry
+  enum stays shared, for its cost (§5.6), and the program's inductives
+  with fields stay shared enums (§5.1, "Shapes"); multi-field value
+  records are `[value]` structs, whose padding is explicit.
 - **Candidate Reussir requests.** Guaranteed tail calls; `[value]` types
   across the FFI (for array elements without a wrapper); borrowed
   FFI parameters (an array `get` currently takes ownership and releases);
@@ -3131,10 +3135,7 @@ Each item says what differs and when.
   function of the cycle, with its arguments), and the function matches it
   and makes the tail call itself; a cycle of tail calls through the parts
   would not always be a sibling call and would use stack per iteration.
-  The step enum is `[value]` (no allocation) when its representative arm
-  surely carries the bytes of the other arms (§9, "Known Reussir bug");
-  otherwise such a loop allocates a step per iteration, only in functions
-  this long.
+  The step enum is `[value]` (no allocation).
   Ordinary functions are below the bounds; the classic corpus only has
   some `main`s cut. rrc also copies a wildcard arm into every constructor
   it covers and expands, in each copy, the release of every value the arm

@@ -56,38 +56,31 @@ text, from growing superlinearly. It is a required part (`outline` in
   `RtOutlineLoops` runs such loops with a 1 MiB stack). Before, recursive
   functions were skipped: a recursive IO function of 1500 statements made
   over 100 MB of `.rr` and did not build under 16 GB. Cost: a step value
-  per iteration, only in functions this long; a heap cell only when the
-  step enum is shared (next entry).
+  per iteration, only in functions this long; no heap cell (next entry).
 - **Where:** `Outline.lean`: `StepInfo`, `stepInfo`, `stepVariant`,
   `stepify`, `stepDispatch`, `cycleCall?`, `hasCycleCall`,
   `tailCycleCalls`, `cycles`.
 - **Remove only if:** as above.
 
-### Step enums are `[value]` when their layout is safe to move
+### Step enums are `[value]`
 
-- **What:** The step enum `L2RStep_k` is an `enum [value]` when a layout
-  model knows every field type and every other arm's bytes lie in the
-  prefix of the representative arm that a move surely carries. The
-  representative is the last arm with the largest alignment; lean2rr
-  declares last the arm with the largest alignment and, of those, the
-  longest carried prefix. Integers and pointer-sized values (shared types,
-  function values, closures, `Nat`, `Int`, `LStr`, `LAny`, `RVec`, …)
-  carry all their bytes; a `bool` (an `i1`) does not; `f32`, `f64` and
-  padding (which Reussir lays out as bytes) are conservatively not counted
-  as carried; a
-  `[value]` struct is its fields in order, a field-less `[value]` enum its
-  tag. The fields of a call variant are in decreasing alignment, fields
-  that carry all their bytes first, ties in parameter order: the
-  construction and the cut point's binders follow that order, the call
-  keeps parameter order. Otherwise (an unknown type, or bytes outside the
-  carried prefix) the enum stays shared. A step value goes only from a
-  part's result to the match at the cut point: never into a field, an
-  array, a `Cell` or a `Box`, and no conversion is generated for its type
-  (Outline runs after lowering), so being `[value]` changes nothing else.
-  Examples (RtOutlineValueSteps): `done(u64)`, `c0(Nat, u64, u64, u64)`
-  is `[value]`; `done(LStr)`, `c0(LStr, RVec<LAny>, Nat, u64, u8, bool)`
-  (parameters `Bool, UInt8, String, Array Nat, Nat, UInt64`) is `[value]`;
-  `done(f64)`, `c0(f64, f64)` stays shared (no carried prefix).
+- **What:** The step enum `L2RStep_k` is an `enum [value]`, whatever the
+  types of its fields: `done` first, then the call variants in order. The
+  fields of a call variant are in decreasing alignment, ties in parameter
+  order, so the variant has no padding between them (a type that the type
+  table does not know keeps parameter order): the construction and the cut
+  point's binders follow that order, the call keeps parameter order. A
+  step value goes only from a part's result to the match at the cut point:
+  never into a field, an array, a `Cell` or a `Box`, and no conversion is
+  generated for its type (Outline runs after lowering), so being `[value]`
+  changes nothing else. No step enum contains itself: `done` holds the
+  function's result type and a call variant the callee's parameter types,
+  all types of the program before outlining. Examples
+  (RtOutlineValueSteps): `done(u64)`, `c0(Nat, u64, u64, u64)`;
+  `done(LStr)`, `c0(LStr, RVec<LAny>, Nat, u64, bool, u8)` (parameters
+  `Bool, UInt8, String, Array Nat, Nat, UInt64`); `done(f64)`,
+  `c0(f64, f64)`; `done(Tuple)` (a `[value]` struct `(f64, bool)`),
+  `c0(Nat, f64, u8, bool)`.
 - **Why:** A shared step enum is a heap cell per iteration. The
   allocation survey of 2026-10-10 found lean-zip's `lz77LazyMergedLoop`
   step (23 fields, 192 bytes): 43,049 cells, 8.27 MB of the 10.39 MB that
@@ -96,21 +89,30 @@ text, from growing superlinearly. It is a required part (`outline` in
   step enums of lean-zip are `[value]`; Z01c's growth is 7,401
   allocations and 2.11 MB (0.16 and 0.41 times native's), Z01r's 0.13 and
   0.59 times native's (before 0.19 and 0.81); Z01d and Z01t do not change
-  (survey sizes and counter, outputs identical).
-  Reussir moves a `[value]` enum as the struct of its representative arm,
-  so another arm's bytes on its padding or on an `i1` are lost (a Reussir
-  bug, fixed upstream in #663; the old stack has a local patch for it),
-  and the guard keeps lean2rr's output right without it (policy). Test `RtOutlineValueSteps`: `.alloc`, no allocation per
-  iteration, as natively; `.pipe`, 3000000 steps of `mixed` and of the
-  mutual recursion `ping` on a 1 MiB stack; also `done` arms narrower than
-  a word (`Bool`, `Bool × UInt8`) and a `done` tuple as the representative.
-- **Where:** `Outline.lean`: `FieldLayout`, `fieldLayout`,
-  `compoundLayout`, `typeTable`, `stepFieldOrder`, `StepCall`, `stepItem`,
-  `stepVariant`, `stepInfo`, `stepify`, `stepDispatch`, `outlineFns`;
-  `Emit/Program.lean`: `LoweredProgram.outline`.
-- **Remove only if:** never for the `[value]` choice (speed); the guard
-  can go when every Reussir that lean2rr supports has that fix (removable
-  after the move to Reussir 7954a367).
+  (survey sizes and counter, outputs identical). From 2026-10-10 to
+  2026-10-19 a layout guard kept a step enum shared unless its
+  representative arm surely carried every other arm's bytes (`floaty`'s
+  `f64`s and `fmix`'s `f64` and `bool` did not): Reussir lost bytes of
+  `[value]` enums whose arms differ (old bug 1,
+  [../reussir-workarounds/correctness-bugs.md](../reussir-workarounds/correctness-bugs.md#old-bug-1-value-enum-payloads-were-lost-when-moved)),
+  fixed in lean2rr's base. Before and after the guard went (2026-10-19;
+  allocation counter, and cachegrind instructions of the whole run with
+  SVE off): `fmix` at 200000 iterations 165,893 allocations (5.31 MB) to
+  43 (6.6 KB), 26.3 to 16.3 million instructions; `floaty` 87,391 to
+  43,187 allocations, 14.7 to 11.7 million; a review repro whose step carries a `Float`, a `Bool`, a
+  `UInt8`, a `UInt64`, two arrays and a `Nat`
+  (`c0(Nat, u64, RVec<u64>, RVec<u8>, Nat, f64, u8, bool)`, 200000
+  iterations) 224,221 allocations (14.4 MB) to 60 (8.4 KB), 86.7 to 81.4
+  million. Test `RtOutlineValueSteps`: `.alloc`, no
+  allocation per iteration, as natively (`fmix` included); `.pipe`,
+  3000000 steps of `mixed` and of the mutual recursion `ping` on a 1 MiB
+  stack; also `done` arms narrower than a word (`Bool`, `Bool × UInt8`)
+  and a `done` tuple larger than the call variant.
+- **Where:** `Outline.lean`: `typeTable`, `fieldAlign?`,
+  `stepFieldOrder`, `StepCall`, `stepItem`, `stepVariant`, `stepInfo`,
+  `stepify`, `stepDispatch`, `outlineFns`; `Emit/Program.lean`:
+  `LoweredProgram.outline`.
+- **Remove only if:** never (speed).
 
 ### Only blocks whose variables have known types are outlined
 

@@ -343,8 +343,8 @@ decoder loop, a state machine of three variants), `RtStateMachines`,
 optimizations of a `NAME.opts` off as in run.sh. It fails when the
 entry point of a state machine whose variants are all nullary is an enum,
 not an integer (in the `.rr`), when the entry point of a state machine
-with a variant that keeps a field is a `[value]` enum, not a shared one
-(Reussir bug 1), when its match is not one literal arm per variant (0,
+with a variant that keeps a field is a shared enum, not a `[value]` one
+(a heap cell per call and jump), when its match is not one literal arm per variant (0,
 1, ... in order) and an unreachable wildcard, when that integer is not a
 `u8` for up to 256 variants and a `u32` above (in the `.rr`, and as the
 last parameter of its function in the IR), when LLVM did not thread
@@ -358,14 +358,14 @@ only passes on the values of an outlined part's step is not checked
 (Outline splits RtSmU32's entry arm into parts). It fails when the test
 is vacuous: RtSmDecode has no such state machine, no slot passed on or
 no IR function of one; RtSmU32 has no state machine of more than 256
-variants in the IR, or none of at most 256; RtSmGuard has no shared-enum
-entry point with a variant that keeps a field. It checks itself on eight
+variants in the IR, or none of at most 256; RtSmGuard has no `[value]`
+enum entry point with a variant that keeps a field. It checks itself on eight
 mutations, each of which must fail: six of RtSmDecode's `.rr` and IR
 (the entry point made a `[value]` enum, a passed-on slot given a
 placeholder, a placeholder replaced by the arm's live variable of that
 slot, the wildcard arm taken away, the IR's entry point made a struct,
 the IR's threaded blocks renamed), RtSmU32's `u32` entry point made a
-`u8`, and RtSmGuard's shared enum made `[value]`.
+`u8`, and RtSmGuard's `[value]` enum made shared.
 `tests/runtime/rows-check.sh` builds lean-runtime's row oracle
 (`scripts/oracle/Oracle.lean` of the lean-runtime checkout, which evaluates
 the functions of its `tests/cases/<area>/<area>.rows.toml`) with lean2rr and
@@ -740,7 +740,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | Review RS-01 of the persistent walk: at a box the walk marked the payload only when the payload's type could hold a task, so a file handle that a marked reference held directly (an initializer's `IO.Ref IO.FS.Handle`, a reference `Runtime.markPersistent` marked) was closed when the program set the reference to another handle; natively it stays open. A payload that cannot hold a task is now marked where its box is met | RtPersistInitHandleDirect, RtMarkPersistentRefHandle (each with `NAME.pipe`: prints the files after the exit) |
 | HSTR2-01 (hunt of strings, round 2): the glue of `String.toList` passed a curried `cons` closure to a prelude loop, about 3 allocations per character where native makes 1 (the cons cell); `String.Pos.Raw.get?` made a `some` closure at every call, also for `none`; `Float.frExp` built its pair through a closure (Reussir and LLVM removed that one in the measured programs) (Performance) | RtGlueAlloc (`RtGlueAlloc.alloc`: `toList`, `get?` and `frExp` at 1000 and 4000, at most native's growth; without arguments their results on edge cases) |
 | Review of the closure glue after HSTR2-01: the glue of a fallible IO primitive passed the outcome to a prelude helper (`l2r_io_finish`) with two callbacks, two closures at every call that Reussir and LLVM kept: a handle's `putStr` made 3 allocations where native makes 1, a `getLine` 6 where native makes 3, the stdout stream's `putStr` 3 where native makes 1 (Performance) | RtIOFinishAlloc (`RtIOFinishAlloc.alloc`: the three at 1000 and 4000, at most native's growth; without arguments the error paths and the payloads of the other glue arms) |
-| Allocation survey of 2026-10-10, cause A (the step enum of an outlined recursive function was shared: a heap cell per iteration, 8.27 MB of the 10.39 MB growth of lean-zip compression, Z01c) | RtOutlineValueSteps (the survey's repro and more loops: mixed field types with an `Array` updated in place, `Float`s only (stays shared), a pair result, mutual recursion, and from the review of the change `done` arms narrower than a word and a `done` tuple as the representative; `RtOutlineValueSteps.alloc`: no allocation per iteration; `.pipe`: 3000000 steps on a 1 MiB stack) |
+| Allocation survey of 2026-10-10, cause A (the step enum of an outlined recursive function was shared: a heap cell per iteration, 8.27 MB of the 10.39 MB growth of lean-zip compression, Z01c) | RtOutlineValueSteps (the survey's repro and more loops: mixed field types with an `Array` updated in place, `Float`s only, a `Float`, a `UInt8` and a `Bool` with a `Float × Bool` result (`fmix`; both shared until 2026-10-19, when the guard against Reussir's old `[value]` enum bug went), a pair result, mutual recursion, and from the review of the change `done` arms narrower than a word and a `done` tuple larger than the call variant; `RtOutlineValueSteps.alloc`: no allocation per iteration; `.pipe`: 3000000 steps on a 1 MiB stack) |
 | HIOG2-01, HIOG2-02 (hunt of the IO glue, round 2): each fallible IO call site had its own copy of the error builder (four curried closures for `l2r_io_error_with`, about 110 lines of `.rr` each; Reussir and LLVM removed their allocations, but the builder read the file name also for an error whose builder takes none: a failing `putStr` made 6 allocations, now 5, native 3); `IO.getEnv` made a `some` closure at every call and looked the variable up twice: 6 allocations for a set variable (native 2, now 3), 1 for an unset one (native and now none) (Performance) | RtIOFinishAlloc (`RtIOFinishAlloc.alloc`: `fail`, `envset` and `envunset` at 1000 and 4000; without arguments also `getEnv` of a set, an unset and a malformed name) |
 | HMEM-01 (hunt of leanrt's memory core): a list whose heads are boxed program payloads (pairs, structures, `Option`s, lists), dropped whole, kept each head in a 24-byte entry of Reussir's pending stack until the glue's walk along the tail ended (a leaf head too: leanrt deferred it inside a free); n = 4M pairs peaked at 391 MB, native 258 MB, consumed cell by cell 195 MB. A leaf payload is now released directly; a payload type whose cell has a wide header gets `WIDE_BIT` and is deferred `_wide`, linked through the cells (195 MB) | RtListDropWhole (`RtListDropWhole.alloc`: peak within native's plus 4000 KB, allocations and bytes as native's; on dev 0bfc2018 every mode failed the peak bound), leanrt's `any::tests::wide_cells_link_into_one_run` |
 | HRT2-02 (hunt of Reussir's drop worklist against leanrt's release paths, after HMEM-01): a boxed function value's payload number had no `WIDE_BIT` (its enum's constructors are known only at the end of the translation), so a `List (Nat → Nat)` dropped whole kept each head in a 24-byte entry of Reussir's pending stack: n = 10^6 peaked at 89 MB, native 70 MB. Function types are now numbered with `WIDE_BIT` (their enums are fused shared enums); the enum of such a type stops the translation if it has more than 2^16 constructors (46 MB) | RtListDropWhole (mode `fns`; `RtListDropWhole.alloc`: on dev 935a87fa it failed the peak bound and the bytes bound) |
