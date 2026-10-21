@@ -5,8 +5,9 @@
 # entered without allocation"). Builds RtSmDecode (a table-driven decoder
 # loop, J4 with three variants), RtStateMachines and RtJpSlots (state
 # machines carrying values of many types), RtSmU32 (a state machine of 261
-# variants) and RtSmGuard (a variant that keeps a field, the soundness
-# guard) through lean2rr to LLVM IR (scripts/l2r.py --emit llvm-ir, with the
+# variants), RtSmGuard (a variant that keeps a field, the soundness
+# guard) and RtSmNestedJp (lean-zip's inflate loop in small: join points
+# inside an outlined join point) through lean2rr to LLVM IR (scripts/l2r.py --emit llvm-ir, with the
 # .rr; the optimizations of NAME.opts off, as run.sh), and fails when
 # - the entry point of a state machine whose variants are all nullary is an
 #   enum (`enum <f>_mode`, shared or `[value]`), not an integer: a shared
@@ -22,9 +23,17 @@
 # - that integer is not a `u8` for up to 256 variants and a `u32` above;
 # - its entry point (`define ... @..._sm(`, the last parameter) is not an
 #   integer of that width in the IR;
-# - in RtSmDecode, LLVM did not thread the state machine's loop: its IR
-#   function has no block of DFAJumpThreading (`<name>.jt<N>`), so every
-#   jump goes through the `switch` at the loop's head;
+# - in RtSmDecode and RtSmNestedJp, LLVM did not thread the state
+#   machine's loop: its IR function has no block of DFAJumpThreading
+#   (`<name>.jt<N>`), so every jump goes through the `switch` at the
+#   loop's head;
+# - in RtSmNestedJp, the state machine has more than 7 variants: the join
+#   points inside its outlined slow path, whose scopes end in jumps to them,
+#   became variants instead of structured `let`s (J2) in that body, and
+#   LLVM's DFAJumpThreading refuses when cloned/original instructions
+#   exceed 7.5 (`dfa-max-cloned-rate`, LLVM 23; each state clones the
+#   loop's head and latch), which for a J4 loop means about 8 or more
+#   states;
 # - in an arm of a state machine, a call of the state machine that enters
 #   variant v passes, in a slot that v does not bind, anything other than a
 #   placeholder (`l2r_zero_N()`, `l2r_str_shared_empty()`) or that slot
@@ -41,7 +50,7 @@
 # It fails when the test is vacuous: no state machine in RtSmDecode, none
 # whose arms pass a slot on, or an IR function of none of them; in RtSmU32
 # no state machine of more than 256 variants whose function is in the IR,
-# or none of at most 256; in
+# or none of at most 256; in RtSmNestedJp no state machine in the IR; in
 # RtSmGuard no state machine whose entry point is a `[value]` enum with a
 # variant that keeps a field. It then checks itself on mutations, each of
 # which must fail: of RtSmDecode's .rr and IR, its entry point made a
@@ -50,7 +59,8 @@
 # replaced by the arm's live variable of that slot, the wildcard arm taken
 # away, the IR's entry point made a struct, and the IR's threaded blocks
 # renamed; RtSmU32's `u32` entry point made a `u8`; RtSmGuard's enum made
-# shared.
+# shared; RtSmNestedJp's threaded blocks renamed, and its bound of 7
+# variants lowered below its variant count.
 #   tests/runtime/sm-slots-check.sh
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
@@ -62,7 +72,7 @@ OUT=${L2R_TEST_BUILD:-$HERE/build}/sm-slots-check
 mkdir -p "$OUT"
 cd "$OUT"
 status=0
-for t in RtSmDecode RtStateMachines RtJpSlots RtSmU32 RtSmGuard; do
+for t in RtSmDecode RtStateMachines RtJpSlots RtSmU32 RtSmGuard RtSmNestedJp; do
   cp "$HERE/$t.lean" .
   lean -o "$t.olean" "$t.lean"
   opts=${L2R_DISABLE_OPTS:-}
@@ -139,8 +149,9 @@ def ir_function(ll, fn):
     end = ll.find('\n}\n', dm.end())
     return params, ll[dm.end():end]
 
-def check(rr, ll, threaded):
-    """The errors; the state machines with an integer entry point, the
+def check(rr, ll, threaded, maxvars=None):
+    """The errors (with at most `maxvars` variants per state machine, when
+    given); the state machines with an integer entry point, the
     slots passed on, those found in the IR; the variant count of each
     integer entry point and whether its function is in the IR (not
     inlined); the state machines whose entry point is a [value]
@@ -175,6 +186,8 @@ def check(rr, ll, threaded):
         n = len(pats) - 1
         if pats != [str(i) for i in range(n)] + ['_'] or n < 1:
             errs.append(f'{fn}: its arms are not 0..{n - 1} in order and a wildcard last ({", ".join(pats)})'); continue
+        if maxvars is not None and n > maxvars:
+            errs.append(f'{fn}: {n} variants, more than {maxvars} (LLVM DFAJumpThreading refuses about 8 or more states)')
         # A u8 for up to 256 variants, a u32 above.
         width = 8 if n <= 256 else 32
         if mode != f'u{width}':
@@ -222,8 +235,9 @@ def check(rr, ll, threaded):
                                     f'does not bind, gets the placeholder {arg} instead of itself')
     return errs, nsm, npass, nll, sizes, nkept, nstep
 
-threaded = name == 'RtSmDecode'
-errs, nsm, npass, nll, sizes, nkept, nstep = check(rr, ll, threaded)
+threaded = name in ('RtSmDecode', 'RtSmNestedJp')
+maxvars = 7 if name == 'RtSmNestedJp' else None
+errs, nsm, npass, nll, sizes, nkept, nstep = check(rr, ll, threaded, maxvars)
 for e in errs[:20]:
     print(f'FAIL {name}: {e}')
 if errs:
@@ -237,7 +251,7 @@ if name == 'RtSmU32':
     # Mutation: the u32 entry point made a u8.
     mm = re.search(r'^fn \w+_sm\(.*, (\w+) : u32\) -> ', rr, re.M)
     if mm is None or not check(rr[:mm.start(1)] + rr[mm.start(1):mm.end()].replace(' : u32)', ' : u8)') + rr[mm.end():],
-                               ll, threaded)[0]:
+                               ll, threaded, maxvars)[0]:
         print(f'FAIL {name}: the check does not catch a mutation (the u32 entry point made a u8)')
         sys.exit(1)
 if name == 'RtSmGuard':
@@ -247,8 +261,26 @@ if name == 'RtSmGuard':
         sys.exit(1)
     # Mutation: that enum made shared.
     em = re.search(r'^enum \[value\] (\w+_mode) \{', rr, re.M)
-    if em is None or not check(rr[:em.start()] + 'enum ' + rr[em.start() + len('enum [value] '):], ll, threaded)[0]:
+    if em is None or not check(rr[:em.start()] + 'enum ' + rr[em.start() + len('enum [value] '):], ll, threaded, maxvars)[0]:
         print(f'FAIL {name}: the check does not catch a mutation (the enum made shared)')
+        sys.exit(1)
+if name == 'RtSmNestedJp':
+    if nll == 0:
+        print(f'FAIL {name}: vacuous (no state machine with an integer entry point in the IR)')
+        sys.exit(1)
+    # Mutations: the threaded blocks renamed; the bound below the count.
+    sm_fns = [m.group(1) + '_sm' for m in re.finditer(r'^fn (\w+)_sm\(', rr, re.M)]
+    mll = ll
+    for f in sm_fns:
+        dm = re.search(r'^define [^@\n]*@_R\w*?\d+' + re.escape(f) + r'\(', mll, re.M)
+        if dm:
+            end = mll.find('\n}\n', dm.end())
+            mll = mll[:dm.end()] + mll[dm.end():end].replace('.jt', '.nt') + mll[end:]
+    if not check(rr, mll, threaded, maxvars)[0]:
+        print(f'FAIL {name}: the check does not catch a mutation (the threaded blocks renamed)')
+        sys.exit(1)
+    if not check(rr, ll, threaded, max(n for n, _ in sizes) - 1)[0]:
+        print(f'FAIL {name}: the check does not catch a mutation (the bound of variants below the count)')
         sys.exit(1)
 if name == 'RtSmDecode':
     if nsm == 0 or npass == 0 or nll == 0:
@@ -298,14 +330,15 @@ if name == 'RtSmDecode':
                            ('the wildcard arm taken away', mut4, ll),
                            ('the IR entry point made a struct', rr, mut5),
                            ('the threaded blocks renamed', rr, mut6)):
-        if mrr is None or mll is None or not check(mrr, mll, threaded)[0]:
+        if mrr is None or mll is None or not check(mrr, mll, threaded, maxvars)[0]:
             print(f'FAIL {name}: the check does not catch a mutation ({what})')
             sys.exit(1)
 print(f'ok {name}: {nsm} state machines with an integer entry point (variants: '
       f'{", ".join(str(n) + (" in the IR" if ir else "") for n, ir in sorted(sizes))}); {npass} slots passed on; {nll} in the IR'
       + (f'; {nkept} with a [value] enum entry point whose variant keeps a field' if nkept else '')
       + (f'; {nstep} calls that pass on a step of an outlined part' if nstep else '')
-      + ('; the loop threaded' if threaded else ''))
+      + ('; the loop threaded' if threaded else '')
+      + (f'; at most {maxvars} variants' if maxvars is not None else ''))
 PY
 done
 exit $status

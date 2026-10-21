@@ -144,7 +144,10 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   added at the end of Reussir's pipeline): RtSmDecode at size 200000,
   190.5 to 171.3 million (171.3), its decode loop 72.3 to 52.7 million
   (52.7); lean-zip on dickens, decompression (Z01d) 1985.3 million before
-  and after (1985.3: its inflate loop is not threaded in any form),
+  and after (1985.3: its inflate loop is not threaded in any form: it had
+  11 variants, more than DFAJumpThreading threads; since a join point
+  declared in an outlined body can be J2 it has 5 and is threaded,
+  [join-points.md](join-points.md#a-join-point-declared-in-an-outlined-body-can-be-j2-there)),
   compression (Z01c) 6949.8 to 6924.6 million (6949.8); Cedar (Z06d)
   57793 to 57343 million (57358).
 - **Where:** `Opt/StateMachines.lean`: `emitStateMachineAlongside`
@@ -153,7 +156,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `RtStateMachines`, `RtJpSlots`; `RtSmU32`, a state machine of 261
   variants, whose entry point is a `u32`; `RtSmGuard`, whose entry point
   is a `[value]` enum because a variant keeps a field; it also checks that
-  LLVM threads RtSmDecode's loop). `RtSmU32` and `RtSmGuard` turn
+  LLVM threads the loops of RtSmDecode and `RtSmNestedJp`, lean-zip's
+  inflate loop in small). `RtSmU32` and `RtSmGuard` turn
   `jp-small` off (`.opts`): it would copy their small join points to the
   jumps, and no state machine would be left.
 - **Remove only if:** never (speed only).

@@ -14,7 +14,8 @@ relative to `lean2rr/LeanToReussir/`. Plan
   or, in a loop, a variant of a state machine (J4). The choice is a
   fixpoint over the declaration: J2 needs every jump to stay in the same
   Reussir function, so a join point jumped to from inside an outlined body
-  cannot be J2; it is outlined too unless J1 or J1′ inlines it there.
+  cannot be J2 (unless it is declared in that body: next entry); it is
+  outlined too unless J1 or J1′ inlines it there.
 - **Why:** J3 is the last resort: a self tail call through an outlined
   function makes a loop mutually recursive, and LLVM makes a mutual tail
   call a jump only when it can be a sibling call (a `for` loop overflowed a
@@ -25,6 +26,59 @@ relative to `lean2rr/LeanToReussir/`. Plan
   `endsInJumps`, `jumpsIn`, `jpBodiesOf`; `Lower/Code.lean`: `lowerCode`
   (the `.jp` and `.jmp` cases); `Lower/Ctx.lean`: `JumpAction`.
 - **Remove only if:** never.
+
+### A join point declared in an outlined body can be J2 there
+
+- **What:** For the rule above, only the outlined join points declared in
+  the join point's scope count, not the outlined join points around its
+  declaration. A join point declared inside the body of an outlined join
+  point (J3, or a variant of a state machine, J4), whose scope ends in
+  jumps to it on every path, is a structured `let` (J2) in that body.
+  Example: the slow path of lean-zip's inflate loop
+  (`InflateBuf.goTreeFreeU`) is an outlined join point of the loop's state
+  machine. Inside it are the join points of the inlined table lookup (the
+  `||` of `if len == 0 || len > cnt`, the value of `let e := if i < size
+  then a[i] else 0`) and of the `Except` results of the inlined `takeBits`.
+  Each of them was a variant of the state machine (11 variants). Now each
+  is a `let` in the slow path's arm (5 variants).
+- **Why:** A jump to a join point can only be in its scope, and the scope
+  is inside every body that contains the declaration. So the outlined join
+  points around the declaration are one function with all its jumps. Only
+  an outlined join point declared in the scope can hold a jump from another
+  function; the check counts those as before. Each extra variant costs a
+  jump through the `switch` at the head of the state machine's loop: the
+  moves of the slots and an indirect branch. LLVM's DFAJumpThreading turns
+  those jumps into direct ones, but it refuses when cloned/original
+  instructions exceed 7.5 (`dfa-max-cloned-rate`, LLVM 23; each state
+  clones the loop's head and latch), which for a J4 loop means about 8 or
+  more states. The 11-variant inflate loop was not threaded (its `switch`
+  had all of the benchmark's indirect mispredicts); the 5-variant one is.
+  Measured (cachegrind with branch simulation, SVE off, 2026-10-21, against
+  101746e5; instructions, then indirect and conditional mispredicts): the
+  inflate loop on dickens (ZipBench `d`), 1148 to 496 million instructions,
+  14.3 million mispredicted dispatches to none; Z01t (decompression of the
+  Silesia tar, ZipBench) 37.79 to 27.77 billion (native 28.07), 217.8
+  million to 189, 128.8 to 119.1 million; Z01d (the same through
+  Survey.Main) 33.57 to 23.55 billion (native 25.14), 217.8 million to 199,
+  108.3 to 139.2 million; Z01r (round trip at level 9) 129.64 to 127.84
+  billion (native 117.87), 50.0 million to 256, 344.4 to 316.9 million;
+  Z01c (compression) 149.72 to 151.01 billion (+0.9%; native 125.60), 19296
+  before and after, 557.5 to 418.1 million (its `lz77LazyMergedLoop` runs
+  3% more instructions: LLVM inlines and threads more of it); Cedar (Z06t,
+  Z06g, Z06d) unchanged (-0.003% instructions). Cachegrind's model predicts
+  a conditional branch from its address and the last branches in a table of
+  16384 counters, so a new code layout alone moves its conditional
+  mispredicts: in Cedar by -2% to +12%, also in functions whose code did
+  not change (mimalloc's). Only the instructions and the indirect
+  mispredicts above are firm. Wall time: at the next joint benchmark. Of
+  the bench set's 47 programs, only lean-zip's two drivers and Cedar change
+  (the `.rr` of the others is byte-identical); lean-zip's `.rr` is 5.8%
+  smaller, and its 19 state machines have 81 match arms instead of 146.
+- **Where:** `Lower/JoinPoints.lean`: `chooseOutlined` (`inside`,
+  `jumpedFromOutlined`). Test: `RtSmNestedJp` (its state machine has 5
+  variants, 10 before), checked by `tests/runtime/sm-slots-check.sh` (at
+  most 7 variants, and the loop threaded).
+- **Remove only if:** never (the condition is exact).
 
 ### A J2 join point with several parameters yields a value tuple
 

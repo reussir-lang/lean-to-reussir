@@ -1622,8 +1622,10 @@ allocation (test `RtJpSlots`).
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
 - J2 requires every jump to `j` to stay inside the same Reussir function.
-  If `j` is also jumped to from inside a join point that was outlined, `j`
-  is outlined too.
+  If `j` is also jumped to from inside a join point that was outlined and
+  that is declared in `j`'s scope, `j` is outlined too. A join point
+  declared inside an outlined body is in that body's function with all its
+  jumps, so it can be J2 there.
 - Inner join points are lowered before the outer ones that contain them.
 
 **Why the choice matters beyond style.**

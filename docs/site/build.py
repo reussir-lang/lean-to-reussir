@@ -288,8 +288,8 @@ def gen_testsets():
         ["Inlined textures", "<code>tests/runtime/ffi-inline-check.sh</code>", f"{ffi_inline_tests()} runtime tests",
          "no call through the FFI boundary in their LLVM IR (it would keep a loop's tail call); "
          "no array read left as a call in <code>RtReadsDeep</code> and no array set in <code>RtArraySets</code>"],
-        ["State machine slots", "<code>tests/runtime/sm-slots-check.sh</code>", "5 runtime tests",
-         "the entry point of a state machine whose variants are all nullary is an integer (a <code>u8</code>, a <code>u32</code> above 256 variants), and LLVM threads RtSmDecode's loop; a variant that keeps a field makes the entry point a shared enum; a jump passes on the slots that its arm does not bind, and puts no live value in a slot that its target does not bind"],
+        ["State machine slots", "<code>tests/runtime/sm-slots-check.sh</code>", "6 runtime tests",
+         "the entry point of a state machine whose variants are all nullary is an integer (a <code>u8</code>, a <code>u32</code> above 256 variants), and LLVM threads the loops of RtSmDecode and RtSmNestedJp; a variant that keeps a field makes the entry point a <code>[value]</code> enum; a jump passes on the slots that its arm does not bind, and puts no live value in a slot that its target does not bind"],
         ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
          "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
         ["Refused externs", "<code>tests/runtime/allow-missing-check.sh</code>", "1 program",

@@ -329,6 +329,11 @@ code.</p>
   new value" in one function. Reussir's token reuse needs that to update in
   place.</li>
 </ul>
+<p>A join point inside the body of an outlined join point can be J2 in that
+body: its jumps are all in the same function. So a state machine gets a
+variant only for a join point that needs one. LLVM's DFAJumpThreading
+refuses to thread a loop when its cloned/original instructions exceed 7.5,
+which for a J4 loop means about 8 or more states.</p>
 <h3 id="externs-and-glue">Externs and glue</h3>
 <p>A call of an extern of Lean's library becomes a call of the prelude
 function with the extern's C symbol as its name (<code>lean_nat_add</code>). The

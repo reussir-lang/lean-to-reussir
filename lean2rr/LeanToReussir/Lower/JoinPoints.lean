@@ -93,19 +93,26 @@ partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bo
     if counts.getD d.fvarId 0 ≤ 1 then s.insert d.fvarId else s
   let scope : JpScope := { bodies := jpBodiesOf body, single := once, loop }
   let mut outlined : FVarIdSet := {}
+  -- The join points declared inside the body of each outlined join point.
+  let mut inside : Std.HashMap FVarId FVarIdSet := {}
   let mut changed := true
   while changed do
     changed := false
     for (d, k) in jps do
       if outlined.contains d.fvarId then continue
       let single := counts.getD d.fvarId 0 ≤ 1
-      -- A J2 join point cannot be the target of a jump from inside an outlined body.
+      -- A J2 join point cannot be the target of a jump from inside an
+      -- outlined body (another function). An outlined join point whose
+      -- body declares it does not count: its scope, and so every jump to
+      -- it, is inside that body too.
       let jumpedFromOutlined := jps.any fun (d', _) =>
-        outlined.contains d'.fvarId && (jumpsIn d'.value {}).contains d.fvarId
+        outlined.contains d'.fvarId && !(inside.getD d'.fvarId {}).contains d.fvarId &&
+          (jumpsIn d'.value {}).contains d.fvarId
       let ok := single || duplicate scope d (counts.getD d.fvarId 0) ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId
+        inside := inside.insert d.fvarId ((jpBodiesOf d.value).fold (fun s j _ => s.insert j) {})
         changed := true
   return outlined
 

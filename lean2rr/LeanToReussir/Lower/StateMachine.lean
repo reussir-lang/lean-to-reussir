@@ -53,7 +53,8 @@ where
 /-- The code that the function of an outlined join point with body `c`
 contains: `c`, and the bodies (`bodies`) of the join points it jumps to that
 are not outlined, transitively. Those are inlined at the jump (J1 or J1′; a
-J2 join point is never jumped to from an outlined body). -/
+J2 join point is jumped to from an outlined body only when that body
+declares it, and then `c` contains its body already). -/
 partial def withInlinedJps (bodies : Std.HashMap FVarId (Code .pure)) (outlined : FVarIdSet) (c : Code .pure) :
     Array (Code .pure) := Id.run do
   let mut out := #[c]

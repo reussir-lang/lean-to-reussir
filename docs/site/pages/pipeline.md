@@ -265,6 +265,12 @@ The choice matters for two reasons:
   new value" in one function. Reussir's token reuse needs that to update in
   place.
 
+A join point inside the body of an outlined join point can be J2 in that
+body: its jumps are all in the same function. So a state machine gets a
+variant only for a join point that needs one. LLVM's DFAJumpThreading
+refuses to thread a loop when its cloned/original instructions exceed 7.5,
+which for a J4 loop means about 8 or more states.
+
 ### Externs and glue
 
 A call of an extern of Lean's library becomes a call of the prelude
