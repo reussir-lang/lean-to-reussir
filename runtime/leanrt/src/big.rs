@@ -31,7 +31,8 @@
 //! referenced and has room for it, or else into a fresh block; a block
 //! grows (`mi_realloc`) only when a result computed in place carries out
 //! of it, and shrinks when a result leaves most of it unused (`set`). The
-//! rare operations (`pow`, `gcd`, parsing, printing) give GMP's `mpz_*`
+//! rare operations (`pow`, `gcd`, parsing, printing), and the truncated
+//! quotient by a divisor of two limbs or more (`div`), give GMP's `mpz_*`
 //! functions read-only `mpz_t` views of the operands (`MPZ_ROINIT_N`) and
 //! copy a result out of a temporary `mpz_t`.
 //! Lean's rules (`src/runtime/object.cpp`: truncating subtraction, `x / 0 =
@@ -739,9 +740,12 @@ enum Div {
     ER,
 }
 
-/// Division with signs; `b` nonzero. The quotient and the remainder are
-/// computed into scratch limbs and the requested one copied into an
-/// operand's block when one is unique, else into a fresh block.
+/// Division with signs; `b` nonzero. A dividend smaller in magnitude gives
+/// its answer at once; a truncated quotient by a divisor of two limbs or
+/// more comes from GMP's `mpz_tdiv_q`; otherwise the quotient and the
+/// remainder are computed into scratch limbs (`mpn_tdiv_qr`,
+/// `mpn_divrem_1`). The result is copied into an operand's block when one
+/// is unique, else into a fresh block.
 fn div(a: LBig, b: LBig, k: Div) -> LBig {
     let (na, nb) = (a.len(), b.len());
     debug_assert!(nb > 0);
@@ -760,6 +764,24 @@ fn div(a: LBig, b: LBig, k: Div) -> LBig {
             }
             Div::TQ | Div::EQ => zero(a, b),
         };
+    }
+    // The truncated quotient by a divisor of two limbs or more (`Nat./`,
+    // `Int.tdiv`): GMP's quotient-only division (`mpz_tdiv_q`, through
+    // `mpn_div_q`), as native Lean's: it computes an approximate quotient
+    // and corrects it, where `mpn_tdiv_qr` below also forms the remainder,
+    // a further multiplication of the divisor's size (the classic Bignum
+    // made 27% more of GMP's multiplications than native, all inside such
+    // divisions). A one-limb divisor stays on `mpn_divrem_1`.
+    if k == Div::TQ && nb > 1 {
+        let mut t = OwnedMpz::new();
+        let (x, y) = (view(&a), view(&b));
+        unsafe { __gmpz_tdiv_q(t.ptr(), &x, &y) };
+        let n = t.0.size.unsigned_abs() as usize;
+        // |q| <= |a|: `a`'s block holds it when `a` is unique.
+        let mut out = either(a, b, n);
+        unsafe { ptr::copy_nonoverlapping(t.0.d, out.ptr(), n) };
+        out.set(n, t.0.size < 0);
+        return out;
     }
     let qn = if na >= nb { na - nb + 1 } else { 0 };
     let (mut qs, mut qh) = ([0u64; SMALL], Vec::new());

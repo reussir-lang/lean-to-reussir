@@ -587,6 +587,30 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **Remove only if:** Lean computes `BitVec.ofNat` without `2 ^ w`; else
   never (speed only).
 
+### A truncated quotient uses GMP's quotient-only division
+
+- **What:** `big::div` computes the truncated quotient (`Nat./`,
+  `Int.tdiv`) by a divisor of two limbs or more with `mpz_tdiv_q` on
+  read-only views of the operands (`view`), and copies the result into an
+  operand's block when one is unique (`either`), else into a fresh one.
+  The other divisions keep `mpn_tdiv_qr` (the remainders, and `Int.ediv`,
+  which needs to know whether the remainder is zero when the dividend is
+  negative); a one-limb divisor keeps `mpn_divrem_1`.
+- **Why:** `mpz_tdiv_q` (through `mpn_div_q`) computes an approximate
+  quotient and corrects it; `mpn_tdiv_qr` also forms the remainder, a
+  further multiplication of the divisor's size. Native Lean's `Nat./` and
+  `Int.tdiv` use `mpz_tdiv_q` (`mpz::operator/=`), its `Int.ediv`
+  `mpz_tdiv_qr`. The classic Bignum (L11: Newton square roots, `n! /
+  (n-1)!`, Int divisions of big operands) made 27% more of GMP's
+  multiplications than native, all inside divisions by multi-limb
+  divisors (callgrind: 361 K multiplications from those divisions, native
+  134 K).
+- **Where:** `leanrt/src/big.rs`: `div`; unit tests `big::tests`
+  (`large_mixed`: `int_tdiv` against `mpz_tdiv_q` for operands of 1 to 70
+  limbs, signed, unique, shared and roomy, and `(a * b) / b == a`;
+  `nat::tests` against `u128` arithmetic).
+- **Remove only if:** GMP's `mpn_tdiv_qr` gains a quotient-only mode.
+
 ### Literals: small below 2^63, big ones parsed from their decimal text
 
 - **What:** A `Nat` literal below 2^63 (`natIsSmall`) is
