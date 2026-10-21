@@ -1,0 +1,8 @@
+# Each cycle one million calls deep on a 1 MiB stack (natively: sibling calls, constant stack).
+LEAN_STACK_SIZE_KB=1024 $BIN io 1000000; echo "io (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN ionat 1000000; echo "ionat (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN except 1000000; echo "except (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN three 1000000; echo "three (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN nat 1000000; echo "nat (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN slots 1000000; echo "slots (1 MiB stack): exit $?"
+$BIN; echo "exit $?"

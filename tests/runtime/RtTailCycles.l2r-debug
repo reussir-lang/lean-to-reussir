@@ -1,0 +1,6 @@
+lean2rr: one state machine for a cycle of tail calls: #[ia, ib]
+lean2rr: one state machine for a cycle of tail calls: #[ja, jb]
+lean2rr: one state machine for a cycle of tail calls: #[ea, eb]
+lean2rr: one state machine for a cycle of tail calls: #[ta, tb, tc]
+lean2rr: one state machine for a cycle of tail calls: #[na, nb]
+lean2rr: one state machine for a cycle of tail calls: #[sa, sb]

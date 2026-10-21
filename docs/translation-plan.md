@@ -1619,6 +1619,40 @@ without a slot (its other variants are nullary). The pass checks
 this on every state machine. So a jump costs a jump and the moves of its slots, and no
 allocation (test `RtJpSlots`).
 
+**Cycles of tail calls between declarations: one more state machine.**
+Native Lean's C code makes a tail call between two functions a sibling
+call (a jump), so mutually recursive functions that call each other in
+tail position run in constant stack. Separate Reussir functions do not
+always: LLVM makes no sibling call when the result has several words
+whose returns it merged into one block (`flatten-structs`' tuples), or
+when the callee needs more stack arguments than the caller received (a
+state machine's slots). So a cycle of tail calls (a strongly connected
+group, of two or more, of the graph of saturated tail calls between
+declarations) also runs in one state machine, named after the first
+declaration in lean2rr's internal order of declarations (`f_cyc_sm`): one
+entry variant per declaration, whose fields
+are its parameters and whose arm is its code, and one entry function per
+declaration (`g_cyc`), which enters at its variant. Each declaration keeps
+its own function, lowered as if it were alone, except that its tail calls
+of the other declarations of the cycle call their entry functions. In the
+state machine, a tail call of a declaration of the cycle enters at its
+variant, a self tail call. A call that is not a tail call calls the
+callee's own function, also from the state machine: LLVM sizes the state
+machine's frame for all its arms, and a deep recursion of a small
+declaration in a cycle with a big one would use the big frame at every
+level (test `RtTailCyclesStack`). So the state machine is entered only by
+a tail call between two declarations of the cycle. A recursion that is not
+a tail call but passes such a tail call at every level still enters it at
+every level, with its big frame (test `RtTailCyclesStack2`, an expected
+failure; planned: each arm a function of its own that returns the next
+step, run by a small trampoline loop). No state machine:
+declarations with different result types. A tail call of another
+declaration (the first one too) that keeps an argument until it returns
+stays a call of the callee's own function (§5.8): natively it is no tail
+call either, as Lean keeps tail calls only for a declaration's calls of
+itself (test `RtTailCyclesBorrow`). (Tests `RtTailCycles`,
+`RtOutlineStates`.)
+
 **Choice and nesting.** J1 applies first, then J2, then J1' (small), then
 J3 (J4 when an outlined body tail-calls the declaration).
 - J2 requires every jump to `j` to stay inside the same Reussir function.

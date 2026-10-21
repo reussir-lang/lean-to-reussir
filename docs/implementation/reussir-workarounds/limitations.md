@@ -65,11 +65,14 @@ files, `runtime/` and `scripts/` from the repository root.
 - **What:** lean2rr keeps loops as self tail calls within one function:
   join points are inlined, structured or duplicated before being outlined
   (J1, J2, J1′), a loop through outlined join points is one state machine
-  (J4), and `Outline`'s parts of a recursive function return step values
-  instead of tail-calling across functions.
+  (J4), so is a cycle of tail calls between declarations, and `Outline`'s
+  parts of a recursive function return step values instead of
+  tail-calling across functions.
 - **Why:** LLVM turns a self tail call into a loop, but a mutual tail call
   only becomes a sibling call when all arguments fit in registers, and
-  Reussir's reference counting after a call can prevent it.
+  Reussir's reference counting after a call can prevent it, and so can a
+  result of several words whose returns LLVM merged into one block
+  ([../control-flow/state-machines.md](../control-flow/state-machines.md#a-cycle-of-tail-calls-between-declarations-runs-in-one-state-machine)).
 - **Where:** [../control-flow/join-points.md](../control-flow/join-points.md),
   [../control-flow/state-machines.md](../control-flow/state-machines.md),
   [../control-flow/outline.md](../control-flow/outline.md#recursive-functions-keep-their-loops-step-values).

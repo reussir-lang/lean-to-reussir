@@ -29,13 +29,38 @@ inductive JumpAction where
   variant (see `StateMachine`). -/
   | enter (variant : String) (captured : Array String)
 
+/-- Another declaration of a state machine that runs a cycle of
+declarations calling each other in tail position (`tailCallGroups`): its
+entry variant, whose fields are its parameters, its arity, and the function
+that enters the state machine at that variant. A tail call of it from the
+state machine re-enters the state machine at that variant; a tail call of
+it from another declaration's own function calls `entryFn`. -/
+structure SmMember where
+  name : Name
+  variant : String
+  arity : Nat
+  /-- Its parameters (the variant's fields): names and types. -/
+  params : Array (String × RR.Ty)
+  /-- The function, with its parameters, that enters the state machine at
+  `variant` (`fnName name ++ "_cyc"`; the declaration's own function is
+  `fnName name`). -/
+  entryFn : String
+  deriving Inhabited
+
 /-- A self-recursive declaration whose outlined join points call it back in
 tail position is lowered as one function over an enum of entry points (J4,
 translation plan §5.6): the declaration's own entry and one variant per
 outlined join point. Jumps to those join points and self tail calls become
 self tail calls of that function, which LLVM turns into a loop; separate
 functions would make the loop mutually recursive, using stack per
-iteration. Planned and emitted by the lowering hook
+iteration. Declarations that call each other in tail position (a cycle,
+`tailCallGroups`) also run in one state machine, with an entry variant per
+declaration (`members`): a tail call between them re-enters it, where a
+call between separate functions uses stack per call unless LLVM makes it a
+sibling call. That state machine is named apart from the first
+declaration's own (`entryFn`): each declaration keeps its own function,
+and only its tail calls of the others enter the cycle's state machine
+(`CodeCtx.cycle`). Planned and emitted by the lowering hook
 `LowerHooks.stateMachine`; `lowerCode` re-enters it when the context has
 one. -/
 structure StateMachine where
@@ -55,6 +80,13 @@ structure StateMachine where
   /-- Names of the declaration's parameters. -/
   params : Array String
   entry : String := "e"
+  /-- The function, with the declaration's parameters, that enters the
+  state machine at `entry`: the declaration's own function (`fnName self`),
+  or for the state machine of a cycle of tail calls `fnName self ++ "_cyc"`. -/
+  entryFn : String
+  /-- The other declarations of its cycle of tail calls (`SmMember`), in
+  the order of their entry variants; none for a single declaration. -/
+  members : Array SmMember := #[]
   /-- Which form of state machine this is: `.anonymous` for the core's
   (`Lower/StateMachine`); an optional pass that plans another form tags it
   with its name, and its hooks handle that form only. -/
@@ -77,6 +109,16 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   /-- The declarations of the call cycle of the declaration being lowered
   (`JpScope.loop`). -/
   loop : NameSet := {}
+  /-- The declaration whose code is being lowered (its own function, or its
+  arm of a cycle's state machine): a tail call of another declaration is
+  no tail call natively when the caller keeps an argument until it returns
+  (`borrowKeeps`), and stays a call. -/
+  decl : Name := .anonymous
+  /-- While a declaration's own function is lowered: the state machine of
+  its cycle of tail calls (`lowerGroup`), if any. A tail call of another
+  declaration of the cycle enters it (calls that declaration's entry
+  function, `StateMachine.entryFn`, `SmMember.entryFn`). -/
+  cycle : Option StateMachine := none
   /-- Variables that a hook bound again, in the current alternative, to a
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/

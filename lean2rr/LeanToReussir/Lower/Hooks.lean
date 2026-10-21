@@ -78,11 +78,16 @@ def bindStructFields (ctx : CodeCtx) (arm : CasesArm) : LowerM (ArmLets × CodeC
 /-- J4 (translation plan §5.6): a declaration lowered as one state machine. -/
 structure StateMachineHook where
   /-- The state machine to lower declaration `d` as (its body, outlined join
-  points and parameter names given), if any. -/
-  plan : (d : Decl .pure) → Code .pure → FVarIdSet → Array String → Option StateMachine
+  points and parameter names given), if any; when the last argument is
+  `true`, always one: the state machine of the cycle of tail calls whose
+  first declaration is `d` (`lowerGroup`), named apart from `d`'s own. -/
+  plan : (d : Decl .pure) → Code .pure → FVarIdSet → Array String → Bool → Option StateMachine
   /-- Emit the functions of declaration `d` lowered as a state machine, given
   its parameters, result type and lowered entry code (the outlined join
-  points' variants are in `LowerState.smArms`). -/
+  points' variants are in `LowerState.smArms`, with the entries of the other
+  declarations of its cycle of tail calls, `StateMachine.members`, whose
+  entry functions it emits too): the dispatching function and the function
+  that enters at `d`'s variant (`StateMachine.entryFn`). -/
   emit : (d : Decl .pure) → StateMachine → Array (String × RR.Ty) → RR.Ty → RR.Block → LowerM Unit
   /-- A self tail call of the declaration, with the new arguments. -/
   selfCall : StateMachine → Array RR.Expr → LowerM RR.Expr

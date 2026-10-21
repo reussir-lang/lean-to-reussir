@@ -1,0 +1,1 @@
+A recursion that is not a tail call but passes a tail call between two declarations of a cycle of tail calls at every level enters the cycle's state machine at every level, whose frame LLVM sizes for all its arms (docs/implementation/control-flow/state-machines.md): 5000 levels overflow a 1 MiB stack, natively and with each declaration a function of its own they pass.

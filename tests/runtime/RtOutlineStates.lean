@@ -1,8 +1,10 @@
 /-! Runtime test: two long mutually recursive IO functions that lean2rr
 outlines into parts and runs as one J4 state machine (translation plan §5.6,
 88 variants), calling each other in tail position deep inside their bodies.
-They run 300000 steps (`RtOutlineStates.args`; the original default was
-2000), so a loop that grew the stack per step would show.
+They run 300000 steps on a 1 MiB stack (`RtOutlineStates.pipe`), so a loop
+that grew the stack per step fails, as it did while each function was a
+state machine of its own (until 2026-10-21: a frame of 288 bytes per call
+between them; `RtTailCycles`).
 From the round-7 review, area L (rv7/lowering), check 9 (LwOutMut). -/
 
 -- Two mutually recursive IO functions long enough to be outlined, calling each other in tail position deep inside

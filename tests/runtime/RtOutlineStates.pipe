@@ -1,0 +1,3 @@
+# 300000 steps on a 1 MiB stack (natively: sibling calls, constant stack); then the default run (2000 steps).
+LEAN_STACK_SIZE_KB=1024 $BIN 300000; echo "300000 steps (1 MiB stack): exit $?"
+$BIN; echo "exit $?"

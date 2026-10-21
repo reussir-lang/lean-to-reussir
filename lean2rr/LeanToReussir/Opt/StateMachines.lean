@@ -174,9 +174,12 @@ def smCall (sm : StateMachine) (lay : SlotLayout) (v : String) (fs : Array (Stri
 /-- Emit declaration `d` lowered as state machine `sm` with its values in
 slots (see the module comment): the dispatching function (the slots, then
 the entry point) over the lowered entry code `block` and the outlined join
-points' variants (`LowerState.smArms`), the declaration's function, which
-enters at its own variant, and the entry-point enum (none when the entry
-point is an integer). -/
+points' variants (`LowerState.smArms`, with the entries of the other
+declarations of its cycle of tail calls, `sm.members`), the function that
+enters at its own variant (`sm.entryFn`: the declaration's function, or for
+a cycle's state machine its entry function), the entry functions of the
+other declarations, each entering at its variant, and the entry-point enum
+(none when the entry point is an integer). -/
 def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
   let arms ← getPart (·.smArms)
@@ -234,11 +237,17 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
   let m ← fresh "m"
   let slotParams := lay.slots.map fun (n, t, _) => (n, t)
   let enter ← smCall sm lay sm.entry params (params.map fun (n, _) => RR.Expr.var n)
+  -- The entry functions of the other declarations of its cycle of tail
+  -- calls: each enters at its own variant.
+  let memberFns ← sm.members.mapM fun mb => do
+    let e ← smCall sm lay mb.variant mb.params (mb.params.map fun (n, _) => RR.Expr.var n)
+    return RR.Item.fn mb.entryFn mb.params ret (.ofExpr e)
   modify fun s => { s with
     typeItems := if scalar then s.typeItems else s.typeItems.push (RR.Item.enum sm.mode true modeVariants)
     fns := s.fns
       |>.push (.fn sm.fn (slotParams.push (m, modeTy)) ret (.ofExpr (.mtch (.var m) matchArms)))
-      |>.push (.fn (fnName d.name) params ret (.ofExpr enter))
+      |>.push (.fn sm.entryFn params ret (.ofExpr enter))
+      |>.append memberFns
     smArms := #[] }
 
 /-- The form of state machine this pass plans and handles. -/
@@ -259,8 +268,8 @@ this form; the hooks handle it and leave other forms to the earlier ones. -/
 def Opt.StateMachines.install (c : PassConfig) : PassConfig :=
   let prev := c.lower.stateMachine
   { c with lower := { c.lower with stateMachine :=
-      { plan := fun d body outlined pnames =>
-          (prev.plan d body outlined pnames).map ({ · with form := alongsideForm })
+      { plan := fun d body outlined pnames cycle =>
+          (prev.plan d body outlined pnames cycle).map ({ · with form := alongsideForm })
         emit := fun d sm params ret block =>
           if sm.form == alongsideForm then emitStateMachineAlongside d sm params ret block
           else prev.emit d sm params ret block

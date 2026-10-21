@@ -109,6 +109,44 @@ def closedLetValue (v : LetValue .pure) (e : RR.Expr) : LowerM (Option RR.Expr) 
 section
 variable (H : LowerHooks)
 
+/-- The call that tail call `let x := f args; return x` (at the result type
+of the code) becomes in context `ctx`, if it enters a state machine (J4,
+translation plan §5.6):
+- in a state machine, a tail call of its declaration re-enters it at the
+  entry, and one of another declaration of its cycle of tail calls at that
+  declaration's variant (`StateMachine.members`): a self tail call of the
+  dispatching function, which LLVM turns into a loop;
+- in a declaration's own function, a tail call of another declaration of
+  its cycle (`CodeCtx.cycle`) calls that declaration's entry function of
+  the cycle's state machine (`StateMachine.entryFn`, `SmMember.entryFn`),
+  where the cycle then runs.
+A tail call of another declaration than the one whose code it is
+(`CodeCtx.decl`) stays a call when the caller keeps an argument until it
+returns (`borrowKeeps`, Lower/Borrow): natively no tail call either (Lean's
+borrow inference keeps tail calls only for calls of the declaration itself,
+`InferBorrow.preserveTailCall`). -/
+def tailCallEntry (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) : LowerM (Option RR.Expr) := do
+  let inMachine : Option (Nat × (Array RR.Expr → LowerM RR.Expr)) := ctx.sm.bind fun sm =>
+    if f == sm.self then some (sm.arity, H.stateMachine.selfCall sm)
+    else (sm.members.find? (·.name == f)).map fun mb => (mb.arity, H.stateMachine.jumpCall sm mb.variant)
+  let intoCycle : Option (Nat × (Array RR.Expr → LowerM RR.Expr)) := ctx.cycle.bind fun cy =>
+    let call (fn : String) (vals : Array RR.Expr) : LowerM RR.Expr := pure (.call fn #[] vals)
+    if f == ctx.decl then none
+    else if f == cy.self then some (cy.arity, call cy.entryFn)
+    else (cy.members.find? (·.name == f)).map fun mb => (mb.arity, call mb.entryFn)
+  let some (arity, enter) := inMachine <|> intoCycle | return none
+  if args.size != arity then return none
+  if f != ctx.decl then
+    unless (← borrowKeeps ctx f args args.size).isEmpty do return none
+  let some fd := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
+  let (ps, _) := splitFnType fd.type args.size
+  -- Rule 4a: the arguments of the parameters it takes.
+  let keep := keepMask (fd.params.map (·.type))
+  let mut vals := #[]
+  for h : i in [:min args.size ps.size] do
+    if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
+  return some (← enter vals)
+
 mutual
   /-- Lower a code block whose value has Reussir type `retTy`. -/
   partial def lowerCode (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (c : Code .pure) :
@@ -136,20 +174,11 @@ mutual
           | some v, _ | none, some v => m.insert x v
           | none, none => m
         let ctx := { base with vars := small }
-        -- J4: a self tail call re-enters the state machine.
-        if let some sm := ctx.sm then
-          if let .const f _ args _ := d.value then
-            if f == sm.self && args.size == sm.arity && t == retTy then
-              if let .return x := k then
-                if x == d.fvarId then
-                  let some selfDecl := (← read).decls.find? f | throwError "lean2rr: no declaration {f}"
-                  let (ps, _) := splitFnType selfDecl.type sm.arity
-                  -- Rule 4a: the arguments of the parameters it takes.
-                  let keep := keepMask (selfDecl.params.map (·.type))
-                  let mut vals := #[]
-                  for h : i in [:min args.size ps.size] do
-                    if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
-                  return ⟨lets, ← H.stateMachine.selfCall sm vals⟩
+        -- J4: a tail call that enters a state machine (`tailCallEntry`).
+        if let .const f _ args _ := d.value then
+          if let .return x := k then
+            if x == d.fvarId && t == retTy then
+              if let some e ← tailCallEntry H ctx f args then return ⟨lets, e⟩
         -- A box that only goes into boxes is bound as a `Box`
         -- (`CodeCtx.boxedOnly`, `letValueBoxed`): a box field or a callee's
         -- `Box` result is not unboxed only to be boxed again.
@@ -449,16 +478,24 @@ mutual
     H.lowerAlt (lowerAlt · outlined retTy) (lowerCode · outlined retTy) ctx retTy k
 end
 
-/-- Lower a declaration with code to a Reussir function. -/
-def lowerDecl (d : Decl .pure) : LowerM Unit := do
-  let .code body := d.value | return
-  -- A constant whose code is one string literal (or one read of such a
-  -- constant) has no function: its reads call the literal cache
-  -- (`strLitCached`).
-  if (← read).litConsts.contains d.name then return
+/-- What lowering a declaration's code needs, set up from the declaration:
+its body (after `LowerHooks.prepareBody`), Reussir parameters and their
+variables, result type, call cycle and outlined join points. -/
+structure DeclSetup where
+  body : Code .pure
+  /-- The result's LCNF type and Reussir type. -/
+  resTy : Expr
+  ret : RR.Ty
+  params : Array (String × RR.Ty)
+  vars : Std.HashMap FVarId (String × RR.Ty)
+  loop : NameSet
+  outlined : FVarIdSet
+  deriving Inhabited
+
+/-- Set up declaration `d` (with code `body`) for lowering. -/
+def setupDecl (d : Decl .pure) (body : Code .pure) : LowerM DeclSetup := do
   let body := H.prepareBody body
-  let (ps, r) := splitFnType d.type d.params.size
-  let _ := ps
+  let (_, r) := splitFnType d.type d.params.size
   let ret ← lowerType r
   -- Rule 4a: the Reussir function takes an erased parameter only when it
   -- is the last one (one unit for the trailing erased ones); the others
@@ -474,28 +511,54 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
       params := params.push (x, t)
       vars := vars.insert p.fvarId (x, t)
     else vars := vars.insert p.fvarId ("L2RUnit::u{}", .unit)
-  let pnames := params.map (·.1)
-  -- `IO.Process.output`: generated glue instead of Lean's body (see
-  -- `processOutputBody`).
-  let orig := ((← read).keys.find? d.name).map (·.decl) |>.getD d.name
-  if orig == ``IO.Process.output && d.params.size == 3 then
-    let block ← processOutputBody params ret r
-    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
-    return
   let loop := ((← read).callCycles.find? d.name).getD {}
   let outlined := chooseOutlined H.duplicateJp loop body
-  -- J4: the declaration as one state machine when an outlined join point
-  -- calls it back in tail position (`LowerHooks.stateMachine`).
-  let sm? := H.stateMachine.plan d body outlined pnames
-  modify fun s => { s with smArms := #[] }
-  let ctx : CodeCtx := { vars, sm := sm?, loop, used := codeUses body {},
-                         boxedOnly := ← boxedOnlyVars body ret }
+  return { body, resTy := r, ret, params, vars, loop, outlined }
+
+/-- Lower the code of declaration `d` (set up as `su`) in state machine
+`sm?`, if any; `cycle?`: the state machine of its cycle of tail calls, when
+this is its own function (`CodeCtx.cycle`). -/
+def lowerDeclCode (d : Decl .pure) (su : DeclSetup) (sm? : Option StateMachine)
+    (cycle? : Option StateMachine := none) : LowerM RR.Block := do
+  let ctx : CodeCtx := { vars := su.vars, sm := sm?, loop := su.loop, used := codeUses su.body {},
+                         boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycle := cycle? }
   -- The body of a declaration without parameters runs once: a constant
   -- boxed there is boxed in line (`boxOf`), not given a once-cell.
   modify fun s => { s with inConstBody := d.params.isEmpty }
-  let block ← try lowerCode H ctx outlined ret body
+  let block ← try lowerCode H ctx su.outlined su.ret su.body
     catch e => throwError "{e.toMessageData}\n  while lowering {d.name}"
   modify fun s => { s with inConstBody := false }
+  return block
+
+/-- Whether declaration `d` gets lowered code of its own (not the glue of
+`IO.Process.output`, `processOutputBody`). -/
+def ownLowering (d : Decl .pure) : LowerM Bool := do
+  let orig := ((← read).keys.find? d.name).map (·.decl) |>.getD d.name
+  return !(orig == ``IO.Process.output && d.params.size == 3)
+
+/-- Lower a declaration with code to a Reussir function; `cycle?`: the
+state machine of its cycle of tail calls (`lowerGroup`), which its tail
+calls of the cycle's other declarations enter. -/
+def lowerDecl (d : Decl .pure) (cycle? : Option StateMachine := none) : LowerM Unit := do
+  let .code body := d.value | return
+  -- A constant whose code is one string literal (or one read of such a
+  -- constant) has no function: its reads call the literal cache
+  -- (`strLitCached`).
+  if (← read).litConsts.contains d.name then return
+  let su ← setupDecl H d body
+  let params := su.params
+  let ret := su.ret
+  -- `IO.Process.output`: generated glue instead of Lean's body (see
+  -- `processOutputBody`).
+  unless ← ownLowering d do
+    let block ← processOutputBody params ret su.resTy
+    modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
+    return
+  -- J4: the declaration as one state machine when an outlined join point
+  -- calls it back in tail position (`LowerHooks.stateMachine`).
+  let sm? := H.stateMachine.plan d su.body su.outlined (params.map (·.1)) false
+  modify fun s => { s with smArms := #[] }
+  let block ← lowerDeclCode H d su sm? cycle?
   if let some sm := sm? then
     H.stateMachine.emit d sm params ret block
     return
@@ -503,11 +566,73 @@ def lowerDecl (d : Decl .pure) : LowerM Unit := do
   -- at each use (Opt/CheapConsts) or it is a closed term evaluated where
   -- it is used (`uncachedConsts`, `chainConsts`). (One whose code is one
   -- string literal has no function at all: `litConsts`, above.)
-  if d.params.isEmpty && !(← H.recomputeConst body) && !(← read).uncachedConsts.contains d.name then
+  if d.params.isEmpty && !(← H.recomputeConst su.body) && !(← read).uncachedConsts.contains d.name then
     let items ← cafAccessor (fnName d.name) ret block
     modify fun s => { s with fns := s.fns ++ items }
   else
     modify fun s => { s with fns := s.fns.push (.fn (fnName d.name) params ret block) }
+
+/-- The Lean declaration that mono declaration `n` comes from (an instance
+`f._l2r.k`, or a declaration a pass made from one, `f._l2r.k._l2r_flat`):
+`f`; `n` when there is none. -/
+def sourceDeclName (keys : NameMap InstKey) (n : Name) : Name :=
+  match keys.find? n with
+  | some k => k.decl
+  | none => match n with
+    | .str p _ | .num p _ => if p.isAnonymous then n else sourceDeclName keys p
+    | .anonymous => n
+
+/-- Lower the declarations `ds` of a cycle of tail calls (`tailCallGroups`,
+in program order): each as its own function (`lowerDecl`), as if alone,
+and the cycle as one more state machine (J4, translation plan §5.6), named
+after the first declaration (`_cyc`) and planned whatever its join points,
+with an entry variant per declaration (the first one's is the entry),
+whose fields are its parameters and whose arm is its lowered code, and an
+entry function per declaration (`StateMachine.entryFn`, `SmMember.entryFn`).
+In a declaration's own function, a tail call of another declaration of the
+cycle calls that declaration's entry function (`CodeCtx.cycle`); in the
+state machine, a tail call of a declaration of the cycle re-enters it at
+that declaration's variant, a self tail call of the function, which LLVM
+turns into a loop (`tailCallEntry`). So the cycle runs in one frame, where
+separate functions call each other, a sibling call only where LLVM can
+make one (not with a multi-word result whose returns LLVM merged, nor with
+more stack arguments than the caller's), and use stack per call. A call
+that is not a tail call calls the declaration's own function, also from
+the state machine: a deep recursion of a declaration uses its own frame per
+level, not the state machine's, which LLVM sizes for every arm (a small
+declaration in a cycle with a big one). When the results have different
+Reussir types, or one of them has no code of its own (`ownLowering`), the
+cycle has no state machine. -/
+def lowerGroup (ds : Array (Decl .pure)) : LowerM Unit := do
+  let mut sus : Array DeclSetup := #[]
+  for d in ds do
+    match d.value with
+    | .code body =>
+      if (← ownLowering d) && !(← read).litConsts.contains d.name then
+        sus := sus.push (← setupDecl H d body)
+    | .extern _ => pure ()
+  let mut cycle? : Option StateMachine := none
+  if sus.size == ds.size && ds.size ≥ 2 && sus.all (·.ret == sus[0]!.ret) then
+    let d0 := ds[0]!
+    let su0 := sus[0]!
+    if let some sm0 := H.stateMachine.plan d0 su0.body su0.outlined (su0.params.map (·.1)) true then
+      let mut members : Array SmMember := #[]
+      for i in [1:ds.size] do
+        members := members.push { name := ds[i]!.name, variant := ← fresh "e", arity := ds[i]!.params.size,
+                                  params := sus[i]!.params, entryFn := fnName ds[i]!.name ++ "_cyc" }
+      let sm : StateMachine := { sm0 with members }
+      if (← IO.getEnv "L2R_DEBUG").isSome then
+        let keys := (← read).keys
+        let names := (ds.map (sourceDeclName keys ·.name |>.toString)).qsort (· < ·)
+        IO.eprintln s!"lean2rr: one state machine for a cycle of tail calls: {names}"
+      modify fun s => { s with smArms := #[] }
+      let block ← lowerDeclCode H d0 su0 (some sm)
+      for i in [1:ds.size] do
+        let b ← lowerDeclCode H ds[i]! sus[i]! (some sm)
+        modify fun s => { s with smArms := s.smArms.push (members[i - 1]!.variant, sus[i]!.params, b) }
+      H.stateMachine.emit d0 sm su0.params su0.ret block
+      cycle? := some sm
+  for d in ds do lowerDecl H d cycle?
 
 end
 

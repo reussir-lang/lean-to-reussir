@@ -6,8 +6,10 @@
 # loop, J4 with three variants), RtStateMachines and RtJpSlots (state
 # machines carrying values of many types), RtSmU32 (a state machine of 261
 # variants), RtSmGuard (a variant that keeps a field, the soundness
-# guard) and RtSmNestedJp (lean-zip's inflate loop in small: join points
-# inside an outlined join point) through lean2rr to LLVM IR (scripts/l2r.py --emit llvm-ir, with the
+# guard), RtSmNestedJp (lean-zip's inflate loop in small: join points
+# inside an outlined join point) and RtTailCycles (state machines of cycles
+# of tail calls between declarations, an entry variant per declaration)
+# through lean2rr to LLVM IR (scripts/l2r.py --emit llvm-ir, with the
 # .rr; the optimizations of NAME.opts off, as run.sh), and fails when
 # - the entry point of a state machine whose variants are all nullary is an
 #   enum (`enum <f>_mode`, shared or `[value]`), not an integer: a shared
@@ -48,7 +50,9 @@
 # (`L2RStep_k::cN(a, ..) => { f_sm(a, ..) }`, Outline: RtSmU32's entry arm
 # is split into parts) is not checked: the part put them in the step.
 # It fails when the test is vacuous: no state machine in RtSmDecode, none
-# whose arms pass a slot on, or an IR function of none of them; in RtSmU32
+# whose arms pass a slot on, or an IR function of none of them; in
+# RtTailCycles fewer than six state machines with an integer entry point
+# (one per cycle); in RtSmU32
 # no state machine of more than 256 variants whose function is in the IR,
 # or none of at most 256; in RtSmNestedJp no state machine in the IR; in
 # RtSmGuard no state machine whose entry point is a `[value]` enum with a
@@ -72,7 +76,7 @@ OUT=${L2R_TEST_BUILD:-$HERE/build}/sm-slots-check
 mkdir -p "$OUT"
 cd "$OUT"
 status=0
-for t in RtSmDecode RtStateMachines RtJpSlots RtSmU32 RtSmGuard RtSmNestedJp; do
+for t in RtSmDecode RtStateMachines RtJpSlots RtSmU32 RtSmGuard RtSmNestedJp RtTailCycles; do
   cp "$HERE/$t.lean" .
   lean -o "$t.olean" "$t.lean"
   opts=${L2R_DISABLE_OPTS:-}
@@ -241,6 +245,9 @@ errs, nsm, npass, nll, sizes, nkept, nstep = check(rr, ll, threaded, maxvars)
 for e in errs[:20]:
     print(f'FAIL {name}: {e}')
 if errs:
+    sys.exit(1)
+if name == 'RtTailCycles' and nsm < 6:
+    print(f'FAIL {name}: vacuous ({nsm} state machines with an integer entry point, not one per cycle of tail calls)')
     sys.exit(1)
 if name == 'RtSmU32':
     # The one of more than 256 variants must be in the IR (its i32).

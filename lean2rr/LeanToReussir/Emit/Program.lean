@@ -564,7 +564,14 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     for st in startup do
       if let .init decl _ := st then
         modify fun s => { s with initSlots := s.initSlots.insert decl s.cafSlots, cafSlots := s.cafSlots + 1 }
-    for d in decls do lowerDecl cfg.lower d
+    -- A cycle of tail calls between declarations is one state machine
+    -- (`lowerGroup`), lowered where its first declaration is.
+    let groups := tailCallGroups decls
+    let byName := (← read).decls
+    for d in decls do
+      match groups.find? d.name with
+      | some g => if g[0]? == some d.name then lowerGroup cfg.lower (g.filterMap byName.find?)
+      | none => lowerDecl cfg.lower d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
     -- `conv-liveness`: the prelude's names are roots too (the raw items'

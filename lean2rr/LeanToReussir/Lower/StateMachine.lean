@@ -69,20 +69,63 @@ partial def withInlinedJps (bodies : Std.HashMap FVarId (Code .pure)) (outlined 
       todo := todo ++ (jumpsIn b {}).toArray
   return out
 
+/-- The declarations `c` calls in tail position (`let x := g args;
+return x`, also in join points' bodies, not in local functions' bodies),
+each with its number of arguments. -/
+partial def tailCallees (c : Code .pure) (acc : Array (Name × Nat) := #[]) : Array (Name × Nat) :=
+  match c with
+  | .let d k =>
+    let acc := match d.value, k with
+      | .const g _ args _, .return x => if x == d.fvarId then acc.push (g, args.size) else acc
+      | _, _ => acc
+    tailCallees k acc
+  | .fun _ k _ => tailCallees k acc
+  | .jp d k => tailCallees k (tailCallees d.value acc)
+  | .cases cs => cs.alts.foldl (fun acc alt => tailCallees alt.getCode acc) acc
+  | _ => acc
+
+/-- The cycles of tail calls between declarations: the strongly connected
+groups, of two or more declarations, of the graph whose edges are the
+saturated tail calls (`tailCallees`) of one declaration of `decls` to
+another. Each declaration of a group maps to the group's declarations in
+program order. Only declarations with code and parameters take part.
+The lowering runs each group as one state machine (`lowerGroup`). -/
+def tailCallGroups (decls : Array (Decl .pure)) : NameMap (Array Name) := Id.run do
+  let arity : NameMap Nat := decls.foldl (init := {}) fun m d =>
+    if d.value matches .code _ && !d.params.isEmpty then m.insert d.name d.params.size else m
+  let byName : NameMap (Decl .pure) := decls.foldl (fun m d => m.insert d.name d) {}
+  let order : NameMap Nat := decls.zipIdx.foldl (fun m (d, i) => m.insert d.name i) {}
+  let succ (n : Name) : List Name := match byName.find? n with
+    | some { value := .code c, .. } => (tailCallees c).toList.filterMap fun (g, k) =>
+        if g != n && arity.find? g == some k then some g else none
+    | _ => []
+  let names := decls.filterMap fun d => if arity.contains d.name then some d.name else none
+  let mut out : NameMap (Array Name) := {}
+  for g in Lean.SCC.scc names.toList succ do
+    if g.length < 2 then continue
+    let members := g.toArray.qsort fun a b => (order.find? a).getD 0 < (order.find? b).getD 0
+    for n in members do out := out.insert n members
+  return out
+
 /-- The state machine of declaration `d` (body `body`, outlined join points
 `outlined`, parameter names `pnames`): J4 when an outlined join point
 tail-calls the declaration, so that a loop passes through it, also from a
 join point inlined into it. (Other calls need no state machine; going
-through its entry wrapper would only cost an allocation per call.) -/
-def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet) (pnames : Array String) :
-    Option StateMachine :=
+through its entry wrapper would only cost an allocation per call.) When
+`cycle`, the state machine of the cycle of tail calls whose first
+declaration is `d` (`lowerGroup`), whatever its join points: named apart
+from `d`'s own (`_cyc`), with an entry function of its own
+(`StateMachine.entryFn`), as `d` keeps its function. -/
+def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet) (pnames : Array String)
+    (cycle : Bool) : Option StateMachine :=
   let bodies := jpBodiesOf body
-  let callsBack := outlinedBodies body outlined |>.any fun c =>
+  let callsBack := cycle || (outlinedBodies body outlined).any fun c =>
     (withInlinedJps bodies outlined c).any (hasSelfTailCall d.name d.params.size)
   if !callsBack || d.params.isEmpty then none
   else
-    let base := fnName d.name
-    some { fn := base ++ "_sm", mode := base ++ "_mode", self := d.name, arity := d.params.size, params := pnames }
+    let entryFn := if cycle then fnName d.name ++ "_cyc" else fnName d.name
+    some { fn := entryFn ++ "_sm", mode := entryFn ++ "_mode", self := d.name, arity := d.params.size,
+           params := pnames, entryFn }
 
 /-- A self tail call of the state machine's declaration with arguments
 `args`: entering it at the declaration's own entry, which carries them. -/
@@ -97,8 +140,12 @@ def stateMachineJumpCall (sm : StateMachine) (variant : String) (fields : Array 
 /-- Emit declaration `d` lowered as state machine `sm` (parameters carried by
 the entry variant): the dispatching function over its entry point, whose
 arms are the lowered entry code `block` and the outlined join points'
-variants (`LowerState.smArms`); the declaration's function, which enters at
-its own variant with its parameters `params`; and the entry-point enum. -/
+variants (`LowerState.smArms`, with the entries of the other declarations
+of its cycle, `sm.members`); the function that enters at its own variant
+with its parameters `params` (`sm.entryFn`: the declaration's function, or
+for a cycle's state machine its entry function), and the entry functions
+of the other declarations, each entering at its variant; and the
+entry-point enum. -/
 def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (String × RR.Ty)) (ret : RR.Ty)
     (block : RR.Block) : LowerM Unit := do
   let arms ← getPart (·.smArms)
@@ -118,8 +165,10 @@ def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (Strin
     typeItems := s.typeItems.push mode
     fns := s.fns
       |>.push (.fn sm.fn #[(m, .named sm.mode)] ret (.ofExpr (.mtch (.var m) matchArms)))
-      |>.push (.fn (fnName d.name) params ret
+      |>.push (.fn sm.entryFn params ret
           (.ofExpr (.call sm.fn #[] #[.ctor sm.mode (some sm.entry) (params.map fun (n, _) => RR.Expr.var n)])))
+      |>.append (sm.members.map fun mb => .fn mb.entryFn mb.params ret
+          (.ofExpr (.call sm.fn #[] #[.ctor sm.mode (some mb.variant) (mb.params.map fun (n, _) => RR.Expr.var n)])))
     smArms := #[] }
 
 end LeanToReussir

@@ -256,8 +256,11 @@ The choice matters for two reasons:
 - **Stack use.** Lean runs self tail calls as loops. Under J1 and J2 the tail
   call stays in its own function, and LLVM turns it into a loop. Under J3 the
   loop becomes mutually recursive and can use stack per iteration. J4 makes
-  such a loop one function again. With the optional pass `state-machines`,
-  the entry point of that function is an integer, and the values of the
+  such a loop one function again. J4 also makes one more function for
+  declarations that call each other in tail position: each declaration
+  gets an entry in it, and their tail calls of each other go into it.
+  Each declaration keeps its own function for its other calls. With the
+  optional pass `state-machines`, the entry point of that function is an integer, and the values of the
   loop go in parameter slots. A jump changes only the slots that it fills.
   On an integer entry point, LLVM threads the loop: a jump goes directly to
   the code that it enters.

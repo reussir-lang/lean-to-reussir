@@ -1,0 +1,3 @@
+# 5000 levels of a recursion through `walk` on a 1 MiB stack (natively: Lean's main stack); then the default run (1000 levels).
+LEAN_STACK_SIZE_KB=1024 $BIN 5000; echo "5000 levels (1 MiB stack): exit $?"
+$BIN; echo "exit $?"
