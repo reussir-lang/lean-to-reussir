@@ -124,11 +124,15 @@ impl<T> ReleaseValue for T {
 
 /// The smallest count of the dummy box of a Reussir immediate (a nullary
 /// variant) under the `immortal` encoding of nullary variants: its count
-/// starts at 3 * 2^30 and Reussir never changes it. Only `lib::is_shared`
-/// (`dbgTraceIfShared`, `isExclusive`) still reads a record's count; the
-/// releases and copies of records go through the record's own
-/// `<record>_ffi_release` and `_ffi_acquire` (`Bridge`'s `Drop` and
-/// `Clone`), which know Reussir's encodings.
+/// starts at 3 * 2^30 and Reussir never changes it; a real box never
+/// reaches 2^31 (Reussir's `BasicOpsLowering.cpp`, which states the
+/// encoding for foreign code). Of a record passed as itself, only
+/// `lib::is_shared_record` (`dbgTraceIfShared` at a record type) reads the
+/// count, through reussir-rt's `Rc`; its releases and copies go through the
+/// record's own `<record>_ffi_release` and `_ffi_acquire` (`Bridge`'s
+/// `Drop` and `Clone`), which know Reussir's encodings. A record in a box
+/// (`any::LAny`) is the exception until clean step C: the box's copy,
+/// release and `is_exclusive` update its payload's count in line.
 pub const IMMORTAL: u32 = 0x8000_0000;
 
 /// A record (`Bridge<Inner>`): its release is the record's own
@@ -704,8 +708,9 @@ impl<T> Drop for Cell<T> {
     /// glue and leanrt's free of the cell's block. The test is `count == 1`,
     /// as `Vec`'s: after Reussir's `rc.inc` LLVM then cancels a read's
     /// increment and release (forcing a finished thunk, reading a task's
-    /// state). leanrt reads and writes the count only through `Rc` (except
-    /// `lib::is_shared`'s read, open in clean step C7).
+    /// state). leanrt reads and writes the count only through `Rc`, except
+    /// for a cell in a box (`any::LAny`), whose copy and release update the
+    /// payload's count in line until clean step C.
     #[inline(always)]
     fn drop(&mut self) {
         if self.0.is_unique() {

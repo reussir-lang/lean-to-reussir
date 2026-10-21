@@ -1555,7 +1555,7 @@ mod tests {
     /// reference releases it (`release_last`, then `release_kind`), also
     /// inside a free (a payload's field) and as an element of an array of
     /// boxes (the array free's two passes, `release_last_in_step`).
-    fn scalar_kind<T: Clone + Copy + PartialEq + std::fmt::Debug>(x: [T; 3], num: u64)
+    fn scalar_kind<T: Clone + Copy + PartialEq + std::fmt::Debug + 'static>(x: [T; 3], num: u64)
     where
         crate::drop::Vec<T>: Payload,
     {

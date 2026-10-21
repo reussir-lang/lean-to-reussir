@@ -72,42 +72,83 @@ static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// Natively `!lean_is_scalar(a) && !lean_is_exclusive(a)`. By `T`:
 /// - a one-word box (`any::LAny`) answers for its payload; an immediate is
 ///   never shared;
-/// - a `Nat` or `Int` (`nat::LNat`, `nat::LInt`): an even word is a big
-///   number, whose block starts with its `u32` count; an odd word is a small
-///   value, a scalar natively (review HL-01: the big numbers were never
-///   reported);
-/// - a one-word handle of Reussir (`reussir_rt::`: records, through
-///   `Bridge`, and runtime objects) or of leanrt (`string::`, and `drop::`:
-///   arrays, `ByteArray`, `FloatArray`, the cells of thunks and tasks): the
-///   `u32` count at the pointer. A Reussir immediate (a nullary
-///   constructor, a scalar natively) is not shared: its top byte is not zero
-///   (the `tbi` encoding), or it points to a dummy box whose count is 2^31
-///   or more (the `immortal` encoding);
-/// - any other type (scalars, and the fresh wrappers lean2rr passes values
-///   that cannot cross the boundary in) is never shared.
+/// - a `reussir_rt::rc::Rc` box that leanrt made with `Rc::new`: the cell
+///   of a thunk or task (`drop::Cell`), a runtime handle (`LHandle`,
+///   `LPromise`: `Rc<Box<dyn Any>>`): `Rc`'s own count (`is_unique`);
+/// - leanrt's own blocks, a string (`string::`), an array, `ByteArray` or
+///   `FloatArray` (`drop::Vec`), a big `Nat` or `Int` (`nat::`): the `u32`
+///   count leanrt keeps at the block's start; an odd `Nat` or `Int` word is
+///   a small value, a scalar natively (review HL-01: the big numbers were
+///   never reported);
+/// - any other type is never shared: scalars, and the fresh wrappers
+///   lean2rr passes values that cannot cross the boundary in. A Reussir
+///   record goes to `is_shared_record` instead (lean2rr calls the record
+///   texture `l2r_dbg_trace_if_shared_rec` at a record type), so no Rust
+///   type name of Reussir's is read here.
 ///
 /// A task that one reference holds is not shared; natively a task that
 /// `Task.spawn` made is multi-threaded, so never exclusive (a documented
 /// difference).
 #[inline]
-pub fn is_shared<T>(a: &T) -> bool {
+pub fn is_shared<T: 'static>(a: &T) -> bool {
     let name = std::any::type_name::<T>();
     if name == "leanrt::any::LAny" {
         return !unsafe { &*(a as *const T as *const any::LAny) }.is_exclusive();
     }
-    let counted = name.starts_with("reussir_rt::")
-        || name.starts_with("leanrt::string::")
-        || name.starts_with("leanrt::drop::")
-        || name.starts_with("leanrt::nat::");
-    if !counted || std::mem::size_of::<T>() != std::mem::size_of::<usize>() {
+    if std::mem::size_of::<T>() != std::mem::size_of::<usize>() {
         return false;
     }
     let p = unsafe { *(a as *const T as *const usize) };
-    if p & 1 != 0 || p >> 56 != 0 {
+    let rc_box = name.starts_with("leanrt::drop::Cell<")
+        || std::any::TypeId::of::<T>() == std::any::TypeId::of::<reussir_rt::rc::Rc<Box<dyn std::any::Any>>>();
+    if rc_box {
+        // The count's offset does not depend on the payload's type: an
+        // `Rc<()>` view of the box, never dropped.
+        let rc = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<()>>(p) });
+        return !rc.is_unique();
+    }
+    let own = name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::") || name.starts_with("leanrt::nat::");
+    if !own || p & 1 != 0 {
         return false;
     }
-    let c = unsafe { *(p as *const u32) };
-    c != 1 && c < drop::IMMORTAL
+    unsafe { *(p as *const u32) != 1 }
+}
+
+/// `dbgTraceIfShared`'s test for a Reussir record (the prelude's
+/// `l2r_dbg_trace_if_shared_rec`, which lean2rr calls at a record type):
+/// whether `w`, the record's handle word (polyffi passes a record as one
+/// pointer word), is a box that another reference also holds. It reads
+/// only what Reussir states for foreign code (Reussir l2r-base3, upstream
+/// 7954a367):
+/// - a nullary constructor of a type with a nullary variant may be an
+///   immediate, a scalar natively and so never shared
+///   (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`, the
+///   encodings of `reussir-special-pointer-tag`; rrc's
+///   `--nullary-variant-encoding`): under `tbi`, aarch64's default, its top
+///   byte is the tag + 1 ("Foreign code may decode `tag = top - 1` without
+///   dereferencing"); under `immortal` (`arch-independent`) it is the
+///   address of a dummy box whose 32-bit count is 3 * 2^30, at or above
+///   `drop::IMMORTAL` = 2^31, which a real box never reaches ("Foreign code
+///   sees a layout-compatible box");
+/// - a box begins with the header that reussir-rt's `rc::Rc` mirrors
+///   (`crates/reussir-rt/src/rc.rs`, `RcBox`: "Mirrors the compiler's box
+///   header"): the count is read through an `Rc<()>` view of the handle,
+///   never dropped.
+///
+/// A record passed in a box (`any::LAny`, an element of an `Array`) is
+/// answered by the box (`is_shared`), which reads its payload's count in
+/// line until clean step C makes the box a Reussir type.
+///
+/// # Safety
+/// `w` is the handle word of a live Reussir record or enum: an immediate,
+/// or the address of a box that the caller holds a reference to.
+#[inline]
+pub unsafe fn is_shared_record(w: usize) -> bool {
+    if w >> 56 != 0 {
+        return false;
+    }
+    let rc = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<()>>(w) });
+    !rc.is_unique() && rc.count_ref().get() < drop::IMMORTAL
 }
 
 /// `dbgTraceIfShared`'s check, recorded for the prelude to read back.
@@ -396,6 +437,49 @@ mod tests {
         assert!(!is_shared(&LAny::imm(3)));
         // Scalars.
         assert!(!is_shared(&7u64) && !is_shared(&1.5f64) && !is_shared(&true));
+        // A thunk or task cell and a runtime handle: `Rc`'s count. (A
+        // cell's last reference asks the task glue: its test lock.)
+        let _g = crate::task::test_lock();
+        let c = crate::drop::Cell::from_inner(reussir_rt::rc::Rc::new(5u64));
+        assert!(!is_shared(&c));
+        let c2 = c.clone();
+        assert!(is_shared(&c) && is_shared(&c2));
+        drop(c2);
+        assert!(!is_shared(&c));
+        let h: reussir_rt::rc::Rc<Box<dyn std::any::Any>> = reussir_rt::rc::Rc::new(Box::new(1u8));
+        assert!(!is_shared(&h));
+        let h2 = h.clone();
+        assert!(is_shared(&h));
+        drop(h2);
+        assert!(!is_shared(&h));
+    }
+
+    /// `is_shared_record`: a box by its count; Reussir's immediates, under
+    /// both encodings, never.
+    #[test]
+    fn shared_record_and_immediates() {
+        use super::is_shared_record;
+        // A box: a reussir-rt `Rc` (the header Reussir's records share).
+        let r = reussir_rt::rc::Rc::new([7u64; 2]);
+        let w = unsafe { std::mem::transmute_copy::<reussir_rt::rc::Rc<[u64; 2]>, usize>(&r) };
+        assert!(!unsafe { is_shared_record(w) });
+        let r2 = r.clone();
+        assert!(unsafe { is_shared_record(w) });
+        drop(r2);
+        assert!(!unsafe { is_shared_record(w) });
+        // `immortal`: a dummy box whose count is 3 * 2^30.
+        let dummy = reussir_rt::rc::Rc::new(0u64);
+        dummy.count_ref().set(3 << 30);
+        let d = unsafe { std::mem::transmute_copy::<reussir_rt::rc::Rc<u64>, usize>(&dummy) };
+        assert!(!unsafe { is_shared_record(d) });
+        // `tbi`: the top byte is the tag + 1 (tag 0 and tag 2), over a dummy
+        // whose count is 2, as Reussir starts it: the top byte alone gives
+        // the answer (this machine's loads ignore the top byte, so a read of
+        // the count would see 2 and answer "shared").
+        dummy.count_ref().set(2);
+        assert!(!unsafe { is_shared_record(d | 1 << 56) });
+        assert!(!unsafe { is_shared_record(d | 3 << 56) });
+        dummy.count_ref().set(1);
     }
 
     /// lean-runtime mirrors the Lean version lean2rr is pinned to: the

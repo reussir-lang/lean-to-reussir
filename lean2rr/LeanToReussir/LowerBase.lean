@@ -565,22 +565,32 @@ def boxName : String := "LAny"
 /-- The uniform type. -/
 def RR.Ty.box : RR.Ty := .named boxName
 
+/-- Whether `t` is a Reussir shared record (or enum): a type of the
+program that is neither an enumeration nor a value type, a reference (see
+`refType`), or a function value (a shared enum). At the FFI boundary its
+value is the record's one-word handle (`Bridge` over the record's own
+wrapper). -/
+def isSharedRecordTy (t : RR.Ty) : LowerM Bool := do
+  match t with
+  | .named n =>
+    if (← get).refName == some n then return true
+    match (← get).typeInfos[n]? with
+    | some info => return info.shape != .enumLike && !info.value
+    | none => return false
+  | .fn .. => return true
+  | _ => return false
+
 /-- Types that may cross Reussir's FFI boundary as parameters: integers,
 floats, `bool`, and RC pointers (opaque runtime types, `Nat`/`Int` among
 them, a handle and a promise, both `Rc<Box<dyn Any>>`, and shared
-records). -/
+records, `isSharedRecordTy`). -/
 def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool",
             "Nat", "Int", "LStr", "LHandle", "LPromise", boxName] then return true
-    -- A reference is a shared record (see `refType`).
-    if (← get).refName == some n then return true
-    match (← get).typeInfos[n]? with
-    | some info => return info.shape != .enumLike && !info.value
-    | none => return false
+    isSharedRecordTy t
   | .app n _ => return n == "RVec" || n == "LRef" || n == "LCell"
-  -- A function value is a shared enum.
   | .fn .. => return true
   | .cls .. => return false
 

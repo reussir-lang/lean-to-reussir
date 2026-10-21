@@ -468,11 +468,18 @@ payload is exactly 16 MiB (a hash table's 2^21 buckets) is, with the
 header, past mimalloc's large-object limit, a huge segment that mimalloc
 purges only 100 ms after it is freed (plan §10, "Arrays and strings are
 one block each").
-`dbgTraceIfShared` (`leanrt::is_shared`) recognizes the counted storage
-types by their Rust type names: `reussir_rt::` (records, runtime
-objects), `leanrt::string::`, `leanrt::drop::` (arrays, `ByteArray`,
-`FloatArray`, thunk and task cells) and `leanrt::nat::` (a big number's
-count; a small one is a scalar); a box answers for its payload.
+`dbgTraceIfShared` (`leanrt::is_shared`) recognizes leanrt's counted
+storage types by their Rust type names: `leanrt::string::`,
+`leanrt::drop::` (arrays, `ByteArray`, `FloatArray`; a thunk or task cell
+through `reussir_rt::rc::Rc`'s count) and `leanrt::nat::` (a big number's
+count; a small one is a scalar), and the runtime handles
+(`Rc<Box<dyn Any>>`, by `TypeId`); a box answers for its payload. At a
+Reussir record type lean2rr calls the record texture
+`l2r_dbg_trace_if_shared_rec`, and `leanrt::is_shared_record` answers from
+the handle word: an immediate (a nullary constructor under the `tbi` or
+the `immortal` encoding, as Reussir states them for foreign code) is never
+shared; a box's count is read through an `Rc<()>` view (reussir-rt's `Rc`
+mirrors the compiler's box header).
 
 **The one-word box `LAny` (lean2rr's `Box`).** `leanrt::any::LAny`, the
 prelude's `LAny` (`tagged`), is a value of unknown type in one word, as

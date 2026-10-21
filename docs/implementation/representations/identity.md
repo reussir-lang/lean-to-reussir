@@ -78,15 +78,43 @@ start with `runtime/`.
   compare addresses, and `dbgTraceIfShared` reads the cell's count, which
   conversions and lean2rr's own copies can make differ from native: the
   count of each storage type (`leanrt::is_shared`: handles, strings,
-  arrays, thunk and task cells, records, big numbers; a box answers for
-  its payload). A task that one reference holds is not reported (natively
+  arrays, thunk and task cells, big numbers; a box answers for its
+  payload). A task that one reference holds is not reported (natively
   a task from `Task.spawn` is multi-threaded, and so reported as shared).
+  At a Reussir shared record type (`isSharedRecordTy`: a record or enum of
+  the program, a reference, a function value) lean2rr calls the record
+  texture `l2r_dbg_trace_if_shared_rec`, and `leanrt::is_shared_record`
+  answers from the record's handle word, with no Rust type name. It reads
+  only what Reussir states for foreign code (Reussir l2r-base3, upstream
+  7954a367): a nullary constructor of a type with a nullary variant may be
+  an immediate, a scalar natively and never shared
+  (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`): under `tbi`,
+  aarch64's default, its top byte is the tag + 1 ("Foreign code may
+  decode `tag = top - 1` without dereferencing"); under `immortal` (rrc's
+  `--nullary-variant-encoding arch-independent`) it is a dummy box whose
+  count is 3 * 2^30, at or above 2^31 (`drop::IMMORTAL`), which a real box
+  never reaches ("Foreign code sees a layout-compatible box"); and a box
+  begins with the header that reussir-rt's `rc::Rc` mirrors
+  (`crates/reussir-rt/src/rc.rs`: "Mirrors the compiler's box header"),
+  so the count is read through an `Rc<()>` view of the handle. Thunk and
+  task cells and the runtime handles, `Rc` boxes leanrt makes, are read
+  through `Rc` too. A record in a box (an element of an `Array`, a value of
+  unknown type) is answered by the box, which reads its payload's count in
+  line until clean step C makes the box a Reussir type. A function value
+  without captures that Reussir encodes as an immediate is not reported,
+  where natively such a closure is usually a persistent closed term and
+  reported as shared.
 - **Why:** lean2rr's objects have no Lean layout to compare byte by byte;
   answering "shared" only makes such code take its general path.
 - **Where:** `runtime/prelude.rr`: `lean_is_exclusive_obj`,
-  `lean_is_scalar`, `lean_sharecommon_quick`, `lean_dbg_trace_if_shared`
-  (`runtime/leanrt/src/lib.rs`: `is_shared`); `Lower/ExternCall.lean`:
-  `customExtern` (`ShareCommon.State.shareCommon`);
+  `lean_is_scalar`, `lean_sharecommon_quick`, `lean_dbg_trace_if_shared`,
+  `l2r_dbg_trace_if_shared_rec` (`runtime/leanrt/src/lib.rs`: `is_shared`,
+  `is_shared_record`; unit tests `tests::shared_by_storage_type`,
+  `tests::shared_record_and_immediates`); `Lower/ExternCall.lean`:
+  `customExtern` (`ShareCommon.State.shareCommon`, `dbgTraceIfShared`),
+  `LowerBase.lean`: `isSharedRecordTy`; tests `RtDbgShared`,
+  `RtDbgSharedRecords` (nullary constructors under both encodings),
+  `RtTraceShared`, `RtReprShare`;
   `lean2rr/L2RShim/Core.lean` (`lean_sharecommon_eq`/`hash`).
 - **Remove only if:** never (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features)).

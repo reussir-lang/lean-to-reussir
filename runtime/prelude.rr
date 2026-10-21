@@ -3143,18 +3143,37 @@ fn lean_dbg_trace<T>(msg : LStr, f : L2RUnit -> T) -> T {
 // `dbgTraceIfShared msg a`: prints `shared RC <msg>` when `a` is a heap
 // object that another reference also holds (`leanrt::is_shared`, by the
 // storage type: the count of a runtime handle, of leanrt's strings, arrays
-// and cells, of a Reussir record and of a big `Nat` or `Int`; a one-word box
-// (`LAny`) answers for its payload; small numbers, scalars and nullary
-// constructors, Reussir immediates, never are).
+// and cells and of a big `Nat` or `Int`; a one-word box (`LAny`) answers
+// for its payload; small numbers and scalars never are). At a Reussir
+// record type lean2rr calls `l2r_dbg_trace_if_shared_rec` instead.
 // This must be an FFI import (lean2rr then passes values that cannot cross
 // the boundary in fresh wrappers, which are never shared), so the message
 // reaches the current stderr stream from Rust (`leanrt::io::diag_put`). The
 // pieces below (`l2r_shared_check<S>(a)`, `l2r_last_shared()`,
-// `l2r_shared_rc_text`) allow the same from Reussir code.
+// `l2r_shared_rc_text`) allow the same from Reussir code (not at a record
+// type: `leanrt::is_shared` answers "not shared" for a record).
 #[ffi(import)]
 fn lean_dbg_trace_if_shared<T>(msg : LStr, a : T) -> T [{
     {
         if leanrt::is_shared::<[:T:]>(&a) {
+            leanrt::io::diag_put(leanrt::string::from_bytes(&lean_runtime::io::debug::shared_rc_line(msg.utf8())));
+        }
+        leanrt::rc_release(msg);
+        a
+    }
+}];
+
+// `dbgTraceIfShared msg a` at a Reussir record type (lean2rr's
+// `customExtern`): leanrt answers from the record's handle word
+// (`leanrt::is_shared_record`: a nullary constructor that Reussir encodes
+// as an immediate is never shared, a box by its count, read through
+// reussir-rt's `Rc`), with no Rust type name.
+#[ffi(import)]
+fn l2r_dbg_trace_if_shared_rec<T>(msg : LStr, a : T) -> T [{
+    {
+        assert!(::std::mem::size_of::<[:T:]>() == ::std::mem::size_of::<usize>());
+        // The handle word of the record that `a` holds (polyffi: one word).
+        if unsafe { leanrt::is_shared_record(::std::mem::transmute_copy::<[:T:], usize>(&a)) } {
             leanrt::io::diag_put(leanrt::string::from_bytes(&lean_runtime::io::debug::shared_rc_line(msg.utf8())));
         }
         leanrt::rc_release(msg);

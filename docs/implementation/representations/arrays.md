@@ -164,8 +164,7 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   task cell (`drop::Cell`) frees when the count is 1 and otherwise
   decrements; never `count > 1`. A cell's count goes through reussir-rt's
   `Rc` (`is_unique`, its own `drop` and `clone`, `count_ref`), not the
-  `u32` at the cell's address (only `lib::is_shared` still reads that,
-  open in clean step C7). Its free path is an `extern "C"` function
+  `u32` at the cell's address (`lib::is_shared` too). Its free path is an `extern "C"` function
   (no unwinding, no landing pads in the textures). A cell's read
   (`l2r_lcell_get`, `drop::cell_get`) releases the cell before it copies
   the state; a read of a shared array or string releases it before its

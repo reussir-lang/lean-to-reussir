@@ -33,6 +33,17 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   if (← externSymbol orig) == "lean_ptr_addr" then
     let some p := params[0]? | return none
     return some (← addrOf args[0]! (← lowerType p))
+  -- `dbgTraceIfShared msg a` at a Reussir shared record type
+  -- (`isSharedRecordTy`): the record texture, which asks leanrt with the
+  -- record's handle word (`leanrt::is_shared_record`), not the generic one,
+  -- which would need the record's Rust type name (clean step C7). Other
+  -- types take the default path (a value type or an enumeration in a fresh
+  -- wrapper, never shared).
+  if (← externSymbol orig) == "lean_dbg_trace_if_shared" then
+    if let some p := params[1]? then
+      let t ← lowerType p
+      if ← isSharedRecordTy t then
+        return some (.call "l2r_dbg_trace_if_shared_rec" #[t] #[args[0]!, args[1]!])
   -- `Lean.Name.beq`: structural equality (see `structEqFn`).
   if (← externSymbol orig) == "lean_name_eq" then
     let .named tn ← lowerType params[0]! | return none

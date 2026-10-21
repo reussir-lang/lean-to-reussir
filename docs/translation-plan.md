@@ -3409,7 +3409,9 @@ Each item says what differs and when.
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`;
   `dbgTraceIfShared` reads lean2rr's own counts (a converted value is a
   new, unshared object, §5.1; `leanrt::is_shared`, which also reads a big
-  `Nat`'s or `Int`'s count, review HL-01). It does not report a task
+  `Nat`'s or `Int`'s count, review HL-01; at a Reussir record type
+  `leanrt::is_shared_record`, which never reports a nullary constructor
+  that Reussir encodes as an immediate). It does not report a task
   that one reference holds, where natively a task that `Task.spawn` made
   is multi-threaded (its count is negative) and reported as shared;
   `shareCommon` shares nothing, and
