@@ -20,13 +20,15 @@
 # docs/implementation/ownership.md, "Reads give their reference up first,
 # for a view"): the read textures must stay under LLVM's inlining threshold
 # for a cold call site (cost 45), else every such read is a call. The
-# exception: three read textures cost more than 45, the read of a box
+# exception: these read textures cost more than 45, the read of a box
 # (`l2r_view_take<LAny>`: with the one-word `Box`) and the reads of a `Nat`
-# or `Int` element at its type (`l2r_view_take_as<Nat>`, `<Int>`), and rrc
-# gives a texture's import trampoline no inline attribute (Reussir issue
-# 6, not patched: its patch 06-a is parked). So in RtReadsDeep, whose
-# reads all sit at cold call sites, the calls of these three symbols
-# (COLD_ALLOWED) are allowed and counted.
+# or `Int` element, from an array of boxes at its type
+# (`l2r_view_take_as<Nat>`, `<Int>`) or from a typed array (`typed-arrays`:
+# `l2r_view_take<Nat>`, `<Int>`; the element's clone is the cost, as in
+# the read at its type), and rrc gives a texture's import trampoline no
+# inline attribute (Reussir issue 6, not patched: its patch 06-a is
+# parked). So in RtReadsDeep, whose reads all sit at cold call sites, the
+# calls of these symbols (COLD_ALLOWED) are allowed and counted.
 # For RtArraySets (array sets and reads in loops at ordinary call sites), it
 # fails on any call left of an array set's or read's texture or function
 # (`l2r_array_set`, `lean_array_set`, `l2r_view_take`, ...), with no
@@ -83,7 +85,7 @@ PY
 # The reads that Reussir issue 6 (not patched) keeps as calls at a cold
 # call site: `l2r_view_take<LAny>`, `l2r_view_take_as<Nat>`,
 # `l2r_view_take_as<Int>`.
-COLD_ALLOWED="_RIC13l2r_view_takeC4LAnyE _RIC16l2r_view_take_asC3NatE _RIC16l2r_view_take_asC3IntE"
+COLD_ALLOWED="_RIC13l2r_view_takeC4LAnyE _RIC16l2r_view_take_asC3NatE _RIC16l2r_view_take_asC3IntE _RIC13l2r_view_takeC3NatE _RIC13l2r_view_takeC3IntE"
 status=0
 for t in "$@"; do
   cp "$HERE/$t.lean" .

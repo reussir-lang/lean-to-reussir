@@ -1,0 +1,2 @@
+# ten rounds of String -> Nat -> String maps on a unique array of n elements: in place, as natively (a new array per map would add 160 bytes per element)
+10000 | 40000 | 1 1000

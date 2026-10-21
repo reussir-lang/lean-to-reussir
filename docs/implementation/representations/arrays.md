@@ -5,6 +5,9 @@ place when unique, for every `α` without a storage kind; an `Array S` of
 a scalar `S` is `RVec<k>` of its storage kind `k` (`RVec<u64>` for
 `Array UInt64`) when the program's whole-program check allows it
 (optimization `compact-arrays`, [compact-arrays.md](compact-arrays.md));
+an `Array X` of a one-word counted type (a shared record or enum, `Nat`,
+`Int`, `String`, an array) is `RVec<T>` of `X`'s own type when that check
+allows it too (optimization `typed-arrays`, [typed-arrays.md](typed-arrays.md));
 `ByteArray` and `FloatArray` are `RVec<u8>` and `RVec<f64>`. Paths:
 `lean2rr/LeanToReussir/` for lean2rr's files, `runtime/` for the runtime.
 Plan [§5.1](../../translation-plan.md#51-type-translation).
@@ -12,9 +15,10 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
 ### An array holds `Box`es, whatever its element type (unless it is compact)
 
 - **What:** `Array α` is `RVec<LAny>` for every `α` that has no storage
-  kind, or whose kind the program stores as boxes (`lowerType`,
-  `arrayStorage`; the compact arrays are in
-  [compact-arrays.md](compact-arrays.md)). A
+  kind or pointer kind, or whose kind the program stores as boxes
+  (`lowerType`, `arrayStorage`; the compact arrays are in
+  [compact-arrays.md](compact-arrays.md), the typed ones in
+  [typed-arrays.md](typed-arrays.md)). A
   value goes into an array by boxing (`Array.push` at `Nat` boxes the
   `Nat`) and comes out by unboxing, at the extern's boundary
   (`lowerExternCall`: an extern over arrays stores its type parameters'
@@ -39,8 +43,8 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
 - **Where:** `LowerBase.lean`: `lowerType`, `arrayStorage`, `arrayElem?`,
   `arrayCall`; `Lower/ExternCall.lean`: `lowerExternCall`, `customExtern`;
   `Lower/Process.lean`: `arrayMapFn`.
-- **Remove only if:** never (the compact arrays cover only scalars that
-  never reach generic code).
+- **Remove only if:** never (the compact and typed arrays cover only
+  element types that never reach generic code).
 
 ### `ByteArray.mk`/`data` and `FloatArray.mk`/`data` are one loop at the exact size
 

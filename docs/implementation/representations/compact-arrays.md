@@ -5,7 +5,8 @@ storage kind `k`, when the whole program allows it: optimization
 `compact-arrays` (on by default; `--disable-opt compact-arrays` gives every
 `Array α` the array of boxes of [arrays.md](arrays.md#an-array-holds-boxes-whatever-its-element-type)).
 An array whose element type is not statically known stays an array of
-boxes, as natively. Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
+boxes, as natively. Optimization `typed-arrays` extends the same check to
+arrays of one-word counted types ([typed-arrays.md](typed-arrays.md)). Paths: `lean2rr/LeanToReussir/` for lean2rr's files,
 `runtime/` for the runtime. Plan
 [§5.1](../../translation-plan.md#51-type-translation).
 
@@ -109,7 +110,8 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     `Array.size` at `UInt64` was unboxed as a compact array; test
     `RtCArrDepUniverse`). Such a position also gets a node when its type
     is an array of boxes (`Array lcAny`) and a box arrives there (an
-    argument of type `lcAny`): the box is unboxed there as an array of
+    argument of type `lcAny`, or an extern's result that its binder of
+    type `lcAny` takes as a box): the box is unboxed there as an array of
     boxes, so the class mentions `Array lcAny` (test `RtCArrBoxedAny`: a
     `T b` that is an `Array UInt64`, read through a proved cast by
     `Array.size` at `lcAny`; before, `u64` stayed on and leanrt converted

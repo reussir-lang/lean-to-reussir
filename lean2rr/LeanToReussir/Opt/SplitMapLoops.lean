@@ -359,6 +359,9 @@ mutual
     match r with
     | some d' =>
       modify fun s => { s with splitDecls := s.splitDecls.push d', sigs := s.sigs.insert name (declSig d') }
+      -- A split only for a pointer kind keeps its loop (`revertPtrSplits`).
+      if !inPlace && !(← holdsCompactKind cache α) && !(← holdsCompactKind cache β) then
+        modify fun s => { s with ptrSplitOrigins := s.ptrSplitOrigins.insert f }
       return some name
     | none =>
       modify fun s => { s with splits := s.splits.insert key none, sigs := s.sigs.erase name }
@@ -386,8 +389,8 @@ mutual
         let s ← mkFreshFVarId
         let t ← mkFreshFVarId
         pure (d.params[:shape.arrPos].toArray ++
-          #[{ p with fvarId := s, binderName := `src, type := mkApp (mkConst ``Array) α },
-            { p with fvarId := t, binderName := `dst, type := mkApp (mkConst ``Array) β }] ++
+          #[{ p with fvarId := s, binderName := splitSrcName, type := mkApp (mkConst ``Array) α },
+            { p with fvarId := t, binderName := splitDstName, type := mkApp (mkConst ``Array) β }] ++
           d.params[shape.arrPos + 1:].toArray,
           ({} : Std.HashMap FVarId (FVarId × FVarId)).insert p.fvarId (s, t))
     let st : SplitSt := {
@@ -420,7 +423,8 @@ mutual
       let α := xt.appArg!
       if ← unknown α then return .let d k'
       let β := sh.elem.getD α
-      unless (← holdsCompactKind cache α) || (← holdsCompactKind cache β) do return .let d k'
+      let ptr := (← get).typedArrays
+      unless (← holdsCompactKind cache α ptr) || (← holdsCompactKind cache β ptr) do return .let d k'
       if (← norm α) == (← norm β) then
         let some name ← ensureSplit f α β shapes src cache | return .let d k'
         return .let { d with value := .const name us args } k'
@@ -725,8 +729,12 @@ def splitMapLoops (decls : Array (Decl .pure)) (types : Array Types) (roots : Ar
   -- A loop nothing reachable calls stays if a declaration that stays still
   -- names it (a typed instance nothing calls any more, which the lowering
   -- still lowers): every name the lowering meets must have its declaration.
+  -- (A loop split only for a pointer kind stays too: the lowering enters
+  -- it again in place when those kinds end up boxed, `revertPtrSplits`.)
+  let origins := (← get).ptrSplitOrigins
   let mut kept : NameSet := all.foldl (fun s d =>
-    if !(shapes.contains d.name) || live.contains d.name then s.insert d.name else s) {}
+    if !(shapes.contains d.name) || live.contains d.name || origins.contains d.name then s.insert d.name
+    else s) {}
   repeat
     let before := kept.size
     for d in all do
@@ -820,7 +828,7 @@ def arrayParamsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
       if blocked.contains (d.name, j) then continue
       let ts := ((sites.getD (d.name, j) #[]).filterMap id)
       let some t := ts[0]? | continue
-      unless ← holdsCompactKind cache t do continue
+      unless ← holdsCompactKind cache t (← get).typedArrays do continue
       let n ← norm t
       let mut agree := true
       for t' in ts do
@@ -845,18 +853,29 @@ def arrayParamsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
 
 /-- Registry entry point (optimization `compact-arrays`: the typed `map`
 loops, the array parameters from call sites, and the compact storage in
-the lowering). -/
+the lowering). With `typed-arrays` installed before it, the loops and the
+parameters are also typed at element types with a pointer kind. -/
 def Opt.CompactArrays.install (c : PassConfig) : PassConfig :=
   let prev := c.stage3.typedMapLoops
   let prevP := c.stage3.paramsFromCallers
+  let ptr := c.typedArrays
   { c with
     compactArrays := true
     stage3 := { c.stage3 with
       typedMapLoops := fun decls types roots => do
-        splitMapLoops (← prev decls types roots) types roots
+        let decls ← prev decls types roots
+        modify fun s => { s with typedArrays := ptr }
+        splitMapLoops decls types roots
       paramsFromCallers := fun decls types => do
         let (decls, types, ch) ← prevP decls types
+        modify fun s => { s with typedArrays := ptr }
         let (decls, types, ch') ← arrayParamsFromCallers decls types
         return (decls, types, ch || ch') } }
+
+/-- Registry entry point (optimization `typed-arrays`, installed before
+`compact-arrays`, which it extends): arrays of one-word counted element
+types are typed where the whole-program check allows it. -/
+def Opt.TypedArrays.install (c : PassConfig) : PassConfig :=
+  { c with typedArrays := true }
 
 end LeanToReussir

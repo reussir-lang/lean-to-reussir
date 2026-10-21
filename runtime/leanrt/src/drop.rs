@@ -388,7 +388,9 @@ pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
     // elements), as natively the array is scanned when it is popped. An
     // array that keeps exactly one element outside a free (the old copy of
     // an array of boxes updated after a copy, which held one element of
-    // its own) may release it without the step (`free_single`).
+    // its own) may release it without the step (`free_single`), and an
+    // array of records is freed at once up to a bounded nesting
+    // (`free_now`).
     if !active() {
         unsafe {
             (*o)._pad = SCANNED;
@@ -396,12 +398,25 @@ pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
                 mi_free(o as *mut std::ffi::c_void);
                 return;
             }
-            if T::free_single(o) {
+            if T::free_single(o) || T::free_now(o) {
                 return;
             }
         }
     }
     run(o as usize, step_vec::<T>);
+}
+
+/// How deep `free_now` runs inside itself on this thread: an element's
+/// release that frees a record holding an array of records frees that
+/// array at once too, up to `FREE_NOW_MAX` levels; the array at that
+/// level goes to the stack (`run`), whose drain then pushes every array
+/// below it (`active`), so the frees below are a loop, not a recursion
+/// (`RtDropDeep`: arrays of records whose records hold arrays of records,
+/// deep enough to overflow an 8 MB stack one frame per level).
+const FREE_NOW_MAX: u32 = 16;
+
+thread_local! {
+    static FREE_NOW_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// `Hdr::_pad` of a block being freed whose first pass (`scan`) is done.
@@ -449,8 +464,9 @@ trait ReleaseElems: Sized {
     /// the array's only reference. Boxes (`LAny`, leanrt's own encoding).
     /// (For other element types the counts are not read here: the block
     /// stays as it is, and its elements are released by
-    /// `release_from_end`: records (`Bridge`) all in index order inside the
-    /// free, the others from the last one, each completely. lean2rr's
+    /// `release_from_end` (records, `Bridge`: all in index order, inside the
+    /// free or, outside one, at once, `free_now`; the others from the last
+    /// one, each completely). lean2rr's
     /// arrays of Lean values hold boxes, `LAny`, or records; the other
     /// element types are scalars, whose release does nothing, and strings,
     /// whose order is not seen.)
@@ -460,6 +476,11 @@ trait ReleaseElems: Sized {
     /// if the rule of the element type allows it (`true`); else nothing
     /// (`false`: the step frees them). Only boxes have such a rule.
     unsafe fn free_single(o: *mut Hdr) -> bool;
+    /// Outside a free, after a first pass that kept elements: release them
+    /// and free the block at once, without the stack (`true`), if the
+    /// element type's rule allows it; else nothing (`false`). Only records
+    /// have such a rule.
+    unsafe fn free_now(o: *mut Hdr) -> bool;
 }
 
 #[inline(always)]
@@ -493,6 +514,10 @@ impl<T> ReleaseElems for T {
     default unsafe fn free_single(_: *mut Hdr) -> bool {
         false
     }
+    #[inline(always)]
+    default unsafe fn free_now(_: *mut Hdr) -> bool {
+        false
+    }
 }
 
 /// A Reussir record (`Bridge<Inner>`): its `Drop` is the record's own
@@ -507,10 +532,11 @@ impl<T> ReleaseElems for T {
 /// inside that element's release). Not for a member that two elements
 /// share: the first element's release only decrements it, and the second
 /// frees it at its place, where natively both decrements come first and
-/// the dead elements go from the last (a deviation; lean2rr makes no array
-/// of records today, clean step B1 will; the exact order needs a release
-/// that decrements or, at the last reference, defers: a Reussir entry
-/// point, parked).
+/// the dead elements go from the last (a deviation; the exact order needs
+/// a release that decrements or, at the last reference, defers: a Reussir
+/// entry point, parked). lean2rr makes an array of records only when its
+/// elements hold nothing whose release the program can observe (typed
+/// arrays, clean step B1), so the deviation is not seen.
 impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     unsafe fn release_from_end(o: *mut Hdr, _depth: usize) -> bool {
@@ -529,6 +555,32 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     unsafe fn free_single(_: *mut Hdr) -> bool {
         false
+    }
+    /// An array of records outside a free: every element released in index
+    /// order by its own `<record>_ffi_release`, then the block freed, with
+    /// no step on the stack, up to `FREE_NOW_MAX` nested levels. The order
+    /// is the step's (`release_from_end`) except that a record an element
+    /// frees is not pushed first; lean2rr types an array of records only
+    /// when its elements hold nothing whose release the program can
+    /// observe. The step, its drain and the drain's end hook cost Cedar
+    /// (Z06g) and monadic-interp (L15) most of what their typed arrays of
+    /// records cost to free (L15: 1.2 billion instructions of 20.3).
+    #[inline(always)]
+    unsafe fn free_now(o: *mut Hdr) -> bool {
+        let d = FREE_NOW_DEPTH.with(|c| c.get());
+        if d >= FREE_NOW_MAX {
+            return false;
+        }
+        FREE_NOW_DEPTH.with(|c| c.set(d + 1));
+        Self::release_from_end(o, 0);
+        mi_free(o as *mut std::ffi::c_void);
+        // A decrement, not `d` again: a drain an element's release starts
+        // ends with leanrt's hook (`task::drained`), whose Lean code may
+        // switch to another context on this thread, which may run its own
+        // `free_now` meanwhile; restores in another order than the
+        // increments would then leave the count high for good.
+        FREE_NOW_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+        true
     }
 }
 
@@ -867,16 +919,19 @@ mod tests {
         true
     }
 
-    /// An array of records whose elements are shared inside it releases
-    /// what they hold in native Lean's order (as one of boxes,
-    /// `any::tests::box_array_free_shared_inside`): a record the array holds
-    /// twice at its last index, one that a later element also holds inside
-    /// that element's release; outside a free and inside one. The step
-    /// releases the elements in index order (`Bridge`'s `release_from_end`);
-    /// what a freed record holds goes on the stack (each record's member
-    /// `10 * id` here, released through `release`), and the pops give the
-    /// order. Only the members are observable (a record's own free shows
-    /// nothing; the log keeps the members, 10 and up).
+    /// An array of records whose elements are shared inside it, freed inside
+    /// a free (the step), releases what they hold in native Lean's order (as
+    /// one of boxes, `any::tests::box_array_free_shared_inside`): a record
+    /// the array holds twice at its last index, one that a later element
+    /// also holds inside that element's release. The step releases the
+    /// elements in index order (`Bridge`'s `release_from_end`); what a freed
+    /// record holds goes on the stack (each record's member `10 * id` here,
+    /// released through `release`), and the pops give the order. Outside a
+    /// free the array is freed at once (`free_now`): the elements in index
+    /// order, each freed record's members at its own free (logged as
+    /// `1000 + id`), an order lean2rr's typed arrays make unobservable.
+    /// The log keeps 10 and up: the members, and the records freed outside
+    /// a free.
     #[test]
     fn record_array_free_shared_inside() {
         let el = |id: u32| rec(id, vec![rec(10 * id, vec![])]);
@@ -893,17 +948,19 @@ mod tests {
                 .fold(crate::array::empty::<B>(), crate::array::push)
         };
         let members = || take_log().into_iter().filter(|&i| i >= 10).collect::<std::vec::Vec<_>>();
+        // Outside a free (`free_now`).
         drop(dup());
-        assert_eq!(members(), vec![40, 20, 30, 10]);
+        assert_eq!(members(), vec![1001, 10, 1003, 30, 1002, 20, 1004, 40]);
         drop(holder());
-        assert_eq!(members(), vec![70, 50, 60]);
+        assert_eq!(members(), vec![1006, 60, 1007, 50, 70]);
         // A member shared by two elements (`[R0{X, H0}, R1{X, H1}]`, `X{G}`):
         // natively H1 H0 G (both decrements first, then the dead from the
         // last); here R0's release only decrements X, R1's frees it after
-        // H1 went on the stack: H1 G H0. A deviation, reached by no program
-        // today (lean2rr makes no array of records); the exact order needs a
-        // release that decrements or, at the last reference, defers (a
-        // Reussir entry point: parked).
+        // H1 went on the stack: H1 G H0. A deviation that no program sees
+        // (lean2rr types an array of records only when its elements hold
+        // nothing whose release the program can observe); the exact order
+        // needs a release that decrements or, at the last reference, defers
+        // (a Reussir entry point: parked).
         let shared = || {
             let x = rec(9, vec![rec(90, vec![])]);
             [B::new(rec(1, vec![x.clone(), rec(10, vec![])])), B::new(rec(2, vec![x, rec(20, vec![])]))]
@@ -911,13 +968,18 @@ mod tests {
                 .fold(crate::array::empty::<B>(), crate::array::push)
         };
         drop(shared());
+        assert_eq!(members(), vec![1001, 10, 1002, 90, 20]);
+        HELD.with(|h| *h.borrow_mut() = Some(shared()));
+        run(0, step_drop_held);
         assert_eq!(members(), vec![20, 90, 10]);
+        // Inside a free (the step): native's order.
         HELD.with(|h| *h.borrow_mut() = Some(dup()));
         run(0, step_drop_held);
         assert_eq!(members(), vec![40, 20, 30, 10]);
         HELD.with(|h| *h.borrow_mut() = Some(holder()));
         run(0, step_drop_held);
         assert_eq!(members(), vec![70, 50, 60]);
+        assert_eq!(FREE_NOW_DEPTH.with(|c| c.get()), 0);
         assert!(!active());
         assert_eq!(reussir_rt::drop::depth(), 0);
     }

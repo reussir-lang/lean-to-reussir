@@ -20,6 +20,12 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   storage kinds, the whole-program check, the typed `map` loops, a `match`
   on an array, the boxed `Array α` fields, the safety net, the
   alternatives considered.
+- [typed-arrays.md](typed-arrays.md): `Array X` of a one-word counted type
+  (a shared record or enum, `Nat`, `Int`, `String`, an array) as `RVec<T>`
+  of its own type (optimization `typed-arrays`, clean step B1): the
+  pointer kinds, the check they share with compact arrays, elements
+  without observable releases only, a set's release of a replaced record
+  by its own drop, the costs.
 - [strings.md](strings.md): the counted string, its equality, the string literal table
   and its `[` escape.
 - [box-and-uniform.md](box-and-uniform.md): the uniform `Box` type and its

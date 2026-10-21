@@ -119,9 +119,20 @@ def spawnCall (sa : RR.Expr) (saTy : RR.Ty) (modes : Option Nat)
       (m, some u64, .atom s!"{i 0} + ({i 1} * {k8}) + ({i 2} * {k16})")]
     modesE := .atom s!"({m} as u32)"
   let (cmd, cmdT, cmdE) ← field 1 (some str) "pcmd"
-  -- `args : Array String`: the one array type (`RVec<Box>`), passed as it
-  -- is; the runtime reads each boxed string in place (`any::str_ref`).
-  let (argv, argvT, argvE) ← field 2 (some (.app "RVec" #[RR.Ty.box])) "pargs"
+  -- `args : Array String`: an array of boxes (`RVec<Box>`), passed as it
+  -- is; the runtime reads each boxed string in place (`any::str_ref`). A
+  -- typed `RVec<LStr>` (`typed-arrays`) is copied into boxes first: the
+  -- runtime only reads the copy.
+  let (argv, argvT, argvE) ← do
+    let (e, t) ← structField saTy sa 2
+    let v ← fresh "pargs"
+    let boxes := RR.Ty.app "RVec" #[RR.Ty.box]
+    match arrayElem? t with
+    | some se =>
+      if se == RR.Ty.box then pure (v, boxes, e) else
+      let fn ← arrayMapFn s!"l2r_proc_args_boxes_{t.enc}" t RR.Ty.box fun x => coerce x se RR.Ty.box
+      pure (v, boxes, .call fn #[] #[e])
+    | none => pure (v, boxes, ← coerce e t boxes)
   let (co, coT, coE) ← field 3 none "pco"
   let cd ← fresh "pcd"
   let ch ← fresh "pch"

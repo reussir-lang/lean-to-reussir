@@ -31,6 +31,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `String` | `LStr`: one block | header (count, byte size, capacity, character count), then UTF-8 bytes |
 | `Array α` | `RVec<LAny>`: one block | for every `α` without a storage kind: each element is a box |
 | `Array S`, `S` a scalar | `RVec<u8>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`, `RVec<f32>`, `RVec<f64>`: one block | the scalars inline ([compact arrays](#compact-arrays)) |
+| `Array X`, `X` a record, an enum with fields, `Nat`, `Int`, `String` or an array | `RVec<T>` of `X`'s own type: one block | the pointers without boxes ([typed arrays](#typed-arrays)) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` are the identity with a compact `Array UInt8`; with an array of boxes they copy the elements in one loop |
 | `ST.Ref`, `IO.Ref` | one generated record around a Reussir `Cell` of a box | for every element type; updates seen through every alias |
 | `Thunk α`, `Task α` | `LCell<S>` holding a generated state | for every `α`: the value is a box; memoized thunks, deferred tasks |
@@ -87,8 +88,9 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
   `mi_realloc`. A shared block is copied once, with room for the update.
 - **Elements.** An `Array α` holds boxes, as Lean's array holds
   `lean_object*` words. A small `Nat` is the word itself. A `Float` in a
-  box is a cell, as natively. An array of scalars is compact (next
-  section). `ByteArray` and `FloatArray` hold raw bytes and floats.
+  box is a cell, as natively. An array of scalars is compact, and an
+  array of records, numbers, strings or arrays can be typed (next
+  sections). `ByteArray` and `FloatArray` hold raw bytes and floats.
 - **Reads.** Reussir has no borrowed parameters, so each read of an array
   or string takes the container owned: an increment by the caller and a
   release in the runtime function. LLVM cancels the pair when nothing lies
@@ -97,11 +99,12 @@ size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
   element from the view. The last reference frees the container after
   the read.
 - **Sets.** A set (or a pop) releases the element that it removes. For a
-  record, only the decrement is inline, so LLVM inlines the set into the
-  loop. When the set frees the last reference to a record, a call puts the
-  record on the pending stack as one cell, and the free releases the record's
-  fields last first, as Lean does. This costs about 74 instructions per
-  freed record.
+  boxed record, only the decrement is inline, so LLVM inlines the set into
+  the loop. When the set frees the last reference to a boxed record, a
+  call puts the record on the pending stack as one cell, and the free
+  releases the record's fields last first, as Lean does. This costs about
+  74 instructions per freed record. A record in a typed array is released
+  by its own drop, through a call out of line.
 - **String equality.** Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.
@@ -160,6 +163,32 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
 
 Status: a tag for the arrays that reach generic code is a possible later
 extension.
+
+## Typed arrays
+
+An array whose element type is a one-word counted type holds the
+elements themselves, without boxes: `RVec<T_Body>` for an `Array Body`,
+`RVec<Nat>`, `RVec<LStr>`, `RVec<RVec<Nat>>`. A read gives the element
+without a test of a box's type, and a write stores it without a tag
+(pass `typed-arrays`, which extends `compact-arrays`).
+
+- **Kinds.** All instances of one inductive type have one kind
+  (`List Nat` and `List String` are both `T_List`). `Nat`, `Int` and
+  `String` have a kind each. An array of arrays has the kind of its
+  element's kind.
+- **The rule.** The same whole-program check as for compact arrays,
+  once for each kind: a kind is typed when no array of that kind can
+  reach code that reads it as an array of boxes. Function types, thunks,
+  tasks, handles and references have no kind.
+- **Releases.** The runtime releases the elements of a typed array in
+  another order than Lean when elements are shared. Thus a kind is typed
+  only when its elements can hold nothing whose release the program can
+  see: no closure, no box, no handle, no task, no reference.
+- **Example.** In n-body, `Array Body` is `RVec<T_Body>`. The program
+  runs about 18% fewer instructions than with boxes.
+
+Status: a conversion for a typed array that generic code unboxes as an
+array of boxes (now a stop with a message) is a possible later extension.
 
 ## Records and enums
 

@@ -168,6 +168,11 @@ structure LowerCtx where
   element type has one of these kinds (`arrayStorage`). Empty: every array
   is an array of `Box`es. -/
   compactKindsOn : Array String := #[]
+  /-- The pointer kinds whose arrays are typed (`RVec<T>` of the element's
+  own type `T`; optimization `typed-arrays`, `compactArrayKinds`'s
+  `ptrOn`, `ArrayKinds.ptrKind?`): an `Array X` whose element type has one
+  of these kinds (`arrayStorage`). -/
+  typedKindsOn : Std.HashSet String := {}
   /-- The inductives whose fields of type `Array α` (`α` a parameter) are a
   `Box` instead of an array of boxes, because the program also stores a
   compact array there (`arrayFieldInductives`, `nominalType`). -/
@@ -261,6 +266,8 @@ structure LowerState where
   ext : NameMap Dynamic := {}
   /-- `enumCtorCount?`'s answers, by inductive (`arrayKindOf`). -/
   enumCounts : Std.HashMap Name (Option Nat) := {}
+  /-- `ptrKind?`'s cache (`arrayPtrKindOf`). -/
+  ptrKindCache : Std.HashMap Name (Option String) := {}
   /-- Targets of function values, by id. -/
   fnTargets : Std.HashMap String FnTarget := {}
   /-- Variants of each function-value type (an `RR.Ty.fn`, at run time:
@@ -1901,17 +1908,35 @@ mutual
       | some k => return if 1 ≤ k && k ≤ 256 then some "u8" else none
       | none => return none
 
+  /-- The pointer kind of an array element of mono type `t`
+  (`ArrayKinds.ptrKind?`, the function the whole-program check uses, so
+  that both name one kind), cached in `LowerState.ptrKindCache`. -/
+  partial def arrayPtrKindOf (t : Expr) : LowerM (Option String) := do
+    let cache ← IO.mkRef (← get).ptrKindCache
+    let k ← ptrKind? cache t
+    let c ← cache.get
+    modify fun s => { s with ptrKindCache := c }
+    return k
+
   /-- The storage type of the elements of an `Array t` (`t` a mono type):
   its storage kind (`arrayKindOf`) when the program stores that kind
-  compactly (`LowerCtx.compactKindsOn`, optimization `compact-arrays`),
-  otherwise `Box` (rule 1: one array of boxes for every other type). A
-  `Bool` is stored as its `u8`, an enumeration as its index. -/
+  compactly (`LowerCtx.compactKindsOn`, optimization `compact-arrays`);
+  `t`'s own type when its pointer kind is typed (`LowerCtx.typedKindsOn`,
+  optimization `typed-arrays`: a shared record or enum, `Nat`, `Int`,
+  `LStr`, an array); otherwise `Box` (rule 1: one array of boxes for every
+  other type). A `Bool` is stored as its `u8`, an enumeration as its
+  index. -/
   partial def arrayStorage (t : Expr) : LowerM RR.Ty := do
     let on := (← read).compactKindsOn
-    if on.isEmpty then return RR.Ty.box
+    let typed := (← read).typedKindsOn
+    if on.isEmpty && typed.isEmpty then return RR.Ty.box
     match ← arrayKindOf t with
     | some k => return if on.contains k then .named k else RR.Ty.box
-    | none => return RR.Ty.box
+    | none =>
+      if typed.isEmpty then return RR.Ty.box
+      match ← arrayPtrKindOf t with
+      | some k => if typed.contains k then lowerType t else return RR.Ty.box
+      | none => return RR.Ty.box
 
   /-- Translate a mono type whose head is constant `n` (its arguments do
   not change the representation, rule 1; an `Array` with its element type

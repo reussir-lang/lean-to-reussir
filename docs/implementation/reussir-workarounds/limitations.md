@@ -131,10 +131,12 @@ files, `runtime/` and `scripts/` from the repository root.
   all, are kept small: each costs less than 45 in LLVM's inline cost model
   once its `_ffi` function is inlined into rrc's import trampoline. An
   array read is three textures (`l2r_array_give`, `l2r_view_size`,
-  `l2r_view_take`) instead of one. Three reads cost more than 45: the
+  `l2r_view_take`) instead of one. These reads cost more than 45: the
   read of a box (`l2r_view_take<LAny>`, with the one-word `Box`) and the
-  reads of a `Nat` or `Int` element at its type (`l2r_view_take_as<Nat>`,
-  `<Int>`). At a call site that LLVM judges cold they stay calls.
+  reads of a `Nat` or `Int` element, at its type from an array of boxes
+  (`l2r_view_take_as<Nat>`, `<Int>`) or from a typed array
+  (`l2r_view_take<Nat>`, `<Int>`, optimization `typed-arrays`). At a call
+  site that LLVM judges cold they stay calls.
   `tests/runtime/ffi-inline-check.sh` allows these calls in `RtReadsDeep`
   (every read there sits behind seven conditions) and nowhere else; in
   `RtArraySets` (sets, and the read of a box, at ordinary call sites) no

@@ -246,6 +246,15 @@ structure MRetypeState where
   splitDecls : Array (Decl .pure) := #[]
   /-- The number of the next typed instance's name. -/
   splitCount : Nat := 0
+  /-- Whether the typed `map` loops and the array parameters from callers
+  also take element types with a pointer kind (optimization
+  `typed-arrays`; set by `compact-arrays`' hooks). -/
+  typedArrays : Bool := false
+  /-- The `map` loops that have a split instance only for a pointer kind
+  (`typed-arrays`; neither element type holds a storage kind): kept, so
+  that the lowering can enter them again in place when those kinds end up
+  boxed (`revertPtrSplits`). -/
+  ptrSplitOrigins : NameSet := {}
 
 abbrev MRetypeM := ReaderT MRetypeCtx (StateRefT MRetypeState CoreM)
 

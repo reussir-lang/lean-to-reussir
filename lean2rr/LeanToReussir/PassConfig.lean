@@ -55,6 +55,12 @@ structure PassConfig where
   (`compactArrayKinds`, Opt/SplitMapLoops). Plain: every `Array α` is an
   array of `Box`es. -/
   compactArrays : Bool := false
+  /-- Whether an `Array X` of a one-word counted type `X` (a shared record
+  or enum, `Nat`, `Int`, `String`, another array) is typed, `RVec<T>` of
+  `X`'s own type, for the pointer kinds the whole-program check of
+  `compactArrays` allows (`compactArrayKinds`'s `ptr`; nothing without
+  `compactArrays`). Plain: such arrays hold boxes. -/
+  typedArrays : Bool := false
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]

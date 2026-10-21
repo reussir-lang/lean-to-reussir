@@ -2,16 +2,16 @@
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 50265
 bytes 2214128
-native-allocs 64913
-native-bytes 2546211
-items 282
-functions 217
+native-allocs 64901
+native-bytes 2546035
+items 290
+functions 223
 conversion-fns 0
 conversion-sites 0
 box-sites 207
-box-variants 13
-unbox-fns 5
-unbox-sites 19
+box-variants 15
+unbox-fns 6
+unbox-sites 16
 item L2RFn_F3nu324nbool 97c2f4999fe7
 item L2RFn_F3nu64F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» f96e8eb23184
 item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
@@ -30,37 +30,40 @@ item T_StdGen_# 066265cc92ad
 item T_Std_DTreeMap_Internal_Impl_# 2b25cc150469
 item T_Std_DTreeMap_Internal_Impl_View_# 782b4cfa993c
 item T_Std_Legacy_Range_# ad4934ced4e1
-item T_Std_Slice_Internal_SubarrayData_# 761b7c7dd120
+item T_Std_Slice_Internal_SubarrayData_# d399261b973b
 item T_String_Slice_# 74f079416627
 item T_T_# f2d5687ae37e
 item T_U_# 15e694c48c6b
-item Tuple# 18ed7f68edb5
-item Tuple# 29872493ec47
+item Tuple# 07808aa2f9b0
+item Tuple# 11bafc13691f
+item Tuple# 19b5842a3be7
+item Tuple# 1d5da4882977
 item Tuple# 2c0ad728dbb9
-item Tuple# 34be5b7965fa
-item Tuple# 34be5b7965fa
 item Tuple# 4339ee611fc7
-item Tuple# 44a714669d99
-item Tuple# 4873bfc698da
 item Tuple# 4eab69a3cbe8
+item Tuple# 5798521c49eb
 item Tuple# 5a497c32bcb0
-item Tuple# 5f478e9b74ca
 item Tuple# 6f19b44cb476
 item Tuple# 7d1ae1a722a1
-item Tuple# 8fc907e9a888
 item Tuple# 914aabebccda
-item Tuple# 9bb1e7ac937a
 item Tuple# 9f0aaa56ba0d
-item Tuple# a304cd1087de
+item Tuple# aeeba11b1f0c
+item Tuple# aef536734f59
 item Tuple# bdc15d88e6b2
 item Tuple# c3785e5640de
 item Tuple# c4790f2e2b1e
+item Tuple# c57ab3d2e999
 item Tuple# d4eee5540d99
-item Tuple# f65785b93149
+item Tuple# eaefd1e7e6b6
+item Tuple# eaefd1e7e6b6
+item Tuple# f3665032a092
 item Tuple# fd4a01cee92a
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 006f0efa3349
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 079b0f39cca0
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 089399175044
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 15e8090426be
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3f03f6ad69ec
@@ -70,7 +73,6 @@ item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 7649f3688788
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 8042c9da9fdc
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; b6a2fc0fd801
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; e122ebc32024
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; e6f65a91ca02
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; fc8ab091200c
 item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
 item extern "C" trampoline "l2r_main_body" = l2r_main_body; 398932703e9e
@@ -82,22 +84,26 @@ item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 0119670e1a65
 item l2r_any_rel_# 088dffee5ccf
 item l2r_any_rel_# 14705fb1e9c6
+item l2r_any_rel_# 1fe052126bca
 item l2r_any_rel_# 2457057329a7
 item l2r_any_rel_# 3190d4b509c2
 item l2r_any_rel_# 335f04c922c7
+item l2r_any_rel_# 5848f841cb11
 item l2r_any_rel_# 5d9b3bfe95fc
+item l2r_any_rel_# 7febeb8aae0c
 item l2r_any_rel_# 97aa07f9e12c
 item l2r_any_rel_# ba250db4e619
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# e7f60d5b8ad4
-item l2r_any_rel_# eb35743aa9bd
-item l2r_any_releases 51dd6072313f
+item l2r_any_releases 8b6f8817bd70
 item l2r_ap1_F3nu324nbool bcd732154723
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
-item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny daecf3bfb378
-item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_4nLAny_go f4af20a6c597
+item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_3nNat 9cd2597ca3d7
+item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_3nNat_go 0655123a698c
+item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_«T_Prod_#~7e6da67e941d» 8f74c0486dd6
+item l2r_array_to_list_«T_List_#~aeda86a38d96»_4aRVec1_«T_Prod_#~7e6da67e941d»_go 57e5b55bc357
 item l2r_box_F3nu324nbool 49b4909e853d
 item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe
 item l2r_box_«T_List_#~aeda86a38d96» a41aad7692e3
@@ -113,7 +119,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body ae64a393e3a3
+item l2r_main_body b85a57468e13
 item l2r_main_on_thread 4f4adafe091e
 item l2r_nullary_of_index_«T_List_#~aeda86a38d96» 94aed60e17ee
 item l2r_nullary_of_index_«T_T_#~88c57bff0e39» f990d51b2718
@@ -130,6 +136,7 @@ item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
 item l2r_task_walk 9c19386ba6fa
+item l2r_unbox_rest_4aRVec1_«T_T_#~88c57bff0e39» 4f804230e278
 item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
 item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» f0e19419da5a
 item l2r_unbox_rest_«T_List_#~aeda86a38d96» ea800b6cf729
@@ -138,22 +145,23 @@ item l2r_unbox_rest_«T_T_#~88c57bff0e39» 681e2378fef3
 item l2r_zero_# 05400cf3c50b
 item l2r_zero_# 098354a8ae5a
 item l2r_zero_# 19a6e9c60fb1
-item l2r_zero_# 4621a50aa2da
 item l2r_zero_# 6065a415a850
 item l2r_zero_# 64b17cf5704f
+item l2r_zero_# 86a784323c4c
 item l2r_zero_# 8cd89651b501
 item l2r_zero_# 8ce037aaca3e
 item l2r_zero_# 9f3e31b628c0
 item l2r_zero_# b348ef685842
 item l2r_zero_# b416255d196c
+item l2r_zero_# bfc31eb67244
 item l2r_zero_# d71d5ec18d04
 item l2r_zero_# f33d0f6f8f3a
 item l2r_zero_# fb7fc53512ff
-item l2r_zero_#_init 6a8819e684fa
 item l2r_zero_#_init 77e9461e58b4
+item l2r_zero_#_init 78a6ed2daea5
 item l2r_zero_#_init e80553a14196
 item l2r_zero_#_init edc7bc631e24
-item l_Array_toSubarray___l2r_#____redArg___l2r__flat 67b8897c75fa
+item l_Array_toSubarray___l2r_#____redArg___l2r__flat 74e72c5b2fc3
 item l_ByteArray_toUInt64LE_x21___l2r_#_ 5aa10a15d1a4
 item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3 28b329d731b5
 item l_ByteArray_toUInt64LE_x21___l2r_#____closed__3_init 37a13966582e
@@ -231,18 +239,18 @@ item l_T_toList___l2r_#_ 52a1dfb2d32c
 item l_U_hash___l2r_#_ 52aa0b0a045e
 item l_U_size___l2r_#_ a5e62440528d
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_contains___at___00String_anyAux_spec__0_spec__0___l2r_#____redArg___l2r__flat d4fe98801c93
-item l___private_Init_Data_Array_Basic_0__Array_forIn_x27Unsafe_loop___at___00main_spec__7___l2r_#____l2r__flat bde050610d22
-item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#_ ccf8da8aaa27
+item l___private_Init_Data_Array_Basic_0__Array_forIn_x27Unsafe_loop___at___00main_spec__7___l2r_#____l2r__flat cc75d6a3d294
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0 9c4e4230dadf
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0_init 2eba11b8cc56
-item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
-item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 6978eefa24fa
+item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____l2r__split_0_ 031d43243166
+item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 4f99e19c7560
+item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 89c914d9b550
 item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 90aa8c56236c
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init e71bee722491
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat 5dc4e7927536
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat b11c08d2caf3
-item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__5___l2r_#____redArg___l2r__flat 7c62b643816a
+item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__5___l2r_#____redArg___l2r__flat 14eb2435bb65
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__9___l2r_#____redArg___l2r__flat 2c8bd6eb41ad
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_addParenHeuristic___l2r_#_ 2716276de4fa
@@ -254,7 +262,7 @@ item l_balanceR___l2r_#_ 21c3f9ab9317
 item l_big___l2r_#_ 02e7ea360cae
 item l_instInhabitedT___l2r_#_ 7f674612a608
 item l_instInhabitedT___l2r_#__init 94fd285a8c68
-item l_main___l2r_#_ 0444393c9208
+item l_main___l2r_#_ de9aed6630dc
 item l_main___l2r_#____closed__0 b57667f50315
 item l_main___l2r_#____closed__0_init e8502f1a4d1f
 item l_main___l2r_#____closed__1 9804e8a34e3e
@@ -262,17 +270,17 @@ item l_main___l2r_#____closed__13 6ff564e579c5
 item l_main___l2r_#____closed__13_init b074e9f24521
 item l_main___l2r_#____closed__15 9ec05dbb11e0
 item l_main___l2r_#____closed__15_init 4e02b04d1d49
-item l_main___l2r_#____closed__17 ff43bbad559c
-item l_main___l2r_#____closed__17_init f49d72aefe45
+item l_main___l2r_#____closed__17 3ec0ad30fa5c
+item l_main___l2r_#____closed__17_init 9a74ba293d24
 item l_main___l2r_#____closed__1_init cd025b5f6454
 item l_main___l2r_#____closed__20 3229f3506c65
 item l_main___l2r_#____closed__20_init 14fc0e2a9e96
 item l_main___l2r_#____closed__29 abfc0cb41077
 item l_main___l2r_#____closed__29_init 8c548f82f1cb
-item l_main___l2r_#____closed__30 b68a6cd4ca88
-item l_main___l2r_#____closed__30_init 8a7e0c02f277
-item l_main___l2r_#____closed__32 f820d670289c
-item l_main___l2r_#____closed__32_init 1fa5d27d8e7b
+item l_main___l2r_#____closed__30 44022007c2dc
+item l_main___l2r_#____closed__30_init fc84fa082d9a
+item l_main___l2r_#____closed__32 35d1b2c34fe1
+item l_main___l2r_#____closed__32_init d95c4ce7f7ef
 item l_main___l2r_#____closed__33 cbf9dd8ab2a3
 item l_main___l2r_#____closed__33_init a155f9fc7d32
 item l_main___l2r_#____closed__34 2df432f99c5a

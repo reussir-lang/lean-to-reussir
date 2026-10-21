@@ -85,10 +85,34 @@ structure CAState where
   noArr : Std.HashSet FVarId := {}
   holdCache : Std.HashMap Expr Bool := {}
   mentionCache : Std.HashMap Expr (Array String × Bool) := {}
+  /-- The element types seen for each pointer kind (`typed-arrays`), for
+  the check that their releases are not observable (`releaseUnsafe?`). -/
+  ptrElems : Std.HashMap String (Array Expr) := {}
+  /-- The pairs of `ptrElems`, for a membership test without a scan. -/
+  ptrElemSet : Std.HashSet (String × Expr) := {}
 
-abbrev CAM := ReaderT (IO.Ref (Std.HashMap Name (Option String))) (StateRefT CAState CoreM)
+structure CACtx where
+  cache : IO.Ref (Std.HashMap Name (Option String))
+  /-- Pointer kinds too (optimization `typed-arrays`), not only storage
+  kinds. -/
+  ptr : Bool
 
-def CAM.kindOf (t : Expr) : CAM (Option String) := do scalarKind? (← read) t
+abbrev CAM := ReaderT CACtx (StateRefT CAState CoreM)
+
+/-- The kind of array element type `t` (`elemKind?`); a pointer kind
+records `t` for the check of its releases. -/
+def CAM.kindOf (t : Expr) : CAM (Option String) := do
+  let r ← elemKind? (← read).cache t (← read).ptr
+  if let some k := r then
+    if isPtrKind k then
+      let t := keyTy t
+      unless (← get).ptrElemSet.contains (k, t) do
+        modify fun s => { s with ptrElems := s.ptrElems.insert k ((s.ptrElems.getD k #[]).push t),
+                                 ptrElemSet := s.ptrElemSet.insert (k, t) }
+  return r
+
+/-- The storage kind of `t` (a scalar), if it has one. -/
+def CAM.scalarOf (t : Expr) : CAM (Option String) := do scalarKind? (← read).cache t
 
 def CAM.turnOff (k : Option String) (why : String) : CAM Unit := do
   let some k := k | return
@@ -132,7 +156,7 @@ where
       if [``lcErased, ``lcVoid, ``Nat, ``Int, ``String, ``ByteArray, ``FloatArray, ``Unit, ``PUnit,
           ``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool].contains n then
         return false
-      if (← CAM.kindOf t).isSome then return false
+      if (← CAM.scalarOf t).isSome then return false
       let env ← getEnv
       let some iv := inductiveOf env t | return mayBeBox env t
       for a in t.getAppArgs do
@@ -195,9 +219,20 @@ partial def alignArr (a b : Expr) (why : String) (fuel : Nat := 16) (inBox : Boo
           ((ka.isNone && boxArrayElem env ea) || (kb.isNone && boxArrayElem env eb)) then return
       CAM.turnOff ka s!"{why}: {a} meets {b}"
       CAM.turnOff kb s!"{why}: {a} meets {b}"
+      -- Both are arrays of boxes now: what they hold is in boxes (two
+      -- arrays of other kinds there, `Array (Array Point)` against
+      -- `Array (Array String)`, still meet).
+      if ka.any isPtrKind || kb.any isPtrKind then
+        alignArr ea eb why fuel' (inBox := true) strict
     else if ka.isNone then
       -- An array of boxes: its elements are in boxes.
       alignArr ea eb why fuel' (inBox := true) strict
+    else if ka.any isPtrKind then
+      -- A typed array (`typed-arrays`): its elements at their own
+      -- representation, which the kind fixes (`List Nat` and `List lcAny`
+      -- are one type, `I:List`); what they hold is compared as they hold it
+      -- (an inductive's type arguments in boxes).
+      alignArr ea eb why fuel' (inBox := false) strict
     return
   | _, _ => pure ()
   match a, b with
@@ -271,12 +306,17 @@ instantiates with a scalar array there (`Subarray UInt64`, `Vector Bool
 n`, a user's `Column UInt8`). The lowering makes such a field a `Box`
 (`nominalType`, `LowerCtx.boxedArrayFields`), which holds a compact array
 as well as an array of boxes; the layout field `Array lcAny` would meet the
-compact array (a crossing, `compactArrayKinds`). -/
-partial def arrayFieldInductives (decls : Array (Decl .pure)) : CoreM NameSet := do
+compact array (a crossing, `compactArrayKinds`). With `ptr`
+(`typed-arrays`), also the pointer kinds each inductive's field is
+instantiated with (`Subarray String`: `LStr`), apart: such a field is a
+box when some pointer kind stays on (`compactArrayKinds`). -/
+partial def arrayFieldInductives (decls : Array (Decl .pure)) (ptr : Bool := false) :
+    CoreM (NameSet × Std.HashMap Name (Array String)) := do
   let env ← getEnv
   let cache ← IO.mkRef ({} : Std.HashMap Name (Option String))
   let seen ← IO.mkRef ({} : Std.HashSet Expr)
   let out ← IO.mkRef ({} : NameSet)
+  let ptrOut ← IO.mkRef ({} : Std.HashMap Name (Array String))
   -- The inductives with a field `Array α`, by name (`none`: none).
   let withField ← IO.mkRef ({} : Std.HashMap Name (Array (Name × Nat)))
   let rec visit (t : Expr) : CoreM Unit := do
@@ -306,6 +346,10 @@ partial def arrayFieldInductives (decls : Array (Decl .pure)) : CoreM NameSet :=
             if (← scalarKind? cache e).isSome then
               out.modify (·.insert iv.name)
               return
+            if ptr then
+              if let some k ← ptrKind? cache e then
+                let ks := (← ptrOut.get).getD iv.name #[]
+                unless ks.contains k do ptrOut.modify (·.insert iv.name (ks.push k))
     | _ => pure ()
   let rec code (c : Code .pure) : CoreM Unit := do
     match c with
@@ -325,7 +369,7 @@ partial def arrayFieldInductives (decls : Array (Decl .pure)) : CoreM NameSet :=
     visit d.type
     for p in d.params do visit p.type
     if let .code c := d.value then code c
-  out.get
+  return (← out.get, ← ptrOut.get)
 
 /-- The field types of constructor `ctor` of a value of type `valTy`, as the
 lowering holds them: `flatten-structs`' tuples at their type arguments,
@@ -425,8 +469,10 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
       -- the value can be an array of boxes (review F1: `v : lcAny` of a
       -- type-code universe read by `Array.size` at `UInt64`). Also a
       -- parameter or field of type `Array lcAny` that gets a box (an
-      -- argument of type `argT`, `lcAny`): the box is unboxed there as an
-      -- array of boxes, so the kinds of the value's class must be off (else
+      -- argument of type `argT`, `lcAny`), and an extern's result of type
+      -- `Array lcAny` that its binder (`argT`) takes as a box: the box is
+      -- unboxed there as an array of boxes (or the array boxed), so the
+      -- kinds of the value's class must be off (else
       -- leanrt converts a compact array, the safety net: a `T b` that is an
       -- `Array UInt64` read through a proved cast by `Array.size` at
       -- `lcAny`; test `RtCArrBoxedAny`).
@@ -450,7 +496,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
             if let some pt := ps[i]? then
               if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
               posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
-          if args.size ≥ ps.size then posNode `_l2r_ret 0 r x
+          if args.size ≥ ps.size then posNode `_l2r_ret 0 r x (some d.type)
           for a in args do CAM.union (← argNode a) x
         else
           let arity := ci.numParams + ci.numFields
@@ -470,7 +516,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
               if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
               posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
           if args.size == cd.params.size then alignArr cd.ret d.type why (strict := true)
-          if args.size ≥ cd.params.size then posNode `_l2r_ret 0 cd.ret x
+          if args.size ≥ cd.params.size then posNode `_l2r_ret 0 cd.ret x (some d.type)
           let mut prev := x
           for a in args do
             let n ← argNode a
@@ -511,7 +557,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
               if let some at_ ← argTy args[i] then alignArr at_ pt why (strict := true)
               posNode `_l2r_arg i pt (← argNode args[i]) (← argTy args[i])
           if args.size == ps.size then alignArr r d.type why (strict := true)
-          if args.size ≥ ps.size then posNode `_l2r_ret 0 r x
+          if args.size ≥ ps.size then posNode `_l2r_ret 0 r x (some d.type)
         let mut prev := x
         for a in args do
           let n ← argNode a
@@ -566,15 +612,70 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
       | _ => pure ()
   | _ => pure ()
 
-/-- The storage kinds the program can store compactly (see the module
-comment), and why each other kind is off. `casts`: whether the program can
-read a value as another type (`programCasts`); `inits`: its constants
-defined by `initialize`, each with the declaration of its initializer. -/
-def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits : Array (Name × Name))
-    (roots : Array Name) :
-    CoreM (Array String × Array (String × String) × NameSet) := do
+/-- A type reachable from mono type `t` whose values may have a release
+that the program can observe, or the order of whose releases it can
+observe (`none`: no such type). From a type: an array's element type, an
+inductive's constructor fields at the instance's arguments
+(`ctorFieldTypes`). Such a type is a function type (a closure holds what
+it captured), `lcAny` (a box holds a value of any type), a handle (its
+release closes the file), a task (its last release cancels it), a thunk
+(a closure), a reference, or a type that is no inductive (a runtime object
+or promise, `lcAny` in mono code). Numbers, strings, byte and float arrays
+and scalars hold nothing observable. Typed arrays (`typed-arrays`) release
+their elements in an order that differs from native Lean's two passes
+when an element or a member of two elements is shared
+(`leanrt::drop`, `ReleaseElems`): only an array whose elements hold
+nothing observable is typed. -/
+partial def releaseUnsafe? (t : Expr) : CoreM (Option Expr) := do
+  go t (← IO.mkRef {})
+where
+  go (t : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM (Option Expr) := do
+    let t := keyTy t
+    if (← visited.get).contains t then return none
+    visited.modify (·.insert t)
+    match t with
+    | .forallE .. => return some t
+    | .sort _ => return none
+    | _ =>
+      let .const n _ := t.getAppFn | return some t
+      if [``lcErased, ``lcVoid, ``Unit, ``PUnit, ``Nat, ``Int, ``String, ``ByteArray, ``FloatArray, ``UInt8,
+          ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool].contains n then
+        return none
+      if n == ``Array then
+        let some e := t.getAppArgs[0]? | return some t
+        return ← go e visited
+      if [``lcAny, ``IO.FS.Handle, ``Thunk, ``Task, ``ST.Ref].contains n then return some t
+      let some iv := inductiveOf (← getEnv) t | return some t
+      for c in iv.ctors do
+        -- A type whose constructors' fields cannot be computed (not the
+        -- inductive applied to its parameters: `ctorFieldTypes` gives
+        -- nothing) is refused, not read as holding nothing.
+        let some (.ctorInfo ci) := (← getEnv).find? c | return some t
+        let fs ← ctorFieldTypes c t
+        unless fs.size == ci.numFields do return some t
+        for f in fs do
+          if let some u ← go f visited then return some u
+      return none
+
+/-- What the whole-program check decided: the storage kinds the program
+can store compactly and why each other one is off; the fields `Array α`
+that are boxes (`arrayFieldInductives`); with `typed-arrays`, the pointer
+kinds whose arrays are typed and why each other one seen is off. -/
+structure CAResult where
+  on : Array String := #[]
+  off : Array (String × String) := #[]
+  boxed : NameSet := {}
+  ptrOn : Array String := #[]
+  ptrOff : Array (String × String) := #[]
+
+/-- One run of the check (see `compactArrayKinds`). Without `ptr`, the
+storage kinds and the fields boxed for them. With `ptr`, the pointer kinds
+too, with `scalarBoxed` the fields that the first run boxed; `boxed` then
+holds only the fields boxed for a pointer kind that stays on. -/
+def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (inits : Array (Name × Name))
+    (roots : Array Name) (ptr : Bool) (scalarBoxed : NameSet := {}) : CoreM CAResult := do
   if let some n := casts then
-    return (#[], compactKinds.map fun k => (k, s!"the program can cast ({n})"), {})
+    return { off := compactKinds.map fun k => (k, s!"the program can cast ({n})") }
   -- Only what the entry point reaches runs (a declaration nothing calls
   -- may keep a type Stage 3 refined in its callee only).
   let bodies : Std.HashMap Name (Code .pure) := decls.foldl (fun m d => match d.value with
@@ -593,7 +694,12 @@ def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits 
   -- (The boxed fields from every declaration: the lowering lowers the
   -- unreachable ones too, and a boxed field there removes a crossing that
   -- would lower to a panic.)
-  let boxed ← arrayFieldInductives decls
+  let (boxedScalar0, ptrFields) ← arrayFieldInductives decls ptr
+  -- (The second run takes the first run's boxed fields as they are.)
+  let boxedScalar := if ptr then scalarBoxed else boxedScalar0
+  -- A field instantiated with a pointer kind is a box during the check;
+  -- it stays one if some pointer kind stays on (below).
+  let boxed := ptrFields.fold (fun s n _ => s.insert n) boxedScalar
   let decls := decls.filter fun d => live.contains d.name
   let mut byName : Std.HashMap Name CADecl := {}
   for d in decls do
@@ -635,9 +741,195 @@ def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits 
         let (ks, _) ← mentions (← get).tys[i]!
         for k in ks do
           CAM.turnOff (some k) s!"{(← get).wheres[i]!}: a value of type {keyTy (← get).tys[i]!} meets an array of boxes (in {w})"
+    -- A typed array releases its elements in another order than native
+    -- Lean when elements are shared: only elements that hold nothing
+    -- observable.
+    for (k, ts) in (← get).ptrElems.toArray.qsort (fun a b => a.1 < b.1) do
+      for t in ts do
+        if let some u ← releaseUnsafe? t then
+          CAM.turnOff (some k) s!"its elements ({t}) may hold a value of type {u}, whose release the program can observe"
+          break
   let cache ← IO.mkRef {}
-  let ((), st) ← (act.run cache).run {}
+  let ((), st) ← (act.run { cache, ptr }).run {}
   let on := compactKinds.filter fun k => !st.off.contains k
-  return (on, compactKinds.filterMap (fun k => st.off[k]?.map (k, ·)), if on.isEmpty then {} else boxed)
+  let seen := (st.ptrElems.toArray.map (·.1)).qsort (· < ·)
+  let ptrOn := seen.filter fun k => !st.off.contains k
+  -- A field boxed during the check stays one when a kind stays on (a value
+  -- of another kind than its binder types say may be stored there, through
+  -- a binder of an imprecise type such as `Subarray lcAny`); with no kind
+  -- on, every array is an array of boxes, which the field `Array lcAny`
+  -- holds.
+  let mut boxedFinal : NameSet := if ptr then {} else if on.isEmpty then {} else boxedScalar
+  unless ptrOn.isEmpty do
+    for (n, _) in ptrFields.toArray do boxedFinal := boxedFinal.insert n
+  return { on, off := compactKinds.filterMap (fun k => st.off[k]?.map (k, ·)), boxed := boxedFinal,
+           ptrOn, ptrOff := seen.filterMap fun k => st.off[k]?.map (k, ·) }
+
+/-- The storage kinds the program can store compactly (see the module
+comment), and why each other kind is off. `casts`: whether the program can
+read a value as another type (`programCasts`); `inits`: its constants
+defined by `initialize`, each with the declaration of its initializer.
+`ptr` (`typed-arrays`): also the pointer kinds, decided by a second run
+under the same rules, in which only the element types that hold nothing
+with an observable release (`releaseUnsafe?`) keep their kinds. The
+storage kinds come from the first run, without pointer kinds: the second
+run's binders of types such as `Array Nat` join more flow classes (a
+binder only joins when its type can hold an array of a kind), which would
+turn storage kinds off that stay on without typed arrays (lean-regex's
+`u32`). Its decisions stay sound for the first run's kinds: a value of
+`Array (Array S)` against one of `Array (Array lcAny)` turns both pointer
+kinds (`A(s)`, `A(box)`) off, so the outer arrays hold boxes where the
+first run assumed them; a field boxed for a pointer kind holds only
+arrays of pointer kinds or of boxes, which the first run's `Array lcAny`
+field held too. -/
+def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits : Array (Name × Name))
+    (roots : Array Name) (ptr : Bool := false) : CoreM CAResult := do
+  let r ← compactArrayKindsRun decls casts inits roots false
+  unless ptr do return r
+  let p ← compactArrayKindsRun decls casts inits roots true r.boxed
+  return { r with ptrOn := p.ptrOn, ptrOff := p.ptrOff,
+                  boxed := p.boxed.toList.foldl (fun s n => s.insert n) r.boxed }
+
+/-- The loop that split instance `n` types (`f._l2r_split.k`, made by
+`ensureSplit`), if `n` is one. -/
+def splitOrigin? (n : Name) : Option Name :=
+  match n with
+  | .num (.str f "_l2r_split") _ => some f
+  | _ => none
+
+/-- The free variables `c` uses. -/
+partial def codeUsedFVars (c : Code .pure) (acc : FVarIdSet := {}) : FVarIdSet :=
+  let args (as : Array (Arg .pure)) (acc : FVarIdSet) : FVarIdSet :=
+    as.foldl (fun s a => match a with | .fvar y => s.insert y | _ => s) acc
+  match c with
+  | .let d k =>
+    let acc := match d.value with
+      | .const _ _ as _ => args as acc
+      | .fvar g as => args as (acc.insert g)
+      | .proj _ _ y => acc.insert y
+      | _ => acc
+    codeUsedFVars k acc
+  | .jp d k | .fun d k _ => codeUsedFVars k (codeUsedFVars d.value acc)
+  | .cases cs => cs.alts.foldl (fun s alt => codeUsedFVars alt.getCode s) (acc.insert cs.discr)
+  | .jmp _ as => args as acc
+  | .return y => acc.insert y
+  | _ => acc
+
+/-- `c` without the `let`s of `xs` that nothing uses, and the variables
+those `let`s used (to try next). -/
+partial def dropUnusedLets (c : Code .pure) (xs : FVarIdSet) : Code .pure × FVarIdSet :=
+  go (codeUsedFVars c) c {}
+where
+  go (used : FVarIdSet) (c : Code .pure) (freed : FVarIdSet) : Code .pure × FVarIdSet :=
+    match c with
+    | .let d k =>
+      let (k', freed) := go used k freed
+      if xs.contains d.fvarId && !used.contains d.fvarId then
+        let freed := match d.value with
+          | .const _ _ as _ => as.foldl (fun s a => match a with | .fvar y => s.insert y | _ => s) freed
+          | _ => freed
+        (k', freed)
+      else (.let d k', freed)
+    | .jp d k =>
+      let (v, freed) := go used d.value freed
+      let (k', freed) := go used k freed
+      (.jp (FunDecl.mk d.fvarId d.binderName d.params d.type v) k', freed)
+    | .fun d k _ =>
+      let (v, freed) := go used d.value freed
+      let (k', freed) := go used k freed
+      (.fun (FunDecl.mk d.fvarId d.binderName d.params d.type v) k', freed)
+    | .cases cs =>
+      let (alts, freed) := cs.alts.foldl (fun (as, fr) alt => match alt with
+        | .alt ctor ps code _ => let (c', fr) := go used code fr; (as.push (.alt ctor ps c'), fr)
+        | .default code => let (c', fr) := go used code fr; (as.push (.default c'), fr)
+        | a => (as.push a, fr)) (#[], freed)
+      (.cases ⟨cs.typeName, cs.resultType, cs.discr, alts⟩, freed)
+    | c => (c, freed)
+
+/-- Enter the `map` loops again in place where Stage 3 split them only for
+a pointer kind (`typed-arrays`) and the check (`ca`) leaves both element
+types boxed. The split instance pushes onto a new array (`dst`, made by
+`Array.emptyWithCapacity` at the source's size); the loop it types
+(`MRetypeState.ptrSplitOrigins`, kept for this) updates the array of
+boxes in place, as natively (review probe D: rounds of `String → Nat →
+String` maps with every kind off allocated 96 bytes per element, native
+8). Each such entry calls the original loop with the original arguments,
+and the `let`s of `dst` and of the source's size go. Splits for a storage
+kind stay, as before typed arrays. The program changes, so the caller
+runs the check again; the number of entries changed is returned. -/
+partial def revertPtrSplits (decls : Array (Decl .pure)) (ca : CAResult) : CoreM (Array (Decl .pure) × Nat) := do
+  let byName : Std.HashMap Name (Decl .pure) := decls.foldl (fun m d => m.insert d.name d) {}
+  let on : Std.HashSet String := (ca.on ++ ca.ptrOn).foldl (·.insert ·) {}
+  let cache ← IO.mkRef ({} : Std.HashMap Name (Option String))
+  let memo ← IO.mkRef ({} : Std.HashMap Name (Option (Name × Nat × Nat)))
+  -- The original loop, the position of `src` (then `dst`) and the number
+  -- of parameters of split instance `sn`, if its entries go back to the
+  -- loop.
+  let revertible (sn : Name) : CoreM (Option (Name × Nat × Nat)) := do
+    if let some r := (← memo.get)[sn]? then return r
+    let r ← do
+      let some f := splitOrigin? sn | pure none
+      let (some sd, some fd) := (byName[sn]?, byName[f]?) | pure none
+      let ps := sd.params
+      -- The instance's own parameters: the loop's, with the loop's array
+      -- replaced by the pair `src`, `dst` under names no user code has
+      -- (`splitSrcName`; a captured variable keeps its user name).
+      if ps.size != fd.params.size + 1 then pure none else
+      let pairs := (List.range ps.size).filter (fun i =>
+          ps[i]!.binderName == splitSrcName && (ps[i + 1]?.map (·.binderName)) == some splitDstName)
+      let [i] := pairs | pure none
+      let (some α, some β) := (arrElemOf? ps[i]!.type, arrElemOf? ps[i + 1]!.type) | pure none
+      if (← holdsCompactKind cache α) || (← holdsCompactKind cache β) then pure none else
+      let mut ok := true
+      for t in [α, β] do
+        if let some k ← elemKind? cache t true then
+          if on.contains k then ok := false
+      pure (if ok then some (f, i, ps.size) else none)
+    memo.modify (·.insert sn r)
+    return r
+  let count ← IO.mkRef 0
+  let mut out := #[]
+  for d in decls do
+    match d.value with
+    | .code c =>
+      let dsts ← IO.mkRef ({} : FVarIdSet)
+      let c' ← revertCode revertible count dsts c
+      let ds ← dsts.get
+      if ds.isEmpty then
+        out := out.push d
+        continue
+      -- The `let`s of `dst` (`Array.emptyWithCapacity`), then of the size.
+      let (c', sizes) := dropUnusedLets c' ds
+      let (c', _) := dropUnusedLets c' sizes
+      out := out.push { d with value := .code c' }
+    | _ => out := out.push d
+  return (out, ← count.get)
+where
+  revertCode (revertible : Name → CoreM (Option (Name × Nat × Nat))) (count : IO.Ref Nat)
+      (dsts : IO.Ref FVarIdSet) (c : Code .pure) : CoreM (Code .pure) := do
+    let go := revertCode revertible count dsts
+    match c with
+    | .let d k =>
+      let k' ← go k
+      if let .const sn us args _ := d.value then
+        if let some (f, i, np) ← revertible sn then
+          if let (true, some (.fvar e)) := (args.size == np, args[i + 1]?) then
+            dsts.modify (·.insert e)
+            count.modify (· + 1)
+            return .let { d with value := .const f us (args.eraseIdx! (i + 1)) } k'
+      return .let d k'
+    | .jp d k =>
+      let v ← go d.value
+      return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← go k)
+    | .fun d k _ =>
+      let v ← go d.value
+      return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← go k)
+    | .cases cs =>
+      let alts ← cs.alts.mapM fun
+        | .alt ctor ps code _ => return .alt ctor ps (← go code)
+        | .default code => return .default (← go code)
+        | a => return a
+      return .cases ⟨cs.typeName, cs.resultType, cs.discr, alts⟩
+    | c => return c
 
 end LeanToReussir

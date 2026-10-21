@@ -375,15 +375,19 @@ get/set/push/size, string get/next/push, the Nat helpers) into Reussir code
 (checked with `rrc --emit llvm-ir`; `tests/runtime/ffi-inline-check.sh`
 checks reads and sets). An array set (and a pop) releases the element it
 removes with only its decrement in line when it is a box (`LAny::drop`;
-the array of a Lean type holds boxes); a Reussir record (`array::ReleaseElem`)
-goes out of line to `array::release_last`, shared or not (leanrt reads no
-record's count, clean step A1). The last reference to a box is released
-out of line by `any::release_last`, inside a free the runtime starts, as
-one pending cell, and so is every released record (a record's by
-`drop::free_unique`; both through `drop::free_deferred`: Reussir's
-`__reussir_drop_defer`, then its drain, which outside a free pops the
-cell at once), so its fields go in Lean's order, the last one first, as `lean_dec` frees them in
-`lean_array_uset` (review RS10-01). Inlined, a read's release meets the
+an array of a Lean type holds boxes unless lean2rr types it); a Reussir
+record (`array::ReleaseElem`) goes to its own drop, `<record>_ffi_release`,
+through a call out of line (`array::drop_record`; leanrt reads no record's
+count, clean step A1): lean2rr types an array of records only when its
+elements hold nothing whose release the program can observe (clean step
+B1), so the field order of the record's free is not seen. The last
+reference to a box is released out of line by `any::release_last`, inside
+a free the runtime starts, as one pending cell, and so is a record that a
+reference or cell set releases (`drop::free_unique`; both through
+`drop::free_deferred`: Reussir's `__reussir_drop_defer`, then its drain,
+which outside a free pops the cell at once), so its fields go in Lean's
+order, the last one first, as `lean_dec` frees them in `lean_array_uset`
+(review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So a read gives its
@@ -629,13 +633,14 @@ release pushes is done before the next element (`drop::free_vec`,
 `ReleaseElems::scan`), so the order of observable releases matches Lean's (file handles closed, and
 so flushed, promises resolved; `fs` and `task` push those too while a free
 runs), except at the top of a free that starts at a record that user code
-drops by itself (translation plan §10). For an
-array of Reussir records (`Bridge` elements), a shared element is
-decremented inline instead of through `<record>_ffi_release` (the
-compiler's glue, an out-of-line call; it decrements the same count), and,
-outside a running free, an array none of whose elements is freed is freed
-without the stack (`ReleaseElems`): only an element whose last reference
-goes takes the glue and the stack, so the order of releases is unchanged.
+drops by itself (translation plan §10). An
+array of Reussir records (`Bridge` elements, lean2rr's typed arrays) is
+freed by its step inside a free, and at once outside one (`free_now`, up
+to 16 nested levels, then the step): every element released in index
+order by its `<record>_ffi_release` (leanrt reads no record's count,
+clean step A1; `ReleaseElems`); a member that two elements share is then
+freed out of Lean's order, so lean2rr types an array of records only when
+its elements hold nothing whose release the program can observe.
 An array of boxes (`LAny`) is freed the same way: an immediate is skipped,
 a shared payload decremented inline, and only a payload whose count is 1
 goes to `any::release_last`. Where the stack would pop that payload's cell

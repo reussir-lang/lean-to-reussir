@@ -858,3 +858,24 @@ e4a1e5f (boxed arrays) every output equals native's.
 | RtCArrMatchPatterns | array literal patterns, `a = #[]`, derived instances of a structure with array fields, and one `⟨xs⟩` pattern on an `Array Float`: every kind stays compact (`RtCArrMatchPatterns.l2r-debug`; on dev 0b6ef980 the `⟨xs⟩` pattern turned `f64` off) | — |
 | RtCArrMatchBytes | `match b with \| ⟨arr⟩` on a `ByteArray` and a `FloatArray`: the data read, updated, mapped and rebuilt, `.data` of a byte array that stays in use, and both fields of a structure taken apart in a loop (`flatten-structs`): every kind stays compact (`RtCArrMatchBytes.l2r-debug`; on dev 0b6ef980 `u8` and `f64` were off) | — |
 | RtCArrMatchBytesMap | `match b with \| ⟨arr⟩ => ⟨arr.map (· + 1)⟩` on a `ByteArray`, the program's only `Array UInt8`: the map runs in place over the bytes and every kind stays compact (`RtCArrMatchBytesMap.l2r-debug`; on dev 0b6ef980 the bytes were copied into boxes and back, and `u8` was off, also for an unrelated `Array Bool`) | — |
+
+### Typed arrays: the `RtTArr*` corpus
+
+Tests for typed arrays (optimization `typed-arrays`, clean step B1): an
+`Array X` of a one-word counted type (a structure, an inductive with
+fields, `Nat`, `Int`, `String`, an array) is stored as a vector of `X`'s
+own type, unless the program's flows connect it to an array of unknown
+element type, to another kind, or to a cast, or its elements can hold a
+value whose release the program can observe. Each output must equal
+native's; the `.l2r-debug` files list the kinds that stay typed (and some
+that go off).
+
+| test | what | `alloc-check` |
+|---|---|---|
+| RtTArrKinds | every pointer kind (a structure, an inductive with nullary constructors, `Nat` from 2^63 and 2^70, `Int`, `String`, `List Nat`, `Option Pt`, `Array Nat`, `Array (Array String)`) through the operations of RtCArrKinds | — |
+| RtTArrInPlace | a unique array of 1000 elements of each kind updated n times by `set!`, `uget`/`uset`, a swap, `push`/`pop`, `modify` and a same-type `map`: no copy (`RtTArrInPlace.alloc`, one line per kind) | passes |
+| RtTArrGeneric | RtCArrGeneric and RtCArrColumn at pointer kinds: generic functions, function values of generic type, existential packages, polymorphic recursion, a dependent column; every kind goes off | — |
+| RtTArrMixed | typed and boxed kinds in one program: `Array Pt` and `Array (Array Pt)` typed, `Array Shape` through an existential package (off), a field `Array (Array Float)`, a subarray, an `Array Pt` in a generic box and in a list of options, copies updated afterwards | — |
+| RtTArrRelease | elements that can hold something whose release the program can observe stay boxed: records holding a file handle (shared between elements), a closure and a task, updated by `set!` and `pop` and dropped; an `Array String` beside them stays typed (`RtTArrRelease.l2r-debug`: the kinds and the reasons) | — |
+| RtTArrMapCaptureNames | a map whose lambda captures two arrays named `src` and `dst` (re-review probe SD2) beside maps whose kinds end up boxed: the revert finds the split's own parameters, not the captured ones (matched by those names, it dropped the wrong argument: an internal panic) | — |
+| RtTArrMapInPlace | rounds of `Array.map` between two pointer kinds (`String → Nat → String`, review probe D) whose kinds end up boxed: the split of the first `map` is entered in place again (`RtTArrMapInPlace.alloc`: bytes grow as natively; with the split, 96 bytes per element against native's 8) | passes |

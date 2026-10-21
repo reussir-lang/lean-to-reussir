@@ -1,0 +1,8 @@
+# per kind: n = 2000 and 8000 steps on a unique array of 1000 elements (set!, uget/uset, swap, push/pop, modify, a map every 50 steps); in place, as natively
+# (arr: factor 2, for bytes: the inner arrays, grown by push from one element, take about 35% more bytes than natively, with typed arrays and with arrays of boxes alike, 4514288 against 3346016 from 2000 to 8000; a copy of the outer array per step would add 48 MB)
+pt 2000 | pt 8000 | 1 1000
+shape 2000 | shape 8000 | 1 1000
+nat 2000 | nat 8000 | 1 1000
+str 2000 | str 8000 | 1 1000
+arr 2000 | arr 8000 | 2 1000
+list 2000 | list 8000 | 1 1000

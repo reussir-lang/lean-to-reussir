@@ -508,14 +508,31 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
         (startup.foldl (fun s st => match st with | .init decl _ => s.insert decl | _ => s) {})
     else {}
   let casts := programCasts (← getEnv) keys decls
+  let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none
+  -- `compact-arrays`: the storage kinds whose arrays are compact.
+  -- `typed-arrays`: the pointer kinds whose arrays are typed; a `map` loop
+  -- split only for pointer kinds that end up boxed is entered in place
+  -- again (`revertPtrSplits`), and the check runs again on that program,
+  -- until no such entry is left.
+  let mut checked := decls
+  let mut ca0 : CAResult ← if cfg.compactArrays then
+      compactArrayKinds checked casts inits roots (ptr := cfg.typedArrays)
+    else pure {}
+  let mut reverted := 0
+  if cfg.compactArrays && cfg.typedArrays then
+    repeat
+      let (decls', n) ← revertPtrSplits checked ca0
+      if n == 0 then break
+      reverted := reverted + n
+      checked := decls'
+      ca0 ← compactArrayKinds checked casts inits roots (ptr := true)
+  let decls := checked
+  let ca := ca0
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
-  let inits := startup.filterMap fun | .init decl inst => some (decl, inst) | _ => none
   let erased ← flowAnalysis decls casts.isSome inits
-  -- `compact-arrays`: the storage kinds whose arrays are compact.
-  let (compactKindsOn, compactOff, boxedArrayFields) ← if cfg.compactArrays then
-      compactArrayKinds decls casts inits roots
-    else pure (#[], #[], {})
+  let (compactKindsOn, compactOff, boxedArrayFields) := (ca.on, ca.off, ca.boxed)
+  let typedKindsOn : Std.HashSet String := ca.ptrOn.foldl (·.insert ·) {}
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
     if cfg.compactArrays then
@@ -523,6 +540,11 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       for (k, why) in compactOff do IO.eprintln s!"lean2rr: compact arrays: {k} off: {why}"
       unless boxedArrayFields.isEmpty do
         IO.eprintln s!"lean2rr: compact arrays: fields `Array α` boxed in {boxedArrayFields.toList}"
+      if cfg.typedArrays then
+        IO.eprintln s!"lean2rr: typed arrays: {ca.ptrOn}"
+        for (k, why) in ca.ptrOff do IO.eprintln s!"lean2rr: typed arrays: {k} off: {why}"
+        unless reverted == 0 do
+          IO.eprintln s!"lean2rr: typed arrays: {reverted} map loop entries in place again (their kinds are off)"
     IO.eprintln s!"lean2rr: program creates tasks: {createsTasks}"
     IO.eprintln s!"lean2rr: rule 4: {erased.eMarks.size} skeletons with a completion at an erased domain, {erased.reached.size} function types reached by a completion"
   let ctx : LowerCtx := { decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
@@ -533,7 +555,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
-                          convLiveness := cfg.convLiveness, erased, compactKindsOn, boxedArrayFields }
+                          convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

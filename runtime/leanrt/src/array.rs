@@ -437,31 +437,25 @@ extern "C" fn push_slow<T: Clone>(mut v: RVec<T>, x: T) -> RVec<T> {
 }
 
 /// How a set or a pop releases the element it removes, as `lean_dec` does
-/// natively (`lean_array_uset`, `lean_array_pop`): by default the element's
-/// own drop, in line (a handle's decrement, its free out of line). A Reussir
-/// record (`Bridge`) goes to `release_last`, out of line, shared or not:
-/// whether a reference is a record's last is not read here (Reussir's
-/// layout and encodings are its own), so the record is released as
-/// `drop::release` does (`drop::release_unique`): inside a free the runtime
-/// starts, where its `<record>_ffi_release` frees it with its fields in
-/// Lean's order, its last field first, and the `sync` dependents of the
-/// promises it drops unresolved run when that free ends, before the set
-/// returns (the record's own `_ffi_release` called directly releases the
-/// first cell's fields in field order; review RS10-01: a structure of two
-/// handles closed them in the opposite order to native's), or only
-/// decrements a shared record, or leaves a nullary variant as it is.
+/// natively (`lean_array_uset`, `lean_array_pop`): the element's own drop,
+/// in line (a handle's decrement, its free out of line); for a Reussir
+/// record (`Bridge`) its `<record>_ffi_release`, which decrements it, frees
+/// it, or leaves a nullary variant as it is, called out of line
+/// (`drop_record`). lean2rr makes an
+/// array of records only when its elements hold nothing whose release the
+/// program can observe (typed arrays, clean step B1), so the order in
+/// which a freed record releases its fields is not seen.
 ///
-/// With the record's release in the texture (its fields' decrements and
-/// frees, `__reussir_deallocate`), the set texture was too big for LLVM to
-/// inline into Reussir code (an instruction-count profile: unionfind's
-/// `l2r_array_set<nodeData>`, 6.9 % of its instructions, about 12 of 29 per
-/// call the call's own cost); now it is inlined. A set that frees the
-/// replaced record pays for the free the runtime starts, with the record
-/// as one pending cell (`drop::free_unique`): about 74 instructions
-/// (cachegrind: Reussir's `drain_one` 26, `__reussir_drop_drain` 18,
+/// Before, a record went to `release_last`, out of line, shared or not,
+/// and was released inside a free the runtime starts (`drop::release_unique`),
+/// so that its fields went in Lean's order (review RS10-01: a structure
+/// of two handles replaced by a set closed them in the opposite order to
+/// native's). That cost about 74 instructions per set (cachegrind:
+/// Reussir's `drain_one` 26, `__reussir_drop_drain` 18,
 /// `__reussir_drop_defer` 17, `release_last` 7, `drop::release_record` 6
-/// with the record's own free), as a reference set that frees its old
-/// value does (`l2r_rc_set`).
+/// with the record's own free), also for a shared record: n-body (X10)
+/// with typed arrays ran 760 M instructions with it, 493 M without it
+/// (602 M with arrays of boxes).
 trait ReleaseElem: Sized {
     unsafe fn release_elem(x: Self);
 }
@@ -473,25 +467,43 @@ impl<T> ReleaseElem for T {
     }
 }
 
-/// A record (`Bridge<Inner>`): whether this is its last reference is not
-/// read (Reussir's layout and encodings are its own), so every record a
-/// set or a pop removes is released inside a free the runtime starts
-/// (`release_last`, `drop::release_unique`): its `<record>_ffi_release`
-/// then frees it with its runtime objects released in Lean's order, or
-/// only decrements a shared one, or leaves a nullary variant as it is.
+/// A record (`Bridge<Inner>`): its own `Drop`, the record's
+/// `<record>_ffi_release` (a decrement, or the record's free), out of line
+/// (`drop_record`). lean2rr makes an array of records only when its
+/// elements hold nothing whose release the program can observe (typed
+/// arrays, clean step B1: no handle, task, promise, closure or box in what
+/// they reach), so the order in which a freed record releases its fields
+/// is not seen and the free the runtime starts (`release_last`, about 74
+/// instructions per set also for a shared record) is not needed.
 impl<X> ReleaseElem for reussir_rt::bridge::Bridge<X> {
     #[inline(always)]
     unsafe fn release_elem(x: Self) {
-        release_last(x)
+        drop_record(x)
     }
 }
 
-/// A record that a set or a pop removes, released inside a free the
-/// runtime starts (`drop::release_unique`). `extern "C"`: the free may
-/// unwind, and a Rust call would be an invoke with a landing pad in the
-/// texture, which then stayed a call at six sites of `RtArraySets`. Not
-/// `#[cold]`: every removed record comes here, shared or not.
+/// A record's own drop (`ReleaseElem for Bridge`), out of line. In line,
+/// LLVM put the record's whole release (`_ffi_release` with its fields'
+/// decrements and frees) into the set texture, which then was too big to
+/// inline into Reussir code: unionfind's `l2r_array_set<nodeData>` stayed
+/// a call (cachegrind: 6.56 G instructions in all, 5.89 G with this
+/// call; n-body 496 M, 493 M). `extern "C"`: no landing pad in the
+/// texture for a free that unwinds.
 #[inline(never)]
+extern "C" fn drop_record<T>(x: T) {
+    drop(x)
+}
+
+/// A record that a set or a pop removes, released inside a free the
+/// runtime starts (`drop::release_unique`), so that its fields go in
+/// Lean's order. `extern "C"`: the free may unwind, and a Rust call would
+/// be an invoke with a landing pad in the texture, which then stayed a
+/// call at six sites of `RtArraySets`. Not used now (`ReleaseElem for
+/// Bridge`: lean2rr's arrays of records hold nothing whose release order
+/// is seen); kept for an element type whose release order the program can
+/// observe, should such arrays ever be typed.
+#[inline(never)]
+#[allow(dead_code)]
 extern "C" fn release_last<T>(x: T) {
     unsafe { crate::drop::release_unique(x) }
 }
