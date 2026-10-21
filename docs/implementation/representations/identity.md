@@ -80,7 +80,9 @@ start with `runtime/`.
   count of each storage type (`leanrt::is_shared`: handles, strings,
   arrays, thunk and task cells, big numbers; a box answers for its
   payload). A task that one reference holds is not reported (natively
-  a task from `Task.spawn` is multi-threaded, and so reported as shared).
+  every task the task manager runs, from `Task.spawn`, `Task.map`,
+  `Task.bind` or `IO.asTask`, is multi-threaded, and so reported as
+  shared; `Task.pure` is not).
   At a Reussir shared record type (`isSharedRecordTy`: a record or enum of
   the program, a reference, a function value) lean2rr calls the record
   texture `l2r_dbg_trace_if_shared_rec`, and `leanrt::is_shared_record`

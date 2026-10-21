@@ -907,9 +907,10 @@ boxed with the mark has more than `boxWideMaxCtors` constructors: the mark
 is never wrong. Not a runtime type (`RVec`, `LCell`, `LHandle`: blocks of
 leanrt or Reussir's runtime, not Reussir records). That exclusion is
 needed for safety, not only for accuracy: the deferral writes the second
-word of the header, and those blocks keep data there (an `LCell`, a
-thunk's or task's cell, its task index; an `RVec` header its `SCANNED`
-mark), so a runtime type must never get the mark. A false answer only
+word of the header, which those blocks do not lay out by Reussir's rule
+(an `RVec` header keeps its `SCANNED` mark there; a thunk's or task's
+cell kept its task index there until the task glue moved it to an address
+map), so a runtime type must never get the mark. A false answer only
 costs memory; a true one for a cell without a wide header corrupts it. -/
 def boxIsWide (store : RR.Ty) : LowerM Bool := do
   -- A function value (its handle type is the function type, `boxKind`):

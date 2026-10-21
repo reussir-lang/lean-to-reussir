@@ -321,8 +321,9 @@ pub fn push_context(base: u64, n: u64) {
 }
 
 /// Restore the cells set aside by the matching `push_context`; the caller
-/// has emptied them. A cell that is set again meanwhile is left as it is
-/// (its reference leaks): the leave's drop of another cell ran code that
+/// has emptied them. A cell that is set again meanwhile has that value
+/// taken out and leaked, and the saved value is put back: the leave's drop
+/// of another cell ran code that
 /// used it (a stream's closure held a promise's last reference, whose
 /// deferred resolution ran a `sync` dependent that printed), as natively a
 /// thread-local stream made again during the thread's finalization is never

@@ -2529,8 +2529,9 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   promises (their task) or boxed values. The walk works as Lean's does: a
   loop over a list of the values still to look at (no recursion), in
   Lean's order (it pushes an object's fields in order and pops the last
-  one first). It marks each cell it visits persistent (its count goes up
-  by 2^30: never freed, never unique; `leanrt::persist`) and does not look
+  one first). It marks each cell it visits persistent (one reference
+  leaks, so the cell is never freed, never unique, and its word goes into
+  leanrt's set of marked cells; `leanrt::persist`) and does not look
   into a cell that is persistent already, marked by this walk or an
   earlier one. A box is looked into where the walk meets it: a payload
   whose type can hold a task is pushed, any other is marked without being
@@ -3412,8 +3413,10 @@ Each item says what differs and when.
   `Nat`'s or `Int`'s count, review HL-01; at a Reussir record type
   `leanrt::is_shared_record`, which never reports a nullary constructor
   that Reussir encodes as an immediate). It does not report a task
-  that one reference holds, where natively a task that `Task.spawn` made
-  is multi-threaded (its count is negative) and reported as shared;
+  that one reference holds, where natively every task the task manager
+  runs (`Task.spawn`, `Task.map`, `Task.bind`, `IO.asTask`; not
+  `Task.pure`) is multi-threaded (its count is negative) and reported as
+  shared;
   `shareCommon` shares nothing, and
   `ShareCommon.Object.eq` compares addresses (§9: at most the same cell;
   natively also two objects with the same fields; `L2RShim`), so an
@@ -3442,10 +3445,11 @@ Each item says what differs and when.
   after the initializer marks the `some` cell, or the handle when the
   reference holds it directly; tests `RtPersistInitHandle`,
   `RtPersistInitHandleDirect`); at the exit the file holds "from-init" in
-  both (hunt HSG-02; docs/implementation/startup/constants.md). A marked
-  cell with 2^30 references or more (8 GiB of pointers to it) has a count
-  of 2^31, which leanrt takes for a nullary variant's dummy box; an
-  unmarked one at 2^31 references.
+  both (hunt HSG-02; docs/implementation/startup/constants.md). A record
+  with 2^31 references or more (16 GiB of pointers to it) has a count
+  that `dbgTraceIfShared` takes for the dummy box of a nullary variant
+  under the `immortal` encoding (`leanrt::is_shared_record`), and so does
+  not report.
 - An internal panic (`INTERNAL PANIC: ...`, the end of the program) in a
   program that has made a task, a promise, a timer or a watch writes its
   line straight to descriptor 2, without waiting for stderr's lock

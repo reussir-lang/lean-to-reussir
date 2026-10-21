@@ -1342,7 +1342,8 @@ frees in allocation-heavy loops (30% of an array-update benchmark).
 - Sharing is not observable: `isExclusiveUnsafe` answers `false`, and
   `dbgTraceIfShared` of values held by value (`[value]` structures, small
   `Nat`s) never reports sharing; nor of a task that one reference holds
-  (natively a task that `Task.spawn` made is multi-threaded and reported). Pointer identity is not emulated (translation
+  (natively every task the task manager runs, from `Task.spawn`,
+  `Task.map`, `Task.bind` or `IO.asTask`, is multi-threaded and reported). Pointer identity is not emulated (translation
   plan §9): `ptrAddrUnsafe` answers the handle pointer of a heap value in
   its own representation (`l2r_ptr_addr_obj`; a record's through
   `l2r_ptr_pass`/`l2r_ptr_passed`, lean2rr's `recordAddr`, its release

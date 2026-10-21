@@ -87,7 +87,8 @@ static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 ///   type name of Reussir's is read here.
 ///
 /// A task that one reference holds is not shared; natively a task that
-/// `Task.spawn` made is multi-threaded, so never exclusive (a documented
+/// the task manager runs (`Task.spawn`, `Task.map`, `Task.bind`,
+/// `IO.asTask`) is multi-threaded, so never exclusive (a documented
 /// difference).
 #[inline]
 pub fn is_shared<T: 'static>(a: &T) -> bool {

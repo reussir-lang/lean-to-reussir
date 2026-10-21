@@ -193,10 +193,10 @@ fn ent(i: u32) -> &'static mut Entry {
     &mut tasks().slab[i as usize]
 }
 
-/// Entry `i` if it is still the one with `serial`.
 // One per unfinished task, beside lean-runtime's own entry and boxed job.
 const _: () = assert!(std::mem::size_of::<Entry>() <= 40);
 
+/// Entry `i` if it is still the one with `serial`.
 fn entry_at(i: u32, serial: u32) -> Option<&'static mut Entry> {
     let e = tasks().slab.get_mut(i as usize)?;
     (e.cell != 0 && e.serial == serial).then_some(e)

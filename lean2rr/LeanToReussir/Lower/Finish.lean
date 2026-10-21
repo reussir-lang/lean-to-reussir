@@ -430,8 +430,10 @@ def persistCell (t : RR.Ty) : LowerM Bool := do
 /-- The walk of a constant's value for tasks (`persistCall`), as native
 `lean_mark_persistent`: a loop (`l2r_persist_walk(w)`) over a work list
 `w` (`L2RPersistW`) of the values still to look at. It marks each cell it
-visits persistent (`l2r_persist_mark`, `leanrt::persist`: the cell's count
-goes up by 2^30), and does not look into a cell that is persistent already,
+visits persistent (`l2r_persist_mark`, `leanrt::persist`: one reference
+leaks, so the cell is never freed or unique, and its word goes into
+leanrt's set of marked cells), and does not look into a cell that is
+persistent already,
 marked by this walk or an earlier one, as native's walk skips an object
 whose count is 0. So a value deep through any of its fields is walked at a
 bounded depth, and a value whose cells are shared (a DAG) in time linear in
