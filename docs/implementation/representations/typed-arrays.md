@@ -113,7 +113,8 @@ drop (below), the program runs 493 M instructions instead of 602 M
 - **Why:** leanrt releases the elements of a typed array in another order
   than native Lean's two passes when an element, or a member of two
   elements, is shared (`ReleaseElems` in `runtime/leanrt/src/drop.rs`:
-  records in index order, other types from the last, each completely), and
+  records in index order; `Nat`, `Int`, `String` and arrays of scalars at
+  once, `free_leaves`; other types from the last, each completely), and
   it releases a record that a set or a pop replaces by the record's own
   drop, which frees its fields in field order (next section). With a
   handle in the element, that changes the order in which files close
@@ -293,6 +294,14 @@ drop (below), the program runs 493 M instructions instead of 602 M
   about 1.2 G of 20.3 G in the steps; with `free_now` Cedar runs 76.01 G
   (0.1% more than with boxes) and monadic-interp 19.61 G (3.3% fewer than
   through the steps).
+- An array of `Nat`, `Int` or `String` is freed at once, inside a free or
+  outside one (`free_leaves`): an element's release frees at most its own
+  block, so nothing nests and the order is not seen. Through the step,
+  fannkuch (X08) and merge sort (E02), which free many `Array Nat`s, ran
+  8.5% and 6.1% more instructions than with arrays of boxes (whose first
+  pass released immediates in line and freed the block without the
+  stack); at once, 3.5% and 0.8% fewer than with boxes (561.6 M, 400.1 M;
+  run 11 timed them through the step: 0.57 → 0.62 and 0.73 → 0.76).
 - The placeholder that `Array.modify` stores is the element type's zero
   (`placeholder-cache`: a once-cell read), where a box was `box(0)`.
 - rrc compiles the array textures again for each typed record type (a

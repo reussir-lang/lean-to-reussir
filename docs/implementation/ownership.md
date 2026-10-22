@@ -209,7 +209,11 @@ runtime.
   an array of records only when its elements hold nothing whose release
   the program can observe (the exact order needs a release that decrements
   or, at the last reference, defers: a Reussir entry point, parked);
-  leanrt's `drop::tests::record_array_free_shared_inside`. Outside a
+  leanrt's `drop::tests::record_array_free_shared_inside`. An array of
+  `Nat`, `Int` or `String` (typed arrays) is freed at once, inside a free
+  or outside one (`free_leaves`): an element's release frees at most its
+  own block (a big number, a string), so nothing nests, and no program
+  sees the order. Outside a
   running free an array of records is freed at once instead (`free_now`):
   its elements in index order, each with its own `_ffi_release`, then the
   block, without the stack, so a record that an element frees releases
@@ -244,14 +248,17 @@ runtime.
   liasolver +0.41 % (an immediate costs 5 instructions instead of 4:
   sieve's million-element `Array Bool`); unionfind, binarytrees, deriv
   and rbtree unchanged.
-- **Where:** `runtime/leanrt/src/drop.rs`: `free_vec`, `free_now` (`FREE_NOW_MAX`), `step_vec`,
+- **Where:** `runtime/leanrt/src/drop.rs`: `free_vec`, `free_leaves` (`leaf_elems!`), `free_now` (`FREE_NOW_MAX`), `step_vec`,
   `SCANNED`, `ReleaseElems` (`scan`, `release_from_end`) for `LAny` and
   `Bridge`; tests leanrt's `any::tests::box_array_free_shared_inside`,
   `drop::tests::record_array_free_shared_inside`,
   `RtArrayDupFreeOrder`,
-  `RtArrayDeepSharedFree`. Other element types (scalars, which have no
-  release, and strings, whose order is not seen) keep one pass from the
-  last element (`release_from_end_each`).
+  `RtArrayDeepSharedFree`, leanrt's `drop::tests::leaf_array_free_inside_and_outside`.
+  The leaf kinds (`Nat`, `Int`, `String`, arrays of scalars) are freed at
+  once (`free_leaves`); scalars have no release. Inside a record's free,
+  before its final drain, the step that a leaf array took drained the
+  record's earlier fields at once; freed at once, they stay pending and the
+  drain pops them last first, native's order.
 - **Remove only if:** never (native's order).
 
 ### Arrays of boxes skip immediates and decrement shared payloads inline

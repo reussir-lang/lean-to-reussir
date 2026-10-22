@@ -373,6 +373,11 @@ pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
         unsafe { mi_free(o as *mut std::ffi::c_void) };
         return;
     }
+    // Elements whose release frees at most a block of their own and is not
+    // observable (`Nat`, `Int`, `String`): at once, inside a free or not.
+    if unsafe { T::free_leaves(o) } {
+        return;
+    }
     // Native Lean frees an array in two passes (`lean_del_core`): it
     // decrements every element in index order, pushing each one whose count
     // reaches zero on its list of objects to free, which it then pops last
@@ -466,10 +471,11 @@ trait ReleaseElems: Sized {
     /// stays as it is, and its elements are released by
     /// `release_from_end` (records, `Bridge`: all in index order, inside the
     /// free or, outside one, at once, `free_now`; the others from the last
-    /// one, each completely). lean2rr's
-    /// arrays of Lean values hold boxes, `LAny`, or records; the other
-    /// element types are scalars, whose release does nothing, and strings,
-    /// whose order is not seen.)
+    /// one, each completely), except the leaf kinds (`Nat`, `Int`, `String`,
+    /// arrays of scalars), freed at once before the first pass
+    /// (`free_leaves`). lean2rr's arrays of Lean values hold boxes, `LAny`,
+    /// records, or leaf kinds; the other element types are scalars, whose
+    /// release does nothing.)
     unsafe fn scan(o: *mut Hdr) -> bool;
     /// After a first pass outside a free (`free_vec`) that kept some
     /// elements: free the block and its one kept element without a step,
@@ -481,6 +487,12 @@ trait ReleaseElems: Sized {
     /// element type's rule allows it; else nothing (`false`). Only records
     /// have such a rule.
     unsafe fn free_now(o: *mut Hdr) -> bool;
+    /// Release every element and free the block at once, inside a free or
+    /// outside one (`true`), if an element's release frees at most a block
+    /// of its own (never another array, so nothing nests) and its order is
+    /// not observable; else nothing (`false`). `Nat`, `Int` and `String`
+    /// (`leaf_elems!`).
+    unsafe fn free_leaves(o: *mut Hdr) -> bool;
 }
 
 #[inline(always)]
@@ -518,7 +530,55 @@ impl<T> ReleaseElems for T {
     default unsafe fn free_now(_: *mut Hdr) -> bool {
         false
     }
+    #[inline(always)]
+    default unsafe fn free_leaves(_: *mut Hdr) -> bool {
+        false
+    }
 }
+
+/// The element kinds of lean2rr's typed arrays whose release is a leaf:
+/// a `Nat` or `Int` (a small value releases nothing, a big one frees its
+/// block), a `String` and an array of scalars (a decrement, or the free of
+/// its block). Such an array is freed at once (`free_leaves`): every
+/// element dropped in index order, then the block, without a step of the
+/// runtime's free, which typed arrays of them took (as arrays of boxes
+/// their first pass, `scan`, released immediates and decremented shared
+/// payloads in line, and freed the block without the stack when it kept
+/// no element): fannkuch (X08) and merge sort (E02), which free many
+/// `Array Nat`s, ran 8.5% and 6.1% more instructions through the step
+/// (`step_vec`, Reussir's `run_step` and `drain_slow`). Inside a record's
+/// free, before its final drain, the step drained the record's earlier
+/// fields at once; freed at once, they stay pending and the drain pops them
+/// last first, native's order (`lean_del` pops the last field first).
+macro_rules! leaf_elems {
+    ($($t:ty),*) => {$(
+        impl ReleaseElems for $t {
+            #[inline(always)]
+            unsafe fn free_leaves(o: *mut Hdr) -> bool {
+                let e = elems::<Self>(o);
+                let n = (*o).len;
+                (*o).len = 0;
+                for i in 0..n {
+                    drop(std::ptr::read(e.add(i)));
+                }
+                mi_free(o as *mut std::ffi::c_void);
+                true
+            }
+        }
+    )*};
+}
+
+leaf_elems!(
+    crate::nat::LNat,
+    crate::nat::LInt,
+    crate::string::LStr,
+    Vec<u8>,
+    Vec<u16>,
+    Vec<u32>,
+    Vec<u64>,
+    Vec<f32>,
+    Vec<f64>
+);
 
 /// A Reussir record (`Bridge<Inner>`): its `Drop` is the record's own
 /// `<record>_ffi_release`, which decrements the record's count or frees it
@@ -1051,6 +1111,34 @@ mod tests {
         std::mem::forget(first);
         run(p, step_first);
         assert_eq!(take_log(), vec![50, 4, 100, 101, 1, 3, 2]);
+        assert!(!active());
+        assert_eq!(reussir_rt::drop::depth(), 0);
+    }
+
+    thread_local! {
+        static HELD_STRS: RefCell<Option<Vec<crate::string::LStr>>> = RefCell::new(None);
+    }
+    unsafe fn step_drop_strs(_: usize) -> bool {
+        drop(HELD_STRS.with(|h| h.borrow_mut().take()));
+        true
+    }
+
+    /// An array of a leaf kind (`free_leaves`) is freed at once, inside a
+    /// free and outside one: shared elements only decremented, the others
+    /// freed, nothing left on the stack.
+    #[test]
+    fn leaf_array_free_inside_and_outside() {
+        let s = crate::string::from_bytes(b"shared");
+        let strs = || {
+            [s.clone(), crate::string::from_bytes(b"own"), s.clone()]
+                .into_iter()
+                .fold(crate::array::empty::<crate::string::LStr>(), crate::array::push)
+        };
+        drop(strs());
+        assert!(!crate::is_shared(&s));
+        HELD_STRS.with(|h| *h.borrow_mut() = Some(strs()));
+        run(0, step_drop_strs);
+        assert!(!crate::is_shared(&s));
         assert!(!active());
         assert_eq!(reussir_rt::drop::depth(), 0);
     }
