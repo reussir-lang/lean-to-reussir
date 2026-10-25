@@ -45,6 +45,8 @@ pub mod net;
 pub mod once;
 pub mod persist;
 pub mod proc;
+#[cfg(leanrt_rcgmp)]
+pub mod rcgmp;
 pub mod refs;
 pub mod rt;
 pub mod sched;
@@ -99,6 +101,14 @@ pub fn is_shared<T: 'static>(a: &T) -> bool {
     if std::mem::size_of::<T>() != std::mem::size_of::<usize>() {
         return false;
     }
+    // Under `--int-backend rcgmp`, a built-in `Nat` or `Int` (Reussir's owned
+    // handle, `Mpz`, at a texture's type argument): Reussir's own query, a
+    // heap integer with another reference (an immortal literal counts as
+    // shared, as Lean's persistent objects do; an immediate never is).
+    #[cfg(leanrt_rcgmp)]
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<crate::rcgmp::Mpz>() {
+        return unsafe { &*(a as *const T as *const crate::rcgmp::Mpz) }.is_shared();
+    }
     let p = unsafe { *(a as *const T as *const usize) };
     let rc_box = name.starts_with("leanrt::drop::Cell<")
         || std::any::TypeId::of::<T>() == std::any::TypeId::of::<reussir_rt::rc::Rc<Box<dyn std::any::Any>>>();
@@ -119,7 +129,7 @@ pub fn is_shared<T: 'static>(a: &T) -> bool {
 /// `l2r_dbg_trace_if_shared_rec`, which lean2rr calls at a record type):
 /// whether `w`, the record's handle word (polyffi passes a record as one
 /// pointer word), is a box that another reference also holds. It reads
-/// only what Reussir states for foreign code (Reussir l2r-base5, upstream
+/// only what Reussir states for foreign code (Reussir l2r-stepd, upstream
 /// 00906e38):
 /// - a nullary constructor of a type with a nullary variant may be an
 ///   immediate, a scalar natively and so never shared

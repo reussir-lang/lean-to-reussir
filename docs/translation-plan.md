@@ -517,6 +517,9 @@ computes itself uses the same conversion.
 - `Nat` constructors and `cases` → `Nat.add x 1`, and `if n == 0 … else
   let m := n - 1`.
 - `Int` `cases` → a sign test plus `natAbs`.
+- (lean2rr's copy, under `--int-backend rcgmp` with the optimization
+  `int-match`: a `cases` on a `Nat` or `Int` stays, and the lowering makes
+  it a Reussir `match` on the built-in integer, §5.1.)
 - `cases` on builtin runtime types (`Array`, `String`, `ByteArray`,
   `Float`, `Thunk`, `Task`, `UIntN`) → accessor externs. (lean2rr's copy
   binds the field of an `Array`, `ByteArray` or `FloatArray` at its own
@@ -749,6 +752,33 @@ small words are exactly Lean's, so C code written against `lean.h` could
 receive and return them unchanged; a big number would be converted at
 that boundary (calling a program's own C code is not supported for now,
 §10).
+
+*Reussir's built-in integers (`--int-backend rcgmp`, in progress).* With
+`--int-backend rcgmp` a `Nat` and an `Int` are Reussir's own
+`core::num::Nat`/`Int` (rcgmp: an immediate for a value in [-2^61, 2^61),
+else a counted heap integer). The prelude keeps both representations in
+marked blocks that define the same functions, and lean2rr keeps the
+chosen backend's. The lowering emits Reussir's literal of any size (a
+value outside the immediates is a read-only object of the program's
+data), boxes and unboxes through the prelude's non-generic
+`l2r_any_of_nat`/`l2r_any_as_nat` (a box keeps Lean's immediates: a `Nat`
+below 2^63, an `Int` in the `int32` range), and keeps `Nat` and `Int` out
+of the type arguments of the runtime's generic FFI functions, where
+Reussir would pass a raw handle and release it after the call: a once-cell
+or a polymorphic extern holds them in an `ElemBox` record, an array of
+them holds boxes, and a check over the finished program refuses any such
+type argument that is left. With Reussir's local patch R2
+(`--rcgmp-type-args`) they are owned handles there, and these limits go.
+lean2rr's cost model (which values are small, which literals cost
+nothing) follows the backend. A case split on a `Nat` or `Int` is a
+Reussir `match` (optimization `int-match`): Stage 2 keeps Lean's `cases`
+(`toMono` would test `n == 0` and compute `n - 1`), and the lowering
+gives `Nat.zero` the literal arm `0` and `Nat.succ p` the arm
+`Nat::Succ(p)` (`Int`: `Int::OfNat(m)`, `Int::NegSucc(m)`), joins the
+split of a field that is its only use (`0`, `1`, `Nat::Succ(Nat::Succ(q))`)
+and a chain of tests of one `Nat` or `Int` against literals (Lean's
+`match n with | 0 => … | 5 => … | _ => …`) into one `match`. Details:
+`docs/implementation/representations/nat-int.md`.
 
 The difficulty is that Reussir, not lean2rr, inserts the reference
 counting: copying a handle increments the count at its address, dropping

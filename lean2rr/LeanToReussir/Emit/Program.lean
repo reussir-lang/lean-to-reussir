@@ -516,17 +516,23 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- again (`revertPtrSplits`), and the check runs again on that program,
   -- until no such entry is left.
   let mut checked := decls
+  -- (Under `rcgmp` without `--rcgmp-type-args`, no `RVec<Nat>`:
+  -- `isFfiTypeArgTy`. `L2R_TEST_NAT_TYPE_ARGS` lowers as with
+  -- `--rcgmp-type-args` but keeps `IntBackendCheck` on: the test of the
+  -- check, tests/runtime/int-backend-check.sh.)
+  let natInt := cfg.intBackend == .leanrt || cfg.rcgmpTypeArgs ||
+    (← IO.getEnv "L2R_TEST_NAT_TYPE_ARGS").isSome
   let mut ca0 : CAResult ← if cfg.compactArrays then
-      compactArrayKinds checked casts inits roots (ptr := cfg.typedArrays)
+      compactArrayKinds checked casts inits roots (ptr := cfg.typedArrays) (natInt := natInt)
     else pure {}
   let mut reverted := 0
   if cfg.compactArrays && cfg.typedArrays then
     repeat
-      let (decls', n) ← revertPtrSplits checked ca0
+      let (decls', n) ← revertPtrSplits checked ca0 natInt
       if n == 0 then break
       reverted := reverted + n
       checked := decls'
-      ca0 ← compactArrayKinds checked casts inits roots (ptr := true)
+      ca0 ← compactArrayKinds checked casts inits roots (ptr := true) (natInt := natInt)
   let decls := checked
   let ca := ca0
   -- Rule 4: where the program's function values complete, along its flow,
@@ -536,7 +542,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let typedKindsOn : Std.HashSet String := ca.ptrOn.foldl (·.insert ·) {}
   -- `typed-cells`: the cell kinds whose references hold their own type.
   let tc : TCResult ← if cfg.typedCells then
-      typedRefKinds decls keys casts compactKindsOn typedKindsOn
+      typedRefKinds decls keys casts compactKindsOn typedKindsOn natInt
     else pure {}
   let refKindsOn : Std.HashSet String := tc.refOn.foldl (·.insert ·) {}
   if (← IO.getEnv "L2R_DEBUG").isSome then
@@ -565,7 +571,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
                           convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields,
-                          refKindsOn }
+                          refKindsOn, intBackend := cfg.intBackend, natIntTypeArgs := natInt,
+                          intMatch := cfg.intMatch }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

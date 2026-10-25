@@ -538,7 +538,8 @@ impl<T> ReleaseElems for T {
 
 /// The element kinds of lean2rr's typed arrays whose release is a leaf:
 /// a `Nat` or `Int` (a small value releases nothing, a big one frees its
-/// block), a `String` and an array of scalars (a decrement, or the free of
+/// block; under `--int-backend rcgmp` an `Mpz`, rcgmp's release), a
+/// `String` and an array of scalars (a decrement, or the free of
 /// its block). Such an array is freed at once (`free_leaves`): every
 /// element dropped in index order, then the block, without a step of the
 /// runtime's free, which typed arrays of them took (as arrays of boxes
@@ -579,6 +580,12 @@ leaf_elems!(
     Vec<f32>,
     Vec<f64>
 );
+
+// Under `--int-backend rcgmp` a typed `Array Nat`/`Array Int` holds
+// Reussir's owned handles (`reussir_rt::rcgmp::Mpz`, local Reussir patch
+// R2): a release frees at most one heap integer, which holds nothing.
+#[cfg(leanrt_rcgmp)]
+leaf_elems!(reussir_rt::rcgmp::Mpz);
 
 /// A Reussir record (`Bridge<Inner>`): its `Drop` is the record's own
 /// `<record>_ffi_release`, which decrements the record's count or frees it

@@ -1,0 +1,7 @@
+[prelude-int-ops,int:rcgmp] lean2rr: prelude-int-ops: Float.ofNat: 
+[prelude-int-ops,int:rcgmp] ! lean2rr: prelude-int-ops: Float.ofNat: 0 call(s)
+[prelude-int-ops,int:rcgmp] ! and 0 instance(s) rewritten to l2r_float_of_nat
+[prelude-int-ops,int:rcgmp] lean2rr: prelude-int-ops: Float.ofInt: 
+[prelude-int-ops,int:rcgmp] ! lean2rr: prelude-int-ops: Float.ofInt: 0 call(s)
+[prelude-int-ops,int:rcgmp] ! and 0 instance(s) rewritten to l2r_float_of_int
+[int:leanrt] ! lean2rr: prelude-int-ops

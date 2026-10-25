@@ -59,7 +59,13 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
     that is a `Box` (`ST.Out σ α`) is the box itself (below);
   - `Nat`, `Int`, `String`, `Array α`, `ByteArray`, `FloatArray`:
     leanrt's kinds 1, 2, 3, 6, 7, 8 (`l2r_any_of<T>`; a small `Nat`/`Int`
-    is its own word); a compact array (`compact-arrays`,
+    is its own word; under `--int-backend rcgmp` a `Nat`/`Int` keeps kind
+    1/2 and Lean's immediates through the prelude's non-generic
+    `l2r_any_of_nat`/`_int`, `l2r_any_as_nat`/`_int` and
+    `l2r_any_raw_take_nat`/`_int`, `natIntBoxFns?`, a bigger value being a
+    leanrt cell that holds the rcgmp reference:
+    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering-in-progress));
+    a compact array (`compact-arrays`,
     [compact-arrays.md](compact-arrays.md)) by its storage: `RVec<u8>` 7
     (as `ByteArray`), `RVec<f64>` 8 (as `FloatArray`), `RVec<u16>` 9,
     `RVec<u32>` 10, `RVec<u64>` 11, `RVec<f32>` 12;
@@ -291,7 +297,9 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   mismatch, as for `l2r_any_as_<k>`; `get!`'s default out of bounds is
   taken at `T` (`l2r_any_take_as`). Only without `slow` (a program that
   casts reads other payloads through the generated function, which needs
-  the box). `boxUnboxed?` folds the boxing of such a read back into the
+  the box), and not at `Nat` or `Int` under `--int-backend rcgmp` (the
+  `_as<T>` reads would take a raw rcgmp handle at `T`; the check
+  `IntBackendCheck` refuses such a read). `boxUnboxed?` folds the boxing of such a read back into the
   read of the box.
 - **Why:** The read copied the element (`LAny::clone`: a test of bit 0,
   an increment for a pointer) and the unboxing tested bit 0 again (review

@@ -1,7 +1,7 @@
-From 10426b8fccd0a099f60328415a9881494d076d33 Mon Sep 17 00:00:00 2001
+From 56b3a6dd223f14a1cd9cd44dc3ced382e0033290 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:09:42 -0400
-Subject: [PATCH 5/8] l2r-local: drop: call the host's function when a drain
+Subject: [PATCH 05/13] l2r-local: drop: call the host's function when a drain
  ends (__reussir_drop_drained)
 
 A host runtime that shares the pending stack (lean2rr's frees its

@@ -155,6 +155,7 @@ mutual
       mix 10; hashExpr self s; mix arms.size.toUInt64
       for a in arms do
         mixStr a.ty; mixStr (a.ctor.getD "_")
+        for (t, c) in a.wrap do mixStr t; mixStr c
         for b in a.binders do
           match b with
           | some x => hbind x

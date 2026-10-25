@@ -1,8 +1,8 @@
-From 2f43981d02eab7df51beca1d56d977d5788bbe5b Mon Sep 17 00:00:00 2001
+From 996e54c0618dea74bc5dbd5d9dfa602b1fbbd75f Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 21:01:52 -0400
-Subject: [PATCH 3/8] l2r-local: bug 13b (runtime): cheaper pending stack, same
- order
+Subject: [PATCH 03/13] l2r-local: bug 13b (runtime): cheaper pending stack,
+ same order
 
 The drop glue calls the pending stack's entry points for every cell it
 frees, and with 0014 deriv and monadic-interp took 17% and 20% more user

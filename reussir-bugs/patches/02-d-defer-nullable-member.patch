@@ -1,7 +1,7 @@
-From 9771434b60fdfbb44ece3e17dea10dc21611a4bc Mon Sep 17 00:00:00 2001
+From da1b514cd3515ad1de37de0f5e00bd48f1c0843e Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 00:53:33 -0400
-Subject: [PATCH 4/8] l2r-local: bug 27: defer a nullable member's release in
+Subject: [PATCH 04/13] l2r-local: bug 27: defer a nullable member's release in
  drop glue like a plain rc member
 
 Inside drop glue (`kDropGlueAttr`: the outlined dtors and the

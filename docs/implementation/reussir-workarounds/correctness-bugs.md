@@ -5,7 +5,7 @@ whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
 numbers). lean2rr's builds use a later base, upstream `00906e38` with
-the series (`./reussir` branch `l2r-base5`, `c4a5df4b`); the
+the series (`./reussir` branch `l2r-stepd`, `e3b96e03`); the
 workarounds stay until each is removed.
 The last entry, the drain-end hook, is a local addition for an open issue
 (9). Issues 1 (a missed optimization) and 2 (a missing feature), which

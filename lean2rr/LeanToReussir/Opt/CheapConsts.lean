@@ -10,10 +10,13 @@ once-cell (`cafAccessor`); for a constant that only builds unboxed values
 from small literals, constructors and total scalar conversions, reading the
 once-cell costs more than computing the value, so it is recomputed at every
 use instead (translation plan §5.12). Every `Nat` or `Int` such a constant
-builds must be a small, one-word value (`natIsSmall`, `intIsSmall`: a
-`Nat` below 2^63, an `Int` in the `int32` range): a bigger one is a heap
-big number, which recomputing would allocate at every use (RV8N-01). Such
-a constant cannot panic, trace or allocate, so the change is unobservable.
+builds must cost no allocation (NatEncoding, by `--int-backend`): a literal
+that is free (`natLitFree`: under `leanrt` below 2^63; under `rcgmp` any,
+a read-only object), and a computed value that is small (`natIsSmall`,
+`intIsSmall`: under `leanrt` a `Nat` below 2^63, an `Int` in the `int32`
+range; under `rcgmp` both in [-2^61, 2^61)): a bigger one is a heap big
+number, which recomputing would allocate at every use (RV8N-01). Such a
+constant cannot panic, trace or allocate, so the change is unobservable.
 Without this pass every constant is cached.
 -/
 
@@ -30,28 +33,30 @@ def isUnboxedTy (t : RR.Ty) : LowerM Bool := do
     return ((← get).typeInfos[n]?.map (·.shape == .enumLike)).getD false
   | _ => return false
 
-/-- A constant whose code only builds unboxed values from small literals
+/-- A constant whose code only builds unboxed values from free literals
 and constructors (`Int.ofNat 0`, an enumeration value), every `Nat` and
-`Int` among them small: a `Nat` literal or `Nat.succ` below 2^63, `Int.ofNat`
-and `Int.negSucc` of a value in the `int32` range (a bigger `Nat`/`Int` is
-a heap big number). It cannot panic, trace or allocate, so it is recomputed
-at every use: cheaper than reading a once-cell (native Lean emits such
-constants as static data). `known` holds the values of the `Nat`/`Int`
-variables bound so far when they are known (a value from another such
-constant is small but unknown). -/
+`Int` among them free: a literal that is free (`natLitFree`), a computed
+`Nat.succ`, `Int.ofNat` or `Int.negSucc` that is small (`natIsSmall`,
+`intIsSmall`; a bigger `Nat`/`Int` is a heap big number). It cannot
+panic, trace or allocate, so it is recomputed at every use: cheaper than
+reading a once-cell (native Lean emits such constants as static data).
+`known` holds the values of the `Nat`/`Int` variables bound so far when
+they are known (a value from another such constant is free but
+unknown). -/
 partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) (known : Std.HashMap FVarId Int := {}) :
     LowerM Bool := do
   match c with
   | .let d k =>
     unless ← isUnboxedTy (← lowerType d.type) do return false
     -- `none`: not cheap; `some v`: cheap, with the value `v` if known.
+    let b := (← read).intBackend
     let val : Option (Option Int) ← match d.value with
       | .lit (.str _) => pure none
-      | .lit (.nat n) => pure (if natIsSmall n then some (some n) else none)
+      | .lit (.nat n) => pure (if natLitFree b n then some (some n) else none)
       | .lit _ => pure (some none)
       | .erased => pure (some none)
       | .const f _ args =>
-        if (← getEnv).isConstructor f then pure (smallCtor f args known)
+        if (← getEnv).isConstructor f then pure (smallCtor b f args known)
         -- Total conversions of scalars (`UInt32.ofNat 0`, the default of
         -- `Inhabited UInt32`, `Float.ofBits` of a bit pattern).
         else if isScalarConversion (((← read).keys.find? f).map (·.decl) |>.getD f) then pure (some none)
@@ -69,27 +74,27 @@ partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) (known : Std.HashMap
   | .return _ => return true
   | _ => return false
 where
-  /-- A constructor application that builds a small value (its value when
-  it is a `Nat` or `Int`): `Nat.succ k` below 2^63, `Int.ofNat k` and
-  `Int.negSucc k` in the `int32` range, for a known `k`; any other
-  constructor (an enumeration value, `Nat.zero`). -/
-  smallCtor (f : Name) (args : Array (Lean.Compiler.LCNF.Arg .pure)) (known : Std.HashMap FVarId Int) :
-      Option (Option Int) :=
+  /-- A constructor application that builds a small value of backend `b`
+  (its value when it is a `Nat` or `Int`): `Nat.succ k`, `Int.ofNat k` and
+  `Int.negSucc k` small (`natIsSmall`, `intIsSmall`), for a known `k`; any
+  other constructor (an enumeration value, `Nat.zero`). -/
+  smallCtor (b : IntBackend) (f : Name) (args : Array (Lean.Compiler.LCNF.Arg .pure))
+      (known : Std.HashMap FVarId Int) : Option (Option Int) :=
     let arg : Option Int := match args[0]? with
       | some (Lean.Compiler.LCNF.Arg.fvar x) => known[x]?
       | _ => none
     if f == ``Nat.zero then some (some 0)
     else if f == ``Nat.succ then
       match arg with
-      | some k => if natIsSmall (k + 1).toNat then some (some (k + 1)) else none
+      | some k => if natIsSmall b (k + 1).toNat then some (some (k + 1)) else none
       | none => none
     else if f == ``Int.ofNat then
       match arg with
-      | some k => if intIsSmall k then some (some k) else none
+      | some k => if intIsSmall b k then some (some k) else none
       | none => none
     else if f == ``Int.negSucc then
       match arg with
-      | some k => if intIsSmall (-(k + 1)) then some (some (-(k + 1))) else none
+      | some k => if intIsSmall b (-(k + 1)) then some (some (-(k + 1))) else none
       | none => none
     else some none
   isScalarConversion (f : Name) : Bool :=

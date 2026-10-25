@@ -88,8 +88,9 @@ finite limit below 2 GiB. A sum of 8000 terms still compiles there.
 Patch file:
 [`patches/parked/16-a-driver-stack-rlimit.patch`](patches/parked/16-a-driver-stack-rlimit.patch)
 (on `7954a367`; it applies to `0378b744` and the `l2r-base5` of then
-too, checked 2026-10-24, and to `ea240b19`, `00906e38` and
-`l2r-base5` on `00906e38`, checked 2026-10-25). No build applies it.
+too, checked 2026-10-24, and to `ea240b19`, `00906e38`, and
+`l2r-base5` and `l2r-stepd` on `00906e38`, checked 2026-10-25). No
+build applies it.
 
 The patch changes #686's code in `crates/reussir-compiler/src/main.rs`:
 

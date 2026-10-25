@@ -1,0 +1,674 @@
+From cb24040e47a6d592108b019079fd403eef53792c Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 00:13:21 -0400
+Subject: [PATCH 11/13] l2r-local: step D (R2b): Mpz clones and drops through
+ compiler-emitted rcgmp glue that inlines into textures
+
+R2's `reussir_rt::rcgmp::Mpz` retains and releases through the rcgmp
+runtime's C entry points, so every clone and drop of a `Nat` in a Rust
+container is a call, also for an immediate, where retain and release do
+nothing. lean2rr's typed `Array Nat` pays it on every read, copy and free:
+a microbenchmark of push, sum, in-place bump and 100 copy-on-write copies
+of 100k elements ran 2.03x the instructions of lean2rr's old Nat, about 8
+instructions per element per call against 1 for the old inline bit test.
+
+`Mpz`'s `Clone`/`Drop` now call `__reussir_rcgmp_ffi_acquire` and
+`__reussir_rcgmp_ffi_release` as plain `extern "C"` functions. Rendering
+`Mpz` (full/ffi.rs) records a glue entry keyed `__reussir_rcgmp` next to
+the shared-record wrappers; it declares nothing in the texture and needs
+no comparison bridge, and monomorphization turns it into an `FfiRcGlue`
+pair with those two symbols, like a shared record's
+`<sym>_ffi_acquire`/`_ffi_release`. Monomorphization also adds the pair to
+every program that uses Nat or Int (`uses_bigint`, the condition under
+which rrc links the rcgmp runtime) when no texture asked for it, so
+runtime code outside the textures that holds an `Mpz` (lean2rr's runtime
+keeps big Nats in box cells) always finds it in a program with integers.
+Codegen (`ffi_rc_glue`) emits their bodies as `rcgmp.retain` and
+`rcgmp.release` instead of `rc.inc`/`rc.dec`, in the home unit and
+`weak_odr` under every policy (one fixed name, defined alike by every
+module), and the backend gives every `__reussir_rcgmp_ffi_*` definition
+hidden visibility once the module is linked (`hide_rcgmp_glue` in
+reussir-backend's llvm.rs), so that each module and shared library binds
+its own copy, next to its own view of the rcgmp runtime. So the rcgmp
+lowering decides the immediate test (the dialect does not make its tag an
+ABI; no tag in Rust), and LLVM inlines the glue into the linked texture
+code wherever their target attributes allow it, as for lean2rr's
+textures, which are compiled for the program's CPU.
+
+reussir-rt has no fallback and no weak symbols, and builds on stable Rust:
+`Mpz`'s methods are `#[inline]`, compiled only into code that uses them,
+so the runtime library references neither the glue nor the rcgmp runtime,
+and a program without integers links without the rcgmp runtime and GMP.
+Runtime code outside the textures that a program without integers links,
+and that holds an `Mpz` in dead code, needs `--gc-sections` (the default
+of rustc's and rrc's links) to drop the reference to the glue.
+
+Also drops "hashed" from the rcgmp module doc: Mpz has no Hash.
+
+Instruction counts (cachegrind) of 1000 copy-on-write copies of a
+1000-element Vec<Nat>, textures compiled for the host CPU as lean2rr does:
+immediates 30.86M (R2) to 12.85M, heap values 41.08M to 26.07M. With
+textures for rustc's generic target, which keeps the glue out of line,
+17.86M and 28.08M.
+
+Tests: new frontend/bigint_ffi_glue.rr (the glue's MLIR, its MIR round
+trip, its hidden weak_odr definitions also in a program without textures
+(bigint_division.rr) and none in a program without integers
+(ffi_vec_e2e.rr), and at -O with the textures' target no call to the glue
+or to rcgmp's retain/release in a Vec<Nat> copy-and-drop loop, a clone or
+a drop, with each function's checks as its own prefix; the program runs),
+new frontend/bigint_ffi_dynlib.rr (a Reussir shared library with Nat
+textures and its own static runtimes, in a host that links
+libreussir_rt.so ahead of it: it runs and exports none of the glue), ASan
+runs of bigint_ffi_glue.rr and of bigint_ffi_generic.rr with the glue
+inlined in sanitizer/bigint-ffi-generic-asan.rr, the glue pair in the
+reussir-core unit test, docs/design/polymorphic-ffi.md.
+---
+ crates/reussir-backend/src/llvm.rs            |  28 ++++-
+ crates/reussir-backend/src/rcgmp.rs           |   8 ++
+ crates/reussir-codegen/src/lower/expr.rs      |  27 +++-
+ crates/reussir-core/src/full/ffi.rs           |  35 +++++-
+ crates/reussir-core/src/full/mono.rs          |  45 ++++---
+ crates/reussir-core/src/semi.rs               |  12 ++
+ crates/reussir-rt/src/rcgmp.rs                |  36 ++++--
+ docs/design/polymorphic-ffi.md                |  25 +++-
+ .../integration/frontend/bigint_ffi_dynlib.rr |  19 +++
+ tests/integration/frontend/bigint_ffi_glue.c  |  16 +++
+ tests/integration/frontend/bigint_ffi_glue.rr | 118 ++++++++++++++++++
+ .../sanitizer/bigint-ffi-generic-asan.rr      |   9 ++
+ 12 files changed, 336 insertions(+), 42 deletions(-)
+ create mode 100644 tests/integration/frontend/bigint_ffi_dynlib.rr
+ create mode 100644 tests/integration/frontend/bigint_ffi_glue.c
+ create mode 100644 tests/integration/frontend/bigint_ffi_glue.rr
+
+diff --git a/crates/reussir-backend/src/llvm.rs b/crates/reussir-backend/src/llvm.rs
+index 40c75c1c..d658e7a3 100644
+--- a/crates/reussir-backend/src/llvm.rs
++++ b/crates/reussir-backend/src/llvm.rs
+@@ -18,7 +18,12 @@
+ 
+ use std::ffi::CString;
+ 
+-use llvm_sys::core::{LLVMContextCreate, LLVMContextDispose, LLVMDisposeModule, LLVMSetDataLayout};
++use llvm_sys::LLVMVisibility;
++use llvm_sys::core::{
++    LLVMContextCreate, LLVMContextDispose, LLVMDisposeModule, LLVMGetFirstFunction,
++    LLVMGetNextFunction, LLVMGetValueName2, LLVMIsDeclaration, LLVMSetDataLayout,
++    LLVMSetVisibility,
++};
+ use llvm_sys::linker::LLVMLinkModules2;
+ use llvm_sys::prelude::{LLVMContextRef, LLVMModuleRef};
+ 
+@@ -256,6 +261,7 @@ impl LlvmLowering {
+             // two objects carry the same instance. No-op off COFF (Mach-O
+             // rejects comdats; ELF weak binding needs none).
+             sys::reussirAttachCoffComdats(main as sys::LLVMModuleRef);
++            hide_rcgmp_glue(main);
+             // Hand the context off to `Finalized`; null it so our `Drop` is inert.
+             let context = std::mem::replace(&mut self.context, std::ptr::null_mut());
+             Ok(Finalized {
+@@ -266,6 +272,26 @@ impl LlvmLowering {
+     }
+ }
+ 
++/// Give the owned rcgmp handle's glue ([`crate::rcgmp::FFI_GLUE_PREFIX`])
++/// hidden visibility: a shared library's references then bind its own copy,
++/// next to its own rcgmp runtime, and no copy of another library or of the
++/// executable preempts it.
++unsafe fn hide_rcgmp_glue(module: LLVMModuleRef) {
++    unsafe {
++        let prefix = crate::rcgmp::FFI_GLUE_PREFIX.as_bytes();
++        let mut function = LLVMGetFirstFunction(module);
++        while !function.is_null() {
++            let mut length = 0;
++            let name = LLVMGetValueName2(function, &mut length);
++            let name = std::slice::from_raw_parts(name.cast::<u8>(), length);
++            if name.starts_with(prefix) && LLVMIsDeclaration(function) == 0 {
++                LLVMSetVisibility(function, LLVMVisibility::LLVMHiddenVisibility);
++            }
++            function = LLVMGetNextFunction(function);
++        }
++    }
++}
++
+ impl Drop for LlvmLowering {
+     fn drop(&mut self) {
+         // Only disposes anything when `finish` was *not* called (e.g. an error
+diff --git a/crates/reussir-backend/src/rcgmp.rs b/crates/reussir-backend/src/rcgmp.rs
+index afa95ec8..a46f374b 100644
+--- a/crates/reussir-backend/src/rcgmp.rs
++++ b/crates/reussir-backend/src/rcgmp.rs
+@@ -20,6 +20,14 @@ use melior::ir::operation::OperationBuilder;
+ use melior::ir::r#type::IntegerType;
+ use melior::ir::{Identifier, Location, Operation, Region, Type, Value, ValueLike};
+ 
++/// The names of the glue the codegen emits for the owned `Nat`/`Int` handle
++/// of the polymorphic FFI (`reussir_rt::rcgmp::Mpz`): reussir-core's
++/// `RCGMP_GLUE` base followed by `_ffi_`. [`crate::llvm::LlvmLowering`]
++/// gives their definitions hidden visibility, so that every linked module and
++/// shared library binds its own copy, next to its own view of the rcgmp
++/// runtime.
++pub const FFI_GLUE_PREFIX: &str = "__reussir_rcgmp_ffi_";
++
+ /// `!rcgmp.mpz`, the nonatomic integer handle, or `!rcgmp.mpz<atomic>` with
+ /// `atomic`; `None` when this build lacks the dialect.
+ pub fn mpz_type(context: &Context, atomic: bool) -> Option<Type<'_>> {
+diff --git a/crates/reussir-codegen/src/lower/expr.rs b/crates/reussir-codegen/src/lower/expr.rs
+index d18aaadb..0b4a2ff2 100644
+--- a/crates/reussir-codegen/src/lower/expr.rs
++++ b/crates/reussir-codegen/src/lower/expr.rs
+@@ -574,24 +574,39 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// Build one Reussir-side FFI rc-glue pair: `acquire` increments and
+     /// `release` decrements the box of a value of `glue.ty`. Bound by the
+     /// generated foreign wrappers' `Clone`/`Drop` impls, so the symbols must
+-    /// stay external for the linked bitcode to resolve them.
++    /// stay external for the linked bitcode to resolve them. For `Nat` /
++    /// `Int` (`reussir_rt::rcgmp::Mpz`) they are `rcgmp.retain` and
++    /// `rcgmp.release`, whose lowering tests for an immediate inline.
+     pub(super) fn ffi_rc_glue_pair(
+         &self,
+         glue: &mir::FfiRcGlue<'tcx>,
+     ) -> Result<[Operation<'c>; 2]> {
+         let loc = Location::unknown(self.context);
+         let ty = self.tys.mlir_ty(glue.ty)?;
+-        let attributes = self.ffi_glue_attributes();
++        // The rcgmp glue has fixed names, which every module using `Nat` or
++        // `Int` defines alike: `weak_odr` under every policy, so that
++        // separately compiled or JIT modules may each carry it (the backend
++        // also hides it, `reussir_backend::rcgmp::FFI_GLUE_PREFIX`).
++        let attributes = if glue.ty.bigint().is_some() {
++            SmallVec::from_buf([(
++                Identifier::new(self.context, "llvm.linkage"),
++                Attribute::parse(self.context, "#llvm.linkage<weak_odr>")
++                    .expect("valid weak_odr linkage attribute"),
++            )])
++        } else {
++            self.ffi_glue_attributes()
++        };
+         let build = |symbol: &str, inc: bool| -> Result<Operation<'c>> {
+             let block = Block::new(&[(ty, loc)]);
+             let arg = block
+                 .argument(0)
+                 .map_err(|e| LoweringError(format!("missing glue argument: {e}").into()))?
+                 .into();
+-            let op = if inc {
+-                dialect::rc_inc(self.context, arg, loc).into()
+-            } else {
+-                dialect::rc_dec(self.context, arg, loc).into()
++            let op = match (glue.ty.bigint().is_some(), inc) {
++                (true, true) => rcgmp::retain(arg, loc),
++                (true, false) => rcgmp::release(arg, loc),
++                (false, true) => dialect::rc_inc(self.context, arg, loc).into(),
++                (false, false) => dialect::rc_dec(self.context, arg, loc).into(),
+             };
+             block.append_operation(op);
+             block.append_operation(func::r#return(&[], loc));
+diff --git a/crates/reussir-core/src/full/ffi.rs b/crates/reussir-core/src/full/ffi.rs
+index d16a048d..751f9e96 100644
+--- a/crates/reussir-core/src/full/ffi.rs
++++ b/crates/reussir-core/src/full/ffi.rs
+@@ -41,7 +41,11 @@
+ //!   (`Vec<Nat>`, `[:T:]`), a parameter or result declared as a generic
+ //!   instantiated at `Nat` — the owned handle `::reussir_rt::rcgmp::Mpz`,
+ //!   whose `Clone`/`Drop` retain and release: the body owns it like any other
+-//!   value of the generic, so it may store or return it.
++//!   value of the generic, so it may store or return it. They call the
++//!   compiler-emitted rcgmp glue `__reussir_rcgmp_ffi_acquire` /
++//!   `__reussir_rcgmp_ffi_release` (`rcgmp.retain` / `rcgmp.release`,
++//!   hidden, in every module that uses `Nat` or `Int`), which LLVM inlines
++//!   into the linked texture, immediate test included.
+ //!
+ //! Symbol scheme (all suffixes appended to complete v0 manglings, which is
+ //! injective — no valid v0 symbol is a prefix of another):
+@@ -49,7 +53,8 @@
+ //! * `<fn instance>` — the native function callers call;
+ //! * `<fn instance>_ffi` — the Rust-side boundary wrapper;
+ //! * `<record instance>_ffi_drop` — an opaque instance's drop hook;
+-//! * `<record instance>_ffi_acquire` / `_ffi_release` — Reussir rc glue.
++//! * `<record instance>_ffi_acquire` / `_ffi_release` — Reussir rc glue;
++//!   `__reussir_rcgmp_ffi_acquire` / `_ffi_release` for `Nat` / `Int`.
+ 
+ use std::collections::BTreeMap;
+ use std::fmt::Write as _;
+@@ -107,6 +112,11 @@ impl ComparisonBridgeNeeds {
+ /// A shared-record boundary wrapper collected while rendering. Its declaration
+ /// is rendered only after all mentions have unioned their comparison needs.
+ /// Keyed by the instance's v0 symbol in a `BTreeMap` for deterministic output.
++///
++/// The owned `Nat` / `Int` handle has an entry too, keyed [`RCGMP_GLUE`]: it
++/// declares nothing (`reussir_rt::rcgmp::Mpz` is the wrapper) and needs no
++/// comparison bridge (`Mpz` compares by value itself); it only makes
++/// monomorphization emit the handle's acquire/release glue.
+ #[derive(Clone)]
+ pub struct WrapperDecl<'tcx> {
+     pub symbol: String,
+@@ -120,6 +130,9 @@ impl WrapperDecl<'_> {
+     /// on `reussir_rt::bridge::Bridge<T>`; this inner type implements only the
+     /// local bridge traits, preserving the orphan-rule boundary.
+     pub fn render(&self) -> String {
++        if matches!(self.ty.kind(), TyKind::BigInt(_)) {
++            return String::new();
++        }
+         let sym = &self.symbol;
+         let mut d = String::new();
+         let _ = write!(
+@@ -327,7 +340,16 @@ impl<'a, 'tcx> FfiCtx<'a, 'tcx> {
+             TyKind::Arc(_) => Err("an `Arc` coloring cannot cross the FFI boundary yet".into()),
+             TyKind::Nullable(_) => Err("`Nullable` cannot cross the FFI boundary yet".into()),
+             TyKind::ConstSeq(_) => Err("a `ConstSeq` cannot cross the FFI boundary yet".into()),
+-            TyKind::BigInt(_) => Ok(RCGMP_OWNED.into()),
++            TyKind::BigInt(_) => {
++                decls
++                    .entry(RCGMP_GLUE.to_owned())
++                    .or_insert_with(|| WrapperDecl {
++                        symbol: RCGMP_GLUE.to_owned(),
++                        ty,
++                        needs: ComparisonBridgeNeeds::default(),
++                    });
++                Ok(RCGMP_OWNED.into())
++            }
+             // `str` lowers to `{ptr, len}`; the runtime's `#[repr(C)]`
+             // borrowed view is bit-identical. Every surface `str` today is a
+             // `'static` global literal, so the spelled lifetime is sound —
+@@ -470,6 +492,13 @@ const RCGMP_HANDLE: &str = "*mut ::std::ffi::c_void";
+ /// which retains when cloned and releases when dropped.
+ const RCGMP_OWNED: &str = "::reussir_rt::rcgmp::Mpz";
+ 
++/// The glue base of the owned handle: its `Clone`/`Drop` call
++/// `__reussir_rcgmp_ffi_acquire` / `__reussir_rcgmp_ffi_release`, which every
++/// program that renders it or otherwise uses `Nat` or `Int` defines (see
++/// `monomorphize`), hidden, so runtime code outside the textures linked into
++/// such a program finds them too.
++pub const RCGMP_GLUE: &str = "__reussir_rcgmp";
++
+ /// Whether an `#[ffi(import)]` parameter or result of type `ty`, declared as
+ /// `declared`, crosses as the raw rcgmp handle: the signature spells `Nat` or
+ /// `Int` itself. A generic instantiated at `Nat` or `Int` crosses as the
+diff --git a/crates/reussir-core/src/full/mono.rs b/crates/reussir-core/src/full/mono.rs
+index d7db2d5b..e6bbc0bd 100644
+--- a/crates/reussir-core/src/full/mono.rs
++++ b/crates/reussir-core/src/full/mono.rs
+@@ -926,21 +926,36 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+     let Driver {
+         symbols, reports, ..
+     } = driver;
+-    (
+-        mir::Program {
+-            functions,
+-            records,
+-            trampolines,
+-            string_literals,
+-            transform_scripts: input.transform_scripts.to_vec(),
+-            ffi_imports: ffi_imports_out,
+-            ffi_textures,
+-            ffi_rc_glue,
+-            ffi_trait_glue: ffi_trait_glue.into_values().collect(),
+-            symbols,
+-        },
+-        reports,
+-    )
++    let mut program = mir::Program {
++        functions,
++        records,
++        trampolines,
++        string_literals,
++        transform_scripts: input.transform_scripts.to_vec(),
++        ffi_imports: ffi_imports_out,
++        ffi_textures,
++        ffi_rc_glue,
++        ffi_trait_glue: ffi_trait_glue.into_values().collect(),
++        symbols,
++    };
++    // The owned `Nat`/`Int` handle's glue (`reussir_rt::rcgmp::Mpz`) belongs
++    // in every program that uses the integers, not only in those whose
++    // textures spell the handle: runtime code outside the textures linked
++    // into the program may hold one, and binds the program's hidden copy.
++    if program.uses_bigint() && !program.ffi_rc_glue.iter().any(|g| g.ty.bigint().is_some()) {
++        let acquire = program
++            .symbols
++            .get_or_intern(format!("{}_ffi_acquire", ffi_render::RCGMP_GLUE));
++        let release = program
++            .symbols
++            .get_or_intern(format!("{}_ffi_release", ffi_render::RCGMP_GLUE));
++        program.ffi_rc_glue.push(mir::FfiRcGlue {
++            ty: tcx.mk_bigint(crate::semi::ty::BigIntTy::Nat),
++            acquire: mir::Symbol(acquire),
++            release: mir::Symbol(release),
++        });
++    }
++    (program, reports)
+ }
+ 
+ /// Resolve a record instance to its ground layout: the field types with the
+diff --git a/crates/reussir-core/src/semi.rs b/crates/reussir-core/src/semi.rs
+index f9d41ee3..5341b07c 100644
+--- a/crates/reussir-core/src/semi.rs
++++ b/crates/reussir-core/src/semi.rs
+@@ -2945,6 +2945,18 @@ mod tests {
+                     })
+                     .collect();
+                 assert_eq!(opaque, [vec.as_str()]);
++                // `Mpz`'s clone and drop glue, emitted once, and declared by
++                // the runtime rather than by the textures.
++                let glue: Vec<(&str, &str)> = full
++                    .ffi_rc_glue
++                    .iter()
++                    .map(|g| (full.symbol(g.acquire), full.symbol(g.release)))
++                    .collect();
++                assert_eq!(
++                    glue,
++                    [("__reussir_rcgmp_ffi_acquire", "__reussir_rcgmp_ffi_release")]
++                );
++                assert!(!push.contains("__reussir_rcgmp"), "{push}");
+             },
+         );
+     }
+diff --git a/crates/reussir-rt/src/rcgmp.rs b/crates/reussir-rt/src/rcgmp.rs
+index 55e69871..dd0e5a9a 100644
+--- a/crates/reussir-rt/src/rcgmp.rs
++++ b/crates/reussir-rt/src/rcgmp.rs
+@@ -9,23 +9,32 @@
+ //! borrows, or returns with one reference.
+ //!
+ //! An [`Mpz`] owns one reference of an rcgmp integer
+-//! (`RCGMP/Runtime/Mpz.h`): cloning retains it and dropping releases it,
+-//! through the rcgmp runtime's C entry points, and it crosses the boundary as
+-//! the handle itself (`#[repr(transparent)]`). Counting is nonatomic: an `Arc`
+-//! coloring never crosses the boundary. Comparisons read the values
+-//! (`rcgmp_mpz_cmp`), so ordered and hashed containers keyed by integers
+-//! compare them by value.
++//! (`RCGMP/Runtime/Mpz.h`): cloning retains it and dropping releases it, and
++//! it crosses the boundary as the handle itself (`#[repr(transparent)]`).
++//! Counting is nonatomic: an `Arc` coloring never crosses the boundary.
++//! Comparisons read the values (`rcgmp_mpz_cmp`), so ordered containers keyed
++//! by integers order them by value.
+ //!
+-//! Every method that calls the rcgmp runtime is `#[inline]`, so it is compiled
+-//! only into the code that uses it: this crate itself references no rcgmp
+-//! symbol, and a program without integers links without the rcgmp runtime.
++//! Cloning and dropping call `__reussir_rcgmp_ffi_acquire` and
++//! `__reussir_rcgmp_ffi_release`, glue the compiler emits into every module
++//! that uses `Nat` or `Int`: `rcgmp.retain` and `rcgmp.release`, `weak_odr`
++//! and hidden, so that each linked module or shared library binds its own
++//! copy, next to its own view of the rcgmp runtime. LLVM inlines the glue
++//! into the linked texture code: an immediate costs a bit test, and the rcgmp
++//! lowering decides the test, as the dialect does not make its tag an ABI.
++//! Runtime code outside the textures that holds an `Mpz` resolves the glue
++//! against the program it is linked into, which uses integers.
++//!
++//! Every method of [`Mpz`] is `#[inline]`, compiled only into the code that
++//! uses it: this crate references neither the glue nor the rcgmp runtime, and
++//! a program without integers links without them.
+ 
+ use core::cmp::Ordering;
+ use core::ffi::c_void;
+ 
+ unsafe extern "C" {
+-    fn rcgmp_mpz_retain(value: *mut c_void, atomic: u32) -> *mut c_void;
+-    fn rcgmp_mpz_release(value: *mut c_void, atomic: u32);
++    fn __reussir_rcgmp_ffi_acquire(value: *mut c_void);
++    fn __reussir_rcgmp_ffi_release(value: *mut c_void);
+     fn rcgmp_mpz_cmp(lhs: *mut c_void, rhs: *mut c_void) -> i32;
+ }
+ 
+@@ -63,14 +72,15 @@ impl Mpz {
+ impl Clone for Mpz {
+     #[inline]
+     fn clone(&self) -> Self {
+-        Self(unsafe { rcgmp_mpz_retain(self.0, 0) })
++        unsafe { __reussir_rcgmp_ffi_acquire(self.0) };
++        Self(self.0)
+     }
+ }
+ 
+ impl Drop for Mpz {
+     #[inline]
+     fn drop(&mut self) {
+-        unsafe { rcgmp_mpz_release(self.0, 0) }
++        unsafe { __reussir_rcgmp_ffi_release(self.0) }
+     }
+ }
+ 
+diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
+index a2a4c3db..61f261ac 100644
+--- a/docs/design/polymorphic-ffi.md
++++ b/docs/design/polymorphic-ffi.md
+@@ -255,6 +255,7 @@ valid v0 mangling is a prefix of another:
+ | `<fn instance>_ffi`         | the Rust-side boundary wrapper          |
+ | `<record instance>_ffi_drop`| an opaque instance's drop hook          |
+ | `<record instance>_ffi_acquire` / `_ffi_release` | Reussir rc glue    |
++| `__reussir_rcgmp_ffi_acquire` / `_ffi_release` | rc glue of `Nat`/`Int` (`Mpz`) |
+ | `<record instance>_ffi_eq`  | borrowed equality entry (`u8`)          |
+ | `<record instance>_ffi_partial_cmp` | borrowed partial classifier (`i8`) |
+ | `<record instance>_ffi_cmp` | borrowed total-order entry (`i8`)       |
+@@ -281,16 +282,32 @@ as a type argument of an opaque type (`Vec<Nat>` is
+ `::reussir_rt::collections::vec::Vec<::reussir_rt::rcgmp::Mpz>`), in `[:T:]`,
+ and as a parameter or result declared as a generic instantiated at `Nat` or
+ `Int`. `Mpz` is a `#[repr(transparent)]` pointer that owns one reference:
+-`Clone` retains it (`rcgmp_mpz_retain`), `Drop` releases it
+-(`rcgmp_mpz_release`), and `PartialEq`/`Ord` compare values
++`Clone` retains it, `Drop` releases it, and `PartialEq`/`Ord` compare values
+ (`rcgmp_mpz_cmp`), so a Rust container stores, clones, drops and orders the
+ integers it holds. It is the generic's ordinary owned value: a body may move
+ an argument into a container or return it, and the wrapper releases nothing
+ after the body; a returned `Mpz` moves its reference to the caller, the C
+ ABI still passing a pointer. `into_raw`, `from_raw` and `as_ptr` convert
+ between the two spellings, e.g. `Mpz::from_raw(rcgmp_mpz_retain(n, 0))`
+-stores a borrowed `Nat` parameter `n`. These methods are inlined into the
+-code that uses them, so `reussir-rt` itself references no rcgmp symbol.
++stores a borrowed `Nat` parameter `n`.
++
++`Clone` and `Drop` call the glue `__reussir_rcgmp_ffi_acquire` and
++`__reussir_rcgmp_ffi_release`, which monomorphization requests whenever a
++texture spells `Mpz` or the program otherwise uses `Nat` or `Int`, and codegen
++emits like a shared record's rc glue, in the home unit, with the bodies
++`rcgmp.retain` and `rcgmp.release`: `weak_odr` under every policy, and hidden
++(`reussir_backend::llvm` marks every `__reussir_rcgmp_ffi_*` definition), so
++that each linked module and shared library binds its own copy, next to its
++own view of the rcgmp runtime. The rcgmp lowering decides the immediate test,
++which keeps the dialect's tag out of the runtime crate, and LLVM inlines the
++glue into the linked texture code where their target attributes allow (a
++texture compiled for the same CPU as the program): cloning or dropping an
++immediate is a bit test, and only a heap integer's count is touched. Runtime
++code outside the textures that holds an `Mpz` (a host runtime's own
++containers) resolves the glue against the program it is linked into, which
++defines it because it uses integers. The methods are inlined into the code
++that uses them, so `reussir-rt` references neither the glue nor the rcgmp
++runtime, and a program without integers links without them.
+ 
+ ## Exposing a new type
+ 
+diff --git a/tests/integration/frontend/bigint_ffi_dynlib.rr b/tests/integration/frontend/bigint_ffi_dynlib.rr
+new file mode 100644
+index 00000000..09b0506f
+--- /dev/null
++++ b/tests/integration/frontend/bigint_ffi_dynlib.rr
+@@ -0,0 +1,19 @@
++// REQUIRES: rcgmp, linux
++// A Reussir shared library with `Nat` textures, which links its own copies
++// of the runtime and of the rcgmp runtime, loaded into a host that also links
++// the shared Reussir runtime ahead of it. The library's rcgmp glue
++// (`__reussir_rcgmp_ffi_acquire` and friends) is hidden, so its textures bind
++// their own copy, next to their own rcgmp runtime, whatever else the process
++// loads; the library exports none of it.
++
++// RUN: rm -rf %t.dir && mkdir -p %t.dir
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %S/bigint_ffi_edge.rr --package-name bigintffiedge --extern core=%t.core.rri --emit dynlib -o %t.dir/libedge.so %rrc_linker
++// RUN: %cc %S/bigint_ffi_edge.c -o %t.exe -Wl,--no-as-needed -L%library_path -lreussir_rt -L%t.dir -ledge -Wl,-rpath,%t.dir %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %llvm-nm -D --defined-only %t.dir/libedge.so > %t.exports
++// RUN: %FileCheck %s --check-prefix=EXPORT --input-file=%t.exports
++// RUN: %FileCheck %s --check-prefix=HIDDEN --input-file=%t.exports
++
++// EXPORT: reussir_main
++// HIDDEN-NOT: __reussir_rcgmp_ffi
+diff --git a/tests/integration/frontend/bigint_ffi_glue.c b/tests/integration/frontend/bigint_ffi_glue.c
+new file mode 100644
+index 00000000..a037f34c
+--- /dev/null
++++ b/tests/integration/frontend/bigint_ffi_glue.c
+@@ -0,0 +1,16 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for bigint_ffi_glue.rr: the lengths and the marker its textures
++// return, one per pair of decimal digits. The one it passes is unknown to the
++// compiled code, so its heap integers are built at run time.
++
++extern unsigned long long reussir_main(unsigned long long one);
++
++int main(void) { return reussir_main(1) == 720909 ? 0 : 1; }
+diff --git a/tests/integration/frontend/bigint_ffi_glue.rr b/tests/integration/frontend/bigint_ffi_glue.rr
+new file mode 100644
+index 00000000..675f8244
+--- /dev/null
++++ b/tests/integration/frontend/bigint_ffi_glue.rr
+@@ -0,0 +1,118 @@
++// UNSUPPORTED: darwin
++// The owned `Nat`/`Int` handle of the polymorphic FFI (`reussir_rt::rcgmp::Mpz`)
++// retains and releases through glue the program defines,
++// `__reussir_rcgmp_ffi_acquire` and `__reussir_rcgmp_ffi_release`: `rcgmp.retain`
++// and `rcgmp.release`, `weak_odr`, which survive the textual MIR. Linked into
++// the textures' module, the glue inlines at -O, so cloning or dropping an
++// immediate element of a `Vec<Nat>` is a bit test and calls nothing; only the
++// last release of a heap integer calls the runtime, to free it. The glue is
++// hidden, and every program that uses `Nat` or `Int` defines it, textures or
++// not (`bigint_division.rr`); one without integers does not
++// (`ffi_vec_e2e.rr`). The textures
++// are compiled for rustc's generic target, so the program is too
++// (`--target-cpu generic`): LLVM inlines a callee only into a caller whose
++// target features include its own.
++
++// Each function's checks run as their own prefix over the same IR, so that
++// they do not depend on the order of the functions.
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigintffiglue --extern core=%t.core.rri --emit mlir --no-source-locations -o - | %FileCheck %s --check-prefix=GLUE
++// RUN: %rrc %s --package-name bigintffiglue --extern core=%t.core.rri --emit mir -o %t.mir
++// RUN: %FileCheck %s --check-prefix=MIR --input-file=%t.mir
++// RUN: %rrc %t.mir --emit mlir -o - | %FileCheck %s --check-prefix=GLUE
++// RUN: %rrc %s --package-name bigintffiglue --extern core=%t.core.rri -t llvm-ir -Oaggressive --target-cpu generic --target-features= -o %t.ll
++// RUN: %FileCheck %s --check-prefix=CHURN --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=PAIR --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=DISCARD --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=HIDDEN --input-file=%t.ll
++// RUN: %rrc %S/bigint_division.rr --package-name bigint --extern core=%t.core.rri -t llvm-ir -o %t.plain.ll
++// RUN: %FileCheck %s --check-prefix=HIDDEN --input-file=%t.plain.ll
++// RUN: %rrc %S/ffi_vec_e2e.rr -t llvm-ir -o %t.none.ll
++// RUN: %FileCheck %s --check-prefix=NONE --input-file=%t.none.ll
++// RUN: %rrc %s --package-name bigintffiglue --extern core=%t.core.rri -o %t.o --relocation-mode pic -Oaggressive --target-cpu generic --target-features=
++// RUN: %cc %t.o %S/bigint_ffi_glue.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++extern "rust" [{
++    use reussir_rt::collections::vec::Vec as RVec;
++}];
++
++#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
++pub struct Vec<T>;
++
++#[ffi(import)]
++fn new<T>() -> Vec<T> [{ RVec::new() }];
++
++#[ffi(import)]
++fn push<T>(v : Vec<T>, x : T) -> Vec<T> [{ v.push(x) }];
++
++#[ffi(import)]
++fn len<T>(v : Vec<T>) -> u64 [{ v.len() as u64 }];
++
++// Copies the vector's buffer, cloning every element, then drops the copy,
++// releasing every element.
++#[ffi(import)]
++fn churn<T>(v : Vec<T>) -> u64 [{
++    let w = v.clone().pop();
++    w.len() as u64
++}];
++
++// One clone.
++#[ffi(import)]
++fn pair<T>(x : T) -> Vec<T> [{ RVec::new().push(x.clone()).push(x) }];
++
++// One release.
++#[ffi(import)]
++fn discard<T>(x : T) -> u64 [{
++    ::std::mem::drop(x);
++    7
++}];
++
++fn nat(x : u64) -> Nat { x as Nat }
++
++fn fill(v : Vec<Nat>, x : Nat, n : u64) -> Vec<Nat> {
++    if n == 0 { v } else { fill(push(v, x), x + 1, n - 1) }
++}
++
++pub fn main(one : u64) -> u64 {
++    let big = core::intrinsic::bigint::ipowi(nat(2 * one), 100);
++    churn(fill(new<Nat>(), nat(one), 10)) + churn(fill(new<Nat>(), big, 10)) * 100
++        + len(pair(big)) * 10000 + discard(big + 1) * 100000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// GLUE: func.func @__reussir_rcgmp_ffi_acquire(%arg0: !rcgmp.mpz) attributes {llvm.linkage = #llvm.linkage<weak_odr>}
++// GLUE-NEXT: rcgmp.retain %arg0
++// GLUE: func.func @__reussir_rcgmp_ffi_release(%arg0: !rcgmp.mpz) attributes {llvm.linkage = #llvm.linkage<weak_odr>}
++// GLUE-NEXT: rcgmp.release %arg0
++
++// MIR: ffi glue @__reussir_rcgmp_ffi_acquire @__reussir_rcgmp_ffi_release : Nat;
++
++// HIDDEN-DAG: define weak_odr hidden void @__reussir_rcgmp_ffi_acquire(ptr
++// HIDDEN-DAG: define weak_odr hidden void @__reussir_rcgmp_ffi_release(ptr
++
++// NONE-NOT: __reussir_rcgmp_ffi
++
++// The copy's clone loop and the drop loop each test an element's low bit, and
++// neither calls the glue or the runtime's retain and release.
++// CHURN: define {{.*}}@{{.*}}5churnNvNvC4core3num3NatE_ffi(
++// CHURN-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_|rcgmp_mpz_retain|rcgmp_mpz_release}}
++// CHURN: and i64 {{.*}}, 1
++// CHURN-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_|rcgmp_mpz_retain|rcgmp_mpz_release}}
++// CHURN: and i64 {{.*}}, 1
++// CHURN-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_|rcgmp_mpz_retain|rcgmp_mpz_release}}
++// CHURN: {{^}}}
++
++// PAIR: define {{.*}}@{{.*}}4pairNvNvC4core3num3NatE_ffi(
++// PAIR-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_acquire|rcgmp_mpz_retain}}
++// PAIR: and i64 {{.*}}, 1
++// PAIR-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_acquire|rcgmp_mpz_retain}}
++// PAIR: {{^}}}
++
++// DISCARD: define {{.*}}@{{.*}}7discardNvNvC4core3num3NatE_ffi(
++// DISCARD-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_|rcgmp_mpz_release}}
++// DISCARD: and i64 {{.*}}, 1
++// DISCARD-NOT: call {{.*}}@{{__reussir_rcgmp_ffi_|rcgmp_mpz_release}}
++// DISCARD: {{^}}}
+diff --git a/tests/integration/sanitizer/bigint-ffi-generic-asan.rr b/tests/integration/sanitizer/bigint-ffi-generic-asan.rr
+index 5345132e..9c4c1adc 100644
+--- a/tests/integration/sanitizer/bigint-ffi-generic-asan.rr
++++ b/tests/integration/sanitizer/bigint-ffi-generic-asan.rr
+@@ -5,6 +5,15 @@
+ // RUN: %cc %asan_flags -c -x ir %t.ll -o %t.o
+ // RUN: %cc %asan_flags %t.o %S/../frontend/bigint_ffi_generic.c %reussir_rt_asan %rcgmp_runtime -o %t.exe %rpath_flag %rpath_san_flag %extra_sys_libs
+ // RUN: %asan_env %t.exe
++// With the textures' generic target the rcgmp glue inlines into them at -O.
++// RUN: %rrc %S/../frontend/bigint_ffi_generic.rr --package-name bigintffigeneric --extern core=%t.core.rri -o %t.inline.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent -Oaggressive --target-cpu generic --target-features=
++// RUN: %cc %asan_flags -c -x ir %t.inline.ll -o %t.inline.o
++// RUN: %cc %asan_flags %t.inline.o %S/../frontend/bigint_ffi_generic.c %reussir_rt_asan %rcgmp_runtime -o %t.inline.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.inline.exe
++// RUN: %rrc %S/../frontend/bigint_ffi_glue.rr --package-name bigintffiglue --extern core=%t.core.rri -o %t.glue.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent -Oaggressive --target-cpu generic --target-features=
++// RUN: %cc %asan_flags -c -x ir %t.glue.ll -o %t.glue.o
++// RUN: %cc %asan_flags %t.glue.o %S/../frontend/bigint_ffi_glue.c %reussir_rt_asan %rcgmp_runtime -o %t.glue.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.glue.exe
+ 
+ // The sanitized allocator backs every heap integer, so a handle a Rust
+ // container keeps after its wrapper released it is a use after free, a
+-- 
+2.43.0
+

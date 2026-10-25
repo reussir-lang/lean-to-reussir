@@ -71,6 +71,9 @@ translator knows only which values are small (a `Nat` below 2^63, an
 `Int` in the `int32` range). A different representation of numbers
 changes only these places.
 
+Status: in progress: `--int-backend rcgmp`, where `Nat` and `Int` are
+Reussir's built-in integers. The default stays `leanrt`.
+
 {{svg:bigblock}}
 
 A two-limb number takes 32 bytes here, and 56 bytes natively. A million

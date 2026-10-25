@@ -17,7 +17,8 @@ The pass rewrites, in the mono code after Stage 3, each `Nat.mod x p`
 whose divisor is bound in the same declaration to
 - `Nat.pow b w` with `b` the literal 2, or `Nat.shiftLeft o w` with `o`
   the literal 1: `L2RNat.truncateBits x w`;
-- the literal `2^k`, `k ≥ 63`, or a read of a constant whose code is that
+- the literal `2^k`, `k ≥ 63` (`k ≥ 61` under `--int-backend rcgmp`:
+  `minLitExp`), or a read of a constant whose code is that
   literal (Lean folds `2 ^ 64` to a literal, which Stage 2 extracts as a
   closed term): `L2RNat.truncateBits x k`, with a `let` of the literal `k`.
 `L2RNat.truncateBits` is an extern (`l2r_nat_truncate_bits`) that the pass
@@ -60,9 +61,10 @@ inductive Def where
 def log2Exact? (n : Nat) : Option Nat :=
   if n != 0 && n &&& (n - 1) == 0 then some n.log2 else none
 
-/-- The smallest exponent of a literal divisor the rule takes: below 2^63
-the divisor is a small word, whose `%` the prelude computes in line. -/
-def minLitExp : Nat := 63
+/-- The smallest exponent of a literal divisor the rule takes under backend
+`b`: below it the divisor is small (`natSmallBits`: 2^63 under `leanrt`,
+2^61 under `rcgmp`), and its `%` is computed in line. -/
+def minLitExp (b : IntBackend) : Nat := natSmallBits b
 
 structure St where
   /-- `Nat.mod` calls rewritten. -/
@@ -72,8 +74,9 @@ structure St where
 
 /-- `c` with its `Nat.mod x (2 ^ w)` calls rewritten; `defs` holds the
 variables bound so far (binders are unique, so a fact is never shadowed).
-`pows` are the constants whose code is the literal `2^k`, `k ≥ 63`. -/
-partial def rewrite (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pure)
+`pows` are the constants whose code is the literal `2^k`, `k ≥ minExp`
+(`minLitExp`). -/
+partial def rewrite (minExp : Nat) (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pure)
     (defs : Std.HashMap FVarId Def) : StateM St (Code .pure) := do
   let declOf (f : Name) : Name := ((keys.find? f).map (·.decl)).getD f
   match c with
@@ -97,10 +100,10 @@ partial def rewrite (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pur
         match (defs[p]? : Option Def) with
         | some (.pow2 w) =>
           modify fun s => { s with rewritten := s.rewritten + 1, divisors := s.divisors.insert p }
-          return .let { d with value := .const truncName [] #[.fvar x, .fvar w] } (← rewrite keys pows k defs)
+          return .let { d with value := .const truncName [] #[.fvar x, .fvar w] } (← rewrite minExp keys pows k defs)
         | some df =>
           let e? := match df with
-            | .lit n => (log2Exact? n).filter (· ≥ minLitExp)
+            | .lit n => (log2Exact? n).filter (· ≥ minExp)
             | .pow2lit e => some e
             | .pow2 _ => none
           if let some e := e? then
@@ -109,19 +112,19 @@ partial def rewrite (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pur
             -- suffix of this one is).
             let w : FVarId := ⟨d.fvarId.name ++ `l2r_w⟩
             return .let { fvarId := w, binderName := `w, type := mkConst ``Nat, value := .lit (.nat e) }
-              (.let { d with value := .const truncName [] #[.fvar x, .fvar w] } (← rewrite keys pows k defs))
+              (.let { d with value := .const truncName [] #[.fvar x, .fvar w] } (← rewrite minExp keys pows k defs))
         | none => pure ()
-    return .let d (← rewrite keys pows k defs)
+    return .let d (← rewrite minExp keys pows k defs)
   | .fun d k =>
-    let v ← rewrite keys pows d.value defs
-    return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← rewrite keys pows k defs)
+    let v ← rewrite minExp keys pows d.value defs
+    return .fun (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← rewrite minExp keys pows k defs)
   | .jp d k =>
-    let v ← rewrite keys pows d.value defs
-    return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← rewrite keys pows k defs)
+    let v ← rewrite minExp keys pows d.value defs
+    return .jp (FunDecl.mk d.fvarId d.binderName d.params d.type v) (← rewrite minExp keys pows k defs)
   | .cases cs =>
     let alts ← cs.alts.mapM fun alt => match alt with
-      | .alt ctor ps code _ => return .alt ctor ps (← rewrite keys pows code defs)
-      | .default code => return .default (← rewrite keys pows code defs)
+      | .alt ctor ps code _ => return .alt ctor ps (← rewrite minExp keys pows code defs)
+      | .default code => return .default (← rewrite minExp keys pows code defs)
       | other => return other
     return .cases ⟨cs.typeName, cs.resultType, cs.discr, alts⟩
   | c => return c
@@ -163,22 +166,23 @@ partial def dropUnused (drop : FVarIdHashSet) (used : FVarIdHashSet) (c : Code .
 /-- The rule on one declaration's code: the code, and the number of calls
 rewritten. The divisors' `let`s that nothing else uses go, then the
 literals they took that nothing else uses. -/
-def rewriteCode (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pure) : Code .pure × Nat :=
-  let (c, st) := (rewrite keys pows c {}).run {}
+def rewriteCode (minExp : Nat) (keys : NameMap InstKey) (pows : NameMap Nat) (c : Code .pure) :
+    Code .pure × Nat :=
+  let (c, st) := (rewrite minExp keys pows c {}).run {}
   if st.rewritten == 0 then (c, 0) else
   let (c, fed) := dropUnused st.divisors c.collectUsed c
   let fed := fed.foldl (·.insert ·) ({} : FVarIdHashSet)
   let (c, _) := dropUnused fed c.collectUsed c
   (c, st.rewritten)
 
-/-- The constants whose code is one `Nat` literal `2^k` with `k ≥ 63`, and
+/-- The constants whose code is one `Nat` literal `2^k` with `k ≥ minExp`, and
 their `k`. -/
-def literalPows (decls : Array (Decl .pure)) : NameMap Nat :=
+def literalPows (minExp : Nat) (decls : Array (Decl .pure)) : NameMap Nat :=
   decls.foldl (init := {}) fun m d =>
     match d.params.isEmpty, d.value with
     | true, .code (.let { fvarId := x, value := .lit (.nat n), .. } (.return r)) =>
       match log2Exact? n with
-      | some e => if x == r && e ≥ minLitExp then m.insert d.name e else m
+      | some e => if x == r && e ≥ minExp then m.insert d.name e else m
       | none => m
     | _, _ => m
 
@@ -220,14 +224,14 @@ def truncDecl : CoreM (Decl .pure) := do
 
 /-- The pass: every declaration with code, then the extern if a call was
 rewritten. -/
-def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (Decl .pure)) := do
-  let pows := literalPows decls
+def run (minExp : Nat) (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (Decl .pure)) := do
+  let pows := literalPows minExp decls
   let mut out := #[]
   let mut n := 0
   for d in decls do
     match d.value with
     | .code c =>
-      let (c, k) := rewriteCode keys pows c
+      let (c, k) := rewriteCode minExp keys pows c
       n := n + k
       out := out.push (if k == 0 then d else { d with value := .code c })
     | _ => out := out.push d
@@ -243,8 +247,9 @@ end LeanToReussir.Opt.ModPow2
 
 namespace LeanToReussir
 
-/-- Registry entry point. -/
+/-- Registry entry point (the smallest literal exponent by the
+representation of `Nat`: `minLitExp`). -/
 def Opt.ModPow2.install (c : PassConfig) : PassConfig :=
-  { c with monoPassesCore := c.monoPassesCore.push Opt.ModPow2.run }
+  { c with monoPassesCore := c.monoPassesCore.push (Opt.ModPow2.run (Opt.ModPow2.minLitExp c.intBackend)) }
 
 end LeanToReussir

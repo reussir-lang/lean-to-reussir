@@ -99,12 +99,17 @@ mutual
   /-- One match arm: a constructor pattern with field binders
   (`none` binds `_`), or a wildcard when `ctor = none`, or an integer
   literal pattern when `ty` is empty (`ctor` is the literal; a match on an
-  integer, `RR.Arm.lit`). -/
+  integer, `RR.Arm.lit`). `wrap`: the one-field constructors around that
+  pattern, outermost first (a match on a `Nat` or `Int`, Lower/IntMatch:
+  `Int::OfNat(Nat::Succ(m))` is `wrap = #[("Int", "OfNat")]`, `ty = "Nat"`,
+  `ctor = "Succ"`, `Nat::Succ(_)` is `wrap = #[("Nat", "Succ")]` with
+  `ctor = none`); the binders are the inner pattern's. -/
   structure Arm where
     ty : String
     ctor : Option String
     binders : Array (Option String)
     body : Block
+    wrap : Array (String × String) := #[]
 
   /-- `{ let x : T = e; … result }`. -/
   structure Block where
@@ -234,6 +239,7 @@ mutual
 
   partial def Arm.renderTo (d : Nat) (a : Arm) (out : String) : String :=
     let out := out.pushn ' ' (4 * d)
+    let out := a.wrap.foldl (fun o (t, c) => o ++ t ++ "::" ++ c ++ "(") out
     let out := match a.ctor with
       | none => out ++ "_"
       | some c =>
@@ -241,6 +247,7 @@ mutual
         let out := out ++ a.ty ++ "::" ++ c
         if a.binders.isEmpty then out
         else joinTo (out ++ "(") a.binders ", " (fun b o => o ++ (match b with | some b => b | none => "_")) ++ ")"
+    let out := out.pushn ')' a.wrap.size
     Block.renderTo d a.body (out ++ " => ")
 
   partial def Block.renderTo (d : Nat) (b : Block) (out : String) : String :=

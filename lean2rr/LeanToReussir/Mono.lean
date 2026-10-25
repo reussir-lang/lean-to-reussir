@@ -64,6 +64,9 @@ structure MonoConfig where
   (`preludeFnDecls`): which symbols lean2rr's runtime implements
   (`computeExternRoute`'s hint). -/
   preludeFns : Std.HashSet String := {}
+  /-- The representation of `Nat` and `Int` (`--int-backend`): which
+  literals allocate (`constComputes`, `natLitFree`). -/
+  intBackend : IntBackend := .leanrt
 
 /-- The functions a prelude declares: the names of its lines that start
 with `fn NAME` or `pub fn NAME`, outside the Rust code of its textures
@@ -1021,8 +1024,9 @@ def tyArgMarker : Expr := .const `L2R.tyArg []
 more than build a dictionary of functions? That is: call a function
 (`instance : Inhabited Grid := ⟨mkGrid 300⟩`), or allocate data: a
 constructor of a type that is not a class, with a relevant field (a list
-or a record literal, a `Thunk.mk`), a string literal, a number past the
-small ones. A class's own constructor (the dictionary and its parent
+or a record literal, a `Thunk.mk`), a string literal, a number literal that
+is not free (`natLitFree`: past the small ones under `leanrt`; none under
+`rcgmp`, whose literals are read-only data). A class's own constructor (the dictionary and its parent
 dictionaries), a closure, a constructor without relevant fields (`[]`,
 `none`) and a small number are values. Natively such a constant is
 evaluated once, at startup, and a callee that receives it reads its
@@ -1044,7 +1048,7 @@ where
       let computes ← match d.value with
         | .erased | .proj .. => pure false
         | .lit (.str _) => pure true
-        | .lit (.nat n) => pure !(natIsSmall n)
+        | .lit (.nat n) => pure !(natLitFree (← get).config.intBackend n)
         | .lit _ => pure false
         | .fvar _ args => pure !args.isEmpty
         | .const f _ args _ =>

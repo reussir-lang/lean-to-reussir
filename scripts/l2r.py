@@ -34,7 +34,11 @@ L2R_LEAN_RUNTIME (another
 lean-runtime checkout, e.g. a branch under review; default: the submodule
 third_party/lean-runtime, whose checked-out commit must be the pinned one),
 L2R_LEAN_RUNTIME_FEATURES (comma-separated lean-runtime features to add, to
-try a branch), L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
+try a branch), L2R_INT_BACKEND (`leanrt` or `rcgmp`: the representation of
+`Nat` and `Int`, lean2rr's `--int-backend`; unset: lean2rr's default),
+L2R_RCGMP_TYPE_ARGS (`0`: under rcgmp, without lean2rr's
+`--rcgmp-type-args`, which is on by default there),
+L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
 `--nullary-variant-encoding arch-independent`), REUSSIR_FFI_CACHE_DIR
 (where rrc keeps the compiled textures; default
 runtime/leanrt/target/polyffi-cache, empty to turn the cache off).
@@ -122,6 +126,26 @@ def rustc_wrapper(rlib, lr):
 # agree between them). rustc runs in the crate's directory (`build_locked`):
 # a relative path in these flags is relative to it.
 LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
+
+# The representation of `Nat` and `Int` (L2R_INT_BACKEND, clean-integration
+# step D): `leanrt` (the default: leanrt's own words and GMP numbers) or
+# `rcgmp` (Reussir's built-in integers; needs a Reussir built with rcgmp).
+# When the variable is set, lean2rr gets `--int-backend` (it keeps the
+# prelude's blocks of that backend), and under `rcgmp` leanrt is built with
+# `--cfg leanrt_rcgmp` (its own build directory, `leanrt_out`), which makes
+# the boxes of a big `Nat` or `Int` cells of rcgmp references.
+INT_BACKEND = os.environ.get("L2R_INT_BACKEND")
+if INT_BACKEND not in (None, "leanrt", "rcgmp"):
+    sys.exit(f"l2r: L2R_INT_BACKEND={INT_BACKEND}: expected leanrt or rcgmp")
+if INT_BACKEND == "rcgmp":
+    LEANRT_FLAGS += ["--cfg", "leanrt_rcgmp"]
+# Under rcgmp, `Nat` and `Int` may be type arguments of the runtime's generic
+# textures (typed arrays and cells of them, once-cell constants, ...):
+# lean2rr's `--rcgmp-type-args`, since the Reussir that rcgmp needs renders
+# them there as an owned handle (local patch R2, `check_rcgmp`).
+# L2R_RCGMP_TYPE_ARGS=0 leaves the flag off: lean2rr then keeps them out
+# (its guard), for measurements.
+RCGMP_TYPE_ARGS = INT_BACKEND == "rcgmp" and os.environ.get("L2R_RCGMP_TYPE_ARGS", "1") != "0"
 
 # Extra rustc flags for the textures rrc compiles (L2R_TEXTURE_RUSTFLAGS,
 # split on spaces), added after NATIVE_FLAGS in the rustc wrapper rrc runs
@@ -440,6 +464,56 @@ def build_leanrt():
     return rlib, lr
 
 
+# What `--int-backend rcgmp` needs of the Reussir checkout beyond its rcgmp
+# feature: local patches R1 (Lean's division modes and `floormod2expi` as
+# bigint intrinsics, which the prelude's rcgmp blocks call) and R2 (`Nat`
+# and `Int` at polyffi type arguments as `reussir_rt::rcgmp::Mpz`, which
+# leanrt re-exports): (patch, file, symbol), as REQUIRED_REUSSIR_PATCHES.
+RCGMP_REUSSIR_PATCHES = [
+    ("R1", "library/core/src/intrinsic/bigint.rr", "divsi_lean"),
+    ("R2", "crates/reussir-rt/src/rcgmp.rs", "pub struct Mpz"),
+]
+
+
+def check_rcgmp():
+    """`--int-backend rcgmp` needs a Reussir built with its `rcgmp` feature
+    (`rrc --help` lists the features) and the local patches
+    RCGMP_REUSSIR_PATCHES."""
+    rrc = REUSSIR / "build" / "bin" / "rrc"
+    help_text = subprocess.run([str(rrc), "--help"], capture_output=True, text=True).stdout
+    if not any(l.split()[:2] == ["rcgmp", "enabled"] for l in help_text.splitlines()):
+        sys.exit(f"l2r: L2R_INT_BACKEND=rcgmp needs a Reussir built with its rcgmp feature; "
+                 f"{rrc} lists none enabled (rrc --help, Features)")
+    for patch, rel, symbol in RCGMP_REUSSIR_PATCHES:
+        src = REUSSIR / rel
+        if not src.is_file() or symbol not in src.read_text():
+            sys.exit(f"l2r: L2R_INT_BACKEND=rcgmp needs the local Reussir patch {patch} "
+                     f"(`{symbol}` in {rel}), which the Reussir checkout {REUSSIR} lacks")
+
+
+def core_interface():
+    """Under `--int-backend rcgmp`: the interface (`.rri`) of Reussir's core
+    package (`library/core`: the built-in `Nat` and `Int`, `core::num`, and
+    `core::intrinsic::bigint`), which rrc loads with `--extern core=` in
+    package mode (the core package compiled into rrc has no `core::num`).
+    Built with the checkout's rrc, in leanrt's build directory (one per
+    Reussir checkout), again when core's sources or rrc change."""
+    out = leanrt_out()
+    src = REUSSIR / "library" / "core" / "src"
+    rrc = REUSSIR / "build" / "bin" / "rrc"
+    h = hashlib.sha256()
+    for f in sorted(src.rglob("*.rr")):
+        h.update(str(f.relative_to(src)).encode())
+        h.update(f.read_bytes())
+    h.update(str(rrc.resolve()).encode())
+    h.update(str(rrc.stat().st_mtime_ns).encode())
+    rri = out / "core.rri"
+    build_locked(out, out / "core.rri.stamp", [rri], h.hexdigest(),
+                 [str(rrc), "--package-root", str(src), "--package-name", "core", "--builtin",
+                  "--emit", "rri", "-o", str(rri)], src)
+    return rri
+
+
 def lean_toolchain():
     """The Lean toolchain directory: L2R_LEAN_TOOLCHAIN, else the elan
     toolchain that lean2rr/lean-toolchain pins (as scripts/toolchain.sh)."""
@@ -532,6 +606,8 @@ def main():
     # local patch. An empty value turns the cache off.
     env.setdefault("REUSSIR_FFI_CACHE_DIR", str(LEANRT_OUT / "polyffi-cache"))
 
+    if INT_BACKEND == "rcgmp":
+        check_rcgmp()
     rlib, lr = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
         rr = Path(args.keep_rr).resolve() if args.keep_rr else Path(tmp) / "prog.rr"
@@ -541,6 +617,8 @@ def main():
         enabled = args.enable_opt + env_names("L2R_ENABLE_OPTS")
         run([str(LEAN2RR), module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)]
+            + (["--int-backend", INT_BACKEND] if INT_BACKEND else [])
+            + (["--rcgmp-type-args"] if RCGMP_TYPE_ARGS else [])
             + [a for n in disabled for a in ("--disable-opt", n)]
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
@@ -572,6 +650,11 @@ def main():
                # redundant there but harmless, and kept for older bases.
                # Native Lean executables are PIEs without text relocations.
                + ["--relocation-mode", "pic"]
+               # The built-in integers (`--int-backend rcgmp`) are declared in
+               # Reussir's core package, which rrc loads as an interface in
+               # package mode (`core_interface`).
+               + (["--package-name", "prog", "--extern", f"core={core_interface()}"]
+                  if INT_BACKEND == "rcgmp" else [])
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
                + os.environ.get("L2R_RRC_FLAGS", "").split())
         if args.no_reuse_across_call:

@@ -85,7 +85,11 @@ typed, `RVec<T>` of `X`'s own Reussir type `T`, when the whole-program check
 allows it. The *pointer kind* of `X` names the Reussir type the lowering
 gives `X`, so that two element types of one kind have one representation:
 
-* `Nat`, `Int`: `Nat`, `Int`; `String`: `LStr`;
+* `Nat`, `Int`: `Nat`, `Int` (none under `--int-backend rcgmp` without
+  `--rcgmp-type-args`, `natInt` below: an `RVec<Nat>` would pass `Nat` at
+  the type arguments of the runtime's array functions, where Reussir gives
+  them a raw handle and releases it after the call; `isFfiTypeArgTy`);
+  `String`: `LStr`;
 * `I:<name>`: an inductive that the lowering makes a shared record or enum
   (`sharedInductive?`); rule 1 gives every instance (`List Nat`,
   `List String`) the one type of the inductive;
@@ -145,26 +149,29 @@ def ptrKindCacheKey (n : Name) : Name := .str n "_l2r_ptrkind"
 
 mutual
   /-- The kind of array element type `t`: its storage kind (`scalarKind?`)
-  or, with `ptr` (`typed-arrays`), its pointer kind (`ptrKind?`). -/
-  partial def elemKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (t : Expr) (ptr : Bool) :
-      CoreM (Option String) := do
+  or, with `ptr` (`typed-arrays`), its pointer kind (`ptrKind?`; `Nat` and
+  `Int` have one only with `natInt`). -/
+  partial def elemKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (t : Expr) (ptr : Bool)
+      (natInt : Bool) : CoreM (Option String) := do
     if let some k ← scalarKind? cache t then return some k
     unless ptr do return none
-    ptrKind? cache t
+    ptrKind? cache t natInt
 
-  /-- The pointer kind of array element type `t` (see above). -/
-  partial def ptrKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (t : Expr) :
+  /-- The pointer kind of array element type `t` (see above); `Nat` and
+  `Int` have one only with `natInt` (`LowerCtx.natIntTypeArgs`: not under
+  `--int-backend rcgmp` without `--rcgmp-type-args`). -/
+  partial def ptrKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (t : Expr) (natInt : Bool) :
       CoreM (Option String) := do
     let t := t.consumeMData.headBeta
     if t.isForall then return none
     let .const n _ := t.getAppFn | return none
     match n with
-    | ``Nat => return some "Nat"
-    | ``Int => return some "Int"
+    | ``Nat => return if natInt then some "Nat" else none
+    | ``Int => return if natInt then some "Int" else none
     | ``String => return some "LStr"
     | ``Array =>
       unless t.getAppNumArgs == 1 do return none
-      return some s!"A({(← elemKind? cache t.appArg! true).getD "box"})"
+      return some s!"A({(← elemKind? cache t.appArg! true natInt).getD "box"})"
     | _ =>
       let ck := ptrKindCacheKey n
       if let some r := (← cache.get)[ck]? then return r
@@ -189,10 +196,10 @@ def isPtrKind (k : String) : Bool := !compactKinds.contains k
 `Array S` of one (`Array (Array UInt8)`, `Option (Array UInt64)`): its
 values can be or hold compact arrays. With `ptr` (`typed-arrays`), also a
 type with a pointer kind, or one that mentions an array whose element type
-has one (`Array String`, `Option (Array Point)`). -/
+has one (`Array String`, `Option (Array Point)`; `natInt` as `ptrKind?`). -/
 partial def holdsCompactKind (cache : IO.Ref (Std.HashMap Name (Option String))) (t : Expr)
-    (ptr : Bool := false) : CoreM Bool := do
-  if (← elemKind? cache t ptr).isSome then return true
+    (ptr : Bool := false) (natInt : Bool := true) : CoreM Bool := do
+  if (← elemKind? cache t ptr natInt).isSome then return true
   go t
 where
   go (t : Expr) : CoreM Bool := do
@@ -200,7 +207,7 @@ where
     | .forallE _ d b _ => return (← go d) || (← go b)
     | t@(.app ..) =>
       if t.isAppOfArity ``Array 1 then
-        if (← elemKind? cache t.appArg! ptr).isSome then return true
+        if (← elemKind? cache t.appArg! ptr natInt).isSome then return true
       for a in t.getAppArgs do
         if ← go a then return true
       return false

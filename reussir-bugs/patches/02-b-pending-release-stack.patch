@@ -1,8 +1,8 @@
-From 2f81c8a2fc9417589baee9220f91e85c2e30f9b0 Mon Sep 17 00:00:00 2001
+From 074e4c59bed7763371024c25bf067b56d7060885 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 10:10:05 -0400
-Subject: [PATCH 2/8] l2r-local: bug 13b: free cells deep through records with
- a stack of pending releases
+Subject: [PATCH 02/13] l2r-local: bug 13b: free cells deep through records
+ with a stack of pending releases
 
 0013 frees a chain of cells in a loop, but drop_and_free still released
 the other chain members about to be freed recursively. A value deep along
@@ -61,7 +61,8 @@ of local patch 11-b that upstream's #671 does not carry.
  lib/IR/ReussirOps.cpp                         |  29 +-
  tests/integration/frontend/drop_long_list.c   |   4 +-
  tests/integration/frontend/drop_long_list.rr  |  17 +-
- 9 files changed, 515 insertions(+), 181 deletions(-)
+ tests/unittest/cases/glue_symbols.cpp         |   3 +-
+ 10 files changed, 517 insertions(+), 182 deletions(-)
  create mode 100644 crates/reussir-rt/src/drop.rs
 
 diff --git a/crates/reussir-rt/src/drop.rs b/crates/reussir-rt/src/drop.rs
@@ -983,6 +984,21 @@ index 5b72f7db..177ed8a7 100644
  
 -// CHECK: define {{.*}}@_RINvNvC4core9intrinsic13drop_and_freeC1TE(
 +// CHECK: define {{.*}}@_RINvNvC4core9intrinsic22drop_and_free_in_drainC1TE(
+diff --git a/tests/unittest/cases/glue_symbols.cpp b/tests/unittest/cases/glue_symbols.cpp
+index 26b16c25..2a797731 100644
+--- a/tests/unittest/cases/glue_symbols.cpp
++++ b/tests/unittest/cases/glue_symbols.cpp
+@@ -49,8 +49,9 @@ TEST_F(ReussirTest, GlueSymbolCollectionTracksInsertionsAndAtomicKinds) {
+           if (kind == AtomicKind::normal)
+             EXPECT_EQ(existing, dtor);
+         }
++        // The local drop series adds the non-atomic dtor's `__reussir_drop_drain` declaration.
+         EXPECT_EQ(std::distance(module.getOps<mlir::func::FuncOp>().begin(),
+-                                module.getOps<mlir::func::FuncOp>().end()), 5);
++                                module.getOps<mlir::func::FuncOp>().end()), 6);
+         EXPECT_TRUE(mlir::succeeded(mlir::verify(module)));
+       });
+ }
 -- 
 2.43.0
 

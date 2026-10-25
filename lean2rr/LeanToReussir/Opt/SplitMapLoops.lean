@@ -424,7 +424,8 @@ mutual
       if ← unknown α then return .let d k'
       let β := sh.elem.getD α
       let ptr := (← get).typedArrays
-      unless (← holdsCompactKind cache α ptr) || (← holdsCompactKind cache β ptr) do return .let d k'
+      let ni := (← get).natIntKinds
+      unless (← holdsCompactKind cache α ptr ni) || (← holdsCompactKind cache β ptr ni) do return .let d k'
       if (← norm α) == (← norm β) then
         let some name ← ensureSplit f α β shapes src cache | return .let d k'
         return .let { d with value := .const name us args } k'
@@ -828,7 +829,7 @@ def arrayParamsFromCallers (decls : Array (Decl .pure)) (types : Array Types) :
       if blocked.contains (d.name, j) then continue
       let ts := ((sites.getD (d.name, j) #[]).filterMap id)
       let some t := ts[0]? | continue
-      unless ← holdsCompactKind cache t (← get).typedArrays do continue
+      unless ← holdsCompactKind cache t (← get).typedArrays (← get).natIntKinds do continue
       let n ← norm t
       let mut agree := true
       for t' in ts do
@@ -859,16 +860,19 @@ def Opt.CompactArrays.install (c : PassConfig) : PassConfig :=
   let prev := c.stage3.typedMapLoops
   let prevP := c.stage3.paramsFromCallers
   let ptr := c.typedArrays
+  -- (`Nat` and `Int` have no pointer kind under `--int-backend rcgmp`
+  -- without `--rcgmp-type-args`: `ArrayKinds.ptrKind?`.)
+  let ni := c.intBackend == .leanrt || c.rcgmpTypeArgs
   { c with
     compactArrays := true
     stage3 := { c.stage3 with
       typedMapLoops := fun decls types roots => do
         let decls ← prev decls types roots
-        modify fun s => { s with typedArrays := ptr }
+        modify fun s => { s with typedArrays := ptr, natIntKinds := ni }
         splitMapLoops decls types roots
       paramsFromCallers := fun decls types => do
         let (decls, types, ch) ← prevP decls types
-        modify fun s => { s with typedArrays := ptr }
+        modify fun s => { s with typedArrays := ptr, natIntKinds := ni }
         let (decls, types, ch') ← arrayParamsFromCallers decls types
         return (decls, types, ch || ch') } }
 

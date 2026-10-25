@@ -17,7 +17,7 @@ REUSSIR=${L2R_REUSSIR:-$ROOT/reussir}
 RUSTC=${L2R_RUSTC:-$HOME/.rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc}
 RT=$REUSSIR/build/target-rt/release
 GMP=${L2R_GMP:-$L2R_LEAN_TOOLCHAIN/lib/libgmp.a}
-OUT=${L2R_TEST_BUILD:-$HERE/build}/leanrt-unit
+OUT=${L2R_TEST_BUILD:-$HERE/build}/leanrt-unit${L2R_INT_BACKEND:+-$L2R_INT_BACKEND}
 mkdir -p "$(dirname "$OUT")"
 # lean-runtime as scripts/l2r.py builds it: rustc's arguments for it
 # (--extern lean_runtime=..., -L dependency=...), one a line.
@@ -31,6 +31,16 @@ for d in lr.dirs: print("-L"); print(f"dependency={d}")' "$ROOT/scripts")
 # Debug assertions on (rustc turns them on by itself only at opt-level 0):
 # leanrt's invariant checks run, e.g. that no big `Int` is in the small
 # range (nat::tests::unnormalized_big_int_is_caught).
+# L2R_INT_BACKEND=rcgmp: leanrt as `--int-backend rcgmp` builds it
+# (`--cfg leanrt_rcgmp`), linked with the Reussir checkout's rcgmp runtime
+# (built with Reussir: its build directory's `rcgmp-runtime.a`).
+RCGMP=()
+if [ "${L2R_INT_BACKEND:-}" = rcgmp ]; then
+  # The newest one: cargo keeps a build-script output directory per configuration.
+  A=$(ls -t "$REUSSIR"/build/target/release/build/rene-*/out/rcgmp-runtime.a 2>/dev/null | head -1)
+  [ -n "$A" ] || { echo "leanrt-unit: no rcgmp-runtime.a in $REUSSIR/build (a Reussir built with rcgmp)" >&2; exit 2; }
+  RCGMP=(--cfg leanrt_rcgmp -C link-arg="$A")
+fi
 "$RUSTC" --edition 2021 --test --crate-name leanrt -C opt-level=1 -C debug-assertions=on -L "$RT" -L "$RT/deps" \
-  "${LR[@]}" -C link-arg="$GMP" "$ROOT/runtime/leanrt/src/lib.rs" -o "$OUT"
+  "${LR[@]}" "${RCGMP[@]}" -C link-arg="$GMP" "$ROOT/runtime/leanrt/src/lib.rs" -o "$OUT"
 "$OUT" "$@"

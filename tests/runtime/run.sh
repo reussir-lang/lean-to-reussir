@@ -20,6 +20,11 @@
 #               optimization that is off by default (`unread-fields`); a
 #               name in NAME.opts is taken out of L2R_ENABLE_OPTS, so a test
 #               keeps a pass off also in a run that turns it on for all
+#   NAME.int-backend  the representation of Nat and Int this test is built
+#               with (one line, `leanrt` or `rcgmp`: lean2rr's
+#               --int-backend, scripts/l2r.py's L2R_INT_BACKEND), whatever
+#               the run's L2R_INT_BACKEND; `rcgmp` needs a Reussir that
+#               scripts/l2r.py accepts for it
 #   NAME.xfail  the test is known to fail through lean2rr; the file says why
 #               (a "Requests for lean2rr" item in runtime/README.md); a
 #               file whose first line starts with `alloc-check:` marks only
@@ -63,7 +68,12 @@
 #               optimizations is turned off for the run (L2R_DISABLE_OPTS,
 #               NAME.opts): a fact that an optimization prints, or that
 #               depends on one (`[typed-cells,typed-arrays] lean2rr: typed
-#               cells: …`)
+#               cells: …`); an item `int:leanrt` or `int:rcgmp` among them
+#               checks the line only when the test is built with that
+#               representation of Nat and Int (L2R_INT_BACKEND, default
+#               leanrt, or NAME.int-backend): a fact that only one
+#               representation prints (`[int:rcgmp] lean2rr: …`); another
+#               `int:NAME` fails the test
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # lean2rr runs with LEAN_ABORT_ON_PANIC=1: a panic of lean2rr itself is a
@@ -75,6 +85,8 @@
 # L2R_LEAN_RUNTIME_FEATURES (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
 # to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
+# L2R_INT_BACKEND (`leanrt` or `rcgmp`, the representation of Nat and Int,
+# passed on by scripts/l2r.py; unset: lean2rr's default, leanrt);
 # L2R_TEST_BUILD (build directory, default tests/runtime/build);
 # L2R_LEAN_TOOLCHAIN (the Lean toolchain of the native builds, default the
 # one lean2rr/lean-toolchain pins; scripts/toolchain.sh).
@@ -144,6 +156,8 @@ for t in "${TESTS[@]}"; do
       done
     done
   fi
+  backend=${L2R_INT_BACKEND:-leanrt}
+  [ -f "$HERE/$t.int-backend" ] && backend=$(tr -d ' \n' < "$HERE/$t.int-backend")
   ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
   # (`env` sets it for the lean2rr build only: lean2rr tests whether it is set.)
   debug=(); [ -f "$HERE/$t.l2r-debug" ] && debug=(env L2R_DEBUG=1)
@@ -162,7 +176,7 @@ for t in "${TESTS[@]}"; do
     status=fail; why="$t.refused expects lean2rr to refuse, but these files describe a run: $(echo $runfiles)"
   elif [ -f "$HERE/$t.refused" ]; then
     # A translation lean2rr refuses, with the expected message.
-    if L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
+    if L2R_INT_BACKEND=$backend L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
       status=fail; why="lean2rr built it, expected an error"
     else
       while IFS= read -r line; do
@@ -174,7 +188,7 @@ for t in "${TESTS[@]}"; do
         esac
       done < "$HERE/$t.refused"
     fi
-  elif ! L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 \
+  elif ! L2R_INT_BACKEND=$backend L2R_DISABLE_OPTS=$opts L2R_ENABLE_OPTS=$enable LEAN_ABORT_ON_PANIC=1 \
         ${debug[@]+"${debug[@]}"} python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" --keep-rr "$d/$t.rr" \
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
@@ -183,12 +197,18 @@ for t in "${TESTS[@]}"; do
       [ -f "$f" ] || continue
       while IFS= read -r line; do
         [ -z "$line" ] && continue
-        # `[OPT,…] line`: only when none of the optimizations is off.
+        # `[OPT,…] line`: only when none of the optimizations is off, and
+        # (`int:NAME`) when the test is built with that representation.
         case $line in
           "["*"] "*)
             skip=""
             for o in $(echo "${line%%] *}" | tr -d '[ ' | tr ',' ' '); do
-              case ",$(echo "$opts" | tr -d ' ')," in *",$o,"*) skip=1 ;; esac
+              case $o in
+                int:leanrt|int:rcgmp) [ "${o#int:}" = "$backend" ] || skip=1 ;;
+                # A misspelt representation would skip the line under both.
+                int:*) status=fail; why="$why $(basename "$f"): unknown representation '$o' (expected int:leanrt or int:rcgmp);"; skip=1 ;;
+                *) case ",$(echo "$opts" | tr -d ' ')," in *",$o,"*) skip=1 ;; esac ;;
+              esac
             done
             [ -n "$skip" ] && continue
             line=${line#*] } ;;

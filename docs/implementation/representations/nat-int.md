@@ -69,8 +69,9 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
     and `int_of_ref`.
   - lean2rr's own rules know only which values are small, not the words.
     `NatEncoding.lean` has `natIsSmall` (below 2^63) and `intIsSmall` (the
-    `int32` range), and `natLiteral`, the optimization `cheap-consts` and
-    `constComputes` (Mono) use them. lean2rr emits only helper calls:
+    `int32` range), by backend (`--int-backend`), and `natLiteral`, the
+    optimizations `cheap-consts` and `mod-pow2` and `constComputes` (Mono)
+    use them. lean2rr emits only helper calls:
     `l2r_nat_small(k)` for a literal, `l2r_nat_small(0)` and
     `l2r_int_small(0)` for placeholders, `l2r_int_word`, `l2r_int_of_word`,
     `lean_usize_of_nat`, `lean_usize_to_nat` and `l2r_int_cast_nat` for
@@ -108,6 +109,409 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   closed-term extraction (`ExtractClosedK.lean`: a literal of 2^63 or more
   is extracted) keeps Lean's rule, which does not depend on lean2rr's
   representation.
+
+### `--int-backend rcgmp`: Reussir's built-in integers (in progress)
+
+- **What:** With `--int-backend rcgmp` (clean-integration step D; scripts:
+  `L2R_INT_BACKEND=rcgmp`), a `Nat` and an `Int` are Reussir's built-in
+  integers (`core::num::Nat`/`Int`, rcgmp: an immediate or a counted heap
+  integer). The prelude keeps both representations in marked blocks: a
+  line `// @int-backend leanrt` or `// @int-backend rcgmp` opens a block,
+  `// @int-backend end` closes it, blocks never nest, and lean2rr keeps
+  only the selected backend's blocks (before prelude-liveness). Every
+  function keeps its name and signature in both, so the lowering and the
+  rest of the prelude call the same functions. The leanrt blocks are
+  today's code unchanged.
+  - The rcgmp Nat and Int sections compose Lean's rules (lean-runtime's
+    `sem::nat`, `sem::int`) of Reussir's operators and
+    `core::intrinsic::bigint`: `+`, `-` (truncating on `Nat`), `*`,
+    comparisons, `& | ^`, `<<`/`>>` (a nonnegative `i64` amount),
+    `/`/`%` behind a zero test (`n / 0 = 0`, `n % 0 = n`), `divsi_exact`,
+    `edivsi`/`emodsi`, `log2i`, `gcdi`, `absi`, `ipowi`, `as` casts (the low
+    bits of the two's complement), `Int::NegSucc`. A value is tested and
+    converted with `trunci_overflow`, never by its encoding.
+  - `Nat.pow` and `Nat.shiftLeft` test the result's size first, as
+    lean-runtime's rules do, against `leanrt::rcgmp::MAX_BITS` (leanrt's
+    `big::MAX_BITS`, the same GMP below rcgmp): above it the process ends
+    with native's message (`l2r_internal_panic` codes 6 and 7 for an
+    exponent or shift of 2^32 or more, else 4, out of memory).
+    `x % 2^w` (`l2r_nat_truncate_bits`) is rcgmp's `floormod2expi`, and
+    the divisions are Lean's modes (`divsi_lean`, `remsi_lean`,
+    `edivsi_lean`, `emodsi_lean`: quotient 0 and remainder `x` for a zero
+    divisor), both through local Reussir patch R1.
+  - Index words: the prelude's string and array functions read a `Nat`
+    index, position or capacity through its word (`l2r_nat_raw`,
+    `l2r_word_index_ok`, ...). The rcgmp block defines those helpers on an
+    index word: the value below 2^63, `u64::MAX` from there, owning
+    nothing. The functions that need a big position's value
+    (`String.Pos.Raw.next`/`prev`), Rust's decoding of a word (the
+    `get_fast`/`next_fast` textures) or the native word (`l2r_addr_nat`,
+    `l2r_addr_int`) and `l2r_int_sat_i64` have rcgmp versions of their own.
+  - Boxes stay Lean's: a `Nat` below 2^63 and an `Int` in the `int32` range
+    are immediates (`l2r_any_of_nat`, `l2r_any_of_int`, tested in Reussir
+    code); a bigger value is a leanrt cell of kind 1 or 2 that holds an
+    rcgmp reference (`leanrt::any::of_mpz`, `mpz_of`; `--cfg leanrt_rcgmp`
+    makes `release_kind` release it). `l2r_any_as_nat`/`_int` decode an
+    immediate in Reussir code. The lowering calls these four for the box
+    kinds 1 and 2 under rcgmp (a generic texture at `Nat` gets the raw
+    handle, so it cannot test a small value).
+  - leanrt's part is `leanrt::rcgmp` (`--cfg leanrt_rcgmp`): the box cells
+    (of `reussir_rt::rcgmp::Mpz`, the owned handle that local Reussir patch
+    R2 renders at polyffi type arguments, re-exported), decimal text
+    (`repr`), `replicate_len`. It calls
+    rcgmp's public C API only. A generic box texture at `Mpz`
+    (`l2r_any_of<Nat>`) ends the program with a message
+    (`generic_mpz_box`): it cannot keep small values immediates.
+  - The backend needs Reussir's local patches R1 and R2:
+    `scripts/l2r.py` checks for them (`RCGMP_REUSSIR_PATCHES`). With R2, a
+    typed `Array Nat`, a once-cell constant and every generic texture at
+    `Nat` hold `Mpz` values, counted by rcgmp's C calls (test
+    `RtNatGenericBig`).
+  - rrc needs Reussir's core package for `Nat` and `Int`: `scripts/l2r.py`
+    builds its interface once per Reussir checkout (`core_interface`) and
+    compiles the program in package mode (`--package-name prog --extern
+    core=...`).
+  - Differences from the leanrt backend (allowed by the functional
+    equivalence contract; review R1):
+    - `Nat.add`/`mul` and the `Int` operations do not test lean-runtime's
+      `MAX_BITS` (only `pow` and `shiftLeft` do, where small operands make
+      a huge result). An allocation failure ends through Reussir's
+      allocation panic or rcgmp's `abort`, not `INTERNAL PANIC: out of
+      memory` (in both backends GMP's own `mpz_pow_ui` aborts).
+    - `Nat.divExact`/`Int.divExact` are computed as `div` (as natively and
+      in the leanrt backend), not with rcgmp's exact division, whose
+      immediate path is LLVM's `sdiv exact`: poison for a false proof.
+    - An immediate of 2^31 or more boxed at another type (a `Nat`, a
+      `UInt32`) and unboxed at `Int` gives the `Int` of its low 32 bits,
+      normalized: `==` with that value is true and `ptrAddrUnsafe` is its
+      `int32` word, where the leanrt backend keeps the raw word (`==`
+      false, as natively). Only a program that casts gets there.
+    - `ptrAddrUnsafe` of a big value is its handle's word (a heap
+      address, or rcgmp's immediate for an `Int` below 2^61 in magnitude),
+      distinct per value. A boxed big value is one leanrt cell per box: two
+      boxes of one integer have different addresses and are both
+      exclusive (natively the box is the number object).
+    - `dbgTraceIfShared` (a debug message) follows rcgmp's immediates, not
+      Lean's: a `Nat` in [2^61, 2^63) is a heap value here and can be
+      reported shared (a literal such as 2^61 always is: an immortal object),
+      where natively it is a scalar; an `Int` with |x| in [2^31, 2^61) is an
+      immediate here and never reported, where natively it is an object.
+    - A boxed `Int` in [2^32, 2^62) or [-2^62, -2^31) is an immediate
+      (`2v + 1`, `l2r_int_box_wide`; natively an object, its word an
+      address): an `int32` value keeps Lean's scalar, and a box word read
+      at `Int` decodes as the `int32` pattern below 2^32 and as `2v + 1`
+      from there.
+- **Why:** Reussir's maintainer asks lean2rr to use Reussir's interface
+  instead of its own encodings (clean-integration plan, step D); rcgmp
+  landed upstream on 2026-10-24.
+- **Where:** `runtime/prelude.rr` (the `@int-backend` blocks);
+  `runtime/leanrt/src/rcgmp.rs`, `any.rs` (`of_mpz`, `mpz_of`,
+  `release_kind`, `generic_mpz_box`); `scripts/l2r.py` (`INT_BACKEND`,
+  `core_interface`, `check_rcgmp`);
+  `tests/runtime/leanrt-unit.sh` (`L2R_INT_BACKEND=rcgmp`).
+- **Remove only if:** the rcgmp backend becomes the default (then the
+  leanrt blocks, `big.rs`, `gmp.rs` and `nat.rs` go) or is dropped.
+
+### `--int-backend rcgmp`: the lowering (in progress)
+
+- **What:** lean2rr's side of the switch (clean-integration step D; plan
+  STEP-D-LOWERING rows 3 to 14, 18, 19). The default, `--int-backend
+  leanrt`, translates every program to the same `.rr` as before (the
+  prelude after its leanrt blocks are kept).
+  - **Options.** `--int-backend leanrt|rcgmp` (`Main.lean`; scripts:
+    `L2R_INT_BACKEND`) and `--rcgmp-type-args` (Reussir's local patch R2
+    is there: a `Nat` or `Int` at a type argument of a generic FFI function
+    is an owned handle). Both are in `PassConfig` (`intBackend`,
+    `rcgmpTypeArgs`), set before the optional passes are installed, in
+    `MonoConfig.intBackend` and in `LowerCtx` (`intBackend`,
+    `natIntTypeArgs`: true under leanrt or with `--rcgmp-type-args`).
+  - **Prelude blocks.** `filterIntBackend` (`NatEncoding.lean`) keeps the
+    chosen backend's blocks and drops the marker lines, right after the
+    prelude is read (`Main.pipeline`), so Stage 1's list of prelude
+    functions, the lowering's signatures and prelude-liveness see one
+    definition of each function. A block opened inside a block, an `end`
+    outside one, an unknown backend or a block left open stops lean2rr.
+  - **Cost model.** `natIsSmall b`, `intIsSmall b` (rcgmp: [-2^61, 2^61),
+    rcgmp's immediates), `natLitFree b` (rcgmp: every literal, a read-only
+    object of the program's data) and `natSmallBits b` (61 under rcgmp).
+    Users: `natLiteral`, `cheap-consts` (any literal is cheap; a computed
+    `Nat.succ`, `Int.ofNat`, `Int.negSucc` within the immediates),
+    `constComputes` (Mono: a literal never computes), `mod-pow2` (a literal
+    divisor `2^k` from `k = 61`). A wrong answer costs time, never a
+    result.
+  - **Literals.** A `Nat` literal of any size is Reussir's literal,
+    `{ let nl4 : Nat = 18446744073709551616; nl4 }` (no `l2r_nat_small`,
+    no decimal text in the string table); a placeholder of `Nat` or `Int`
+    is `{ let z : Nat = 0; z }`.
+  - **Boxes.** The box kinds stay 1 and 2. `natIntBoxFns?` (LowerBase)
+    gives the prelude's non-generic functions: `boxValue` calls
+    `l2r_any_of_nat`/`_int`, `boxUnboxWith` `l2r_any_as_nat`/`_int` (in a
+    program that casts, `l2r_any_raw_take_nat`/`_int` on the box's word
+    when it is an immediate, and when it is a cell of the number's kind
+    after the number test; any other word goes to the cast's slow path),
+    `boxTake` (`boxDispatch`, the generated unbox of a program that casts)
+    `l2r_any_raw_take_nat`/`_int`. No array
+    element is read at `Nat` or `Int` through its word (`boxWordRead?`:
+    the prelude's `_as<T>` reads have no rcgmp path). `boxUnboxed?` folds
+    `l2r_any_as_nat(b)` boxed again to `b`. `boxAllocates` is true at
+    `Nat` and `Int` (a value outside the immediates gets a new leanrt cell
+    per boxing), so `boxed-consts` boxes a constant of those types once,
+    except one whose value the box holds as an immediate
+    (`constIsImmediate`: `constNumValue?` evaluates the constant's code of
+    literals, `Int.ofNat`, `Int.negSucc`, `Int.neg`, `Int.add`, `Int.sub`,
+    `Int.mul`, `Int.pow`; `natBoxIsImmediate`: a `Nat` below 2^63;
+    `intBoxIsImmediate`: an `Int` in the `int32` range or in [2^32, 2^62)
+    or [-2^62, -2^31), the rule of the prelude's `l2r_any_of_int` and
+    `l2r_int_box_wide`), which is boxed in line (review of step D:
+    `def k5 : Nat := 5` stored in a `List` had a once-cell; test
+    `RtNatBoxedConsts`, checked by `int-backend-check.sh`). Only under
+    rcgmp: under leanrt boxing never allocates, and the constant is not
+    evaluated.
+    `Lower/Live` counts `l2r_any_of_nat` as payload `b1` and
+    `l2r_any_of_int` as `b2`.
+  - **No `Nat` or `Int` at the FFI's type arguments** (without
+    `--rcgmp-type-args`). `isFfiTypeArgTy` (LowerBase) is `isBoundaryTy`
+    minus the types that mention `Nat` or `Int`; `cellStorage` uses it,
+    so a once-cell of a computed `Nat` constant (`onceCell`) and a
+    polymorphic extern's value at `α := Nat` (`lowerExternCall`) go
+    through an `ElemBox` record, which holds the integer as a field.
+    `ArrayKinds.ptrKind?` gives `Nat` and `Int` no pointer kind
+    (`natInt`; also in the whole-program check, the typed `map` loops
+    and the lowering's `arrayPtrKindOf`), so an `Array Nat` holds boxes
+    and an `Array (Array Nat)` is of kind `A(box)`. `CellKinds.cellKind?`
+    gives them no cell kind either (`typed-cells`: a reference of `Nat`
+    keeps its cell of boxes; the glue `l2r_rc_set_ref<T, R>` passes the
+    old value to the texture `l2r_release_value_then<T, R>`). Thunks and
+    tasks hold boxes anyway.
+  - **The check.** `Emit/IntBackendCheck.lean` (`intBackendCheck`, run
+    by `Main.pipeline` on the finished program under rcgmp without
+    `--rcgmp-type-args`) stops lean2rr with an internal error at any call
+    of a generic FFI function of the prelude whose type argument mentions
+    `Nat` or `Int` (also through a plain generic prelude function that
+    passes the type parameter on, `ffiTypeParams`: `lean_array_fget_as<T>`
+    calls `l2r_view_take_as<T>`), and at any `RVec`, `LRef` or `LCell` of
+    them, in the generated items and in the prelude's text. Test hook:
+    `L2R_TEST_NAT_TYPE_ARGS=1` lowers as with `--rcgmp-type-args` but
+    keeps the check on (`tests/runtime/int-backend-check.sh`).
+- **Why:** Reussir renders a built-in integer at a polyffi type argument
+  as the raw handle and releases it after the call (its `rcgmp_handle`
+  comes from the substituted parameter type): `l2r_once_put<Nat>` stored a
+  handle that the wrapper then released, `l2r_array_push<Nat>` the same,
+  and `l2r_once_get`/`l2r_view_take` copied without a retain (review
+  R1-01 of step D: a big closed term and a typed `Array Nat` printed wrong
+  sums, exit 0; test `RtNatGenericBig`). A declared `Nat` parameter is
+  fine (#795: a borrowed handle). The boxes keep native's words, so casts
+  and `ptrAddrUnsafe` of small values stay native's (`RtBoxPassOnCast`,
+  `RtCastBoxImm`).
+- **Where:** `lean2rr/Main.lean` (options, `filterIntBackend`, the check);
+  `NatEncoding.lean`; `PassConfig.lean`, `Opt/Registry.lean` (`config`);
+  `Mono.lean` (`MonoConfig.intBackend`, `constComputes`);
+  `LowerBase.lean` (`LowerCtx.intBackend`, `natIntTypeArgs`,
+  `mentionsNatInt`, `isFfiTypeArgTy`, `cellStorage`, `onceCell`,
+  `natIntBoxFns?`, `boxValue`, `boxTake`, `boxUnboxWith`, `boxUnboxed?`,
+  `boxAllocates`, `arrayPtrKindOf`); `ArrayKinds.lean` (`ptrKind?`);
+  `CompactArrays.lean`, `Opt/SplitMapLoops.lean`, `MonoRetype.lean`
+  (`natIntKinds`); `CellKinds.lean`, `TypedCells.lean`, `Lower/Externs.lean`
+  (`refElemTy`); `Lower/Values.lean` (`natLiteral`); `Lower/Conv.lean`
+  (`zeroTry`); `Lower/Live.lean`; `Opt/CheapConsts.lean`;
+  `Opt/ModPow2.lean` (`minLitExp`); `Emit/IntBackendCheck.lean`. Tests:
+  `RtNatImmEdges`, `RtNatDivZero`, `RtNatLitHuge`, `RtNatGenericFfi`,
+  `RtNatGenericBig`, `tests/runtime/int-backend-check.sh`; run.sh's
+  `int:NAME` items of an expectation line's `[OPT,…]` prefix and
+  `NAME.int-backend`.
+- **Remove only if:** the rcgmp backend becomes the default (then the
+  leanrt paths go) or is dropped. With an owned handle at type arguments
+  (`--rcgmp-type-args`: Reussir's local patch R2, which scripts/l2r.py
+  requires for rcgmp) typed arrays, typed cells and once-cells hold `Nat`
+  and `Int` directly and the check is off; the guard and the check (rows
+  10, 11, 19) stay as a lowering option (for measurements) until it is
+  dropped.
+
+### `--int-backend rcgmp`: bit tests and float conversions by rcgmp (`prelude-int-ops`)
+
+- **What:** Under `--int-backend rcgmp` the optional pass
+  `prelude-int-ops` (`Opt/PreludeIntOps.lean`, a pass over the mono code
+  after Stage 3, after `float-lits`) replaces three Lean definitions by
+  the prelude's rcgmp functions:
+
+  | Lean | Lean's code | prelude (rcgmp block) |
+  |---|---|---|
+  | `Nat.testBit m i` | `1 &&& (m >>> i) != 0` | `l2r_nat_test_bit`: `testbiti`, reads bit `i` of `m` in place; `i` of 2^64 or more is `false` |
+  | `Float.ofNat n`, `Nat.toFloat n` | `Float.ofScientific n false 0` | `l2r_float_of_nat`: `sitofp` |
+  | `Float.ofInt i`, `Int.toFloat i` | `Float.ofNat` of `i.natAbs`, negated | `l2r_float_of_int`: `sitofp` |
+
+  Example (`x.testBit i`, a `BitVec`'s `getLsbD`): Lean's mono code
+  `let b := Nat.testBit._l2r.0 x i` becomes `let b := L2RNat.testBit x i`,
+  and the `.rr` has `l2r_nat_test_bit(x, i)` instead of a call of the
+  translated `Nat.testBit` (`lean_nat_shiftr`, `lean_nat_land`,
+  `lean_nat_dec_eq`).
+  - **Shapes.** None of the three definitions is `@[inline]` and none is
+    small: LCNF inlines a definition without the attribute only when its
+    code has at most `compiler.small` = 1 binding, and these have 3 to 5.
+    `Nat.toFloat` and `Int.toFloat` are abbreviations, so they are calls
+    of `Float.ofNat`/`Float.ofInt` by then, and so is `OfNat Float n`'s
+    instance. What reaches lean2rr is therefore a full call of the
+    definition's instance, or the instance as a function value (a
+    partial application, `xs.map Float.ofNat`), never the inlined
+    `Nat.land 1 (Nat.shiftRight m n)` and `Nat.decEq` (checked on a
+    probe program and on Z03b's `.rr`, where `Regex.Data.BitMatrix.get`
+    calls `Nat.testBit`). The pass rewrites each full call to the extern
+    and replaces the instance's own code by one call of it
+    (`Nat.testBit._l2r.0 m n := L2RNat.testBit m n`), so a function value
+    runs the prelude function too; `Float.ofInt`'s code (with its own
+    `Float.ofNat` calls) goes the same way.
+  - **Externs.** `L2RNat.testBit`, `L2RFloat.ofNat`, `L2RFloat.ofInt` are
+    added as `mod-pow2` adds `L2RNat.truncateBits`: a definition in the
+    environment whose value is the Lean definition (not an axiom:
+    `programCasts` reads one as a possible cast) with `@[extern]` naming
+    the prelude function, and an extern declaration of the program, only
+    when a call or an instance was rewritten. One already in the
+    environment must be that extern at that type, else lean2rr stops
+    (internal error).
+  - **Same results.** `testbiti` reads the bit Lean's definition tests.
+    `sitofp` gives the nearest double, ties to even, an infinity of the
+    sign past the largest finite one; Lean 4.34's `Float.ofScientific`
+    (its `Float.Model` path from 2^53) gives the same bits for every value
+    (judged 2026-10-25 with 381 inputs; test `RtFloatOfNatInt`: ties at
+    2^53, 2^54, 2^64, 2^100 and 2^200, one decided by a bit 147 places
+    below the halfway point, the largest finite double and
+    `(2^54 - 1) * 2^970`, which goes up to an infinity, and the
+    negatives).
+  - **leanrt.** The pass does nothing. The leanrt block's
+    `l2r_nat_test_bit` is Lean's definition, the same three operations
+    with the same `m >>> i`, so the rewrite would add nothing there; the
+    leanrt block has no float conversions. The `.rr` of every program
+    under leanrt is the same as without the pass.
+  - `L2R_DEBUG=1` prints, per definition, the calls and instances
+    rewritten (`lean2rr: prelude-int-ops: Nat.testBit: 2 call(s) and 1
+    instance(s) rewritten to l2r_nat_test_bit`).
+- **Why:** `m >>> i` makes a new number for a big `m` at every test (Z03b,
+  the regex backtracker's bit matrix of states times positions); from
+  2^53 on, `Float.ofScientific` builds `Float.Model` values with bignum
+  arithmetic in time quadratic in the number's bits. Cachegrind
+  instructions under rcgmp (SVE-free builds, with the pass against
+  without it): Z03b 19.16 → 18.88 G (−1.5 %; the rest of its gap to
+  leanrt is `|||` on big numbers); a loop of `toFloat` on small, 2-limb
+  and negative 2-limb values 4.17 G → 80.1 M (100000 rounds, about 41700
+  → 800 per round), on small values only 41.5 → 17.5 M (a million
+  rounds); `testBit` at every bit of a 9512-bit number, 20 times, 142.6 →
+  7.8 M.
+- **Where:** `lean2rr/LeanToReussir/Opt/PreludeIntOps.lean`;
+  `Opt/Registry.lean`; `runtime/prelude.rr` (the rcgmp block's
+  `l2r_nat_test_bit`, `l2r_float_of_nat`, `l2r_float_of_int`). Tests:
+  `RtNatTestBit`, `RtFloatOfNatInt` (each with a `.l2r-debug` check that
+  the rewrite runs under rcgmp and not under leanrt).
+- **Remove only if:** Lean inlines these definitions (then the pass must
+  match the inlined code), or Reussir lowers Lean's code to the same
+  operations.
+
+### `--int-backend rcgmp`: a case split is a Reussir `match` (`int-match`)
+
+- **What:** Under `--int-backend rcgmp` the optimization `int-match`
+  (on by default; nothing under leanrt) lowers Lean's case splits on a
+  `Nat` or `Int` to a Reussir `match` on the built-in integer, which
+  Reussir compiles to one `rcgmp.match` over integer intervals.
+  - **Stage 2 keeps the `cases`.** lean2rr's copy of `toMono` (`toMonoK`,
+    `keepIntCases`) leaves a `cases` on `Nat` (`Nat.zero`, `Nat.succ p`)
+    or `Int` (`Int.ofNat m`, `Int.negSucc m`) a `cases`, its fields at
+    `Nat`, where Lean's `casesNatToMono` writes `zero := 0; isZero :=
+    Nat.decEq n zero; cases isZero | false => p := Nat.sub n 1 …` and
+    `casesIntToMono` `Int.decLt i 0` and `Int.natAbs`. Lean's mono passes
+    and lean2rr's handle it as a `cases` on any inductive (Lean's own base
+    phase has them; `elimDeadBranches` knows `Nat` values as constructor
+    chains). A `Nat.succ` value is still `Nat.add x 1`.
+  - **The `match`.** `lowerCases` (Lower/Code) sends a `cases` on a
+    `Nat` or `Int` scrutinee to `lowerIntMatch`; `Lower/IntMatch.lean`
+    finds the arms (`natArms`, `intArms`):
+
+    ```
+    def fib : Nat → Nat                  fn l_fib___l2r_0_(a1 : Nat) -> Nat {
+      | 0 => 0                               match a1 {
+      | 1 => 1                                   0 => { … },
+      | n+2 => fib n + fib (n+1)                 1 => { … },
+                                                 Nat::Succ(Nat::Succ(f2)) => { … }
+                                             }
+                                         }
+    ```
+
+    `Nat.zero` is the literal arm `0`, `Nat.succ p` the arm `Nat::Succ(p)`:
+    Reussir computes `p` in the selection (an immediate's tagged bits
+    minus 4; a heap value's difference), with no test of `n == 0` and no
+    `Nat.sub`. A `cases` on a field that is the field's only use, at the
+    start of its arm (after `let`s of literals), joins the outer `match`:
+    its zero is a literal (`1` above; `0` under `Int::OfNat`, `-1` under
+    `Int::NegSucc`), its `succ` a pattern inside the outer constructors
+    (`Nat::Succ(Nat::Succ(q))`, `Int::OfNat(Nat::Succ(k))`), its default
+    `Nat::Succ(_)` (`RR.Arm.wrap`: the constructors around the arm's own
+    pattern). The arm's binder is `_` where the code does not use it.
+  - **Chains of literal tests.** Lean compiles `match n with | 0 => … |
+    5 => … | _ => …` to tests `Nat.decEq n k` (`Nat.beq n k` for `==`;
+    `Int.decEq i k` on an `Int`), not to a `cases`. In `lowerCode`'s run
+    of `let`s, a test of a `Nat` or `Int` against a literal whose result
+    only its `cases` reads starts a chain (`chainArms`). A literal is a
+    `let` of one, or of `Int.ofNat`, `Int.negSucc` or `Int.neg` of
+    literals, or a read of a constant that computes one (`litValue?`,
+    `litConst?`: Lean extracts a `Nat` literal from 2^63 on, and an `Int`
+    literal such as `-7` as `Int.neg (Int.ofNat 7)`, as closed terms). The
+    chain has an arm per literal while the `false` branch, after `let`s of
+    literals, is another such test of the same variable, then that branch
+    as the default `_`, or the arms of a `cases` on the same variable
+    there. Literal `let`s between the tests go into the later arms that
+    use them, with the `let`s these read in turn (`-6` computed in place
+    is `Int.neg` of `Int.ofNat` of `6`: `IntArm.fullCode`); those only
+    the tests read are left out. The arms keep the
+    order of Lean's tests, and Reussir's first matching arm wins (a literal
+    tested first goes to its arm also when a later `Nat::Succ` arm covers
+    it). A literal tested again stops the chain.
+  - **Coverage.** A literal arm that an earlier arm covers is left out,
+    and so is a default whose position is covered (Reussir warns about an
+    arm no value reaches); arms that do not cover every value (Lean's
+    `elimDeadBranches` removed an alternative, no default) end with
+    `_ => l2r_unreachable`.
+  - **The scrutinee in an arm.** An arm that names the scrutinee reads it
+    through a binding Reussir makes of the whole scrutinee (#803): in a
+    literal arm the constant, in `_`, `Int::OfNat(m)`, `Int::OfNat(_)` and
+    a last arm without a binder (Reussir makes it the `default`) the value
+    itself, but in an arm that selects the scrutinee minus a bound
+    (`Nat::Succ(p)`, `Int::NegSucc(m)`, `Nat::Succ(_)` before other arms,
+    …) a value rebuilt from that difference (`p + 1`, an allocation for a
+    heap value; Reussir's tests SUMTO, GUARDED). Where such an arm names it, the
+    `match` is on a copy (`let ns3 : Nat = n; match ns3 { … }`): the arm
+    reads `n` itself, which Reussir retains before the `match` (a test of
+    the tag for an immediate) and releases in the arms that do not use it.
+- **Why:** The owner and Reussir's maintainer want lean2rr to use
+  Reussir's own `Nat` where Reussir has a construct for it (clean
+  integration, step D, D7a). One `rcgmp.match` selects the arm by the
+  tagged bits and gives the arm its binder; Lean's form is a test and a
+  `Nat.sub` (a monus with its own fast path) per split, and a chain of
+  literal tests is one test per literal. Instruction counts (cachegrind,
+  2026-10-25, rcgmp with the pass against `--disable-opt int-match`): a
+  loop through `n+1` −7.9%, `sumTo` −3.1%, a countdown above 2^64 −2.5%,
+  `fib` (`0`, `1`, `n+2`) +6.6%, Ackermann +7.6%, six literal arms +10%;
+  of the shared benchmarks E01 −3.0%, X14, X13, L04, L11 unchanged, X04
+  +1.7%, L08 +2.2%. The increases come from rcgmp's selection among
+  immediates: it computes the arm's index and the binder's offset with
+  conditional selects and then switches on the index, a few instructions
+  more than one comparison for two or three arms, and it computes the
+  binder also on paths that do not use it (Lean's `Nat.sub` moves into
+  the branch that uses it).
+- **Where:** `TypedToMono.lean` (`keepIntCases`, `toMonoK`);
+  `Opt/IntMatch.lean` (`install`: Stage 2's `toMono` and
+  `PassConfig.intMatch`, only under rcgmp); `PassConfig.lean`,
+  `LowerBase.lean` (`LowerCtx.intMatch`), `Emit/Program.lean`;
+  `Lower/IntMatch.lean` (`IntMatchInfo`, `intMatchInfo`, `litValue?`,
+  `litConst?`, `litEqTest?`, `litTest?`,
+  `natCasesOn?`, `natArms`, `intArms`, `chainArms`); `Lower/Ctx.lean`
+  (`CodeCtx.intInfo`); `Lower/Code.lean` (`lowerCases`, the chain in
+  `lowerCode`'s run of `let`s, `lowerIntMatch`); `RR.lean` (`Arm.wrap`);
+  `Outline.lean` (`variantTable`: the binders of `Nat::Succ`,
+  `Int::OfNat`, `Int::NegSucc` are `Nat`s); `Opt/MergeFns.lean` (the
+  hash reads `wrap`). Tests: `RtNatMatch`, `RtIntMatch`,
+  `RtIntMatchNoExtract`,
+  `tests/runtime/int-match-check.sh` (the shapes; none with the pass off;
+  leanrt's `.rr` unchanged).
+- **Remove only if:** the rcgmp backend is dropped, or Reussir rebuilds
+  no value from a `match` (then the copy goes).
 
 ### Reussir counts only the even words (tagged opaque handles, patch 10-a)
 
@@ -531,8 +935,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 - **What:** The optional pass `mod-pow2` (`Opt/ModPow2.lean`, after Stage 3)
   rewrites `Nat.mod x p` where `p` is bound in the same declaration to
   `Nat.pow 2 w`, to `Nat.shiftLeft 1 w`, or to the literal `2^k` with
-  `k ≥ 63` (also a read of a constant whose code is that literal: Lean
-  folds `2 ^ 64` to a literal, which Stage 2 extracts as a closed term).
+  `k ≥ 63` (`k ≥ 61` under `--int-backend rcgmp`, whose immediates end
+  at 2^61: `minLitExp`, `natSmallBits`; also a read of a constant whose
+  code is that literal: Lean folds `2 ^ 64` to a literal, which Stage 2
+  extracts as a closed term).
   The call becomes `L2RNat.truncateBits x w` (with a `let` of the literal
   `k`), an extern the pass adds (`@[extern "l2r_nat_truncate_bits"]`, in
   the environment a definition whose value is the rule,
@@ -625,6 +1031,8 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `leanrt/src/nat.rs`: `nat_of_decimal`.
 - **Remove only if:** the encoding changes; the flat call is cheaper
   anyway. Plan [§5.4](../../translation-plan.md#54-let-return-literals).
+  Under `--int-backend rcgmp` every literal is Reussir's own (see the
+  lowering's entry above).
 
 ### `Nat` and `Int` are FFI-boundary types
 
@@ -635,7 +1043,10 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   FFI boundary and keeps in cells (the old Reussir bug with cells, fixed
   upstream in #666 and #681, only concerned `[value]` records).
 - **Where:** `LowerBase.lean`: `isBoundaryTy`, `refType`.
-- **Remove only if:** `Nat` stops being a counted handle.
+- **Remove only if:** `Nat` stops being a counted handle. Under
+  `--int-backend rcgmp` without `--rcgmp-type-args` a `Nat`/`Int` is a
+  parameter type of the FFI but no type argument (`isFfiTypeArgTy`: a
+  once-cell holds it in an `ElemBox`; the lowering's entry above).
 
 ### `ptrAddrUnsafe` and casts read a `Nat`/`Int` word as native does
 

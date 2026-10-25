@@ -5,13 +5,19 @@ import LeanToReussir.Lower.Borrow
 namespace LeanToReussir
 open Lean Compiler LCNF
 
-/-- A `Nat` literal: a small value (`natIsSmall`) is `l2r_nat_small k`,
-any other a big number parsed by the runtime from its decimal digits in
-the string literal table (a flat call: a nested arithmetic expression per
-limb overflowed rrc's stack for literals of thousands of digits, and cost
-quadratic time). -/
+/-- A `Nat` literal. Under `leanrt`: a small value (`natIsSmall`) is
+`l2r_nat_small k`, any other a big number parsed by the runtime from its
+decimal digits in the string literal table (a flat call: a nested
+arithmetic expression per limb overflowed rrc's stack for literals of
+thousands of digits, and cost quadratic time). Under `rcgmp`: Reussir's
+own literal of any size, `{ let k : Nat = 340282366920938463463374607431768211456; k }`
+(rcgmp makes a value outside the immediates a read-only object of the
+program's data: no allocation, no parse at run time). -/
 def natLiteral (n : Nat) : LowerM RR.Expr := do
-  if natIsSmall n then return .call "l2r_nat_small" #[] #[.atom (toString n)]
+  if (← read).intBackend == .rcgmp then
+    let k ← fresh "nl"
+    return .block ⟨#[(k, some (.named "Nat"), .atom (toString n))], .var k⟩
+  if natIsSmall .leanrt n then return .call "l2r_nat_small" #[] #[.atom (toString n)]
   return .call "l2r_nat_of_decimal_lstr" #[] #[← strLit (toString n)]
 
 /-- Constructor `c` applied to all its arguments `vals` (parameters, then

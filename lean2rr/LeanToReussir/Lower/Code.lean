@@ -63,12 +63,66 @@ def dropUnusedConvs (lets : ArmLets) (convs : Std.HashSet String) (body : RR.Blo
   let free := rrFreeVars.blockFreeVars body {} {}
   lets.filter fun (y, _, _) => !convs.contains y || free.contains y
 
+/-- The value of the `Nat` or `Int` constant `f` (a declaration without
+parameters), if its code computes it from literals: a `Nat` literal (Lean
+folds `Nat` arithmetic on literals), `Int.ofNat` or `Int.negSucc` of one,
+`Int.neg`, `Int.add`, `Int.sub`, `Int.mul` and `Int.pow` (an exponent of at
+most 64, a base below 2^64 in magnitude) of such values, and reads of other
+such constants (up to `fuel` deep). Lean does not fold `Int` arithmetic:
+`-7 : Int` is `Int.neg` of the closed term `Int.ofNat 7`, and `2 ^ 40 :
+Int` is `Int.pow`. -/
+partial def constNumValue? (f : Name) (fuel : Nat := 8) : LowerM (Option Int) := do
+  let some { params := #[], value := .code body, .. } := (← read).decls.find? f | return none
+  let keys := (← read).keys
+  let declOf (g : Name) : Name := ((keys.find? g).map (·.decl)).getD g
+  let rec go (c : Code .pure) (vals : Std.HashMap FVarId Int) : LowerM (Option Int) := do
+    match c with
+    | .let d k =>
+      let arg (a : Arg .pure) : Option Int := match a with
+        | .fvar x => vals[x]?
+        | _ => none
+      let v? ← match d.value with
+        | .lit (.nat n) => pure (some (n : Int))
+        | .const g _ #[] _ => if fuel > 0 then constNumValue? g (fuel - 1) else pure none
+        | .const g _ #[a] _ => pure <| do
+          let x ← arg a
+          match declOf g with
+          | ``Int.ofNat => some x
+          | ``Int.negSucc => some (-x - 1)
+          | ``Int.neg => some (-x)
+          | _ => none
+        | .const g _ #[a, b] _ => pure <| do
+          let x ← arg a
+          let y ← arg b
+          match declOf g with
+          | ``Int.add => some (x + y)
+          | ``Int.sub => some (x - y)
+          | ``Int.mul => some (x * y)
+          | ``Int.pow => if 0 ≤ y && y ≤ 64 && x.natAbs < 2 ^ 64 then some (x ^ y.toNat) else none
+          | _ => none
+        | _ => pure none
+      go k (match v? with | some v => vals.insert d.fvarId v | none => vals)
+    | .return x => return vals[x]?
+    | _ => return none
+  go body {}
+
 /-- Whether constant `f`'s value is a literal that a box holds as an
 immediate: its code returns a `UInt8`/`UInt16`/`UInt32` literal or a
 `UInt64`/`USize` literal below 2^63, possibly through other such constants
-(up to `fuel` deep). -/
+(up to `fuel` deep); or it is a `Nat` or `Int` constant whose value
+(`constNumValue?`) the box holds as an immediate (`natBoxIsImmediate`,
+`intBoxIsImmediate`: under `--int-backend rcgmp` the box of any other
+value is a new cell, `boxAllocates`, so `boxed-consts` boxes such a
+constant once). Under `leanrt` boxing a `Nat` or `Int` never allocates,
+so the answer would change nothing there: such a constant is not
+evaluated (`constNumValue?` is not memoised). -/
 partial def constIsImmediate (f : Name) (fuel : Nat := 8) : LowerM Bool := do
-  let some { params := #[], value := .code body, .. } := (← read).decls.find? f | return false
+  let some { params := #[], value := .code body, type, .. } := (← read).decls.find? f | return false
+  if type.isConstOf ``Nat || type.isConstOf ``Int then
+    if (← read).intBackend != .rcgmp then return false
+    let some v ← constNumValue? f fuel | return false
+    if type.isConstOf ``Nat then return v ≥ 0 && natBoxIsImmediate v.toNat
+    return intBoxIsImmediate (← read).intBackend v
   let rec go (c : Code .pure) (vals : Std.HashMap FVarId (LetValue .pure)) : LowerM Bool := do
     match c with
     | .let d k => go k (vals.insert d.fvarId d.value)
@@ -97,8 +151,8 @@ def closedLetValue (v : LetValue .pure) (e : RR.Expr) : LowerM (Option RR.Expr) 
     match (← read).decls.find? f with
     | some { params := #[], value := .code _, .. } =>
       -- A constant whose value is a literal that boxes as an immediate
-      -- (`def k : UInt64 := 77`): boxed in line, which LLVM folds, not
-      -- read from a once-cell.
+      -- (`def k : UInt64 := 77`; under rcgmp `def k : Nat := 5`): boxed
+      -- in line, which LLVM folds, not read from a once-cell.
       if ← constIsImmediate f then return none
       return some e
     | _ => return none
@@ -166,8 +220,21 @@ mutual
       let mut runCalls := ctx.letCalls
       let mut c := c
       let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
+      -- `int-match`: a chain of tests of a `Nat` against literals, one
+      -- `match` (Lower/IntMatch), its scrutinee and arms.
+      let mut chain : Option (String × RR.Ty × IntArms) := none
+      let mut litNames : Std.HashSet String := {}
       repeat
         let .let d k := c | break
+        if (← read).intMatch then
+          if let some (n, _, isInt, _) := litTest? ctx.intInfo none c then
+            let nv := match runVars[n]?, outer[n]? with
+              | some v, _ | none, some v => some v
+              | none, none => none
+            if let some (x, nt) := nv then
+              if nt == .named (if isInt then "Int" else "Nat") then
+                chain := some (x, nt, chainArms ctx.intInfo n isInt c)
+                break
         let t ← lowerType d.type
         let used := valueUses d.value {}
         let small := used.fold (init := ({} : Std.HashMap FVarId (String × RR.Ty))) fun m x =>
@@ -189,6 +256,7 @@ mutual
           catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
         let x ← fresh "x"
         lets := lets.push (x, some t, e)
+        if ctx.intInfo.litLet d then litNames := litNames.insert x
         runVars := runVars.insert d.fvarId (x, t)
         if let some v ← closedLetValue d.value e then
           modify fun s => { s with closedLets := s.closedLets.insert x (v, t) }
@@ -196,8 +264,21 @@ mutual
           if !args.isEmpty then runCalls := runCalls.insert d.fvarId (f, args.size)
         c := k
       let vars := runVars.fold (init := outer) fun m k v => m.insert k v
-      let b ← lowerCode { base with vars, letCalls := runCalls } outlined retTy c
-      return { b with lets := lets ++ b.lets }
+      let ctx' := { base with vars, letCalls := runCalls }
+      match chain with
+      | some (x, nt, arms) =>
+        let m ← lowerIntMatch ctx' outlined retTy x nt arms
+        -- The literals only the fused tests read are left out.
+        let mut used := rrFreeVars m {} {}
+        let mut kept := #[]
+        for (y, t, e) in lets.reverse do
+          if litNames.contains y && !used.contains y then continue
+          used := rrFreeVars e {} used
+          kept := kept.push (y, t, e)
+        return ⟨kept.reverse, m⟩
+      | none =>
+        let b ← lowerCode ctx' outlined retTy c
+        return { b with lets := lets ++ b.lets }
     | .return x =>
       if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
@@ -378,6 +459,11 @@ mutual
       let ctx' := alt.getParams.foldl (fun c p => { c with vars := c.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }) ctx
       return .block (← lowerCode ctx' outlined retTy alt.getCode)
     let (scrut, sty) := (scrut0, sty0)
+    -- A `cases` on Reussir's built-in `Nat` or `Int` (Stage 2 keeps it
+    -- under `int-match`): a `match` on the integer (Lower/IntMatch).
+    if (cs.typeName == ``Nat && sty == .named "Nat") || (cs.typeName == ``Int && sty == .named "Int") then
+      let arms := if cs.typeName == ``Nat then natArms ctx.intInfo {} cs #[] {} else intArms ctx.intInfo cs
+      return ← lowerIntMatch ctx outlined retTy scrut sty arms
     let altFor (ctor : Name) : Option (Alt .pure) := cs.alts.find? fun
       | .alt c _ _ _ => c == ctor
       | _ => false
@@ -472,6 +558,54 @@ mutual
         return .mtch (.var scrut) arms
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 
+  /-- The `match` on `Nat` or `Int` variable `scrut` (of type `sty`) with
+  arms `arms` (Lower/IntMatch). An arm's binder is a `Nat` (converted to
+  its parameter's type, `bindField`), `_` where the code does not use it.
+  An arm that names the scrutinee reads it through a binding Reussir makes
+  of the whole scrutinee (#803): in a literal arm the constant, in `_`,
+  `Int::OfNat(m)`, `Int::OfNat(_)` and a last arm without a binder (which
+  Reussir makes the `default`) the value itself, but in an arm that
+  selects the scrutinee minus a bound (`Nat::Succ(p)`, `Int::NegSucc(m)`,
+  `Nat::Succ(_)` before other arms, …) a value rebuilt from that
+  difference (`p + 1`: an allocation for a heap value). So where such an
+  arm names the scrutinee,
+  the `match` is on a copy (`let s = n; match s { … }`): the arm reads `n`
+  itself, which Reussir retains for it (a test of the tag for an
+  immediate). Arms not covering every value get `_ => l2r_unreachable`. -/
+  partial def lowerIntMatch (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (scrut : String)
+      (sty : RR.Ty) (arms : IntArms) : LowerM RR.Expr := do
+    let mut out : Array RR.Arm := #[]
+    let mut copy := false
+    for h : i in [:arms.arms.size] do
+      let a := arms.arms[i]
+      let code := a.fullCode
+      let (arm, offset) ← match a.pat with
+        | .lit v => pure (({ ty := "", ctor := some (toString v), binders := #[], body := ← lowerAlt ctx outlined retTy code } : RR.Arm), false)
+        | .wild ws =>
+          pure ({ ty := "", ctor := none, binders := #[], body := ← lowerAlt ctx outlined retTy code, wrap := ws },
+            ws.any (· != ("Int", "OfNat")))
+        | .bind ws ty c p =>
+          let offset := !(ws.isEmpty && c == "OfNat")
+          if ctx.used.contains p.fvarId then
+            let x ← fresh "f"
+            let (conv, ctx') ← bindField ctx p.fvarId (← lowerType p.type) x (.named "Nat")
+            let body ← lowerAlt ctx' outlined retTy code
+            let conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
+            pure ({ ty, ctor := some c, binders := #[some x], body := { body with lets := conv ++ body.lets }, wrap := ws }, offset)
+          else
+            pure ({ ty, ctor := some c, binders := #[none], body := ← lowerAlt ctx outlined retTy code, wrap := ws }, offset)
+      -- The last arm, without a binder, takes what is left: Reussir makes it
+      -- the `default`, which receives the scrutinee itself.
+      let last := i + 1 == arms.arms.size && arms.exhaustive && arm.binders.all (·.isNone)
+      if offset && !last && !copy && (rrFreeVars.blockFreeVars arm.body {} {}).contains scrut then copy := true
+      out := out.push arm
+    unless arms.exhaustive do
+      out := out.push { ty := "", ctor := none, binders := #[], body := .ofExpr (.call "l2r_unreachable" #[retTy] #[]) }
+    if copy then
+      let s ← fresh "ns"
+      return .block ⟨#[(s, some sty, .var scrut)], .mtch (.var s) out⟩
+    return .mtch (.var scrut) out
+
   /-- Lower the code of an alternative, after its fields are bound (a hook
   may bind more first: Opt/LazyFields). -/
   partial def lowerAlt (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (k : Code .pure) :
@@ -521,8 +655,10 @@ def setupDecl (d : Decl .pure) (body : Code .pure) : LowerM DeclSetup := do
 its tail calls enter (`CodeCtx.cycles`). -/
 def lowerDeclCode (d : Decl .pure) (su : DeclSetup) (sm? : Option StateMachine)
     (cycles : Array StateMachine := #[]) : LowerM RR.Block := do
+  let lc ← read
   let ctx : CodeCtx := { vars := su.vars, sm := sm?, loop := su.loop, used := codeUses su.body {},
-                         boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycles }
+                         boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycles,
+                         intInfo := if lc.intMatch then intMatchInfo lc.decls su.body else {} }
   -- The body of a declaration without parameters runs once: a constant
   -- boxed there is boxed in line (`boxOf`), not given a once-cell.
   modify fun s => { s with inConstBody := d.params.isEmpty }

@@ -186,6 +186,28 @@ structure LowerCtx where
   `refTypeOf` of that type (`refElemTy`). Empty: every reference holds a
   `Box`. -/
   refKindsOn : Std.HashSet String := {}
+  /-- The representation of `Nat` and `Int` (`--int-backend`,
+  `PassConfig.intBackend`; NatEncoding): under `rcgmp` they are Reussir's
+  built-in integers, boxed by the prelude's `l2r_any_of_nat`/`_int` and
+  unboxed by `l2r_any_as_nat`/`_int` and `l2r_any_raw_take_nat`/`_int`
+  (`boxValue`, `boxUnboxWith`, `boxTake`). -/
+  intBackend : IntBackend := .leanrt
+  /-- Whether a `Nat` or `Int` may be a type argument of a generic FFI
+  function of the prelude, or the element of an `RVec`, `LRef` or `LCell`
+  (`isFfiTypeArgTy`): always under `leanrt` (a counted word); under
+  `rcgmp` only with `--rcgmp-type-args` (Reussir's local patch R2, an owned
+  handle there). Without it rcgmp's texture glue would give the generic
+  function the raw handle at such a type argument and release it after the
+  call, so a value the function keeps (a once-cell's, an array's element)
+  would be released twice; the check `IntBackendCheck` stops lean2rr if
+  one is left. -/
+  natIntTypeArgs : Bool := true
+  /-- Whether a chain of tests `Nat.decEq n k` (`Nat.beq`, `Int.decEq`)
+  of one `Nat` or `Int` against literals is one Reussir `match` on `n` with
+  an arm per literal (`PassConfig.intMatch`; optimization `int-match`,
+  Lower/IntMatch). A `cases` on a `Nat` or `Int`, which Stage 2 keeps only
+  with it, is always such a `match`. -/
+  intMatch : Bool := false
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -623,12 +645,35 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   | .fn .. => return true
   | .cls .. => return false
 
+/-- Whether Reussir type `t` mentions `Nat` or `Int` other than in a
+type of the program (a record's field, a function value's enum). -/
+partial def mentionsNatInt (t : RR.Ty) : Bool :=
+  match t with
+  | .named n => n == "Nat" || n == "Int"
+  | .app _ args => args.any mentionsNatInt
+  | .fn .. => false
+  | .cls d c => mentionsNatInt d || mentionsNatInt c
+
+/-- Types that may be a type argument of the prelude's generic FFI
+functions (`l2r_once_put<T>`, a polymorphic extern's `T`): those of
+`isBoundaryTy`, except, when `LowerCtx.natIntTypeArgs` is off (`rcgmp`
+without `--rcgmp-type-args`), a type that mentions `Nat` or `Int`
+(`Nat` itself, `RVec<Nat>`). Reussir passes such a value to the FFI
+function as a raw handle there and releases it after the call, so the
+function could not keep it. A parameter declared `Nat` is fine
+(`isBoundaryTy`: a borrowed handle). -/
+def isFfiTypeArgTy (t : RR.Ty) : LowerM Bool := do
+  if !(← read).natIntTypeArgs && mentionsNatInt t then return false
+  isBoundaryTy t
+
 /-- The type a runtime cell (a once-cell of a constant, `onceCell`; a
 polymorphic extern's value of a type parameter) stores values of Reussir
-type `t` as, and whether it wraps them: a type that cannot cross the FFI
-boundary is wrapped in a one-field shared struct `ElemBox`. -/
+type `t` as, and whether it wraps them: a type that cannot be a type
+argument of the prelude's FFI functions (`isFfiTypeArgTy`) is wrapped in
+a one-field shared struct `ElemBox` (also a `Nat` or `Int` under `rcgmp`
+without `--rcgmp-type-args`). -/
 def cellStorage (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
-  if ← isBoundaryTy t then return (t, false)
+  if ← isFfiTypeArgTy t then return (t, false)
   let key := #[t, .named "__elem_box"]
   if let some n := (← get).tupleTypes[key]? then return (.named n, true)
   let n ← fresh "ElemBox"
@@ -850,7 +895,10 @@ inductive BoxKind where
   /-- One of leanrt's kinds, with its fixed number: `Nat` 1, `Int` 2,
   `LStr` 3, `RVec<Box>` 6, `RVec<u8>` 7, `RVec<f64>` 8, and the compact
   arrays `RVec<u16>` 9, `RVec<u32>` 10, `RVec<u64>` 11, `RVec<f32>` 12 (`l2r_any_of<T>`;
-  `l2r_any_as<T>` decodes `box(0)` as the kind's zero). -/
+  `l2r_any_as<T>` decodes `box(0)` as the kind's zero). Under `--int-backend
+  rcgmp` a `Nat` and an `Int` keep kinds 1 and 2 (leanrt built with
+  `--cfg leanrt_rcgmp` holds a big one's rcgmp reference in its cell), boxed
+  and unboxed by the prelude's non-generic functions (`natIntBoxFns?`). -/
   | leanrt (num : Nat)
   /-- A program payload: a pointer with the program's number `num`
   (`boxNum`). `store` is the type the pointer is a handle of: an `ElemBox`
@@ -1080,6 +1128,23 @@ def boxPointer? (t : RR.Ty) : LowerM (Option (Nat × RR.Ty × Bool)) := do
   | .prog n st wrapped .. => return some (n, st, wrapped)
   | _ => return none
 
+/-- Under `--int-backend rcgmp`, the prelude's box functions of leanrt
+kind `n` when it is a `Nat`'s (1) or an `Int`'s (2): boxing, unboxing a
+box, and unboxing a box's word that owns its reference (`l2r_any_of_nat`,
+`l2r_any_as_nat`, `l2r_any_raw_take_nat`; `_int`). They keep Lean's boxes:
+a `Nat` below 2^63 and an `Int` in the `int32` range are immediates,
+tested in Reussir code, and a bigger value is a leanrt cell of kind `n`
+holding the rcgmp reference. The generic `l2r_any_of<T>`/`l2r_any_as<T>`
+would receive a raw handle at `T := Nat` and could not test it (and the
+FFI releases a value at a type argument after the call: `isFfiTypeArgTy`).
+`none` under `leanrt` (the generic functions) and for any other kind. -/
+def natIntBoxFns? (n : Nat) : LowerM (Option (String × String × String)) := do
+  if (← read).intBackend != .rcgmp then return none
+  match n with
+  | 1 => return some ("l2r_any_of_nat", "l2r_any_as_nat", "l2r_any_raw_take_nat")
+  | 2 => return some ("l2r_any_of_int", "l2r_any_as_int", "l2r_any_raw_take_int")
+  | _ => return none
+
 /-- `box(0)`: the box Lean passes where a value is never inspected, and the
 boxed unit: the word 1. -/
 def boxZero : LowerM RR.Expr := return .call "l2r_any_unit" #[] #[]
@@ -1090,9 +1155,12 @@ def boxZeroAllocates : Bool := false
 
 /-- Whether boxing a value of type `t` can allocate (`boxKind`): a `u64`,
 `i64` or `f64` word (a `Float`, a `UInt64` from 2^63, a negative `i64`),
-a `[value]` struct of one, a value wrapped in an `ElemBox`. An immediate
-never does: `u8`/`u16`/`u32` (`Char`), `bool`, `f32`, an enumeration, the
-unit, and `i8`/`i16`/`i32`, boxed as their zero-extended bits. Lean's
+a `[value]` struct of one, a value wrapped in an `ElemBox`; under
+`--int-backend rcgmp`, a `Nat` or `Int` (a value outside the box's
+immediates is a new leanrt cell holding the rcgmp reference, where leanrt's
+own big numbers are boxed as they are). An immediate never does:
+`u8`/`u16`/`u32` (`Char`), `bool`, `f32`, an enumeration, the unit, and
+`i8`/`i16`/`i32`, boxed as their zero-extended bits. Lean's
 `Int8`…`Int64` and `ISize` are not signed types here: Lean's `toMonoType`
 erases them to `UInt8`…`USize` (`hasTrivialStructure?`), so they are
 `u8`…`u64`. -/
@@ -1102,6 +1170,7 @@ partial def boxAllocates (t : RR.Ty) : LowerM Bool := do
   | .word k => return k ∉ ["i8", "i16", "i32"]
   | .valueStruct _ ft => if ft == RR.Ty.box then return false else boxAllocates ft
   | .prog _ _ wrapped _ _ => return wrapped
+  | .leanrt n => return (n == 1 || n == 2) && (← read).intBackend == .rcgmp
   | _ => return false
 
 /-- The function `l2r_box_T(x, num)` boxes a value of payload type `t`, a
@@ -1141,7 +1210,9 @@ partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     -- Over a box (`ST.Out σ α`): the box itself.
     if ft == RR.Ty.box then return .block ⟨#[(v, some t, e)], .field (.var v) 0⟩
     return .block ⟨#[(v, some t, e)], ← boxValue (.field (.var v) 0) ft⟩
-  | .leanrt n => return .call "l2r_any_of" #[t] #[e, .atom (toString n)]
+  | .leanrt n =>
+    if let some (ofFn, _, _) ← natIntBoxFns? n then return .call ofFn #[] #[e]
+    return .call "l2r_any_of" #[t] #[e, .atom (toString n)]
   | .prog n st wrapped nullary isFn =>
     let v := if wrapped then (match st with | .named sn => RR.Expr.ctor sn none #[e] | _ => e) else e
     -- A type with nullary variants (a shared enum's, a function value's)
@@ -1155,7 +1226,10 @@ partial def boxValue (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
 /-- The value of type `t` a pointer word `w` (owning its reference) of
 payload `t` holds: `l2r_any_raw_take` (the number was checked). -/
 def boxTake (w : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
-  let some (_, st, wrapped) ← boxPointer? t | throwError "lean2rr: {t.render} is not a pointer payload (internal error)"
+  let some (n, st, wrapped) ← boxPointer? t | throwError "lean2rr: {t.render} is not a pointer payload (internal error)"
+  -- A `Nat` or `Int` under `rcgmp`: the prelude's take (`natIntBoxFns?`).
+  if let .leanrt _ ← boxKind t then
+    if let some (_, _, takeFn) ← natIntBoxFns? n then return .call takeFn #[] #[w]
   let x := RR.Expr.call "l2r_any_raw_take" #[st] #[w]
   return if wrapped then .field x 0 else x
 
@@ -1318,6 +1392,14 @@ partial def boxUnboxWith (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR
     return .ctor tn none #[← boxUnboxWith b ft zeroOf fnUnbox fieldSlow native
       (outline := outline && slow.isNone)]
   | .leanrt n =>
+    -- A `Nat` or `Int` under `rcgmp`: the prelude's unboxing, which decodes
+    -- an immediate as `l2r_any_as<T>` does under `leanrt` (`natIntBoxFns?`;
+    -- no word read of an array element, `boxWordRead?`).
+    if let some (_, asFn, takeFn) ← natIntBoxFns? n then
+      if slow.isNone then return .call asFn #[] #[b]
+      return ← boxWithWord b fun w => do
+        let yes := RR.Block.ofExpr (.call takeFn #[] #[.var w])
+        return .ite (isImm w) yes (.ofExpr (← ifNum w n yes (← otherwise w)))
     if slow.isNone then
       -- An array element read at once as a `Nat` or `Int`: an immediate
       -- without a copy of the box (`boxWordRead?`).
@@ -1433,7 +1515,10 @@ partial def boxUnboxed? (e : RR.Expr) (t : RR.Ty) : LowerM (Option RR.Expr) := d
       if ft == RR.Ty.box then return some inner
       boxUnboxed? inner ft
     | _ => return none
-  | .leanrt _ =>
+  | .leanrt n =>
+    if let some (_, asFn, _) ← natIntBoxFns? n then
+      if let .call f #[] #[b] := e then
+        if f == asFn then return some b
     if let .call "l2r_any_as" #[_] #[b, _] := e then return some b
     if let some b := boxWordReadBack? e then return some b
     return ofWordBlock
@@ -1555,7 +1640,7 @@ before. -/
 partial def onceCell (t : RR.Ty) : LowerM OnceCell := do
   -- `cellStorage` only where the `ElemBox` is used (a `typed` cell, or a
   -- wrapped handle, through `boxKind`): it registers the struct.
-  if (← isBoundaryTy t) && tyInEveryProgram t then return .every t
+  if (← isFfiTypeArgTy t) && tyInEveryProgram t then return .every t
   match ← boxKind t with
   | .prog _ store wrapped nullary isFn =>
     return .handle store wrapped (if isFn then some true else if nullary.isEmpty then none else some false)
@@ -1955,7 +2040,7 @@ mutual
   that both name one kind), cached in `LowerState.ptrKindCache`. -/
   partial def arrayPtrKindOf (t : Expr) : LowerM (Option String) := do
     let cache ← IO.mkRef (← get).ptrKindCache
-    let k ← ptrKind? cache t
+    let k ← ptrKind? cache t (← read).natIntTypeArgs
     let c ← cache.get
     modify fun s => { s with ptrKindCache := c }
     return k

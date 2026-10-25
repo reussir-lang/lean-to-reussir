@@ -36,7 +36,7 @@ lean -o "$t.olean" "$t.lean" > lean.log 2>&1 || { echo "FAIL prelude-liveness: l
 translate() {
   local o=$1; shift
   LEAN_PATH="$OUT" L2R_SHIM_DIR="$ROOT/lean2rr/.lake/build/lib/lean" LEAN_STACK_SIZE_KB=1048576 \
-    "$LEAN2RR" "$t" --root main --emit rr --prelude "$PRELUDE" -o "$o" "$@" > "$o.log" 2>&1
+    "$LEAN2RR" "$t" --root main --emit rr --prelude "$PRELUDE" --int-backend "${L2R_INT_BACKEND:-leanrt}" -o "$o" "$@" > "$o.log" 2>&1
 }
 translate on.rr || { echo "FAIL prelude-liveness: lean2rr failed (see $OUT/on.rr.log)"; exit 1; }
 translate off.rr --disable-opt prelude-liveness \
@@ -45,8 +45,14 @@ gen() { sed -n '/^\/\/ ---- generated types ----$/,$p' "$1"; }
 gen on.rr > on.gen; gen off.rr > off.gen
 [ -s on.gen ] || fail "no generated part in on.rr"
 cmp -s on.gen off.gen || fail "the generated parts differ (diff $OUT/off.gen $OUT/on.gen)"
-cmp -s <(head -c "$(stat -c %s "$PRELUDE")" off.rr) "$PRELUDE" \
-  || fail "without the pass the text does not start with the whole prelude"
+# The prelude as lean2rr reads it: its `// @int-backend` blocks filtered for
+# the backend (NatEncoding.filterIntBackend: the marker lines go, and so do the
+# lines of the other backend's blocks).
+awk -v b="${L2R_INT_BACKEND:-leanrt}" '
+  /^\/\/ @int-backend / { a = substr($0, 17); sub(/[ \t\r]+$/, "", a); cur = (a == "end") ? "" : a; next }
+  cur == "" || cur == b' "$PRELUDE" > prelude.filtered
+cmp -s <(head -c "$(stat -c %s prelude.filtered)" off.rr) prelude.filtered \
+  || fail "without the pass the text does not start with the whole prelude (filtered for ${L2R_INT_BACKEND:-leanrt})"
 all=$(grep -c '^#\[ffi(import)\]$' "$PRELUDE")
 kept=$(sed '/^\/\/ ---- generated types ----$/q' on.rr | grep -c '^#\[ffi(import)\]$')
 echo "$t: the prelude's #[ffi(import)] functions kept: $kept of $all"

@@ -29,6 +29,22 @@ structure RRProgram where
 structure PassConfig where
   /-- Edits of Lean's pass lists for Stage 2. -/
   stage2 : Stage2Config := #[]
+  /-- The representation of `Nat` and `Int` (`--int-backend`, NatEncoding),
+  set before the optional passes are installed: their cost models read it
+  (`cheap-consts`, `mod-pow2`), and so does the lowering
+  (`LowerCtx.intBackend`). -/
+  intBackend : IntBackend := .leanrt
+  /-- `--rcgmp-type-args`: Reussir passes a `Nat` or `Int` at a type
+  argument of a generic FFI function as an owned handle (Reussir's local
+  patch R2), so `rcgmp` may instantiate one at them
+  (`LowerCtx.natIntTypeArgs`). -/
+  rcgmpTypeArgs : Bool := false
+  /-- Whether a test of a `Nat` or `Int` against literals (`Nat.decEq n
+  k`, `Int.decEq i k`, a chain of them) is a Reussir `match` on it
+  (`LowerCtx.intMatch`); set with
+  Stage 2's `cases` on `Nat` and `Int` kept (`toMonoK`'s `keepIntCases`)
+  by the optimization `int-match` under `rcgmp`. Plain: Lean's tests. -/
+  intMatch : Bool := false
   /-- A pass over Stage 1's result, before Stage 2, that leaves out startup
   steps of constants and what only they reach (`Opt/UnreadConsts`). It gets
   Stage 1's state, the instances of `main` and of the error printer, and the

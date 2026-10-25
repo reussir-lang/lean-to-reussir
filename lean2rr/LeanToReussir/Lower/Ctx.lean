@@ -1,6 +1,7 @@
 import Lean
 import LeanToReussir.MonoTypesKeep
 import LeanToReussir.LowerBase
+import LeanToReussir.Lower.IntMatch
 
 /-!
 # Stage 4: the context of code lowering
@@ -161,6 +162,10 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   when its code does not use it (`dropUnusedConvs`), and `lazy-fields`'
   consuming re-match keeps it instead of converting the field again. -/
   fieldConv : Std.HashMap FVarId String := {}
+  /-- With `LowerCtx.intMatch`: the declaration's `let`s of `Nat` literals
+  and how many times its code names each variable (`intMatchInfo`), for
+  the matches on `Nat` and `Int` (Lower/IntMatch). -/
+  intInfo : IntMatchInfo := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

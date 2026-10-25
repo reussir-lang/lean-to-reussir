@@ -1,0 +1,4 @@
+[prelude-int-ops,int:rcgmp] lean2rr: prelude-int-ops: Nat.testBit: 
+[prelude-int-ops,int:rcgmp] ! lean2rr: prelude-int-ops: Nat.testBit: 0 call(s)
+[prelude-int-ops,int:rcgmp] ! and 0 instance(s) rewritten to l2r_nat_test_bit
+[int:leanrt] ! lean2rr: prelude-int-ops

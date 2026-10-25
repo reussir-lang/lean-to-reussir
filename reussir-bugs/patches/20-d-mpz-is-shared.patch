@@ -1,0 +1,409 @@
+From 729ea9fbc5a4939fb4d7cceb6b775b5d423485e9 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 01:30:35 -0400
+Subject: [PATCH 12/13] l2r-local: step D (R2c): Mpz::is_shared through
+ compiler-emitted glue from rcgmp.mpz.is_unique
+
+lean2rr's dbgTraceIfShared (Lean's `lean_dbg_trace_if_shared`, natively
+`!lean_is_scalar(a) && !lean_is_exclusive(a)`) must say whether a big Nat
+or Int held in runtime code is shared. rcgmp's C API has no count or
+uniqueness query; its dialect has `rcgmp.bridge.mpz.is_unique` (a heap
+handle with an owned reference; false for an immortal).
+
+Codegen emits a third function with the owned handle's acquire/release
+glue, in the same place and the same way (home unit, `weak_odr`, hidden):
+`__reussir_rcgmp_ffi_is_unique(handle) -> u8`, 1 for an immediate
+(`rcgmp.bridge.mpz.is_immediate`) and otherwise `rcgmp.bridge.mpz.is_unique`.
+It returns a byte rather than an `i1`, like the borrowed comparison
+entries, so the C ABI value is defined. `Mpz::is_shared` is
+`is_unique == 0`. So an immediate is never shared, a heap integer is
+shared while another reference holds it, and an immortal literal always
+is: natively, a persistent object (count 0) fails `lean_is_st`, so
+`lean_is_exclusive` is false and dbgTraceIfShared reports it, as for Lean's
+closed constants. The backend gains the `is_immediate` and `is_unique`
+builders; reussir-core names the symbol (`RCGMP_IS_UNIQUE`).
+
+Tests: frontend/bigint_ffi_shared.rr (an immediate, a unique heap value,
+a heap value the caller still holds, one after a clone in the texture, an
+immortal literal, a negative heap Int, and Vec<Nat> elements read while
+the vector holds them; the glue's MLIR; run with the glue out of line and
+inlined) and its ASan twin sanitizer/bigint-ffi-shared-asan.rr, the hidden
+weak_odr definition in frontend/bigint_ffi_glue.rr,
+docs/design/polymorphic-ffi.md.
+---
+ crates/reussir-backend/src/rcgmp.rs           | 29 ++++++++
+ crates/reussir-codegen/src/lower/expr.rs      | 67 +++++++++++++++--
+ crates/reussir-codegen/src/lower/mod.rs       |  2 +-
+ crates/reussir-core/src/full/ffi.rs           |  5 ++
+ crates/reussir-rt/src/rcgmp.rs                | 15 ++++
+ docs/design/polymorphic-ffi.md                | 10 +++
+ tests/integration/frontend/bigint_ffi_glue.rr |  1 +
+ .../integration/frontend/bigint_ffi_shared.c  | 16 ++++
+ .../integration/frontend/bigint_ffi_shared.rr | 74 +++++++++++++++++++
+ .../sanitizer/bigint-ffi-shared-asan.rr       | 14 ++++
+ 10 files changed, 225 insertions(+), 8 deletions(-)
+ create mode 100644 tests/integration/frontend/bigint_ffi_shared.c
+ create mode 100644 tests/integration/frontend/bigint_ffi_shared.rr
+ create mode 100644 tests/integration/sanitizer/bigint-ffi-shared-asan.rr
+
+diff --git a/crates/reussir-backend/src/rcgmp.rs b/crates/reussir-backend/src/rcgmp.rs
+index a46f374b..5cbc323d 100644
+--- a/crates/reussir-backend/src/rcgmp.rs
++++ b/crates/reussir-backend/src/rcgmp.rs
+@@ -73,6 +73,35 @@ pub fn release<'c>(value: Value<'c, '_>, location: Location<'c>) -> Operation<'c
+         .expect("valid rcgmp.release")
+ }
+ 
++/// `rcgmp.bridge.mpz.is_immediate <value>`: whether a handle is an
++/// immediate, from its tag alone.
++pub fn is_immediate<'c>(
++    context: &'c Context,
++    value: Value<'c, '_>,
++    location: Location<'c>,
++) -> Operation<'c> {
++    OperationBuilder::new("rcgmp.bridge.mpz.is_immediate", location)
++        .add_operands(&[value])
++        .add_results(&[IntegerType::new(context, 1).into()])
++        .build()
++        .expect("valid rcgmp.bridge.mpz.is_immediate")
++}
++
++/// `rcgmp.bridge.mpz.is_unique <value>`: whether a heap integer, which the
++/// caller holds a reference of, has no other reference; false for an
++/// immortal. `value` must not be an immediate.
++pub fn is_unique<'c>(
++    context: &'c Context,
++    value: Value<'c, '_>,
++    location: Location<'c>,
++) -> Operation<'c> {
++    OperationBuilder::new("rcgmp.bridge.mpz.is_unique", location)
++        .add_operands(&[value])
++        .add_results(&[IntegerType::new(context, 1).into()])
++        .build()
++        .expect("valid rcgmp.bridge.mpz.is_unique")
++}
++
+ /// A binary operation consuming both operands.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Binary {
+diff --git a/crates/reussir-codegen/src/lower/expr.rs b/crates/reussir-codegen/src/lower/expr.rs
+index 0b4a2ff2..5117f413 100644
+--- a/crates/reussir-codegen/src/lower/expr.rs
++++ b/crates/reussir-codegen/src/lower/expr.rs
+@@ -576,11 +576,9 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// generated foreign wrappers' `Clone`/`Drop` impls, so the symbols must
+     /// stay external for the linked bitcode to resolve them. For `Nat` /
+     /// `Int` (`reussir_rt::rcgmp::Mpz`) they are `rcgmp.retain` and
+-    /// `rcgmp.release`, whose lowering tests for an immediate inline.
+-    pub(super) fn ffi_rc_glue_pair(
+-        &self,
+-        glue: &mir::FfiRcGlue<'tcx>,
+-    ) -> Result<[Operation<'c>; 2]> {
++    /// `rcgmp.release`, whose lowering tests for an immediate inline, and a
++    /// third function answers `Mpz::is_shared` (`rcgmp_is_unique_glue`).
++    pub(super) fn ffi_rc_glue(&self, glue: &mir::FfiRcGlue<'tcx>) -> Result<Vec<Operation<'c>>> {
+         let loc = Location::unknown(self.context);
+         let ty = self.tys.mlir_ty(glue.ty)?;
+         // The rcgmp glue has fixed names, which every module using `Nat` or
+@@ -621,10 +619,65 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+                 loc,
+             ))
+         };
+-        Ok([
++        let mut functions = vec![
+             build(self.program.symbol(glue.acquire), true)?,
+             build(self.program.symbol(glue.release), false)?,
+-        ])
++        ];
++        if glue.ty.bigint().is_some() {
++            functions.push(self.rcgmp_is_unique_glue(ty, &attributes)?);
++        }
++        Ok(functions)
++    }
++
++    /// `__reussir_rcgmp_ffi_is_unique(x) -> u8`: 1 when the borrowed handle
++    /// `x` is an immediate or the only reference of a heap integer, 0 when
++    /// another reference holds it or it is immortal (`rcgmp.bridge.mpz.
++    /// is_unique`, which only a heap handle may take). It returns a byte
++    /// rather than an `i1`, as the borrowed comparison entries do, so that
++    /// the C ABI's value is defined.
++    fn rcgmp_is_unique_glue(
++        &self,
++        ty: Type<'c>,
++        attributes: &[(Identifier<'c>, Attribute<'c>)],
++    ) -> Result<Operation<'c>> {
++        let loc = Location::unknown(self.context);
++        let i1: Type<'c> = IntegerType::new(self.context, 1).into();
++        let byte: Type<'c> = IntegerType::new(self.context, 8).into();
++        let block = Block::new(&[(ty, loc)]);
++        let arg: Value<'c, '_> = block
++            .argument(0)
++            .map_err(|e| LoweringError(format!("missing glue argument: {e}").into()))?
++            .into();
++        let immediate = self.append(&block, rcgmp::is_immediate(self.context, arg, loc));
++        let then_block = Block::new(&[]);
++        let unique = self.append(
++            &then_block,
++            arith::constant(self.context, IntegerAttribute::new(i1, 1).into(), loc),
++        );
++        then_block.append_operation(scf::r#yield(&[unique], loc));
++        let then_region = Region::new();
++        then_region.append_block(then_block);
++        let else_block = Block::new(&[]);
++        let unique = self.append(&else_block, rcgmp::is_unique(self.context, arg, loc));
++        else_block.append_operation(scf::r#yield(&[unique], loc));
++        let else_region = Region::new();
++        else_region.append_block(else_block);
++        let unique = self.append(
++            &block,
++            scf::r#if(immediate, &[i1], then_region, else_region, loc),
++        );
++        let result = self.append(&block, arith::extui(unique, byte, loc));
++        block.append_operation(func::r#return(&[result], loc));
++        let region = Region::new();
++        region.append_block(block);
++        Ok(func::func(
++            self.context,
++            StringAttribute::new(self.context, reussir_core::full::ffi::RCGMP_IS_UNIQUE),
++            TypeAttribute::new(FunctionType::new(self.context, &[ty], &[byte]).into()),
++            region,
++            attributes,
++            loc,
++        ))
+     }
+ 
+     /// Build one borrowed comparison entry. The foreign caller retains both
+diff --git a/crates/reussir-codegen/src/lower/mod.rs b/crates/reussir-codegen/src/lower/mod.rs
+index 456080d4..17c53369 100644
+--- a/crates/reussir-codegen/src/lower/mod.rs
++++ b/crates/reussir-codegen/src/lower/mod.rs
+@@ -545,7 +545,7 @@ pub fn lower_unit<'c, 'tcx>(
+         if !unit.is_home(program.symbol(glue.acquire)) {
+             continue;
+         }
+-        for op in lowerer.ffi_rc_glue_pair(glue)? {
++        for op in lowerer.ffi_rc_glue(glue)? {
+             body.append_operation(op);
+         }
+     }
+diff --git a/crates/reussir-core/src/full/ffi.rs b/crates/reussir-core/src/full/ffi.rs
+index 751f9e96..db90a788 100644
+--- a/crates/reussir-core/src/full/ffi.rs
++++ b/crates/reussir-core/src/full/ffi.rs
+@@ -499,6 +499,11 @@ const RCGMP_OWNED: &str = "::reussir_rt::rcgmp::Mpz";
+ /// such a program finds them too.
+ pub const RCGMP_GLUE: &str = "__reussir_rcgmp";
+ 
++/// The third glue function of the owned handle, emitted with its
++/// acquire/release pair: whether a handle is an immediate or the only
++/// reference of a heap integer (`Mpz::is_shared` negates it).
++pub const RCGMP_IS_UNIQUE: &str = "__reussir_rcgmp_ffi_is_unique";
++
+ /// Whether an `#[ffi(import)]` parameter or result of type `ty`, declared as
+ /// `declared`, crosses as the raw rcgmp handle: the signature spells `Nat` or
+ /// `Int` itself. A generic instantiated at `Nat` or `Int` crosses as the
+diff --git a/crates/reussir-rt/src/rcgmp.rs b/crates/reussir-rt/src/rcgmp.rs
+index dd0e5a9a..53bb58fe 100644
+--- a/crates/reussir-rt/src/rcgmp.rs
++++ b/crates/reussir-rt/src/rcgmp.rs
+@@ -24,6 +24,9 @@
+ //! lowering decides the test, as the dialect does not make its tag an ABI.
+ //! Runtime code outside the textures that holds an `Mpz` resolves the glue
+ //! against the program it is linked into, which uses integers.
++//! [`Mpz::is_shared`] asks a third glue function emitted with them,
++//! `__reussir_rcgmp_ffi_is_unique`: an immediate test, then
++//! `rcgmp.bridge.mpz.is_unique`.
+ //!
+ //! Every method of [`Mpz`] is `#[inline]`, compiled only into the code that
+ //! uses it: this crate references neither the glue nor the rcgmp runtime, and
+@@ -35,6 +38,7 @@ use core::ffi::c_void;
+ unsafe extern "C" {
+     fn __reussir_rcgmp_ffi_acquire(value: *mut c_void);
+     fn __reussir_rcgmp_ffi_release(value: *mut c_void);
++    fn __reussir_rcgmp_ffi_is_unique(value: *mut c_void) -> u8;
+     fn rcgmp_mpz_cmp(lhs: *mut c_void, rhs: *mut c_void) -> i32;
+ }
+ 
+@@ -67,6 +71,17 @@ impl Mpz {
+     pub fn as_ptr(&self) -> *mut c_void {
+         self.0
+     }
++
++    /// Whether another reference also holds this integer, the question of
++    /// Lean's `dbgTraceIfShared` (`!lean_is_scalar(a) && !lean_is_exclusive(a)`):
++    /// never for an immediate, and for a heap integer unless `self` is its
++    /// only reference. An immortal one (a literal) is shared, as a persistent
++    /// Lean object is not exclusive. It asks the compiler's
++    /// `__reussir_rcgmp_ffi_is_unique` glue (`rcgmp.bridge.mpz.is_unique`).
++    #[inline]
++    pub fn is_shared(&self) -> bool {
++        unsafe { __reussir_rcgmp_ffi_is_unique(self.0) == 0 }
++    }
+ }
+ 
+ impl Clone for Mpz {
+diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
+index 61f261ac..ae466fb1 100644
+--- a/docs/design/polymorphic-ffi.md
++++ b/docs/design/polymorphic-ffi.md
+@@ -256,6 +256,7 @@ valid v0 mangling is a prefix of another:
+ | `<record instance>_ffi_drop`| an opaque instance's drop hook          |
+ | `<record instance>_ffi_acquire` / `_ffi_release` | Reussir rc glue    |
+ | `__reussir_rcgmp_ffi_acquire` / `_ffi_release` | rc glue of `Nat`/`Int` (`Mpz`) |
++| `__reussir_rcgmp_ffi_is_unique` | `Mpz`'s count query (`u8`)    |
+ | `<record instance>_ffi_eq`  | borrowed equality entry (`u8`)          |
+ | `<record instance>_ffi_partial_cmp` | borrowed partial classifier (`i8`) |
+ | `<record instance>_ffi_cmp` | borrowed total-order entry (`i8`)       |
+@@ -309,6 +310,15 @@ defines it because it uses integers. The methods are inlined into the code
+ that uses them, so `reussir-rt` references neither the glue nor the rcgmp
+ runtime, and a program without integers links without them.
+ 
++A third glue function, `__reussir_rcgmp_ffi_is_unique`, emitted with the
++pair, answers `Mpz::is_shared`, the question of Lean's `dbgTraceIfShared`
++(`!lean_is_scalar(a) && !lean_is_exclusive(a)`): it returns 1 for an
++immediate and otherwise lowers `rcgmp.bridge.mpz.is_unique`, which is false
++for an immortal integer. So an immediate is never shared, a heap integer is
++shared while another reference holds it, and an immortal literal always is,
++as a persistent Lean object (count 0) is never exclusive. It returns a byte,
++like the borrowed comparison entries.
++
+ ## Exposing a new type
+ 
+ Nothing in the compiler is Vec-specific. To expose another Rust type:
+diff --git a/tests/integration/frontend/bigint_ffi_glue.rr b/tests/integration/frontend/bigint_ffi_glue.rr
+index 675f8244..55e801d7 100644
+--- a/tests/integration/frontend/bigint_ffi_glue.rr
++++ b/tests/integration/frontend/bigint_ffi_glue.rr
+@@ -92,6 +92,7 @@ extern "C" trampoline "reussir_main" = main;
+ 
+ // HIDDEN-DAG: define weak_odr hidden void @__reussir_rcgmp_ffi_acquire(ptr
+ // HIDDEN-DAG: define weak_odr hidden void @__reussir_rcgmp_ffi_release(ptr
++// HIDDEN-DAG: define weak_odr hidden i8 @__reussir_rcgmp_ffi_is_unique(ptr
+ 
+ // NONE-NOT: __reussir_rcgmp_ffi
+ 
+diff --git a/tests/integration/frontend/bigint_ffi_shared.c b/tests/integration/frontend/bigint_ffi_shared.c
+new file mode 100644
+index 00000000..76dce840
+--- /dev/null
++++ b/tests/integration/frontend/bigint_ffi_shared.c
+@@ -0,0 +1,16 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for bigint_ffi_shared.rr: seven independent properties, one decimal
++// digit each. The one it passes is unknown to the compiled code, so its heap
++// integers are built at run time.
++
++extern long long reussir_main(unsigned long long one);
++
++int main(void) { return reussir_main(1) == 1111111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/bigint_ffi_shared.rr b/tests/integration/frontend/bigint_ffi_shared.rr
+new file mode 100644
+index 00000000..d152950c
+--- /dev/null
++++ b/tests/integration/frontend/bigint_ffi_shared.rr
+@@ -0,0 +1,74 @@
++// UNSUPPORTED: darwin
++// `reussir_rt::rcgmp::Mpz::is_shared`, the question of Lean's
++// `dbgTraceIfShared`, asks the compiler-emitted glue
++// `__reussir_rcgmp_ffi_is_unique`: an immediate test, then
++// `rcgmp.bridge.mpz.is_unique`. An immediate is never shared, a heap integer
++// only while another reference holds it, and an immortal literal always, as a
++// persistent Lean object is never exclusive. The program runs with the glue out
++// of line (textures for rustc's generic target, the program for the host) and
++// inlined (`--target-cpu generic`); the sanitizer variant
++// (`sanitizer/bigint-ffi-shared-asan.rr`) checks the balance.
++
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigintffishared --extern core=%t.core.rri --emit mlir --no-source-locations -o - | %FileCheck %s --check-prefix=GLUE
++// RUN: %rrc %s --package-name bigintffishared --extern core=%t.core.rri -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/bigint_ffi_shared.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s --package-name bigintffishared --extern core=%t.core.rri -o %t.inline.o --relocation-mode pic -Oaggressive --target-cpu generic --target-features=
++// RUN: %cc %t.inline.o %S/bigint_ffi_shared.c -o %t.inline.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.inline.exe
++
++extern "rust" [{
++    use reussir_rt::collections::vec::Vec as RVec;
++}];
++
++#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
++pub struct Vec<T>;
++
++#[ffi(import)]
++fn new<T>() -> Vec<T> [{ RVec::new() }];
++
++#[ffi(import)]
++fn push<T>(v : Vec<T>, x : T) -> Vec<T> [{ v.push(x) }];
++
++// Whether the argument is shared while the texture holds it.
++#[ffi(import)]
++fn shared<T>(x : T) -> bool [{ x.is_shared() }];
++
++// Whether the argument and its clone are both shared.
++#[ffi(import)]
++fn shared_after_clone<T>(x : T) -> bool [{
++    let y = x.clone();
++    x.is_shared() && y.is_shared()
++}];
++
++// Whether element `i` is shared, read while the vector also holds it.
++#[ffi(import)]
++fn element_shared<T>(v : Vec<T>, i : u64) -> bool [{ v.get(i as usize).unwrap().is_shared() }];
++
++fn nat(x : u64) -> Nat { x as Nat }
++
++fn int(x : i64) -> Int { x as Int }
++
++fn digit(ok : bool) -> i64 { if ok { 1 } else { 0 } }
++
++// Another reference, the caller's, holds `y` during the call.
++fn kept(y : Nat) -> bool { shared(y) && y == y }
++
++pub fn main(one : u64) -> i64 {
++    let big = core::intrinsic::bigint::ipowi(nat(2 * one), 100);
++    let literal : Nat = 1267650600228229401496703205376;
++    let v = push(push(new<Nat>(), big + 4), nat(5 * one));
++    digit(!shared(nat(7 * one))) + digit(!shared(big + 1)) * 10 + digit(kept(big + 2)) * 100
++        + digit(shared_after_clone(big + 3)) * 1000 + digit(shared(literal)) * 10000
++        + digit(!shared(int(0) - big as Int)) * 100000
++        + digit(element_shared(v, 0) && !element_shared(v, 1)) * 1000000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// GLUE: func.func @__reussir_rcgmp_ffi_is_unique(%arg0: !rcgmp.mpz) -> i8 attributes {llvm.linkage = #llvm.linkage<weak_odr>}
++// GLUE-NEXT: rcgmp.bridge.mpz.is_immediate %arg0
++// GLUE: rcgmp.bridge.mpz.is_unique %arg0
++// GLUE: arith.extui
+diff --git a/tests/integration/sanitizer/bigint-ffi-shared-asan.rr b/tests/integration/sanitizer/bigint-ffi-shared-asan.rr
+new file mode 100644
+index 00000000..64ecf078
+--- /dev/null
++++ b/tests/integration/sanitizer/bigint-ffi-shared-asan.rr
+@@ -0,0 +1,14 @@
++// UNSUPPORTED: darwin
++// REQUIRES: asan, rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %S/../frontend/bigint_ffi_shared.rr --package-name bigintffishared --extern core=%t.core.rri -o %t.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent
++// RUN: %cc %asan_flags -c -x ir %t.ll -o %t.o
++// RUN: %cc %asan_flags %t.o %S/../frontend/bigint_ffi_shared.c %reussir_rt_asan %rcgmp_runtime -o %t.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.exe
++// RUN: %rrc %S/../frontend/bigint_ffi_shared.rr --package-name bigintffishared --extern core=%t.core.rri -o %t.inline.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent -Oaggressive --target-cpu generic --target-features=
++// RUN: %cc %asan_flags -c -x ir %t.inline.ll -o %t.inline.o
++// RUN: %cc %asan_flags %t.inline.o %S/../frontend/bigint_ffi_shared.c %reussir_rt_asan %rcgmp_runtime -o %t.inline.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.inline.exe
++
++// The sanitized allocator backs every heap integer: asking a count reads only
++// live heap integers, never an immediate, and changes none.
+-- 
+2.43.0
+

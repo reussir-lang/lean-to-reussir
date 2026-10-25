@@ -50,6 +50,7 @@ enum [value] L2RUnit {
 #[ffi(rust = "::leanrt::string::LStr")]
 pub struct LStr;
 
+// @int-backend leanrt
 // A Lean `Nat` / `Int`: one word, Lean's own encoding (leanrt::nat). An odd
 // word is a small value: `lean_box(n)` for a `Nat` below 2^63,
 // `lean_box((unsigned)(int)i)` for an `Int` in the `int32` range. An even
@@ -63,6 +64,12 @@ pub struct Nat;
 #[ffi(rust = "::leanrt::nat::LInt", tagged)]
 pub struct Int;
 
+// @int-backend end
+// @int-backend rcgmp
+// A Lean `Nat` / `Int`: Reussir's built-in integers (`core::num`, rcgmp;
+// see the Nat and Int sections' rcgmp block).
+
+// @int-backend end
 // A Lean `Array` (and `ByteArray` = RVec<u8>, `FloatArray` = RVec<f64>):
 // a copy-on-write vector, updated in place when unique. One block: the
 // count, the size, the capacity and the elements (`leanrt::drop::Vec`,
@@ -246,6 +253,75 @@ fn l2r_any_raw_as<T>(w : u64, num : u64) -> T [{ unsafe { leanrt::any::raw_as(w,
 #[ffi(import)]
 fn l2r_any_raw_take<T>(w : u64) -> T [{ unsafe { leanrt::any::raw_take(w) } }];
 
+// @int-backend leanrt
+// A `Nat` or `Int` boxed and unboxed: `l2r_any_of<T>` and `l2r_any_as<T>`
+// at leanrt's kinds 1 and 2 (the lowering calls these under
+// `--int-backend rcgmp`, the generic ones here).
+fn l2r_any_of_nat(x : Nat) -> LAny { l2r_any_of<Nat>(x, 1) }
+fn l2r_any_of_int(x : Int) -> LAny { l2r_any_of<Int>(x, 2) }
+fn l2r_any_as_nat(a : LAny) -> Nat { l2r_any_as<Nat>(a, 1) }
+fn l2r_any_as_int(a : LAny) -> Int { l2r_any_as<Int>(a, 2) }
+// The same from a box's word that owns its reference (`l2r_any_raw`).
+fn l2r_any_raw_take_nat(w : u64) -> Nat { l2r_any_raw_as<Nat>(w, 1) }
+fn l2r_any_raw_take_int(w : u64) -> Int { l2r_any_raw_as<Int>(w, 2) }
+// @int-backend end
+// @int-backend rcgmp
+// A `Nat` or `Int` in a box, as natively: a `Nat` below 2^63 and an `Int`
+// in the `int32` range are Lean's immediates (`lean_box(n)`,
+// `lean_box((unsigned)(int)i)`), tested with Reussir's operations; an `Int`
+// in [2^32, 2^62) or [-2^62, -2^31) is a wider immediate
+// (`l2r_int_box_wide`); another value is a leanrt cell of kind 1 (`Nat`) or
+// 2 (`Int`) that holds a reference (`leanrt::rcgmp::box_big`). Unboxing
+// decodes an immediate here (`box(0)` is 0; at `Nat` the value; at `Int`
+// below 2^32 the low 32 bits signed, as `l2r_any_as<T>` reads them at
+// leanrt's backend, from there the wider immediate's value) and takes a
+// reference out of a cell (`unbox_big`; a pointer of another kind is a
+// mismatch).
+#[ffi(import)]
+fn l2r_any_of_nat_big(x : Nat) -> LAny [{ leanrt::rcgmp::box_big(x, leanrt::any::NUM_NAT) }];
+#[ffi(import)]
+fn l2r_any_of_int_big(x : Int) -> LAny [{ leanrt::rcgmp::box_big(x, leanrt::any::NUM_INT) }];
+#[ffi(import)]
+fn l2r_any_nat_big(a : LAny) -> Nat [{ leanrt::rcgmp::unbox_big(a, leanrt::any::NUM_NAT) }];
+#[ffi(import)]
+fn l2r_any_int_big(a : LAny) -> Int [{ leanrt::rcgmp::unbox_big(a, leanrt::any::NUM_INT) }];
+
+fn l2r_any_of_nat(x : Nat) -> LAny {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(x);
+    if !wide && (v >> 63) == 0 { l2r_any_imm(v) } else { l2r_any_of_nat_big(x) }
+}
+fn l2r_any_of_int(x : Int) -> LAny {
+    let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(x);
+    if !wide { l2r_any_imm((v as u32) as u64) } else {
+        let (w, wide64) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(x);
+        if !wide64 && l2r_int_box_wide(w) { l2r_any_of_raw(((w as u64) << 1) | 1) } else { l2r_any_of_int_big(x) }
+    }
+}
+fn l2r_any_as_nat(a : LAny) -> Nat { l2r_any_raw_take_nat(l2r_any_raw(a)) }
+fn l2r_any_as_int(a : LAny) -> Int { l2r_any_raw_take_int(l2r_any_raw(a)) }
+// The same from a box's word that owns its reference (`l2r_any_raw`).
+fn l2r_any_raw_take_nat(w : u64) -> Nat {
+    if l2r_any_raw_is_imm(w) { l2r_any_raw_imm(w) as Nat } else { l2r_any_nat_big(l2r_any_of_raw(w)) }
+}
+fn l2r_any_raw_take_int(w : u64) -> Int {
+    if l2r_any_raw_is_imm(w) {
+        let k = l2r_any_raw_imm(w);
+        if k < 4294967296 { (((k as u32) as i32) as i64) as Int } else { ((w as i64) >> 1) as Int }
+    } else { l2r_any_int_big(l2r_any_of_raw(w)) }
+}
+
+// The wider immediates of a boxed `Int`: outside the `int32` range, a value
+// in [2^32, 2^62) or [-2^62, -2^31) is the immediate `2v + 1` (`w`'s bits
+// above 32, so never an `int32` pattern, which are below 2^32; read back
+// with an arithmetic shift). Natively such a value is an object, whose word
+// a program cannot depend on; a box of one is then no allocation here (a
+// cell before: liasolver, L10, boxes many). [2^31, 2^32) and the values
+// from 2^62 in magnitude stay cells.
+fn l2r_int_box_wide(w : i64) -> bool {
+    (w >= 4294967296 && w < 4611686018427387904) || (w >= 0 - 4611686018427387904 && w < 0 - 2147483648)
+}
+// @int-backend end
+
 // `ptrAddrUnsafe` of a box: its payload's address (an immediate: its word,
 // as natively); and whether it is the only reference (`isExclusive`).
 #[ffi(import)]
@@ -285,14 +361,20 @@ fn l2r_uncaught_exception(msg : LStr) -> unit [{ leanrt::uncaught_exception(msg.
 
 // `lean_internal_panic` (lean-runtime's `sem::panic::InternalPanic`), by
 // code (no `str` arguments on hot paths): 0 unreachable code (also
-// lean2rr's `l2r_internal_panic_at<T>(0)`), 4 out of memory (no caller
-// since an array capacity that is not a word gives the empty array,
-// lean-runtime's LB-37), 5 `sorry`.
+// lean2rr's `l2r_internal_panic_at<T>(0)`), 4 out of memory (a `Nat`
+// result above lean-runtime's `MAX_BITS` under `--int-backend rcgmp`; an
+// array capacity that is not a word gives the empty array, lean-runtime's
+// LB-37), 5 `sorry`, 6 `Nat.pow exponent is too big`, 7 `Nat.shiftl
+// exponent is too big` (the same limit for an exponent or shift of 2^32 or
+// more, native's own end there; rcgmp only: the leanrt backend's rules end
+// in leanrt).
 #[ffi(import)]
 fn l2r_internal_panic(code : u64) -> u64 [{
     leanrt::lean_internal_panic(match code {
         4 => sem::panic::InternalPanic::OutOfMemory,
         5 => sem::panic::InternalPanic::Sorry,
+        6 => sem::panic::InternalPanic::NatPowExponent,
+        7 => sem::panic::InternalPanic::NatShiftlExponent,
         _ => sem::panic::InternalPanic::Unreachable,
     })
 }];
@@ -365,6 +447,7 @@ fn lean_panic_fn<T>(dflt : T, msg : LStr) -> T {
 // `sorryAx`: `INTERNAL PANIC: executed 'sorry'`.
 fn lean_sorry<T>(b : bool) -> T { l2r_internal_panic_at<T>(5) }
 
+// @int-backend leanrt
 // ===========================================================================
 // Nat
 //
@@ -629,6 +712,11 @@ fn l2r_nat_truncate_bits(a : Nat, b : Nat) -> Nat {
 #[ffi(import)]
 fn l2r_nat_log2_big(a : u64) -> Nat [{ leanrt::nat::nat_log2(a) }];
 
+// `Nat.testBit m i`: Lean's definition, `1 &&& (m >>> i) != 0`. lean2rr
+// rewrites calls to it under rcgmp only (prelude-int-ops): here it would
+// compute what Lean's code computes.
+fn l2r_nat_test_bit(m : Nat, i : Nat) -> bool { !lean_nat_dec_eq(lean_nat_land(l2r_nat_small(1), lean_nat_shiftr(m, i)), l2r_nat_small(0)) }
+
 fn lean_nat_log2(a : Nat) -> Nat {
     let x = l2r_nat_raw(a);
     if (x & 1) == 1 {
@@ -660,12 +748,14 @@ fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
 #[ffi(import)]
 fn lean_nat_gcd(a : Nat, b : Nat) -> Nat [{ leanrt::nat::nat_gcd(a.into_raw(), b.into_raw()) }];
 
+// @int-backend end
 // One shared empty string (a new reference, no allocation): the
 // placeholder of a string parameter that is never read (lean2rr's
 // Opt/StateMachines).
 #[ffi(import)]
 fn l2r_str_shared_empty() -> LStr [{ leanrt::string::shared_empty() }];
 
+// @int-backend leanrt
 // Decimal representation (`Nat.repr`); lean2rr replaces Lean's `Nat.repr`
 // and `Nat.reprFast` with it (the former builds big numbers digit by digit).
 // Below 128, as natively (`Nat.reprFast` reads the closed term
@@ -937,6 +1027,291 @@ fn l2r_int_cast_nat(a : Int) -> Nat {
 #[ffi(import)]
 fn l2r_int_repr(a : Int) -> LStr [{ leanrt::nat::int_repr(a.into_raw()) }];
 
+// @int-backend end
+// @int-backend rcgmp
+// ===========================================================================
+// Nat and Int (`--int-backend rcgmp`)
+//
+// A `Nat` and an `Int` are Reussir's built-in integers (`core::num`; rcgmp:
+// an immediate or a counted heap integer, which Reussir copies, releases
+// and reuses in place when unique). The prelude never reads their
+// encoding: values are tested and converted with Reussir's operations
+// (`trunci_overflow`, `as`, the comparisons), and Lean's rules (those of
+// lean-runtime's `sem::nat` and `sem::int`: the zero divisor, the
+// truncating subtraction, the limits of `pow` and `shiftLeft`) are
+// composed here of Reussir's operators and `core::intrinsic::bigint`.
+// leanrt takes the steps that Reussir has no operation for (a box's cell,
+// decimal text: `leanrt::rcgmp`, over rcgmp's C API). The backend needs
+// Reussir's local patches R1 (Lean's division modes, `floormod2expi`) and
+// R2 (`reussir_rt::rcgmp::Mpz` at polyffi type arguments). The functions keep the names and signatures of the
+// leanrt backend's, which the lowering and the rest of the prelude call.
+//
+// Index words. The rest of the prelude reads a `Nat` index, position or
+// capacity through its word (`l2r_nat_raw`, `l2r_nat_word_is_small`,
+// `l2r_nat_word_val`, `l2r_word_index_ok`, `l2r_nat_drop_raw`). Here a
+// `Nat` has no word that owns it: `l2r_nat_raw` gives its index word, the
+// value below 2^63 and `u64::MAX` from there (no array or string reaches
+// such an index or position, and the leanrt backend treats every value
+// from 2^63 on as one big case too). An index word owns nothing. The
+// functions that need the value of a big position (`String.Pos.Raw.next`
+// and `prev` past the end), a word's decoding in Rust or the native word
+// itself (`ptrAddrUnsafe`) have their own rcgmp versions further down.
+
+fn l2r_nat_raw(n : Nat) -> u64 {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    if wide || (v >> 63) != 0 { 18446744073709551615 } else { v }
+}
+fn l2r_nat_drop_raw(w : u64) -> u64 { 0 }
+fn l2r_nat_word_is_small(w : u64) -> bool { (w >> 63) == 0 }
+fn l2r_nat_word_val(w : u64) -> u64 { w }
+fn l2r_word_index_ok(w : u64, n : u64) -> bool { w < n }
+
+// Reads at a `Nat` index or position keep the `Nat` until after the read
+// and release it there (`l2r_consume<Nat>`): their rcgmp versions below
+// (array and string reads). Released before the read, as `l2r_nat_raw`
+// does, a big one's release (a call) sits on a path that rejoins the read,
+// between the caller's increment of the array or string and the read's
+// decrement, and LLVM then keeps both (a matrix loop's `get!`, E08: 996
+// to 793 million instructions, the leanrt backend 806). `l2r_index_sat` is
+// the index word of `trunci_overflow`'s pair.
+fn l2r_index_sat(v : u64, wide : bool) -> u64 { if wide || (v >> 63) != 0 { 18446744073709551615 } else { v } }
+
+// A value below 2^63 (lean2rr's small literals), and any word.
+fn l2r_nat_small(x : u64) -> Nat { x as Nat }
+fn l2r_nat_of_u64(x : u64) -> Nat { x as Nat }
+
+// (A `Nat` literal of any size is Reussir's own under rcgmp: lean2rr's
+// `natLiteral` emits no `l2r_nat_of_decimal_lstr`.)
+
+// The limit of lean-runtime's rules (`BigNat::MAX_BITS`): a `Nat.pow` or
+// `Nat.shiftLeft` result of more bits ends the process. `code` is the
+// internal panic for an exponent or shift of 2^32 or more (6
+// `Nat.pow exponent is too big`, 7 `Nat.shiftl exponent is too big`,
+// native's own end there); below, `out of memory` (4).
+// `leanrt::rcgmp::MAX_BITS` (leanrt asserts the value), a literal so that
+// Reussir's folding sees it.
+fn l2r_nat_max_bits() -> u64 { 137438953088 }
+
+fn l2r_nat_too_big(exponent_wide : bool, code : u64) -> Nat {
+    if exponent_wide { l2r_internal_panic_at<Nat>(code) } else { l2r_internal_panic_at<Nat>(4) }
+}
+
+fn lean_nat_add(a : Nat, b : Nat) -> Nat { a + b }
+
+// Truncated: `m - n = 0` for m < n (Reussir's `-` on `Nat`, `rcgmp.monusi`).
+fn lean_nat_sub(a : Nat, b : Nat) -> Nat { a - b }
+
+fn lean_nat_pred(a : Nat) -> Nat { a - 1 }
+
+fn lean_nat_mul(a : Nat, b : Nat) -> Nat { a * b }
+
+// `m / 0 = 0`, `m % 0 = m`: Lean's division modes (local Reussir patch
+// R1; rcgmp's `divzero<lean>`, which Reussir's `/` and `%` do not use: they
+// end the program on a zero divisor). On `Nat` truncating and Euclidean
+// division agree.
+fn lean_nat_div(a : Nat, b : Nat) -> Nat { core::intrinsic::bigint::divsi_lean(a, b) }
+
+// `Nat.divExact`: `b` divides `a` by its proof; computed as `Nat.div`, as
+// natively (`lean_box(n1 / n2)` for scalars) and by the leanrt backend: an
+// exact division (`divsi_exact`) is `sdiv exact` on immediates, whose result
+// is undefined (LLVM poison) when a proof is false (`sorry`), where native
+// gives the truncated quotient (review R1-03).
+fn lean_nat_div_exact(a : Nat, b : Nat) -> Nat { lean_nat_div(a, b) }
+
+fn lean_nat_mod(a : Nat, b : Nat) -> Nat { core::intrinsic::bigint::remsi_lean(a, b) }
+
+fn lean_nat_dec_eq(a : Nat, b : Nat) -> bool { a == b }
+fn lean_nat_dec_lt(a : Nat, b : Nat) -> bool { a < b }
+fn lean_nat_dec_le(a : Nat, b : Nat) -> bool { a <= b }
+
+fn lean_nat_land(a : Nat, b : Nat) -> Nat { a & b }
+fn lean_nat_lor(a : Nat, b : Nat) -> Nat { a | b }
+fn lean_nat_lxor(a : Nat, b : Nat) -> Nat { a ^ b }
+
+// `Nat.shiftLeft` (lean-runtime's `sem::nat::shiftl`): a result of more
+// than `MAX_BITS` bits ends the process, any other shift is computed (LB-12
+// lifted), and `0 <<< s = 0` for any `s`. Reussir's `<<` takes a
+// nonnegative `i64`; `s` is then below `MAX_BITS`. The zero test is on the
+// refused path only (`log2i 0 = 0`: a zero passes the size test for every
+// shift below `MAX_BITS`), so a shift by a constant is one test in line.
+fn lean_nat_shiftl(a : Nat, b : Nat) -> Nat {
+    let (s, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let l = core::intrinsic::bigint::log2i(a) + 1;
+    let m = l2r_nat_max_bits();
+    if !wide && l <= m && s <= m - l { a << (s as i64) } else {
+        if a == 0 { 0 } else { l2r_nat_too_big(wide || s > 4294967295, 7) }
+    }
+}
+
+// `Nat.shiftRight` (`sem::nat::shiftr`): a shift of 2^63 or more clears
+// every value (none has that many bits); any shift of a big value is
+// computed (LB-04 lifted).
+fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
+    let (s, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    if wide || (s >> 63) != 0 { 0 } else { a >> (s as i64) }
+}
+
+// `x % 2^w`, the low `w` bits of `x`, without making `2^w` (see the leanrt
+// backend's): rcgmp's `floormod2expi` (local Reussir patch R1), which keeps
+// immediates in line and reads the low limb of a big `x` for `w` below 62;
+// a `w` of 2^64 or more is more bits than any number has.
+fn l2r_nat_truncate_bits(a : Nat, b : Nat) -> Nat {
+    let (w, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    if wide { a } else { core::intrinsic::bigint::floormod2expi(a, w) }
+}
+
+// `Nat.log2` (`log2 0 = 0`).
+fn lean_nat_log2(a : Nat) -> Nat { core::intrinsic::bigint::log2i(a) as Nat }
+
+// `Nat.testBit m i` (lean2rr rewrites its calls to this): bit `i` of `m`
+// read in place (`testbiti`, which borrows `m`), where Lean's definition,
+// `1 &&& (m >>> i) != 0`, builds `m >>> i` (a new number for a big `m`: a
+// regex's bit matrix, Z03b). No number has a bit from 2^64 on.
+fn l2r_nat_test_bit(m : Nat, i : Nat) -> bool {
+    let (k, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    if wide { false } else { core::intrinsic::bigint::testbiti(m, k) }
+}
+
+// `Nat.pow` (`sem::nat::pow`): `a ^ 0 = 1`; `0 ^ e = 0` and `1 ^ e = 1`
+// for every `e >= 1`, also of 2^64 or more. For a base of 2 or more the
+// result's size is tested first, `j * e + 1` bits for a base `2^j` and
+// `bit_len(a) * e` otherwise: above `MAX_BITS` the process ends (LB-11
+// lifted). The products are compared by division, which cannot overflow.
+fn lean_nat_pow(a : Nat, b : Nat) -> Nat {
+    let (e, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    if !wide && e == 0 { 1 } else {
+        if a < 2 { a } else {
+            let j = core::intrinsic::bigint::log2i(a);
+            let m = l2r_nat_max_bits();
+            let fits = if (a & (a - 1)) == 0 { e <= (m - 1) / j } else { e <= m / (j + 1) };
+            if !wide && fits { core::intrinsic::bigint::ipowi(a, e) } else { l2r_nat_too_big(wide || e > 4294967295, 6) }
+        }
+    }
+}
+
+fn lean_nat_gcd(a : Nat, b : Nat) -> Nat { core::intrinsic::bigint::gcdi(a, b) }
+
+// `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` (lean2rr
+// rewrites their calls to these under rcgmp): `sitofp`, the nearest double,
+// ties to even, an infinity of the sign past the largest finite one. Lean's
+// definitions (`Float.ofScientific`, its `Float.Model` path from 2^53) give
+// the same bits for every value (judged 2026-10-25,
+// l2r-scratch/step-d/judge-float/VERDICT.md: 381 inputs, ties at every
+// magnitude, the overflow edge), in a time linear rather than quadratic in
+// the number's bits.
+fn l2r_float_of_nat(n : Nat) -> f64 { core::intrinsic::bigint::sitofp(n) }
+fn l2r_float_of_int(i : Int) -> f64 { core::intrinsic::bigint::sitofp(i) }
+
+// Decimal representation (`Nat.repr`; see the leanrt backend's): a word
+// through lean-runtime's digits (below 128 the shared strings of
+// `Nat.reprArray`), a bigger value through rcgmp's.
+#[ffi(import)]
+fn l2r_u64_repr(x : u64) -> LStr [{ if x < 128 { leanrt::string::repr_small(x) } else { leanrt::string::of_u64(x) } }];
+#[ffi(import)]
+fn l2r_nat_repr_big(a : Nat) -> LStr [{ leanrt::rcgmp::repr(a) }];
+
+fn l2r_nat_repr(a : Nat) -> LStr {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(a);
+    if wide { l2r_nat_repr_big(a) } else { l2r_u64_repr(v) }
+}
+
+fn lean_system_platform_nbits(u : L2RUnit) -> Nat { 64 }
+
+// The value modulo 2^64 (`UInt64.ofNat`, `USize.ofNat`, ...).
+fn l2r_nat_low(a : Nat) -> u64 { a as u64 }
+
+// A `Nat` size or offset as lean-runtime's array rules take it: its value,
+// or `u64::MAX` for 2^64 or more.
+fn l2r_nat_sat(n : Nat) -> u64 {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    if wide { 18446744073709551615 } else { v }
+}
+
+// `Array.replicate`'s size (`lean_mk_array`): from 2^63 on lean-runtime's
+// `sem::array::replicate_len` ends the process (a small one is checked by
+// the allocation, `leanrt::array::check_alloc`).
+#[ffi(import)]
+fn l2r_replicate_len_big(v : u64, fits : bool) -> u64 [{ leanrt::rcgmp::replicate_len(v, fits) }];
+
+fn l2r_replicate_len(n : Nat) -> u64 {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    if !wide && (v >> 63) == 0 { v } else { l2r_replicate_len_big(v, !wide) }
+}
+
+// `Int`: a value in the `int32` range is what natively is a scalar (the
+// boxed word `lean_box((unsigned)(int)i)`, which `unsafeCast` and boxes
+// expose: `l2r_int_word`, `l2r_any_of_int`).
+
+fn l2r_int_small(v : i64) -> Int { v as Int }
+fn l2r_int_of_i64(v : i64) -> Int { v as Int }
+
+// `Int.ofNat`, `Int.negSucc n = -(n + 1)`.
+fn lean_nat_to_int(n : Nat) -> Int { n as Int }
+fn lean_int_neg_succ_of_nat(n : Nat) -> Int { Int::NegSucc{n} }
+
+fn lean_int_neg(a : Int) -> Int { -a }
+fn lean_int_add(a : Int, b : Int) -> Int { a + b }
+fn lean_int_sub(a : Int, b : Int) -> Int { a - b }
+fn lean_int_mul(a : Int, b : Int) -> Int { a * b }
+
+// `Int.div` (T-division, C's `/`); `x / 0 = 0` (R1, as for `Nat`).
+fn lean_int_div(a : Int, b : Int) -> Int { core::intrinsic::bigint::divsi_lean(a, b) }
+
+// As `lean_nat_div_exact`.
+fn lean_int_div_exact(a : Int, b : Int) -> Int { lean_int_div(a, b) }
+
+// `Int.mod` (T-remainder, sign of the dividend); `x % 0 = x`.
+fn lean_int_mod(a : Int, b : Int) -> Int { core::intrinsic::bigint::remsi_lean(a, b) }
+
+// `Int.ediv`, `Int.emod` (Euclidean, the remainder never negative for
+// d != 0); `x / 0 = 0`, `x % 0 = x`.
+fn lean_int_ediv(a : Int, b : Int) -> Int { core::intrinsic::bigint::edivsi_lean(a, b) }
+fn lean_int_emod(a : Int, b : Int) -> Int { core::intrinsic::bigint::emodsi_lean(a, b) }
+
+fn lean_int_dec_eq(a : Int, b : Int) -> bool { a == b }
+fn lean_int_dec_lt(a : Int, b : Int) -> bool { a < b }
+fn lean_int_dec_le(a : Int, b : Int) -> bool { a <= b }
+fn lean_int_dec_nonneg(a : Int) -> bool { a >= 0 }
+
+// The value modulo 2^64 in two's complement (`Int64.ofInt`, ...).
+fn l2r_int_low_twos(a : Int) -> u64 { a as u64 }
+
+// `unsafeCast` between `Int` and scalars (lean2rr's `wordOf`/`ofWord`): an
+// `Int` in the `int32` range is natively the boxed scalar of its 32 bits,
+// which `lean_unbox` reads; another is an object (its "word" an address;
+// here the low bits of its two's complement value).
+fn l2r_int_word(a : Int) -> u64 {
+    let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(a);
+    if wide { a as u64 } else { (v as u32) as u64 }
+}
+
+// The `Int` whose boxed scalar is word `w` (`lean_scalar_to_int64`: its low
+// 32 bits, signed).
+fn l2r_int_of_word(w : u64) -> Int { (((w as u32) as i32) as i64) as Int }
+
+// `Int.natAbs`.
+fn lean_nat_abs(a : Int) -> Nat { core::intrinsic::bigint::absi(a) }
+
+// `unsafeCast (i : Int) : Nat`: an `Int` in the `int32` range is read as
+// the `Nat` of its 32 bits (the same word natively), a big number object
+// as a `Nat` of its magnitude.
+fn l2r_int_cast_nat(a : Int) -> Nat {
+    let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(a);
+    if wide { core::intrinsic::bigint::absi(a) } else { ((v as u32) as u64) as Nat }
+}
+
+// Decimal representation (`Int.repr`; `Int.repr (ofNat m) = Nat.repr m`:
+// shared strings below 128).
+#[ffi(import)]
+fn l2r_i64_repr(x : i64) -> LStr [{ if x >= 0 && x < 128 { leanrt::string::repr_small(x as u64) } else { leanrt::string::of_i64(x) } }];
+#[ffi(import)]
+fn l2r_int_repr_big(a : Int) -> LStr [{ leanrt::rcgmp::repr(a) }];
+
+fn l2r_int_repr(a : Int) -> LStr {
+    let (v, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(a);
+    if wide { l2r_int_repr_big(a) } else { l2r_i64_repr(v) }
+}
+// @int-backend end
 // ===========================================================================
 // Fixed-width integers (UInt8..64, USize; Int8..64, ISize as bit patterns)
 
@@ -1418,10 +1793,18 @@ fn lean_float32_scaleb(a : f32, b : Int) -> f32 { l2r_float32_scaleb(a, l2r_int_
 
 // An `Int` saturated to `i64`: a small one's value, a big one `i64::MIN` or
 // `i64::MAX` by its sign.
+// @int-backend leanrt
 fn l2r_int_sat_i64(b : Int) -> i64 {
     let x = l2r_int_raw(b);
     if l2r_int_word_is_small(x) { l2r_int_word_val(x) } else { if l2r_int_is_neg_raw(x) { 0 - 9223372036854775807 - 1 } else { 9223372036854775807 } }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn l2r_int_sat_i64(b : Int) -> i64 {
+    let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    if !wide { v as i64 } else { if b < 0 { 0 - 9223372036854775807 - 1 } else { 9223372036854775807 } }
+}
+// @int-backend end
 
 // libm functions under their C names (the extern symbols of `Float.sin`,
 // ...): lean-runtime's `sem::libm`, glibc's results. Its inexact `Float32`
@@ -1639,82 +2022,216 @@ fn l2r_pos_of_word(x : u64) -> u64 {
 }
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
+// @int-backend leanrt
 fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
     let x = l2r_nat_raw(p);
     let c = l2r_string_get(s, l2r_pos_of_word(x));
     let d = l2r_nat_drop_raw(x);
     c
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let c = l2r_string_get(s, l2r_index_sat(v, w));
+    let d = l2r_consume<Nat>(p);
+    c
+}
+// @int-backend end
 
 // `String.Pos.Raw.get?`.
+// @int-backend leanrt
 fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
     let x = l2r_nat_raw(p);
     let c = l2r_string_get_opt(s, l2r_pos_of_word(x));
     let d = l2r_nat_drop_raw(x);
     c
 }
+// @int-backend end
+// @int-backend rcgmp
+fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let c = l2r_string_get_opt(s, l2r_index_sat(v, w));
+    let d = l2r_consume<Nat>(p);
+    c
+}
+// @int-backend end
 
 // `String.Pos.Raw.get!`: panics (C message) and returns `'A'`.
+// @int-backend leanrt
 fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
     let x = l2r_nat_raw(p);
     let c = l2r_string_get_bang(s, l2r_pos_of_word(x));
     let d = l2r_nat_drop_raw(x);
     if c == 1114112 { let ignored = l2r_panic_code(1); l2r_char_default() } else { c }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let c = l2r_string_get_bang(s, l2r_index_sat(v, w));
+    let d = l2r_consume<Nat>(p);
+    if c == 1114112 { let ignored = l2r_panic_code(1); l2r_char_default() } else { c }
+}
+// @int-backend end
 
 // `String.Pos.get`/`Pos.Raw.get'` and `next'` take a proof that the
 // position is valid and not the end: never a big `Nat` (see
 // `l2r_string_get_fast_word`).
+// @int-backend leanrt
 fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast_word(s, l2r_nat_raw(p)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    if w || (v >> 63) != 0 { l2r_unreachable<u32>() } else {
+        let c = l2r_string_get_fast(s, v);
+        let d = l2r_consume<Nat>(p);
+        c
+    }
+}
+// @int-backend end
 
 // `String.Pos.Raw.next`: `p + 1` at or past the end. lean-runtime's `next`
 // takes a position below 2^63 (a small `Nat`) and may answer 2^63, a big
 // `Nat`; for a big position C computes `p + 1` on the `Nat`, as here.
+// @int-backend leanrt
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
     if l2r_nat_word_is_small(x) { l2r_nat_of_u64(l2r_string_next(s, l2r_nat_word_val(x))) } else { lean_nat_add(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    if wide || (v >> 63) != 0 { p + 1 } else {
+        let r = l2r_string_next(s, v);
+        let d = l2r_consume<Nat>(p);
+        l2r_nat_of_u64(r)
+    }
+}
+// @int-backend end
 
+// @int-backend leanrt
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast_word(s, l2r_nat_raw(p))) }
+// @int-backend end
+// @int-backend rcgmp
+#[ffi(import)]
+fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next_fast(b, i)) }];
+fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    if w || (v >> 63) != 0 { l2r_unreachable<Nat>() } else {
+        let r = l2r_string_next_fast(s, v);
+        let d = l2r_consume<Nat>(p);
+        l2r_nat_small(r)
+    }
+}
+// @int-backend end
 
+// @int-backend leanrt
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
     let x = l2r_nat_raw(p);
     if l2r_nat_word_is_small(x) { l2r_nat_small(l2r_string_prev(s, l2r_nat_word_val(x))) } else { lean_nat_sub(l2r_nat_of_raw(x), l2r_nat_small(1)) }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    if wide || (v >> 63) != 0 { p - 1 } else {
+        let r = l2r_string_prev(s, v);
+        let d = l2r_consume<Nat>(p);
+        l2r_nat_small(r)
+    }
+}
+// @int-backend end
 
+// @int-backend leanrt
 fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
     let x = l2r_nat_raw(p);
     let r = l2r_string_at_end(s, l2r_pos_of_word(x));
     let d = l2r_nat_drop_raw(x);
     r
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let r = l2r_string_at_end(s, l2r_index_sat(v, w));
+    let d = l2r_consume<Nat>(p);
+    r
+}
+// @int-backend end
 
+// @int-backend leanrt
 fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
     let x = l2r_nat_raw(p);
     let r = l2r_string_is_valid_pos(s, l2r_pos_of_word(x));
     let d = l2r_nat_drop_raw(x);
     r
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
+    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let r = l2r_string_is_valid_pos(s, l2r_index_sat(v, w));
+    let d = l2r_consume<Nat>(p);
+    r
+}
+// @int-backend end
 
 // `String.Pos.Raw.extract`. A non-scalar (big) position counts as
 // SIZE_MAX, as natively since Lean 4.34: a big start gives "", a big end
 // extracts to the end of the string.
+// @int-backend leanrt
 fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
     let bi = l2r_pos_of_nat(b);
     l2r_string_extract(s, bi, l2r_pos_of_nat(e))
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
+    let (bv, bw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let (ev, ew) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    let r = l2r_string_extract(s, l2r_index_sat(bv, bw), l2r_index_sat(ev, ew));
+    let d = l2r_consume<Nat>(b) + l2r_consume<Nat>(e);
+    r
+}
+// @int-backend end
 
 // `String.extract` (positions of `s`, valid by their proofs: never big).
+// @int-backend leanrt
 fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
     l2r_string_extract_fast(s, l2r_index_of_nat(b), l2r_index_of_nat(e))
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
+    let (bv, bw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let (ev, ew) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    if bw || ew || ((bv | ev) >> 63) != 0 { l2r_unreachable<LStr>() } else {
+        let r = l2r_string_extract_fast(s, bv, ev);
+        let d = l2r_consume<Nat>(b) + l2r_consume<Nat>(e);
+        r
+    }
+}
+// @int-backend end
 
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
     let x = l2r_nat_raw(p);
     if l2r_nat_word_is_small(x) { l2r_string_set(s, l2r_nat_word_val(x), c) } else { let d = l2r_nat_drop_raw(x); s }
 }
 
+// @int-backend leanrt
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, lean_usize_of_nat(i)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let r = l2r_string_get_byte(s, k);
+    let d = l2r_consume<Nat>(i);
+    r
+}
+// @int-backend end
 fn lean_string_uget_byte_fast(s : LStr, i : u64) -> u8 { l2r_string_get_byte(s, i) }
 
 // Two references to the same string are equal without comparing the bytes,
@@ -1744,9 +2261,22 @@ fn lean_decode_lossy_utf8(b : RVec<u8>) -> LStr [{ leanrt::string::from_bytes_lo
 #[ffi(import)]
 fn l2r_string_memcmp(a : LStr, b : LStr, ls : u64, rs : u64, len : u64) -> bool [{ { let r = sem::string::memcmp(a.utf8(), b.utf8(), ls, rs, len); leanrt::rc_release(a); leanrt::rc_release(b); r } }];
 
+// @int-backend leanrt
 fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
     l2r_string_memcmp(a, b, lean_usize_of_nat(ls), lean_usize_of_nat(rs), lean_usize_of_nat(len))
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
+    // `lean_usize_of_nat` of each (the low 64 bits), read without consuming.
+    let (lk, lw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(ls);
+    let (rk, rw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(rs);
+    let (nk, nw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(len);
+    let r = l2r_string_memcmp(a, b, lk, rk, nk);
+    let d = l2r_consume<Nat>(ls) + l2r_consume<Nat>(rs) + l2r_consume<Nat>(len);
+    r
+}
+// @int-backend end
 
 // Slices (`String.Slice` is a Lean structure; lean2rr's glue passes its
 // string and byte bounds).
@@ -1877,8 +2407,31 @@ fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_
 fn lean_array_get_size<T>(v : RVec<T>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 
+// @int-backend leanrt
 fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_word(v, l2r_nat_raw(i)) }
 fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_word(v, l2r_nat_raw(i)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_array_fget<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_nat(v, i) }
+fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_nat(v, i) }
+
+// `l2r_array_get_word` at the `Nat` index `i`, released after the read
+// (`l2r_index_sat`); the failing branch as `l2r_index_fail`.
+fn l2r_array_get_nat<T>(v : RVec<T>, i : Nat) -> T {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<T>(v);
+    let n = l2r_view_size(p);
+    if !w && k < n {
+        let r = l2r_view_take<T>(p, k);
+        let d = l2r_consume<Nat>(i);
+        r
+    } else { l2r_index_fail_nat<T>(k, w, n) }
+}
+
+fn l2r_index_fail_nat<T>(k : u64, wide : bool, n : u64) -> T {
+    if wide || (k >> 63) != 0 { l2r_unreachable<T>() } else { l2r_array_index_bug<T>(k, n) }
+}
+// @int-backend end
 fn lean_array_uget<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) }
 
@@ -1929,6 +2482,7 @@ fn l2r_index_fail<T>(x : u64, n : u64) -> T {
 // the reference that keeps a shared array alive: nothing reads through the
 // view after it (`l2r_view_end` of a shared view reads nothing;
 // `leanrt::array::give`).
+// @int-backend leanrt
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<T>(v);
@@ -1943,6 +2497,23 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
         dflt
     }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<T>(v);
+    if !w && k < l2r_view_size(p) {
+        let r = l2r_view_take<T>(p, k);
+        let d = l2r_consume<T>(dflt) + l2r_consume<Nat>(i);
+        r
+    } else {
+        let ignored = l2r_panic_code(0);
+        let e = l2r_view_end<T>(p);
+        let d = l2r_consume<Nat>(i);
+        dflt
+    }
+}
+// @int-backend end
 
 fn lean_array_get_borrowed<T>(dflt : T, v : RVec<T>, i : Nat) -> T { lean_array_get(dflt, v, i) }
 
@@ -2009,13 +2580,31 @@ fn l2r_array_get_word_as<T>(v : RVec<LAny>, x : u64) -> T {
     if l2r_word_index_ok(x, n) { l2r_view_take_as<T>(p, l2r_nat_word_val(x)) } else { l2r_index_fail<T>(x, n) }
 }
 
+// @int-backend leanrt
 fn lean_array_fget_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_word_as<T>(v, l2r_nat_raw(i)) }
 fn lean_array_fget_borrowed_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_word_as<T>(v, l2r_nat_raw(i)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_array_fget_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_nat_as<T>(v, i) }
+fn lean_array_fget_borrowed_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_nat_as<T>(v, i) }
+
+fn l2r_array_get_nat_as<T>(v : RVec<LAny>, i : Nat) -> T {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<LAny>(v);
+    let n = l2r_view_size(p);
+    if !w && k < n {
+        let r = l2r_view_take_as<T>(p, k);
+        let d = l2r_consume<Nat>(i);
+        r
+    } else { l2r_index_fail_nat<T>(k, w, n) }
+}
+// @int-backend end
 fn lean_array_uget_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
 fn lean_array_uget_borrowed_as<T>(v : RVec<LAny>, i : u64) -> T { l2r_array_get_as<T>(v, i) }
 
 // `get!` (as `lean_array_get`): out of bounds, the panic first (hunt HA-01's
 // order), then the view's end, then the default taken at `T`.
+// @int-backend leanrt
 fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<LAny>(v);
@@ -2030,6 +2619,23 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
         l2r_any_take_as<T>(dflt)
     }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<LAny>(v);
+    if !w && k < l2r_view_size(p) {
+        let r = l2r_view_take_as<T>(p, k);
+        let d = l2r_consume<LAny>(dflt) + l2r_consume<Nat>(i);
+        r
+    } else {
+        let ignored = l2r_panic_code(0);
+        let e = l2r_view_end<LAny>(p);
+        let d = l2r_consume<Nat>(i);
+        l2r_any_take_as<T>(dflt)
+    }
+}
+// @int-backend end
 fn lean_array_get_borrowed_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T { lean_array_get_as<T>(dflt, v, i) }
 
 fn lean_array_fset<T>(v : RVec<T>, i : Nat, x : T) -> RVec<T> { l2r_array_set(v, l2r_index_of_nat(i), x) }
@@ -2080,8 +2686,14 @@ fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8
 fn lean_byte_array_size(v : RVec<u8>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
+// @int-backend leanrt
 fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get_word(v, l2r_nat_raw(i)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_byte_array_fget(v : RVec<u8>, i : Nat) -> u8 { l2r_array_get_nat(v, i) }
+// @int-backend end
 // `ByteArray.get!`: 0 out of bounds (no panic, as lean.h).
+// @int-backend leanrt
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<u8>(v);
@@ -2091,6 +2703,22 @@ fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
         0
     }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<u8>(v);
+    if !w && k < l2r_view_size(p) {
+        let r = l2r_view_take<u8>(p, k);
+        let d = l2r_consume<Nat>(i);
+        r
+    } else {
+        let e = l2r_view_end<u8>(p);
+        let d = l2r_consume<Nat>(i);
+        0
+    }
+}
+// @int-backend end
 fn lean_byte_array_push(v : RVec<u8>, x : u8) -> RVec<u8> { l2r_array_push(v, x) }
 fn lean_byte_array_uset(v : RVec<u8>, i : u64, x : u8) -> RVec<u8> { l2r_array_set(v, i, x) }
 fn lean_byte_array_fset(v : RVec<u8>, i : Nat, x : u8) -> RVec<u8> { l2r_array_set(v, l2r_index_of_nat(i), x) }
@@ -2145,8 +2773,14 @@ fn l2r_boxes_all_float_words(src : RVec<LAny>) -> bool [{ leanrt::array::boxes_a
 fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
 fn lean_float_array_size(v : RVec<f64>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
+// @int-backend leanrt
 fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get_word(v, l2r_nat_raw(i)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get_nat(v, i) }
+// @int-backend end
 // `FloatArray.get!`: 0.0 out of bounds.
+// @int-backend leanrt
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
     let x = l2r_nat_raw(i);
     let p = l2r_array_give<f64>(v);
@@ -2156,6 +2790,22 @@ fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
         0.0
     }
 }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
+    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let p = l2r_array_give<f64>(v);
+    if !w && k < l2r_view_size(p) {
+        let r = l2r_view_take<f64>(p, k);
+        let d = l2r_consume<Nat>(i);
+        r
+    } else {
+        let e = l2r_view_end<f64>(p);
+        let d = l2r_consume<Nat>(i);
+        0.0
+    }
+}
+// @int-backend end
 fn lean_float_array_push(v : RVec<f64>, x : f64) -> RVec<f64> { l2r_array_push(v, x) }
 fn lean_float_array_uset(v : RVec<f64>, i : u64, x : f64) -> RVec<f64> { l2r_array_set(v, i, x) }
 fn lean_float_array_fset(v : RVec<f64>, i : Nat, x : f64) -> RVec<f64> { l2r_array_set(v, l2r_index_of_nat(i), x) }
@@ -3228,6 +3878,7 @@ fn l2r_addr_word(w : u64) -> u64 { w + w + 1 }
 #[ffi(import)]
 fn l2r_addr_fresh() -> u64 [{ leanrt::fresh_addr() }];
 
+// @int-backend leanrt
 // A `Nat` is represented as natively: a small one is its boxed scalar
 // `2n+1`, a big one the pointer to its object; either way, its word.
 fn l2r_addr_nat(n : Nat) -> u64 {
@@ -3242,6 +3893,31 @@ fn l2r_addr_int(i : Int) -> u64 {
     let w = l2r_int_raw(i);
     if l2r_int_word_is_small(w) { w } else { let d = l2r_int_drop_raw(w); w }
 }
+// @int-backend end
+// @int-backend rcgmp
+// A `Nat` below 2^63 is natively its boxed scalar `2n+1`; a bigger one is
+// an object, here its handle's word (the address of its heap integer, read
+// as a number only, never decoded: rcgmp's immediates stop at 2^61).
+#[ffi(import)]
+fn l2r_addr_nat_big(n : Nat) -> u64 [{ n as u64 }];
+fn l2r_addr_nat(n : Nat) -> u64 {
+    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    if !wide && (v >> 63) == 0 { l2r_addr_word(v) } else { l2r_addr_nat_big(n) }
+}
+
+// An `Int` in the `int32` range is natively its boxed scalar; another is an
+// object, here its handle's word: a heap integer's address (even), or for
+// a value within rcgmp's immediate range (|i| below 2^61) the handle itself
+// (odd, at least 2^33 + 1, or from 2^63 for a negative value). The `int32`
+// words are odd and below 2^33, so the answers of different values differ
+// and `ptrEq` stays a valid shortcut (review R1-06).
+#[ffi(import)]
+fn l2r_addr_int_big(i : Int) -> u64 [{ i as u64 }];
+fn l2r_addr_int(i : Int) -> u64 {
+    let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    if !wide { l2r_addr_word((v as u32) as u64) } else { l2r_addr_int_big(i) }
+}
+// @int-backend end
 
 // A heap value's handle pointer, whatever its count: the address is the
 // identity even when this call holds the last reference (`ptrEq a b`

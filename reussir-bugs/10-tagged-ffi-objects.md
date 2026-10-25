@@ -69,7 +69,13 @@ handle's low bit is clear.
   `reussirFFIObjectTypeGet(..., tagged)`).
 - Dialect: `FFIObjectType` gets a default-valued `bool` parameter, printed
   `!reussir.ffi_object<"path", @hook, tagged = true>` and omitted when
-  false (existing IR is unchanged).
+  false (existing IR is unchanged). Since 2026-10-25 the type also has a
+  builder with the two old parameters (`FFIObjectType::get(ctx, name,
+  hook)` in `include/Reussir/IR/ReussirTypes.td`), which gives an untagged
+  object: C++ code written for the type before `tagged` compiles
+  unchanged. Upstream's C++ unit test `record_drop.cpp` builds the type
+  that way; without the builder, Reussir's C++ unit tests (`reussir-ut`)
+  do not compile. With it and 02-b's test update, all 82 pass.
 - Lowering (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`, the only
   place where `rc.inc` and `rc.dec` of an `ffi_object` become code):
   `beginRealBoxGuard` splits the block on `(ptrtoint p) & 1 == 0`; the

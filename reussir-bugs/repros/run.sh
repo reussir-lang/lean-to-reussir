@@ -10,8 +10,8 @@
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
 # line here: 1 to 4, 6 to 8, 12, 17 and 18 (number 5 is retired). Entries
-# 9 and 10 (missing features) have no repro: their patches carry their own
-# tests; 11 is a run-time cost of entry 2's stack; 13 needs a 32-bit
+# 9, 10 and 20 (missing features) have no repro: their patches carry their
+# own tests; 11 is a run-time cost of entry 2's stack; 13 needs a 32-bit
 # target, 14 MLIR written by hand, and 15 is shown by lean2rr's runtime
 # test RtArenaPurge. Entry 2's Miri test (bug02-unlink-provenance.rs) is
 # run by hand (its header). Each repro prints one line:

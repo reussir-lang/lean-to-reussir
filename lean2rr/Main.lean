@@ -14,10 +14,18 @@ structure CliOptions where
   disabled : Array String := #[]
   enabled : Array String := #[]
   listOpts : Bool := false
+  /-- The representation of `Nat` and `Int` (`--int-backend`; NatEncoding). -/
+  intBackend : IntBackend := .leanrt
+  /-- Whether Reussir passes a `Nat` or `Int` as a type argument of a
+  generic FFI function as an owned handle (`--rcgmp-type-args`, Reussir's
+  local patch R2): only then may `rcgmp` instantiate one at them
+  (`LowerCtx.natIntTypeArgs`). -/
+  rcgmpTypeArgs : Bool := false
 
 def usage : String :=
   "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|opt|rr] [--prelude FILE]\n" ++
   "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
+  "               [--int-backend leanrt|rcgmp] [--rcgmp-type-args]\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
   "  may contain non-identifier characters (`rbtree-zipper`) or be written `«rbtree-zipper»`."
@@ -56,10 +64,15 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | "--disable-opt" :: n :: rest, o => parseArgs rest { o with disabled := o.disabled.push n }
   | "--enable-opt" :: n :: rest, o => parseArgs rest { o with enabled := o.enabled.push n }
   | "--list-opts" :: rest, o => parseArgs rest { o with listOpts := true }
+  | "--int-backend" :: b :: rest, o =>
+    match IntBackend.ofString? b with
+    | some ib => parseArgs rest { o with intBackend := ib }
+    | none => .error s!"unknown --int-backend '{b}' (supported: leanrt, rcgmp)"
+  | "--rcgmp-type-args" :: rest, o => parseArgs rest { o with rcgmpTypeArgs := true }
   | "-o" :: f :: rest, o => parseArgs rest { o with output := some f }
   | a :: rest, o =>
     -- An option that takes an argument gets here only without one.
-    if a ∈ ["--root", "--emit", "--prelude", "--disable-opt", "--enable-opt", "-o"] then
+    if a ∈ ["--root", "--emit", "--prelude", "--disable-opt", "--enable-opt", "--int-backend", "-o"] then
       .error s!"option '{a}' needs an argument"
     else if a.startsWith "-" then .error s!"unknown option '{a}'"
     else if o.module.isSome then .error s!"unexpected argument '{a}'"
@@ -84,6 +97,11 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let prelude ← match opts.prelude with
     | some p => IO.FS.readFile p
     | none => pure ""
+  -- The blocks of the chosen representation of `Nat` and `Int` (the
+  -- prelude keeps both; NatEncoding).
+  let prelude ← match filterIntBackend prelude opts.intBackend with
+    | .ok p => pure p
+    | .error e => throwError "lean2rr: {e}"
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
   -- startup items (the program's constants and `initialize` actions, and
   -- the `initialize` declarations of Lean's library, in Lean's module
@@ -91,7 +109,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- implements (the message of a refused extern, `Mono.computeExternRoute`).
   let (leanInit, items) ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root leanInit items)
-    { preludeFns := ← preludeFnDeclsM prelude }
+    { preludeFns := ← preludeFnDeclsM prelude, intBackend := opts.intBackend }
   -- The startup steps, with instance names; the registry's pass that
   -- leaves out the steps of unread constants without effects, with what
   -- only they reach (`Opt/UnreadConsts`).
@@ -180,7 +198,12 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- #670 and #674; their repros are in git history).
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
-  return (prog.runRRPasses cfg).render cfg.prunePrelude
+  let prog := prog.runRRPasses cfg
+  -- `--int-backend rcgmp` without `--rcgmp-type-args`: no `Nat` or `Int`
+  -- left at a type argument of the runtime's generic FFI functions
+  -- (Emit/IntBackendCheck).
+  if cfg.intBackend == .rcgmp && !cfg.rcgmpTypeArgs then intBackendCheck prog
+  return prog.render cfg.prunePrelude
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   let env ← loadEnvironment #[module]
@@ -221,7 +244,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok opts =>
     -- The registry's passes, minus `--disable-opt`, plus `--enable-opt`
     -- (the names are checked first, also for `--list-opts`).
-    let cfg ← match Opt.config opts.disabled opts.enabled with
+    let cfg ← match Opt.config opts.disabled opts.enabled opts.intBackend opts.rcgmpTypeArgs with
       | .ok cfg => pure cfg
       | .error e =>
         IO.eprintln s!"lean2rr: {e}"

@@ -103,7 +103,13 @@ applied to 0378b744 with no change on 2026-10-24, and to ea240b19 and
   registered in the pass's shared symbol table when it is made (upstream
   #671 shares one table per pass; without the registration the second dtor
   declared the function again: "redefinition of symbol named
-  `__reussir_drop_drain`"). That line was part of old 11-b.
+  `__reussir_drop_drain`"). That line was part of old 11-b. Since
+  2026-10-25 it also updates upstream's C++ unit test
+  `tests/unittest/cases/glue_symbols.cpp`: the test counts the
+  `func.func` operations of a module with the dtors, and the
+  non-atomic dtor's `__reussir_drop_drain` declaration makes them 6, not
+  5. Without it, that test fails when Reussir's C++ unit tests
+  (`reussir-ut`) are built; with it and 10-a's builder, all 82 pass.
 - **02-c** (was 13-c): the same stack, cheaper. Consecutive deferred cells
   form one run linked through the cells' headers (no memory per pending
   cell; `_wide` deferrals only). It has the fix of old entry 47: `unlink`

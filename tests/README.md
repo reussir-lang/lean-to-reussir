@@ -90,6 +90,7 @@ The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
 `tests/runtime/conv-count-check.sh`, `tests/runtime/alloc-check.sh`,
 `tests/runtime/paynothing-check.sh`, `tests/runtime/determinism-check.sh`,
+`tests/runtime/int-backend-check.sh`, `tests/runtime/int-match-check.sh`,
 `tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
 `scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
 (`lean2rr/lean-toolchain`, the elan toolchain
@@ -221,8 +222,10 @@ which must finish (`stats-polyrec`).
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
 lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.enable-opts`,
-`.xfail`, `.ffi.c`, `.refused`, `.l2r-log` and `.l2r-debug` files: `.opts`
-turns optimizations off for the test, `.enable-opts` turns on one that is
+`.int-backend`, `.xfail`, `.ffi.c`, `.refused`, `.l2r-log` and
+`.l2r-debug` files: `.opts` turns optimizations off for the test,
+`.int-backend` builds it with one representation of `Nat` and `Int`
+whatever the run's `L2R_INT_BACKEND`, `.enable-opts` turns on one that is
 off by default (`unread-fields`), `.ffi.c` is C code for the native build
 only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
 expected in lean2rr's build output, `.l2r-debug` the same with lean2rr
@@ -267,7 +270,10 @@ error natively; before the fix, an internal panic).
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run, such as no big
-`Int` in the small range).
+`Int` in the small range). With `L2R_INT_BACKEND=rcgmp` it builds leanrt
+as `--int-backend rcgmp` does (`--cfg leanrt_rcgmp`) and links the
+Reussir checkout's rcgmp runtime: `leanrt::rcgmp`'s tests (a big `Nat` or
+`Int` in a box's cell, shared and unique; `low_bits`) run too.
 `tests/runtime/any-probe.sh` probes the one-word box `LAny` (every `Box`)
 with a hand-written Reussir program (`tests/runtime/any-probe/`)
 appended to a translated host program and linked with an allocation
@@ -872,6 +878,53 @@ e4a1e5f (boxed arrays) every output equals native's.
 | RtCArrMatchPatterns | array literal patterns, `a = #[]`, derived instances of a structure with array fields, and one `⟨xs⟩` pattern on an `Array Float`: every kind stays compact (`RtCArrMatchPatterns.l2r-debug`; on dev 0b6ef980 the `⟨xs⟩` pattern turned `f64` off) | — |
 | RtCArrMatchBytes | `match b with \| ⟨arr⟩` on a `ByteArray` and a `FloatArray`: the data read, updated, mapped and rebuilt, `.data` of a byte array that stays in use, and both fields of a structure taken apart in a loop (`flatten-structs`): every kind stays compact (`RtCArrMatchBytes.l2r-debug`; on dev 0b6ef980 `u8` and `f64` were off) | — |
 | RtCArrMatchBytesMap | `match b with \| ⟨arr⟩ => ⟨arr.map (· + 1)⟩` on a `ByteArray`, the program's only `Array UInt8`: the map runs in place over the bytes and every kind stays compact (`RtCArrMatchBytesMap.l2r-debug`; on dev 0b6ef980 the bytes were copied into boxes and back, and `u8` was off, also for an unrelated `Array Bool`) | — |
+
+### `--int-backend rcgmp`: Reussir's built-in integers
+
+`L2R_INT_BACKEND=rcgmp tests/runtime/run.sh …` builds the tests with
+`Nat` and `Int` as Reussir's built-in integers (lean2rr's
+`--int-backend rcgmp`; scripts/l2r.py needs a Reussir with its rcgmp
+feature and the local patches it checks). An item `int:leanrt` or
+`int:rcgmp` in the `[OPT,…] ` prefix of a line of a `.l2r-log` or
+`.l2r-debug` file checks the line only under that representation; a
+test's `NAME.int-backend` fixes its representation. The expected typed
+array and typed cell kinds (`RtTArr*`, `RtTRef*`) are those of rcgmp with
+`--rcgmp-type-args` (Reussir's handles at type arguments), the same as
+leanrt's; without it `Nat` and `Int` have none. Every test means the same
+under both representations. Tests for the switch (each passes under
+both):
+
+| test | what |
+|---|---|
+| RtNatImmEdges | `Nat` and `Int` at the edges of both representations' immediates (2^31, 2^32, 2^61, 2^62, 2^63, 2^64; `Int` ±2^31, ±2^61, ±2^63), each as a literal, computed and read back from a box: every operation and conversion, equality and order of all pairs |
+| RtNatDivZero | every division of `Nat` and `Int` (`/`, `%`, `divExact`, `tdiv`/`tmod`, `ediv`/`emod`, `fdiv`/`fmod`, `bdiv`/`bmod`) by 0, 1, -1 and a big divisor, on immediate and heap operands, divisors computed and literal |
+| RtNatLitHuge | a `Nat` literal of 20000 digits, as a constant read in a loop and as a literal in a function's code |
+| RtNatGenericFfi | `Nat` and `Int` where the runtime holds them through its generic functions: computed constants (once-cells), `dbgTraceIfShared` at `Nat`, arrays of `Nat`, `Int` and `Array Nat`, references, thunks and tasks |
+| RtNatGenericBig | a big literal's closed term and a typed `Array Nat` read after other allocations (review R1-01 of step D: under rcgmp without lean2rr's guard the sums were silently wrong) |
+| RtNatBoxedConsts | `Nat` and `Int` constants at the edges of the box's immediates (`Nat` 2^63; `Int` 2^31 - 1, ±2^31, -2^31 - 1, 3000000000, 2^32 - 1, 2^32, 2^62 - 1, ±2^62, -2^62 - 1; computed by `Int.pow`, `Int.neg`, `Int.sub`) stored in lists: under rcgmp `boxed-consts` boxes only those whose box is a cell once (review of step D: `k5 : Nat := 5` had a once-cell; `int-backend-check.sh` checks the once-cells) |
+| RtNatTestBit | `Nat.testBit` on small and big values at indices below, at and past the value's bit length, up to 2^70, also as a function value (`m.testBit` and `Nat.testBit` passed to functions that are not inlined, which call the instance's own code), and a bit matrix set with `\|\|\|` and read back; under rcgmp `prelude-int-ops` computes it with `l2r_nat_test_bit` (rcgmp's `testbiti`), under leanrt with Lean's definition (`RtNatTestBit.l2r-debug`) |
+| RtFloatOfNatInt | `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` on values computed at run time (not folded by `float-lits`): the immediates' edges, 2^53 ± 1, ties to even at 2^53, 2^54, 2^64, 2^100 and 2^200 (one decided by a bit far below the halfway point), the largest finite double and `(2^54 - 1) * 2^970`, which goes up to an infinity, far past it, and their negatives, by direct calls and through function values; under rcgmp `prelude-int-ops` computes them with `sitofp` (`l2r_float_of_nat`/`_int`), under leanrt with Lean's `Float.ofScientific` (`RtFloatOfNatInt.l2r-debug`) |
+| RtNatMatch | case splits on `Nat`, under rcgmp `match`es on the built-in integer (`int-match`): `0`/`n+1`, nested splits fused (`0`, `1`, `n+2`; `0`, `1`, `2`, `n+3`), chains of literal tests (literals from 2^61 on among them) ending in a default or in `n+1`, the scrutinee named in each kind of arm, used after the split, a test whose result is used twice, tail recursion, Ackermann; immediates, rcgmp's immediate edges and heap values |
+| RtIntMatch | case splits on `Int` (`ofNat`/`negSucc`, the fields' splits fused: `0`, `ofNat (n+1)`, `-1`, `negSucc (m+1)`), the scrutinee named in each arm, `Int.repr`, `toNat`, `natAbs`, a sign split in a loop; small values of both signs, ±2^61 and neighbours, ±2^63, ±2^64, ±10^30 |
+| RtIntMatchNoExtract | `Int` literal matches with `compiler.extract_closed false`, so a negative literal is computed in place (`Int.neg (Int.ofNat 6)`) and an arm returns the literal it was tested against; literal tests before the `Int` split with nested fields; ±2^70 (review of 762c2ac6: an arm kept the literal's `let` but not the `let`s it reads, and lean2rr stopped with an internal error) |
+
+`tests/runtime/int-backend-check.sh` checks lean2rr's guard of rcgmp
+without `--rcgmp-type-args` (translation only, no Reussir): on
+`RtNatGenericFfi` and `RtNatGenericBig` the `.rr` has no `Nat` or `Int` at a
+type argument of the runtime's generic FFI functions; with
+`L2R_TEST_NAT_TYPE_ARGS=1` (the lowering leaves them there) lean2rr stops
+with the check's internal error (`Emit/IntBackendCheck`); with
+`--rcgmp-type-args` it translates. It also checks `boxed-consts` on
+`RtNatBoxedConsts`: under rcgmp only the `Nat` and `Int` constants whose box
+is a cell get a once-cell (`l2r_boxed_N`), under leanrt none.
+
+`tests/runtime/int-match-check.sh` checks the shapes of `int-match`
+(translation only, no Reussir): under rcgmp `RtNatMatch`'s and
+`RtIntMatch`'s splits are `match`es (`sumTo`, `fib`, a chain of eight
+literal arms, a copy of the scrutinee where an `n+1` arm names it, the
+fused `Int` splits) and no test or `Nat.sub` is left in them; with
+`--disable-opt int-match` no `match` on a `Nat` or `Int` is left; under
+leanrt the pass changes nothing.
 
 ### Typed arrays: the `RtTArr*` corpus
 

@@ -1,0 +1,953 @@
+From c13b1ac39782574838974cee1ed63129172f205e Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 24 Oct 2026 23:28:28 -0400
+Subject: [PATCH 09/13] l2r-local: step D (R1): bigint intrinsics for Lean's
+ division modes and floormod2expi
+
+lean2rr lowers Lean's Nat and Int onto the rcgmp builtin (step D). Lean's
+divisions do not trap on a zero divisor: x / 0 = 0 and x % 0 = x, for
+Nat.div/mod, Int.tdiv/tmod (lean_int_div/mod), Int.ediv/emod, Int.fdiv/fmod
+and the exact divisions (0 / 0 = 0). Its mod-2^k rewrite needs the
+remainder by a power of two. mlir-rcgmp has both: the `divzero<lean>` mode
+of divsi, remsi, edivsi, emodsi, floordivsi, floormodsi and `divsi exact`,
+lowered inline on immediates and to the rcgmp_mpz_*_lean runtime entries
+on heap values, and `rcgmp.floormod2expi`. Reussir's `core::intrinsic::
+bigint` exposes neither, so the prelude has to compose a zero test and the
+trapping operation (two tests on the immediate path) and cannot reach the
+power-of-two remainder at all.
+
+New `core::intrinsic::bigint` intrinsics, declared in core like the others
+and lowered to the operation their name spells:
+
+- `divsi_lean`, `remsi_lean`, `edivsi_lean`, `emodsi_lean`,
+  `floordivsi_lean`, `floormodsi_lean`, `divsi_exact_lean`, each
+  `(T, T) -> T` for T = Nat or Int: the trapping operation with
+  `divzero<lean>`;
+- `floormod2expi(x : T, amount : u64) -> T`: `rcgmp.floormod2expi`, x
+  modulo 2^amount rounded toward negative infinity (the low bits of the
+  infinite two's complement, never negative).
+
+All consume their integer operands, as the existing divisions do, so the
+ownership analysis and monomorphization's operand check need no change.
+
+Divisions of Nats also set rcgmp's `nonnegative` attribute (mlir-rcgmp
+#48, in the pinned ca288d5e): both operands are nonnegative, so immediates
+untag by a logical shift and divide unsigned, with no test of the
+quotient, and every rounding agrees. This covers the `/` and `%`
+operators at Nat and every division intrinsic at Nat, the existing
+trapping ones and the `_lean` ones; Int divisions are unchanged. (If
+upstream sets the attribute itself, this part drops.)
+
+The backend gains `rcgmp::division` and `rcgmp::exact_division`, which
+take a `DivisionMode { lean, nonnegative }`, and `Shift::FloorMod2Exp`
+(the dialect's floormod2expi is a shift-shaped op).
+
+Tests: frontend/bigint_lean_division.rr (each mode on immediate and heap
+operands of every sign, heap by heap included, the smallest immediate by
+-1 whose quotient 2^61 is a heap value, a zero divisor from the driver so
+the runtime paths run, and constant operands that fold),
+frontend/bigint_floormod2exp.rr (amounts 0, within the value, around the
+62-bit immediate width and the largest u64, on Nat, negative Int and heap
+values, a cross-check against floormodsi by 2^k for k up to 130, an
+in-place reduction chain), both also under ASan in
+sanitizer/bigint-asan.rr, the new names and the `nonnegative` Nat
+divisions in frontend/bigint_intrinsics.rr (MIR round trip, MLIR
+spelling), and in bigint_lean_division.rr the -O LLVM IR of a Nat `/` and
+a Nat `remsi_lean` (unsigned division of the untagged immediates) against
+an Int `/` (signed).
+---
+ crates/reussir-backend/src/rcgmp.rs           |  96 +++++++
+ .../reussir-codegen/src/lower/expr/bigint.rs  |  63 ++++-
+ crates/reussir-core/src/intrinsic.rs          |  40 +++
+ crates/reussir-core/src/semi/check.rs         |  17 +-
+ library/core/src/intrinsic/bigint.rr          |  43 ++++
+ .../frontend/bigint_floormod2exp.c            |  16 ++
+ .../frontend/bigint_floormod2exp.rr           | 122 +++++++++
+ .../integration/frontend/bigint_intrinsics.rr |  28 ++
+ .../frontend/bigint_lean_division.c           |  16 ++
+ .../frontend/bigint_lean_division.rr          | 239 ++++++++++++++++++
+ tests/integration/sanitizer/bigint-asan.rr    |   8 +
+ 11 files changed, 674 insertions(+), 14 deletions(-)
+ create mode 100644 tests/integration/frontend/bigint_floormod2exp.c
+ create mode 100644 tests/integration/frontend/bigint_floormod2exp.rr
+ create mode 100644 tests/integration/frontend/bigint_lean_division.c
+ create mode 100644 tests/integration/frontend/bigint_lean_division.rr
+
+diff --git a/crates/reussir-backend/src/rcgmp.rs b/crates/reussir-backend/src/rcgmp.rs
+index 3b8e6351..afa95ec8 100644
+--- a/crates/reussir-backend/src/rcgmp.rs
++++ b/crates/reussir-backend/src/rcgmp.rs
+@@ -111,6 +111,20 @@ impl Binary {
+             Binary::Xor => "rcgmp.xori",
+         }
+     }
++
++    /// Whether the operation is a quotient or a remainder, which takes a
++    /// [`DivisionMode`].
++    fn is_division(self) -> bool {
++        matches!(
++            self,
++            Binary::Div
++                | Binary::Rem
++                | Binary::EuclidDiv
++                | Binary::EuclidRem
++                | Binary::FloorDiv
++                | Binary::FloorRem
++        )
++    }
+ }
+ 
+ /// `<op> <lhs>, <rhs>`: consume both operands and produce one owned result.
+@@ -127,6 +141,65 @@ pub fn binary<'c>(
+         .unwrap_or_else(|_| panic!("valid {}", op.name()))
+ }
+ 
++/// How a division treats its operands, beyond the dialect's defaults (a zero
++/// divisor terminates the program; operands of either sign).
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
++pub struct DivisionMode {
++    /// `divzero<lean>`: a zero divisor gives the quotient zero and the
++    /// remainder the dividend, as Lean's integer division does.
++    pub lean: bool,
++    /// `nonnegative`: both operands are nonnegative, as `Nat`s are, so
++    /// immediates divide unsigned and every rounding agrees.
++    pub nonnegative: bool,
++}
++
++impl DivisionMode {
++    /// The attributes setting this mode on a division, after `exact` for an
++    /// exact quotient.
++    fn attributes<'c>(
++        self,
++        context: &'c Context,
++        exact: bool,
++    ) -> Vec<(Identifier<'c>, Attribute<'c>)> {
++        let mut attributes = Vec::new();
++        if exact {
++            attributes.push((Identifier::new(context, "exact"), Attribute::unit(context)));
++        }
++        if self.nonnegative {
++            attributes.push((
++                Identifier::new(context, "nonnegative"),
++                Attribute::unit(context),
++            ));
++        }
++        if self.lean {
++            attributes.push((
++                Identifier::new(context, "divZero"),
++                Attribute::parse(context, "#rcgmp.divzero<lean>").expect("valid #rcgmp.divzero"),
++            ));
++        }
++        attributes
++    }
++}
++
++/// `<op> <lhs>, <rhs> [nonnegative] [divzero<lean>]`: a quotient or remainder
++/// `op` in `mode`, consuming both operands.
++pub fn division<'c>(
++    context: &'c Context,
++    op: Binary,
++    lhs: Value<'c, '_>,
++    rhs: Value<'c, '_>,
++    mode: DivisionMode,
++    location: Location<'c>,
++) -> Operation<'c> {
++    assert!(op.is_division(), "{} is not a division", op.name());
++    OperationBuilder::new(op.name(), location)
++        .add_attributes(&mode.attributes(context, false))
++        .add_operands(&[lhs, rhs])
++        .add_results(&[lhs.r#type()])
++        .build()
++        .unwrap_or_else(|_| panic!("valid {}", op.name()))
++}
++
+ /// A unary operation consuming its operand.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum Unary {
+@@ -167,6 +240,24 @@ pub fn divsi_exact<'c>(
+         .expect("valid rcgmp.divsi")
+ }
+ 
++/// `rcgmp.divsi <lhs>, <rhs> exact [nonnegative] [divzero<lean>]`:
++/// [`divsi_exact`] in `mode`. With a Lean zero divisor, the only multiple of
++/// zero is zero, whose quotient is zero.
++pub fn exact_division<'c>(
++    context: &'c Context,
++    lhs: Value<'c, '_>,
++    rhs: Value<'c, '_>,
++    mode: DivisionMode,
++    location: Location<'c>,
++) -> Operation<'c> {
++    OperationBuilder::new("rcgmp.divsi", location)
++        .add_attributes(&mode.attributes(context, true))
++        .add_operands(&[lhs, rhs])
++        .add_results(&[lhs.r#type()])
++        .build()
++        .expect("valid rcgmp.divsi")
++}
++
+ /// `rcgmp.ipowi <base>, <exponent>`: consume `base` and raise it to the
+ /// unsigned fixed-width `exponent`.
+ pub fn ipowi<'c>(
+@@ -212,6 +303,10 @@ pub enum Shift {
+     Left,
+     /// Arithmetic: rounds toward negative infinity.
+     Right,
++    /// The remainder of [`Shift::Right`], `rcgmp.floormod2expi`: the integer
++    /// modulo two to the power of the amount, the low bits of its infinite
++    /// two's complement read as a nonnegative integer.
++    FloorMod2Exp,
+ }
+ 
+ /// `<op> <value>, <amount>`: consume `value` and shift it by `amount` bits.
+@@ -224,6 +319,7 @@ pub fn shift<'c>(
+     let name = match op {
+         Shift::Left => "rcgmp.shli",
+         Shift::Right => "rcgmp.shrsi",
++        Shift::FloorMod2Exp => "rcgmp.floormod2expi",
+     };
+     OperationBuilder::new(name, location)
+         .add_operands(&[value, amount])
+diff --git a/crates/reussir-codegen/src/lower/expr/bigint.rs b/crates/reussir-codegen/src/lower/expr/bigint.rs
+index bb6f560c..3933a118 100644
+--- a/crates/reussir-codegen/src/lower/expr/bigint.rs
++++ b/crates/reussir-codegen/src/lower/expr/bigint.rs
+@@ -23,7 +23,7 @@ use reussir_backend::builders;
+ use reussir_backend::melior::dialect::arith::{self, CmpiPredicate};
+ use reussir_backend::melior::ir::attribute::{Attribute, IntegerAttribute};
+ use reussir_backend::melior::ir::{Block, BlockLike, Region, RegionLike, Type, Value, ValueLike};
+-use reussir_backend::rcgmp::{self, ArmKind, Binary, Predicate, Shift, Unary};
++use reussir_backend::rcgmp::{self, ArmKind, Binary, DivisionMode, Predicate, Shift, Unary};
+ use reussir_core::full::mir::{self, DecisionTree, Expr, ExprKind};
+ use reussir_core::full::ownership::subtrees;
+ use reussir_core::intrinsic::BigIntFn;
+@@ -124,7 +124,8 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// Integer arithmetic, consuming both operands. Subtraction on `Nat` is
+     /// truncated at zero, so the type stays closed under it. Division and
+     /// remainder truncate, as they do for fixed-width integers, and a zero
+-    /// divisor terminates the program. Bitwise operations act on the infinite
++    /// divisor terminates the program; on `Nat` they are `nonnegative`, so
++    /// immediates divide unsigned. Bitwise operations act on the infinite
+     /// two's complement, so `>>` rounds toward negative infinity.
+     pub(super) fn bigint_arith<'b>(
+         &self,
+@@ -139,6 +140,21 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+             (ArithOp::Sub, BigIntTy::Nat) => Binary::Monus,
+             (ArithOp::Sub, BigIntTy::Int) => Binary::Sub,
+             (ArithOp::Mul, _) => Binary::Mul,
++            (ArithOp::Div | ArithOp::Mod, BigIntTy::Nat) => {
++                let division = if matches!(op, ArithOp::Div) {
++                    Binary::Div
++                } else {
++                    Binary::Rem
++                };
++                let mode = DivisionMode {
++                    nonnegative: true,
++                    ..DivisionMode::default()
++                };
++                return Ok(self.append(
++                    block,
++                    rcgmp::division(self.context, division, lv, rv, mode, self.loc()),
++                ));
++            }
+             (ArithOp::Div, _) => Binary::Div,
+             (ArithOp::Mod, _) => Binary::Rem,
+             (ArithOp::BitAnd, _) => Binary::And,
+@@ -220,7 +236,7 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// A `core::intrinsic::bigint` call. The borrowing operations leave their
+     /// integer operand with the caller, which releases it afterwards when
+     /// this was its last use, through the temporary recorded here; the others
+-    /// consume their integer operands.
++    /// consume their integer operands. Divisions of `Nat`s are `nonnegative`.
+     pub(super) fn lower_bigint_intrinsic<'b>(
+         &self,
+         block: &'b Block<'c>,
+@@ -242,16 +258,30 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+         }
+         let loc = self.loc();
+         let binary = |op| Ok(self.append(block, rcgmp::binary(op, operands[0], operands[1], loc)));
++        let nonnegative = args
++            .first()
++            .and_then(|a| a.ty.bigint())
++            .is_some_and(|(int, _)| int == BigIntTy::Nat);
++        let mode = |lean| DivisionMode { lean, nonnegative };
++        let divide = |op, lean| {
++            Ok(self.append(
++                block,
++                rcgmp::division(self.context, op, operands[0], operands[1], mode(lean), loc),
++            ))
++        };
++        let divide_exact = |lean| {
++            Ok(self.append(
++                block,
++                rcgmp::exact_division(self.context, operands[0], operands[1], mode(lean), loc),
++            ))
++        };
+         match func {
+             BigIntFn::Gcdi => binary(Binary::Gcd),
+-            BigIntFn::Edivsi => binary(Binary::EuclidDiv),
+-            BigIntFn::Emodsi => binary(Binary::EuclidRem),
+-            BigIntFn::Floordivsi => binary(Binary::FloorDiv),
+-            BigIntFn::Floormodsi => binary(Binary::FloorRem),
+-            BigIntFn::DivsiExact => Ok(self.append(
+-                block,
+-                rcgmp::divsi_exact(self.context, operands[0], operands[1], loc),
+-            )),
++            BigIntFn::Edivsi => divide(Binary::EuclidDiv, false),
++            BigIntFn::Emodsi => divide(Binary::EuclidRem, false),
++            BigIntFn::Floordivsi => divide(Binary::FloorDiv, false),
++            BigIntFn::Floormodsi => divide(Binary::FloorRem, false),
++            BigIntFn::DivsiExact => divide_exact(false),
+             BigIntFn::Ipowi => Ok(self.append(block, rcgmp::ipowi(operands[0], operands[1], loc))),
+             BigIntFn::Absi => Ok(self.append(block, rcgmp::unary(Unary::Abs, operands[0], loc))),
+             BigIntFn::Log2i => {
+@@ -286,6 +316,17 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+                 let ty = self.tys.mlir_ty(e.ty)?;
+                 Ok(self.append(block, rcgmp::limb(operands[0], index, ty, loc)))
+             }
++            BigIntFn::DivsiLean => divide(Binary::Div, true),
++            BigIntFn::RemsiLean => divide(Binary::Rem, true),
++            BigIntFn::EdivsiLean => divide(Binary::EuclidDiv, true),
++            BigIntFn::EmodsiLean => divide(Binary::EuclidRem, true),
++            BigIntFn::FloordivsiLean => divide(Binary::FloorDiv, true),
++            BigIntFn::FloormodsiLean => divide(Binary::FloorRem, true),
++            BigIntFn::DivsiExactLean => divide_exact(true),
++            BigIntFn::Floormod2expi => Ok(self.append(
++                block,
++                rcgmp::shift(Shift::FloorMod2Exp, operands[0], operands[1], loc),
++            )),
+             BigIntFn::TrunciOverflow => {
+                 let TyKind::Tuple([fixed, _]) = e.ty.kind() else {
+                     return err("`trunci_overflow` result is not a pair");
+diff --git a/crates/reussir-core/src/intrinsic.rs b/crates/reussir-core/src/intrinsic.rs
+index 2463e1c2..2ebe3172 100644
+--- a/crates/reussir-core/src/intrinsic.rs
++++ b/crates/reussir-core/src/intrinsic.rs
+@@ -618,6 +618,30 @@ pub enum BigIntFn {
+     /// `limb(x, i: u64) -> u64`: limb `i` of the magnitude, least significant
+     /// first, or zero past the last one.
+     Limb,
++    /// `divsi_lean(a, b)`: the quotient rounded toward zero, with Lean's zero
++    /// divisor: `a / 0 = 0`.
++    DivsiLean,
++    /// `remsi_lean(a, b)`: the remainder with the sign of `a`, with Lean's
++    /// zero divisor: `a % 0 = a`.
++    RemsiLean,
++    /// `edivsi_lean(a, b)`: the Euclidean quotient; `0` for a zero divisor.
++    EdivsiLean,
++    /// `emodsi_lean(a, b)`: the Euclidean remainder; `a` for a zero divisor.
++    EmodsiLean,
++    /// `floordivsi_lean(a, b)`: the quotient rounded toward negative
++    /// infinity; `0` for a zero divisor.
++    FloordivsiLean,
++    /// `floormodsi_lean(a, b)`: the remainder with the sign of `b`; `a` for a
++    /// zero divisor.
++    FloormodsiLean,
++    /// `divsi_exact_lean(a, b)`: the quotient of an exact division; `a` must
++    /// be a multiple of `b`, and the only multiple of zero, `0`, divided by
++    /// zero is `0`.
++    DivsiExactLean,
++    /// `floormod2expi(x, amount: u64)`: `x` modulo `2^amount`, rounded toward
++    /// negative infinity: the low `amount` bits of the infinite two's
++    /// complement, read as a nonnegative integer.
++    Floormod2expi,
+ }
+ 
+ impl BigIntFn {
+@@ -637,6 +661,14 @@ impl BigIntFn {
+         BigIntFn::Fptosi,
+         BigIntFn::LimbCount,
+         BigIntFn::Limb,
++        BigIntFn::DivsiLean,
++        BigIntFn::RemsiLean,
++        BigIntFn::EdivsiLean,
++        BigIntFn::EmodsiLean,
++        BigIntFn::FloordivsiLean,
++        BigIntFn::FloormodsiLean,
++        BigIntFn::DivsiExactLean,
++        BigIntFn::Floormod2expi,
+     ];
+ 
+     /// Parse a surface / textual-IR name.
+@@ -662,6 +694,14 @@ impl BigIntFn {
+             BigIntFn::Fptosi => "fptosi",
+             BigIntFn::LimbCount => "limb_count",
+             BigIntFn::Limb => "limb",
++            BigIntFn::DivsiLean => "divsi_lean",
++            BigIntFn::RemsiLean => "remsi_lean",
++            BigIntFn::EdivsiLean => "edivsi_lean",
++            BigIntFn::EmodsiLean => "emodsi_lean",
++            BigIntFn::FloordivsiLean => "floordivsi_lean",
++            BigIntFn::FloormodsiLean => "floormodsi_lean",
++            BigIntFn::DivsiExactLean => "divsi_exact_lean",
++            BigIntFn::Floormod2expi => "floormod2expi",
+         }
+     }
+ 
+diff --git a/crates/reussir-core/src/semi/check.rs b/crates/reussir-core/src/semi/check.rs
+index 7d3206db..a8e3ad7d 100644
+--- a/crates/reussir-core/src/semi/check.rs
++++ b/crates/reussir-core/src/semi/check.rs
+@@ -4138,9 +4138,12 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+     /// `floordivsi`/`floormodsi(T, T) -> T`, `absi(T) -> Nat`, and
+     /// `trunci_overflow(T) -> (U, bool)` for a fixed-width integer `U`, the
+     /// optional second type argument, `sitofp(T) -> f64`,
+-    /// `limb_count(T) -> u64`, `limb(T, u64) -> u64`, and `fptosi(f64) ->
+-    /// Int`, which takes no type argument. A `T` this check cannot see yet is
+-    /// left to monomorphization, which rejects anything but `Nat` and `Int`.
++    /// `limb_count(T) -> u64`, `limb(T, u64) -> u64`, `fptosi(f64) -> Int`,
++    /// which takes no type argument, the Lean divisions `divsi_lean`/
++    /// `remsi_lean`/`edivsi_lean`/`emodsi_lean`/`floordivsi_lean`/
++    /// `floormodsi_lean`/`divsi_exact_lean(T, T) -> T`, and
++    /// `floormod2expi(T, u64) -> T`. A `T` this check cannot see yet is left
++    /// to monomorphization, which rejects anything but `Nat` and `Int`.
+     fn infer_bigint_intrinsic(&mut self, fc: &surface::FuncCall, span: Option<Span>) -> Expr<'tcx> {
+         use crate::intrinsic::{BigIntFn, IntrinsicOp};
+         use crate::semi::ty::{BigIntTy, IntTy};
+@@ -4201,6 +4204,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+             BigIntFn::Fptosi => (vec![f64_ty], int),
+             BigIntFn::LimbCount => (vec![int], u64_ty),
+             BigIntFn::Limb => (vec![int, u64_ty], u64_ty),
++            BigIntFn::DivsiLean
++            | BigIntFn::RemsiLean
++            | BigIntFn::EdivsiLean
++            | BigIntFn::EmodsiLean
++            | BigIntFn::FloordivsiLean
++            | BigIntFn::FloormodsiLean
++            | BigIntFn::DivsiExactLean => (vec![int, int], int),
++            BigIntFn::Floormod2expi => (vec![int, u64_ty], int),
+         };
+         if fc.args.len() != params.len() {
+             self.error(
+diff --git a/library/core/src/intrinsic/bigint.rr b/library/core/src/intrinsic/bigint.rr
+index 3173d64b..cbc0e6c4 100644
+--- a/library/core/src/intrinsic/bigint.rr
++++ b/library/core/src/intrinsic/bigint.rr
+@@ -76,3 +76,46 @@ pub fn limb_count<T: Integral>(x: T) -> u64;
+ /// bits of `|x| >> (64 * i)`, so `0` from `limb_count(x)` on.
+ #[lang("core::intrinsic::bigint::limb")]
+ pub fn limb<T: Integral>(x: T, i: u64) -> u64;
++
++/// The quotient of `a` by `b` rounded toward zero, or `0` when `b` is zero,
++/// as Lean's `Nat.div` and `Int.tdiv` give.
++#[lang("core::intrinsic::bigint::divsi_lean")]
++pub fn divsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The remainder of `divsi_lean(a, b)`, with the sign of `a`, or `a` when `b`
++/// is zero, as Lean's `Nat.mod` and `Int.tmod` give.
++#[lang("core::intrinsic::bigint::remsi_lean")]
++pub fn remsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The Euclidean quotient of `a` by `b`, or `0` when `b` is zero, as Lean's
++/// `Int.ediv` gives.
++#[lang("core::intrinsic::bigint::edivsi_lean")]
++pub fn edivsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The Euclidean remainder of `a` by `b`, never negative, or `a` when `b` is
++/// zero, as Lean's `Int.emod` gives.
++#[lang("core::intrinsic::bigint::emodsi_lean")]
++pub fn emodsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The quotient of `a` by `b` rounded toward negative infinity, or `0` when
++/// `b` is zero, as Lean's `Int.fdiv` gives.
++#[lang("core::intrinsic::bigint::floordivsi_lean")]
++pub fn floordivsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The remainder of `floordivsi_lean(a, b)`, with the sign of `b`, or `a` when
++/// `b` is zero, as Lean's `Int.fmod` gives.
++#[lang("core::intrinsic::bigint::floormodsi_lean")]
++pub fn floormodsi_lean<T: Integral>(a: T, b: T) -> T;
++
++/// The quotient `a / b` of an exact division: `a` must be a multiple of `b`,
++/// otherwise the result is unspecified. The only multiple of zero is `0`,
++/// whose quotient by zero is `0`, as for Lean's `Nat.divExact` and
++/// `Int.divExact`.
++#[lang("core::intrinsic::bigint::divsi_exact_lean")]
++pub fn divsi_exact_lean<T: Integral>(a: T, b: T) -> T;
++
++/// `x` modulo `2^amount`, rounded toward negative infinity: the low `amount`
++/// bits of the infinite two's complement of `x`, read as a nonnegative
++/// integer. `0` for an amount of zero.
++#[lang("core::intrinsic::bigint::floormod2expi")]
++pub fn floormod2expi<T: Integral>(x: T, amount: u64) -> T;
+diff --git a/tests/integration/frontend/bigint_floormod2exp.c b/tests/integration/frontend/bigint_floormod2exp.c
+new file mode 100644
+index 00000000..4ed6dd25
+--- /dev/null
++++ b/tests/integration/frontend/bigint_floormod2exp.c
+@@ -0,0 +1,16 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for bigint_floormod2exp.rr: six independent properties, one decimal
++// digit each. The one and the largest amount it passes are unknown to the
++// compiled code, so its reductions run rather than fold.
++
++extern long long reussir_main(unsigned long long one, unsigned long long all);
++
++int main(void) { return reussir_main(1, ~0ull) == 111111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/bigint_floormod2exp.rr b/tests/integration/frontend/bigint_floormod2exp.rr
+new file mode 100644
+index 00000000..9bc050de
+--- /dev/null
++++ b/tests/integration/frontend/bigint_floormod2exp.rr
+@@ -0,0 +1,122 @@
++// `floormod2expi(x, amount)` reduces a `Nat` or an `Int` modulo two to the
++// power `amount`, rounded toward negative infinity: the low `amount` bits of
++// the infinite two's complement, never negative. Immediates and heap values,
++// amounts on both sides of the immediate width and the saturated largest one,
++// and a cross-check against `floormodsi` by the power itself. The driver
++// supplies the operands, so the runtime paths are taken; constant operands fold
++// to the same results.
++
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri --emit mlir -o - | %FileCheck %s
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/bigint_floormod2exp.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++fn int(x : i64) -> Int { x as Int }
++
++fn nat(x : u64) -> Nat { x as Nat }
++
++fn digit(ok : bool) -> i64 { if ok { 1 } else { 0 } }
++
++fn low_nat(x : Nat, amount : u64) -> Nat { core::intrinsic::bigint::floormod2expi(x, amount) }
++
++fn low_int(x : Int, amount : u64) -> Int { core::intrinsic::bigint::floormod2expi(x, amount) }
++
++// Immediate `Nat`s: an amount of zero, amounts within the value, and amounts
++// past the immediate width up to the largest one.
++fn nat_small(one : u64, all : u64) -> bool {
++    low_nat(nat(13 * one), 2 * one) == 1 && low_nat(nat(13 * one), 0 * one) == 0
++        && low_nat(nat(13 * one), 4 * one) == 13 && low_nat(nat(13 * one), 62 * one) == 13
++        && low_nat(nat(13 * one), 100 * one) == 13 && low_nat(nat(13 * one), all) == 13
++}
++
++// Negative immediates: the remainder is the power minus the magnitude's
++// remainder, which leaves the immediate range from 62 bits on.
++fn int_small(one : u64, all : u64) -> bool {
++    let m1 = int(-1) * (one as Int);
++    let m13 = int(-13) * (one as Int);
++    low_int(m13, 2 * one) == 3 && low_int(m1, 0 * one) == 0
++        && low_int(m1, 61 * one) == 2305843009213693951
++        && low_int(m1, 62 * one) == 4611686018427387903
++        && low_int(m1, 64 * one) == 18446744073709551615
++        && low_int(m13, 100 * one) == 1267650600228229401496703205363
++        && low_int(int(13) * (one as Int), all) == 13
++}
++
++// Heap values with amounts that keep the remainder immediate.
++fn heap_narrow(one : u64, big : Int) -> bool {
++    let positive = big + 13;
++    let negative = int(0) - positive;
++    let wide = big + core::intrinsic::bigint::ipowi(int(2), 60 * one) + 5;
++    low_int(positive, 4 * one) == 13 && low_int(positive, 61 * one) == 13
++        && low_int(negative, 4 * one) == 3 && low_int(negative, 61 * one) == 2305843009213693939
++        && low_int(wide, 61 * one) == 1152921504606846981
++        && low_nat(core::intrinsic::bigint::absi(big + 13), 4 * one) == 13
++}
++
++// Heap values with amounts past the immediate width, the largest one among
++// them.
++fn heap_wide(one : u64, all : u64, big : Int) -> bool {
++    let positive = big + 13;
++    let negative = int(0) - positive;
++    let wide = big + core::intrinsic::bigint::ipowi(int(2), 70 * one) + 5;
++    low_int(positive, 64 * one) == 13 && low_int(positive, 100 * one) == 13
++        && low_int(positive, 101 * one) == 1267650600228229401496703205389
++        && low_int(positive, all) == 1267650600228229401496703205389
++        && low_int(wide, 80 * one) == 1180591620717411303429
++        && low_int(negative, 64 * one) == 18446744073709551603
++        && low_int(int(0) - big, 101 * one) == 1267650600228229401496703205376
++        && low_int(int(0) - big, 100 * one) == 0
++}
++
++// Constant operands, which the dialect folds.
++fn folded() -> bool {
++    let c : Int = -13;
++    let h : Nat = 1267650600228229401496703205389;
++    low_int(c, 2) == 3 && low_int(c, 100) == 1267650600228229401496703205363 && low_nat(h, 64) == 13
++        && low_nat(h, 0) == 0
++}
++
++// `floormod2expi(x, k)` against `floormodsi(x, 2^k)` for every `k` up to `stop`.
++// The base `two` is unknown to the compiler, so the division is not rewritten
++// into the reduction it checks.
++fn agrees(x : Int, k : u64, stop : u64, two : Int) -> bool {
++    if k > stop {
++        true
++    } else {
++        let power = core::intrinsic::bigint::ipowi(two, k);
++        low_int(x, k) == core::intrinsic::bigint::floormodsi(x, power) && agrees(x, k + 1, stop, two)
++    }
++}
++
++// The same reduction of a uniquely owned heap value, step after step, through
++// `floormod2expi` and through `%` by the power.
++fn chain(x : Nat, n : u64) -> Nat { if n == 0 { x } else { chain(low_nat(x * x + 3, 90), n - 1) } }
++
++fn chain_rem(x : Nat, n : u64, power : Nat) -> Nat {
++    if n == 0 { x } else { chain_rem((x * x + 3) % power, n - 1, power) }
++}
++
++fn cross(one : u64, big : Int) -> bool {
++    let o = one as Int;
++    let two = int(2) * o;
++    let near = core::intrinsic::bigint::ipowi(int(2), 61 * one);
++    agrees(int(0) * o, 0, 130, two) && agrees(int(13) * o, 0, 130, two)
++        && agrees(int(-1) * o, 0, 130, two) && agrees(int(-13) * o, 0, 130, two)
++        && agrees(near - 1, 0, 130, two) && agrees(near, 0, 130, two)
++        && agrees(int(0) - near, 0, 130, two) && agrees(int(-1) - near, 0, 130, two)
++        && agrees(big + 13, 0, 130, two) && agrees(int(0) - big - 13, 0, 130, two)
++        && chain(nat(5 * one), 20) == chain_rem(nat(5 * one), 20, core::intrinsic::bigint::ipowi(nat(2 * one), 90))
++}
++
++pub fn main(one : u64, all : u64) -> i64 {
++    let big = core::intrinsic::bigint::ipowi(int(2), 100 * one);
++    digit(nat_small(one, all)) + digit(int_small(one, all)) * 10 + digit(heap_narrow(one, big)) * 100
++        + digit(heap_wide(one, all, big)) * 1000 + digit(folded()) * 10000
++        + digit(cross(one, big)) * 100000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// CHECK-DAG: rcgmp.floormod2expi {{.*}} : !rcgmp.mpz, i64
+diff --git a/tests/integration/frontend/bigint_intrinsics.rr b/tests/integration/frontend/bigint_intrinsics.rr
+index fbd51de2..104dad25 100644
+--- a/tests/integration/frontend/bigint_intrinsics.rr
++++ b/tests/integration/frontend/bigint_intrinsics.rr
+@@ -33,9 +33,37 @@ pub fn conversions(a : Int, i : u64) -> u64 {
+     core::intrinsic::bigint::limb_count(b) + core::intrinsic::bigint::limb(a, i)
+ }
+ 
++pub fn lean(a : Int, b : Int, k : u64) -> Int {
++    core::intrinsic::bigint::divsi_lean(a, b) + core::intrinsic::bigint::remsi_lean(a, b)
++        + core::intrinsic::bigint::edivsi_lean(a, b) + core::intrinsic::bigint::emodsi_lean(a, b)
++        + core::intrinsic::bigint::floordivsi_lean(a, b) + core::intrinsic::bigint::floormodsi_lean(a, b)
++        + core::intrinsic::bigint::divsi_exact_lean(a, b) + core::intrinsic::bigint::floormod2expi(a, k)
++}
++
++// The divisions of `Nat`s are `nonnegative`, those of `Int`s above are not.
++pub fn natural(a : Nat, b : Nat) -> Nat {
++    core::intrinsic::bigint::remsi_lean(a, b) + core::intrinsic::bigint::floordivsi(a, b)
++        + core::intrinsic::bigint::divsi_exact_lean(a, b) + a / b + a % b
++}
++
+ // MIR-DAG: intrinsic#bigint#edivsi#0
+ // MIR-DAG: intrinsic#bigint#trunci_overflow#0
++// MIR-DAG: intrinsic#bigint#divsi_lean#0
++// MIR-DAG: intrinsic#bigint#floormod2expi#0
+ 
++// The `Nat` divisions first, then the Lean divisions: a pattern below without
++// `nonnegative` or `divzero` would also match one of them, and leave its
++// namesake unmatched.
++// CHECK-DAG: rcgmp.remsi {{.*}} nonnegative divzero<lean>
++// CHECK-DAG: rcgmp.floordivsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
++// CHECK-DAG: rcgmp.divsi {{.*}} exact nonnegative divzero<lean>
++// CHECK-DAG: rcgmp.divsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
++// CHECK-DAG: rcgmp.remsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
++// CHECK-DAG: rcgmp.remsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.emodsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.floordivsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.divsi {{.*}} exact divzero<lean>
++// CHECK-DAG: rcgmp.floormod2expi
+ // CHECK-DAG: rcgmp.edivsi
+ // CHECK-DAG: rcgmp.emodsi
+ // CHECK-DAG: rcgmp.floordivsi
+diff --git a/tests/integration/frontend/bigint_lean_division.c b/tests/integration/frontend/bigint_lean_division.c
+new file mode 100644
+index 00000000..f58803a6
+--- /dev/null
++++ b/tests/integration/frontend/bigint_lean_division.c
+@@ -0,0 +1,16 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for bigint_lean_division.rr: nine independent properties, one
++// decimal digit each. The zero and the one it passes are unknown to the
++// compiled code, so its divisions run rather than fold.
++
++extern long long reussir_main(long long zero, long long one);
++
++int main(void) { return reussir_main(0, 1) == 111111111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/bigint_lean_division.rr b/tests/integration/frontend/bigint_lean_division.rr
+new file mode 100644
+index 00000000..dcd4c85e
+--- /dev/null
++++ b/tests/integration/frontend/bigint_lean_division.rr
+@@ -0,0 +1,239 @@
++// Lean's integer division on `Nat` and `Int`: the `_lean` intrinsics divide
++// as their trapping namesakes, rounding toward zero, toward negative infinity,
++// or to a nonnegative remainder, but a zero divisor gives the quotient zero and
++// the remainder the dividend instead of terminating the program. The driver
++// supplies the operands, so the runtime paths are taken, on immediate and heap
++// values of every sign; constant operands fold to the same results.
++
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri --emit mlir -o - | %FileCheck %s
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -t llvm-ir -Oaggressive -o %t.ll
++// RUN: %FileCheck %s --check-prefix=NATDIV --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=NATREM --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=INTDIV --input-file=%t.ll
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/bigint_lean_division.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++fn int(x : i64) -> Int { x as Int }
++
++fn nat(x : u64) -> Nat { x as Nat }
++
++fn digit(ok : bool) -> i64 { if ok { 1 } else { 0 } }
++
++// Immediate `Nat`s, a zero divisor among them.
++fn nat_small(zero : Nat, seven : Nat) -> bool {
++    core::intrinsic::bigint::divsi_lean(seven, 2) == 3 && core::intrinsic::bigint::remsi_lean(seven, 2) == 1
++        && core::intrinsic::bigint::divsi_lean(seven, zero) == 0
++        && core::intrinsic::bigint::remsi_lean(seven, zero) == 7
++        && core::intrinsic::bigint::edivsi_lean(seven, zero) == 0
++        && core::intrinsic::bigint::emodsi_lean(seven, zero) == 7
++        && core::intrinsic::bigint::floordivsi_lean(seven, zero) == 0
++        && core::intrinsic::bigint::floormodsi_lean(seven, zero) == 7
++        && core::intrinsic::bigint::divsi_exact_lean(seven * 4, 4) == 7
++        && core::intrinsic::bigint::divsi_exact_lean(zero, zero) == 0
++}
++
++// Heap `Nat`s as dividends and divisors.
++fn nat_heap(zero : Nat, seven : Nat, big : Nat) -> bool {
++    core::intrinsic::bigint::divsi_lean(big, zero) == 0
++        && core::intrinsic::bigint::remsi_lean(big, zero) == 1267650600228229401496703205376
++        && core::intrinsic::bigint::emodsi_lean(big, zero) == 1267650600228229401496703205376
++        && core::intrinsic::bigint::floormodsi_lean(big, zero) == 1267650600228229401496703205376
++        && core::intrinsic::bigint::divsi_lean(big, 1099511627776) == 1152921504606846976
++        && core::intrinsic::bigint::remsi_lean(big + 5, 1099511627776) == 5
++        && core::intrinsic::bigint::divsi_lean(seven, big) == 0
++        && core::intrinsic::bigint::remsi_lean(seven, big) == 7
++        && core::intrinsic::bigint::divsi_exact_lean(big * 3, 3) == 1267650600228229401496703205376
++}
++
++// Truncated `Int` division of immediates: the remainder has the sign of the
++// dividend.
++fn int_truncated(zero : Int, one : Int) -> bool {
++    core::intrinsic::bigint::divsi_lean(int(-7) * one, int(2)) == -3
++        && core::intrinsic::bigint::remsi_lean(int(-7) * one, int(2)) == -1
++        && core::intrinsic::bigint::divsi_lean(int(7) * one, int(-2)) == -3
++        && core::intrinsic::bigint::remsi_lean(int(7) * one, int(-2)) == 1
++        && core::intrinsic::bigint::divsi_lean(int(-7) * one, int(-2)) == 3
++        && core::intrinsic::bigint::remsi_lean(int(-7) * one, int(-2)) == -1
++        && core::intrinsic::bigint::divsi_lean(int(-7) * one, zero) == 0
++        && core::intrinsic::bigint::remsi_lean(int(-7) * one, zero) == -7
++        && core::intrinsic::bigint::divsi_exact_lean(int(-12) * one, int(4)) == -3
++}
++
++// Euclidean `Int` division of immediates: the remainder is never negative.
++fn int_euclidean(zero : Int, one : Int) -> bool {
++    core::intrinsic::bigint::edivsi_lean(int(-7) * one, int(2)) == -4
++        && core::intrinsic::bigint::emodsi_lean(int(-7) * one, int(2)) == 1
++        && core::intrinsic::bigint::edivsi_lean(int(7) * one, int(-2)) == -3
++        && core::intrinsic::bigint::emodsi_lean(int(7) * one, int(-2)) == 1
++        && core::intrinsic::bigint::edivsi_lean(int(-7) * one, int(-2)) == 4
++        && core::intrinsic::bigint::emodsi_lean(int(-7) * one, int(-2)) == 1
++        && core::intrinsic::bigint::edivsi_lean(int(-7) * one, zero) == 0
++        && core::intrinsic::bigint::emodsi_lean(int(-7) * one, zero) == -7
++}
++
++// Floored `Int` division of immediates: the remainder has the sign of the
++// divisor.
++fn int_floored(zero : Int, one : Int) -> bool {
++    core::intrinsic::bigint::floordivsi_lean(int(-7) * one, int(2)) == -4
++        && core::intrinsic::bigint::floormodsi_lean(int(-7) * one, int(2)) == 1
++        && core::intrinsic::bigint::floordivsi_lean(int(7) * one, int(-2)) == -4
++        && core::intrinsic::bigint::floormodsi_lean(int(7) * one, int(-2)) == -1
++        && core::intrinsic::bigint::floordivsi_lean(int(-7) * one, int(-2)) == 3
++        && core::intrinsic::bigint::floormodsi_lean(int(-7) * one, int(-2)) == -1
++        && core::intrinsic::bigint::floordivsi_lean(int(-7) * one, zero) == 0
++        && core::intrinsic::bigint::floormodsi_lean(int(-7) * one, zero) == -7
++}
++
++// Heap `Int`s: a zero divisor of a heap dividend, an immediate divided by a
++// heap divisor, and a heap dividend by an immediate, in every rounding.
++fn int_heap(zero : Int, big : Int) -> bool {
++    let negative = int(0) - big;
++    let odd = negative - 1;
++    core::intrinsic::bigint::divsi_lean(negative, zero) == 0
++        && core::intrinsic::bigint::remsi_lean(negative, zero) == -1267650600228229401496703205376
++        && core::intrinsic::bigint::edivsi_lean(negative, zero) == 0
++        && core::intrinsic::bigint::emodsi_lean(negative, zero) == -1267650600228229401496703205376
++        && core::intrinsic::bigint::floordivsi_lean(negative, zero) == 0
++        && core::intrinsic::bigint::floormodsi_lean(negative, zero) == -1267650600228229401496703205376
++        && core::intrinsic::bigint::divsi_lean(int(-7), big) == 0
++        && core::intrinsic::bigint::remsi_lean(int(-7), big) == -7
++        && core::intrinsic::bigint::floordivsi_lean(int(-7), big) == -1
++        && core::intrinsic::bigint::floormodsi_lean(int(-7), big) == 1267650600228229401496703205369
++        && core::intrinsic::bigint::edivsi_lean(int(-7), negative) == 1
++        && core::intrinsic::bigint::emodsi_lean(int(-7), negative) == 1267650600228229401496703205369
++        && core::intrinsic::bigint::divsi_lean(odd, int(2)) == -633825300114114700748351602688
++        && core::intrinsic::bigint::remsi_lean(odd, int(2)) == -1
++        && core::intrinsic::bigint::floordivsi_lean(odd, int(2)) == -633825300114114700748351602689
++        && core::intrinsic::bigint::floormodsi_lean(odd, int(2)) == 1
++        && core::intrinsic::bigint::edivsi_lean(odd, int(-2)) == 633825300114114700748351602689
++        && core::intrinsic::bigint::emodsi_lean(odd, int(-2)) == 1
++        && core::intrinsic::bigint::divsi_exact_lean(negative, int(-4)) == 316912650057057350374175801344
++}
++
++// The quotient of the smallest immediate by -1 leaves the immediate range in
++// every rounding.
++fn int_minimum(one : Int) -> bool {
++    let minimum = int(-2305843009213693952) * one;
++    let m1 = int(-1) * one;
++    core::intrinsic::bigint::divsi_lean(minimum, m1) == 2305843009213693952
++        && core::intrinsic::bigint::edivsi_lean(minimum, m1) == 2305843009213693952
++        && core::intrinsic::bigint::floordivsi_lean(minimum, m1) == 2305843009213693952
++        && core::intrinsic::bigint::divsi_exact_lean(minimum, m1) == 2305843009213693952
++        && core::intrinsic::bigint::remsi_lean(minimum, m1) == 0
++        && core::intrinsic::bigint::emodsi_lean(minimum, m1) == 0
++        && core::intrinsic::bigint::floormodsi_lean(minimum, m1) == 0
++}
++
++// Heap dividends by heap divisors of every sign, and an immediate by a
++// negative heap divisor, in every rounding.
++fn int_heap_heap(one : Int) -> bool {
++    let a = (core::intrinsic::bigint::ipowi(int(2), 100) + 7) * one;
++    let b = (core::intrinsic::bigint::ipowi(int(2), 70) + 3) * one;
++    let na = int(0) - a;
++    let nb = int(0) - b;
++    let seven = int(7) * one;
++    core::intrinsic::bigint::divsi_lean(a, b) == 1073741823
++        && core::intrinsic::bigint::remsi_lean(a, b) == 1180591620714190077962
++        && core::intrinsic::bigint::edivsi_lean(a, b) == 1073741823
++        && core::intrinsic::bigint::emodsi_lean(a, b) == 1180591620714190077962
++        && core::intrinsic::bigint::floordivsi_lean(a, b) == 1073741823
++        && core::intrinsic::bigint::floormodsi_lean(a, b) == 1180591620714190077962
++        && core::intrinsic::bigint::divsi_lean(a, nb) == -1073741823
++        && core::intrinsic::bigint::remsi_lean(a, nb) == 1180591620714190077962
++        && core::intrinsic::bigint::edivsi_lean(a, nb) == -1073741823
++        && core::intrinsic::bigint::emodsi_lean(a, nb) == 1180591620714190077962
++        && core::intrinsic::bigint::floordivsi_lean(a, nb) == -1073741824
++        && core::intrinsic::bigint::floormodsi_lean(a, nb) == -3221225465
++        && core::intrinsic::bigint::divsi_lean(na, b) == -1073741823
++        && core::intrinsic::bigint::remsi_lean(na, b) == -1180591620714190077962
++        && core::intrinsic::bigint::edivsi_lean(na, b) == -1073741824
++        && core::intrinsic::bigint::emodsi_lean(na, b) == 3221225465
++        && core::intrinsic::bigint::floordivsi_lean(na, b) == -1073741824
++        && core::intrinsic::bigint::floormodsi_lean(na, b) == 3221225465
++        && core::intrinsic::bigint::divsi_lean(na, nb) == 1073741823
++        && core::intrinsic::bigint::remsi_lean(na, nb) == -1180591620714190077962
++        && core::intrinsic::bigint::edivsi_lean(na, nb) == 1073741824
++        && core::intrinsic::bigint::emodsi_lean(na, nb) == 3221225465
++        && core::intrinsic::bigint::floordivsi_lean(na, nb) == 1073741823
++        && core::intrinsic::bigint::floormodsi_lean(na, nb) == -1180591620714190077962
++        && core::intrinsic::bigint::divsi_lean(seven, nb) == 0
++        && core::intrinsic::bigint::remsi_lean(seven, nb) == 7
++        && core::intrinsic::bigint::edivsi_lean(seven, nb) == 0
++        && core::intrinsic::bigint::emodsi_lean(seven, nb) == 7
++        && core::intrinsic::bigint::floordivsi_lean(seven, nb) == -1
++        && core::intrinsic::bigint::floormodsi_lean(seven, nb) == -1180591620717411303420
++        && core::intrinsic::bigint::divsi_exact_lean(a * b, nb) == -1267650600228229401496703205383
++}
++
++// Constant operands, which the dialect folds.
++fn folded() -> bool {
++    let z : Int = 0;
++    let n : Int = -7;
++    let h : Int = -1267650600228229401496703205376;
++    let zn : Nat = 0;
++    core::intrinsic::bigint::divsi_lean(n, z) == 0 && core::intrinsic::bigint::remsi_lean(n, z) == -7
++        && core::intrinsic::bigint::edivsi_lean(n, z) == 0 && core::intrinsic::bigint::emodsi_lean(n, z) == -7
++        && core::intrinsic::bigint::floordivsi_lean(n, z) == 0
++        && core::intrinsic::bigint::floormodsi_lean(n, z) == -7
++        && core::intrinsic::bigint::remsi_lean(h, z) == -1267650600228229401496703205376
++        && core::intrinsic::bigint::emodsi_lean(n, 2) == 1
++        && core::intrinsic::bigint::floordivsi_lean(n, 2) == -4
++        && core::intrinsic::bigint::divsi_exact_lean(zn, zn) == 0
++}
++
++pub fn main(zero : i64, one : i64) -> i64 {
++    let nzero = nat(zero as u64);
++    let seven = nat((7 * one) as u64);
++    let nbig = core::intrinsic::bigint::ipowi(nat((2 * one) as u64), 100);
++    let ibig = core::intrinsic::bigint::ipowi(int(2 * one), 100);
++    digit(nat_small(nzero, seven)) + digit(nat_heap(nzero, seven, nbig)) * 10
++        + digit(int_truncated(int(zero), int(one))) * 100
++        + digit(int_euclidean(int(zero), int(one))) * 1000
++        + digit(int_floored(int(zero), int(one))) * 10000
++        + digit(int_heap(int(zero), ibig)) * 100000 + digit(folded()) * 1000000
++        + digit(int_minimum(int(one))) * 10000000 + digit(int_heap_heap(int(one))) * 100000000
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// The divisions of `Nat`s are `nonnegative`: their immediates untag by a
++// logical shift and divide unsigned. An `Int` division divides signed. Each
++// function's checks run as their own prefix, independent of the order of the
++// functions.
++pub fn nat_div(x : Nat, m : Nat) -> Nat { x / m }
++
++pub fn nat_rem(x : Nat, m : Nat) -> Nat { core::intrinsic::bigint::remsi_lean(x, m) }
++
++pub fn int_div(x : Int, m : Int) -> Int { x / m }
++
++// CHECK-DAG: rcgmp.divsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.remsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.edivsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.emodsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.floordivsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.floormodsi {{.*}} divzero<lean>
++// CHECK-DAG: rcgmp.divsi {{.*}} exact divzero<lean>
++
++// NATDIV: define {{.*}}@{{.*}}7nat_div(
++// NATDIV-NOT: sdiv
++// NATDIV: lshr i64 %{{[0-9]+}}, 2
++// NATDIV: udiv i64
++// NATDIV-NOT: sdiv
++// NATDIV: {{^}}}
++
++// NATREM: define {{.*}}@{{.*}}7nat_rem(
++// NATREM-NOT: srem
++// NATREM: lshr i64 %{{[0-9]+}}, 2
++// NATREM: urem i64
++// NATREM-NOT: srem
++// NATREM: {{^}}}
++
++// INTDIV: define {{.*}}@{{.*}}7int_div(
++// INTDIV-NOT: udiv
++// INTDIV: ashr i64 %{{[0-9]+}}, 2
++// INTDIV: sdiv i64
++// INTDIV-NOT: udiv
++// INTDIV: {{^}}}
+diff --git a/tests/integration/sanitizer/bigint-asan.rr b/tests/integration/sanitizer/bigint-asan.rr
+index a30a2390..b625bb2e 100644
+--- a/tests/integration/sanitizer/bigint-asan.rr
++++ b/tests/integration/sanitizer/bigint-asan.rr
+@@ -14,6 +14,14 @@
+ // RUN: %cc %asan_flags -c -x ir %t.floats.ll -o %t.floats.o
+ // RUN: %cc %asan_flags %t.floats.o %t.core.o %S/../frontend/bigint_floats.c %reussir_rt_asan %rcgmp_runtime -o %t.floats.exe %rpath_flag %rpath_san_flag %extra_sys_libs
+ // RUN: %asan_env %t.floats.exe
++// RUN: %rrc %S/../frontend/bigint_lean_division.rr --package-name bigint --extern core=%t.core.rri -o %t.lean.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent
++// RUN: %cc %asan_flags -c -x ir %t.lean.ll -o %t.lean.o
++// RUN: %cc %asan_flags %t.lean.o %S/../frontend/bigint_lean_division.c %reussir_rt_asan %rcgmp_runtime -o %t.lean.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.lean.exe
++// RUN: %rrc %S/../frontend/bigint_floormod2exp.rr --package-name bigint --extern core=%t.core.rri -o %t.mod2exp.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent
++// RUN: %cc %asan_flags -c -x ir %t.mod2exp.ll -o %t.mod2exp.o
++// RUN: %cc %asan_flags %t.mod2exp.o %S/../frontend/bigint_floormod2exp.c %reussir_rt_asan %rcgmp_runtime -o %t.mod2exp.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.mod2exp.exe
+ 
+ // Heap integers come from the sanitized runtime's allocator through the rcgmp
+ // allocation hooks, so ASan sees every retain, release and in-place reuse of
+-- 
+2.43.0
+

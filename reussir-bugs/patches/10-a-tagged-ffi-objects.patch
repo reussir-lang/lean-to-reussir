@@ -1,7 +1,7 @@
-From 8de32f34a96f5b9241763a1f223ed5e69e52aab3 Mon Sep 17 00:00:00 2001
+From 46b195cf68edd58f6e4b16fe9ae7048de98cdeb8 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 6/8] l2r-local: tagged FFI objects: an odd handle is an
+Subject: [PATCH 06/13] l2r-local: tagged FFI objects: an odd handle is an
  immediate, not counted
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
@@ -14,7 +14,9 @@ The flag travels with the record (semi `Record::ffi_tagged`, HIR
 `{ ffi tagged "path" }`, MIR `RecordLayout::Opaque { tagged }` printed as
 `{ "path", @hook, tagged }`) to the dialect type
 `!reussir.ffi_object<"path", @hook, tagged = true>` (a default-valued
-parameter; the C API and the Rust bindings take it). In the LLVM lowering,
+parameter; the C API and the Rust bindings take it, and C++ code that
+builds the type without it, `FFIObjectType::get(ctx, name, hook)`, gets an
+untagged object). In the LLVM lowering,
 `rc.inc` of a tagged object updates the count only when the handle's low
 bit is clear, and `rc.dec` calls the cleanup hook only then; nothing is
 loaded from the handle before the test. Real boxes are at least 4-aligned
@@ -52,7 +54,7 @@ tests.
  crates/reussir-core/src/semi/hir/raw.rs       |  5 +-
  crates/reussir-core/src/semi/repl.rs          |  1 +
  include/Reussir-c/Types.h                     |  7 +-
- include/Reussir/IR/ReussirTypes.td            | 14 +++-
+ include/Reussir/IR/ReussirTypes.td            | 21 +++++-
  lib/CAPI/Types.cpp                            |  4 +-
  .../BasicOpsLowering/BasicOpsLowering.cpp     | 57 ++++++++++++++++
  .../InstrumentNonlinearFFI.cpp                |  4 ++
@@ -60,7 +62,7 @@ tests.
  .../instrument_nonlinear_ffi_tagged.mlir      | 33 +++++++++
  .../conversion/tagged_ffi_object.mlir         | 68 +++++++++++++++++++
  tests/integration/frontend/ffi_tagged.rr      | 40 +++++++++++
- 26 files changed, 348 insertions(+), 41 deletions(-)
+ 26 files changed, 355 insertions(+), 41 deletions(-)
  create mode 100644 tests/integration/conversion/instrument_nonlinear_ffi_tagged.mlir
  create mode 100644 tests/integration/conversion/tagged_ffi_object.mlir
  create mode 100644 tests/integration/frontend/ffi_tagged.rr
@@ -587,10 +589,10 @@ index d1fe8804..d8bce1ad 100644
  // `!reussir.str<lifeScope>`.
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope);
 diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
-index 602c61a3..3468211f 100644
+index 602c61a3..33fe7f6c 100644
 --- a/include/Reussir/IR/ReussirTypes.td
 +++ b/include/Reussir/IR/ReussirTypes.td
-@@ -728,10 +728,20 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+@@ -728,10 +728,27 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
      refcount the foreign `Rc` wrapper pins at offset 0. The payload behind
      the header stays opaque — debug info describing a boxed variable is the
      client, and it renders the box as that visible header.
@@ -608,6 +610,13 @@ index 602c61a3..3468211f 100644
 -  let assemblyFormat = "`<` $ffiName `,` $cleanupHook `>`";
 +      "::mlir::FlatSymbolRefAttr":$cleanupHook,
 +      DefaultValuedParameter<"bool", "false">:$tagged);
++  // Without the flag (the type's form before `tagged`): an untagged object.
++  let builders = [
++    TypeBuilder<(ins "::mlir::StringAttr":$ffiName,
++                     "::mlir::FlatSymbolRefAttr":$cleanupHook), [{
++      return $_get($_ctxt, ffiName, cleanupHook, /*tagged=*/false);
++    }]>
++  ];
 +  let assemblyFormat =
 +      "`<` $ffiName `,` $cleanupHook (`,` `tagged` `=` $tagged^)? `>`";
  }

@@ -434,7 +434,12 @@ extern "C" fn release_kind(w: u64, num: u64) {
     let p = ptr_of(w).mask(ADDR_MASK as usize);
     unsafe {
         match num {
+            #[cfg(not(leanrt_rcgmp))]
             NUM_NAT | NUM_INT => drop(std::mem::transmute::<*mut u8, LBig>(p)),
+            // Under `--int-backend rcgmp`: the cell of a big built-in
+            // integer (`of_mpz`), whose release is rcgmp's.
+            #[cfg(leanrt_rcgmp)]
+            NUM_NAT | NUM_INT => drop(std::mem::transmute::<*mut u8, Rc<crate::rcgmp::Mpz>>(p)),
             NUM_STR => drop(std::mem::transmute::<*mut u8, LStr>(p)),
             // A scalar cell holds nothing to drop.
             NUM_F64 | NUM_U64 => crate::alloc::free(p),
@@ -586,6 +591,35 @@ impl Payload for LInt {
     unsafe fn from_any_word(w: u64, _num: u64) -> Self {
         int_of_word(w)
     }
+}
+
+/// Under `--int-backend rcgmp`, a generic box texture at `Nat` or `Int`
+/// (`l2r_any_of<T>`, `l2r_any_as<T>` with `T` = `Mpz`). lean2rr boxes and
+/// unboxes them through `l2r_any_of_nat`/`_int` and `l2r_any_as_nat`/`_int`,
+/// which keep a small value Lean's immediate by a test in Reussir code;
+/// leanrt does not read a handle, so the generic path ends the program
+/// (a line on descriptor 2, then Lean's internal panic) instead of storing
+/// the handle as a pointer of a kind whose release is another's.
+#[cfg(leanrt_rcgmp)]
+impl Payload for crate::rcgmp::Mpz {
+    fn into_any(self, num: u64) -> LAny {
+        generic_mpz_box(num)
+    }
+    unsafe fn from_any_word(_w: u64, num: u64) -> Self {
+        generic_mpz_box(num)
+    }
+}
+
+#[cfg(leanrt_rcgmp)]
+#[cold]
+#[inline(never)]
+fn generic_mpz_box(num: u64) -> ! {
+    use std::io::Write;
+    let _ = writeln!(
+        std::io::stderr(),
+        "leanrt: a generic box texture at a built-in Nat or Int (payload {num}): under --int-backend rcgmp lean2rr boxes them with l2r_any_of_nat/_int and unboxes them with l2r_any_as_nat/_int"
+    );
+    crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::Unreachable)
 }
 
 /// leanrt's own payload kinds have fixed numbers, whatever `num` says, so
@@ -854,6 +888,40 @@ pub fn int_of_ref(a: &LAny) -> LInt {
 #[inline(never)]
 fn copy_big<B>(a: &LAny, num: u64) -> B {
     as_(a.clone(), num)
+}
+
+/// Under `--int-backend rcgmp`, a big built-in `Nat` (`num` = `NUM_NAT`)
+/// or `Int` (`NUM_INT`) in a box: a cell holding the reference `x`
+/// (`rcgmp::box_big`). The prelude boxes every other value as Lean's
+/// immediate (a `Nat` below 2^63, an `Int` in the `int32` range), tested
+/// in Reussir code; leanrt does not read the handle.
+#[cfg(leanrt_rcgmp)]
+#[inline]
+pub fn of_mpz(x: crate::rcgmp::Mpz, num: u64) -> LAny {
+    debug_assert!(matches!(num, NUM_NAT | NUM_INT));
+    let c = crate::alloc::rc_new(x);
+    unsafe { of_ptr(word_of(c), num) }
+}
+
+/// The reference that the box `a` of a big built-in integer of kind `num`
+/// holds (`of_mpz`), the box given up: moved out of a unique cell, else a
+/// new reference. Any other word, an immediate too, is `mismatch` (the
+/// prelude decodes immediates).
+#[cfg(leanrt_rcgmp)]
+#[inline]
+pub fn mpz_of(a: LAny, num: u64) -> crate::rcgmp::Mpz {
+    let w = a.into_raw();
+    if is_imm(w) || num_of(w) != num {
+        mismatch(w, num);
+    }
+    let c: Rc<crate::rcgmp::Mpz> = unsafe { take_word(w) };
+    if c.is_unique() {
+        unsafe { crate::alloc::rc_into_inner(c) }
+    } else {
+        let x = (*c).clone();
+        drop(c);
+        x
+    }
 }
 
 /// A `Float` in a box: a cell, as natively.

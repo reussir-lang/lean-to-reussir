@@ -38,8 +38,10 @@ cp "$HERE/any-probe/AnyHost.lean" .
 lean -o AnyHost.olean AnyHost.lean
 # The whole prelude (`--disable-opt prelude-liveness`): the probe calls
 # prelude functions that the host does not use.
+# (L2R_INT_BACKEND: lean2rr's --int-backend, as scripts/l2r.py passes it.)
 LEAN_PATH=. L2R_SHIM_DIR=${L2R_SHIM_DIR:-$(dirname "$LEAN2RR")/../lib/lean} "$LEAN2RR" AnyHost --root main --emit rr \
-  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness
+  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness \
+  ${L2R_INT_BACKEND:+--int-backend "$L2R_INT_BACKEND"}
 python3 - "$HERE/any-probe/probe.rr" <<'PY'
 import sys
 s = open('host.rr').read()
@@ -73,7 +75,11 @@ cmd = ([str(l2r.REUSSIR / "build" / "bin" / "rrc"), os.path.abspath("prog.rr"), 
        + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
        + ["--link-lib", str(l2r.gmp_archive()), "--no-pack-record-members",
           "--relocation-mode", "pic", "--reuse-across-call",
-          "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")] + sys.argv[4:])
+          "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")]
+       # `--int-backend rcgmp`: Reussir's core package, as scripts/l2r.py.
+       + (["--package-name", "prog", "--extern", f"core={l2r.core_interface()}"]
+          if l2r.INT_BACKEND == "rcgmp" else [])
+       + sys.argv[4:])
 with tempfile.TemporaryDirectory(dir=".") as tmp:
     sys.exit(subprocess.run(cmd, env=env, cwd=tmp).returncode)
 PY
