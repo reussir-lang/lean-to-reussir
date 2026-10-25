@@ -449,7 +449,7 @@ def ref_cells():
             "seen everywhere. Two allocations (Lean: one).")
     s.box(10, 30, 210, 60, ["L2RRefN", "shared record (count, cell)"], "b-l2r")
     s.arrow(220, 60, 300, 60)
-    s.box(305, 30, 230, 60, ["Cell<LAny>", "the value, a box"], "b-rr")
+    s.box(305, 30, 230, 60, ["Cell<T> or Cell<LAny>", "the value: typed, or a box"], "b-rr")
     s.text(560, 55, "set: store the new value, then release the old one", "ts")
     s.text(560, 72, "take: move the value out, leave the placeholder", "ts")
     return s.render()

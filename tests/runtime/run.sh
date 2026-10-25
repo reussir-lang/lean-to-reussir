@@ -57,6 +57,12 @@
 #   NAME.l2r-debug  as NAME.l2r-log, with lean2rr run under L2R_DEBUG=1,
 #               which prints its whole-program facts (e.g. `lean2rr: program
 #               casts: no`, the compact array kinds and why one is off)
+#               A line of NAME.l2r-log or NAME.l2r-debug that starts with
+#               `[OPT,OPT…] ` is checked only when none of those lean2rr
+#               optimizations is turned off for the run (L2R_DISABLE_OPTS,
+#               NAME.opts): a fact that an optimization prints, or that
+#               depends on one (`[typed-cells,typed-arrays] lean2rr: typed
+#               cells: …`)
 #
 # Both executables run with LEAN_BACKTRACE=0, so panics print no stack trace.
 # lean2rr runs with LEAN_ABORT_ON_PANIC=1: a panic of lean2rr itself is a
@@ -176,6 +182,16 @@ for t in "${TESTS[@]}"; do
       [ -f "$f" ] || continue
       while IFS= read -r line; do
         [ -z "$line" ] && continue
+        # `[OPT,…] line`: only when none of the optimizations is off.
+        case $line in
+          "["*"] "*)
+            skip=""
+            for o in $(echo "${line%%] *}" | tr -d '[ ' | tr ',' ' '); do
+              case ",$(echo "$opts" | tr -d ' ')," in *",$o,"*) skip=1 ;; esac
+            done
+            [ -n "$skip" ] && continue
+            line=${line#*] } ;;
+        esac
         case $line in
           "! "*) if grep -qF -- "${line#! }" "$d/build-l2r.log"; then
                    status=fail; why="$why '${line#! }' in $d/build-l2r.log;"; fi ;;

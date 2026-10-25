@@ -158,8 +158,8 @@ at once during initialization, and `sync` dependents of finished tasks). -/
 def lazyDone (z : String) (v : RR.Expr) : RR.Expr :=
   .call "l2r_lcell_new" #[.named z] #[.ctor z (some "done") #[v]]
 
-/-- A new reference of the reference type `rt` (`refType`) holding the
-`Box` `v`. -/
+/-- A new reference of reference type `rt` (`refType`, `refTypeOf`)
+holding `v`, a value of the cell's type. -/
 def refNew (rt : RR.Ty) (v : RR.Expr) : RR.Expr :=
   let rn := match rt with | .named n => n | _ => ""
   .ctor rn none #[.call "core::intrinsic::cell::alloc" #[] #[v]]

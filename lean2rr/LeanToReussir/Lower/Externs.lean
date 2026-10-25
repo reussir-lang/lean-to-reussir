@@ -630,14 +630,13 @@ def programCreatesTasks (env : Environment) (keys : NameMap InstKey) (decls : Ar
     | _ => false
 
 /-- In a program that creates tasks, the point before reference operation
-`op` on the reference `r` (of the reference type, `refType`; prelude
+`op` on the reference `r` (of reference type `rt`, `refTypeOf`; prelude
 `l2r_ref_*`, `leanrt::refs`): a polling point before a read, a publication
 before a write, and, while some reference is taken by a `modify`, the wait
 for its store (Lean 4.35's rule; `take` always records the reference).
 `none` in a program without tasks. -/
-def refPoint (op : String) (r : RR.Expr) : LowerM (Option (String × Option RR.Ty × RR.Expr)) := do
+def refPoint (op : String) (rt : RR.Ty) (r : RR.Expr) : LowerM (Option (String × Option RR.Ty × RR.Expr)) := do
   unless (← read).createsTasks do return none
-  let rt ← refType
   let n ← fresh "rp"
   let u64 := RR.Ty.named "u64"
   if op == "take" then return some (n, some u64, .call "l2r_ref_take_mark" #[rt] #[r])
@@ -648,10 +647,46 @@ def refPoint (op : String) (r : RR.Expr) : LowerM (Option (String × Option RR.T
   return some (n, some u64,
     .ite (.call point #[] #[]) (.ofExpr (.call "l2r_ref_wait" #[rt] #[r, .atom store])) (.ofExpr (.atom "0")))
 
-/-- Reference operation `op` on the reference `r` (of the reference type,
-`refType`, whose cell holds a `Box`; `v`, for `set` and `swap`, a `Box`):
-`get` (a copy: the cell keeps its reference), `take` (the value moves out
-and the cell gets the placeholder `box(0)`, `zeroValue`; natively
+/-- The placeholder that `take` stores into a cell holding values of type
+`e`: `box(0)` for a cell of boxes; for a typed cell (`typed-cells`) the
+zero of `e` (`zeroValue`), which `placeholder-cache` keeps in a once-cell
+when it allocates. Without that optimization a zero that allocates (a
+record without a constructor without fields, an array, a string outside
+the literal cache) is still built once, in a once-cell of its own
+(`cafAccessor`, `l2r_cellzero_N`): every `modify` takes the value out, and
+a placeholder built at each take would allocate where the cell of boxes
+stores `box(0)`. -/
+def cellZero (e : RR.Ty) : LowerM RR.Expr := do
+  if e == RR.Ty.box || (← read).cachePlaceholders then return ← zeroValue e
+  let heap ← match e with
+    | .named n =>
+      if n == "LStr" then pure !(← read).literalCache
+      else match (← get).typeInfos[n]? with
+        | some info =>
+          -- The zero of a shared type is a constructor without fields when
+          -- it has one (no allocation; `zeroTry`).
+          pure (info.shape != .enumLike && !info.value &&
+            !info.ctorOrder.any fun c => (info.ctors.find? c).any (·.posTys.isEmpty))
+        | none => pure false
+    | .app "RVec" _ => pure true
+    | _ => pure false
+  unless heap do return ← zeroValue e
+  if let some f := (← get).cellZeroFns[e]? then return .call f #[] #[]
+  let z ← zeroValue e
+  -- A type without a finite value keeps its `l2r_unreachable` (never run).
+  if (← get).zeroNone.contains e then return z
+  let f ← fresh "l2r_cellzero_"
+  modify fun s => { s with cellZeroFns := s.cellZeroFns.insert e f }
+  let items ← cafAccessor f e (.ofExpr z) (walk := false)
+  modify fun s => { s with fns := s.fns ++ items }
+  return .call f #[] #[]
+
+/-- Reference operation `op` on the reference `r` (of reference type `rt`,
+whose cell holds values of type `e`: a `Box` for `refType`, the element's
+own type for a typed reference of `refTypeOf`; `v`, for `set` and `swap`,
+a value of type `e`): `get` (a copy: the cell keeps its reference), `take`
+(the value moves out and the cell gets the placeholder of `e`, `box(0)` for
+a `Box`, `cellZero`; natively
 `lean_st_ref_take` stores a null pointer, which only unsafe code can see
 before the next store: Lean's `modify` is take-then-set, so a value only
 the cell holds stays unshared and is updated in place), `set` (`u64` result: `l2r_rc_set_ref`,
@@ -660,41 +695,80 @@ which releases the old value after storing the new one, as
 promise it drops, sees the new value; and then the reference `r` itself,
 which the caller would release natively after the set: when the set is
 `r`'s last use, its cell, and the new value with it, is freed after the old
-value, not at the store), `swap`. The results are `Box`es. The cell operation
-alone (`refCellOp` adds the task-aware point): also the read of a
-constant's walk for tasks, which natively reads the cell directly. -/
-def refCellOpPlain (op : String) (r : RR.Expr) (v : Option RR.Expr) : LowerM RR.Expr := do
+value, not at the store), `swap`. The results are values of type `e`. The
+cell operation alone (`refCellOp` adds the task-aware point): also the read
+of a constant's walk for tasks, which natively reads the cell directly. -/
+def refCellOpPlain (op : String) (rt e : RR.Ty) (r : RR.Expr) (v : Option RR.Expr) : LowerM RR.Expr := do
   let cell := RR.Expr.field r 0
-  let e := RR.Ty.box
   match op, v with
   | "get", _ => return .call "l2r_rc_get" #[e] #[cell]
-  | "take", _ => return .call "l2r_rc_swap" #[e] #[cell, ← zeroValue e]
-  | "set", some v => return .call "l2r_rc_set_ref" #[e, ← refType] #[cell, v, r]
+  | "take", _ => return .call "l2r_rc_swap" #[e] #[cell, ← cellZero e]
+  | "set", some v => return .call "l2r_rc_set_ref" #[e, rt] #[cell, v, r]
   | "swap", some v => return .call "l2r_rc_swap" #[e] #[cell, v]
   | _, _ => throwError "lean2rr: reference operation {op} without a value (internal error)"
 
-/-- Reference operation `op` (`refCellOpPlain`) on the reference `r`: in a
-program that creates tasks, after its `refPoint`. -/
-def refCellOp (op : String) (r : RR.Expr) (v : Option RR.Expr) : LowerM RR.Expr := do
-  let res ← refCellOpPlain op r v
-  match ← refPoint op r with
+/-- Reference operation `op` (`refCellOpPlain`) on the reference `r` of
+type `rt` holding values of type `e`: in a program that creates tasks,
+after its `refPoint`. -/
+def refCellOp (op : String) (rt e : RR.Ty) (r : RR.Expr) (v : Option RR.Expr) : LowerM RR.Expr := do
+  let res ← refCellOpPlain op rt e r v
+  match ← refPoint op rt r with
   | some l => return .block ⟨#[l], res⟩
   | none => return res
 
-/-- Glue for `ST.Ref` operations (translation plan §5.1). A reference is one
-generated record type holding a Reussir cell of a `Box`, `L2RRefN(Cell<Box>)`
-(`refType`), whatever its contents' type: two allocations per reference
-(the record and the cell). Lean's mono phase types every reference
-`lcAny`, so a reference travels in a `Box`; an operation unboxes it (one
-variant) and acts on its one cell, boxing the value it stores and giving
-the value it reads as a `Box` (the IO result's field is one). So all
-aliases of a reference share its one cell. `args` are at the Reussir types
-of `params`. -/
-def refGlue (orig : Name) (params : Array Expr) (ret : Expr)
+/-- The type of the values in the cells of the references that a reference
+primitive instantiated at type arguments `typeArgs` (`σ`, `α`) acts on:
+with `typed-cells`, `α`'s own Reussir type when its cell kind
+(`cellKind?`) is one the whole-program check allows
+(`LowerCtx.refKindsOn`, `typedRefKinds`); otherwise a `Box` (rule 1). The
+check and this function compute the kind alike, from `α`'s mono type, so
+every primitive at one kind acts on one reference type. -/
+def refElemTy (typeArgs : Array Expr) : LowerM RR.Ty := do
+  let on := (← read).refKindsOn
+  if on.isEmpty then return RR.Ty.box
+  let some a := typeArgs[1]? | return RR.Ty.box
+  let t ← toMonoTypeKeep a
+  let cache ← IO.mkRef (← get).ptrKindCache
+  let k ← cellKind? cache (← read).compactKindsOn (← read).typedKindsOn t
+  let c ← cache.get
+  modify fun s => { s with ptrKindCache := c }
+  let some k := k | return RR.Ty.box
+  unless on.contains k do return RR.Ty.box
+  let e ← lowerType t
+  -- The kind names the representation: a scalar, `Nat`, `Int`, `LStr`, an
+  -- array, or a shared record or enum of the program. Any other type keeps
+  -- the cell of boxes: every type of the kind lowers alike (one type per
+  -- inductive), and the check let the kind stay on only where every make
+  -- and operation that can meet it has this kind, so all of them keep the
+  -- cell of boxes together.
+  let ok ← match e with
+    | .named n =>
+      if n ∈ ["bool", "u8", "u16", "u32", "f32", "Nat", "Int", "LStr"] then pure true
+      else pure ((← isSharedRecordTy e) && !(← isRefType e))
+    | .app "RVec" _ => pure true
+    | _ => pure false
+  return if ok then e else RR.Ty.box
+
+/-- Glue for `ST.Ref` operations (translation plan §5.1). A reference is a
+generated record type holding a Reussir cell: of a `Box`,
+`L2RRefN(Cell<Box>)` (`refType`), whatever its contents' type; with
+`typed-cells`, of the element's own type `T`, `L2RRefN(Cell<T>)`
+(`refTypeOf`), where the whole-program check allows the element's cell kind
+(`refElemTy`, `typedRefKinds`). Two allocations per reference (the record
+and the cell). Lean's mono phase types every reference `lcAny`, so a
+reference travels in a `Box`; an operation unboxes it at its record type
+(the box's payload number tells the record types apart) and acts on its one
+cell, storing and reading values of the cell's type (the value a read gives
+goes into the IO result's `Box` field). So all aliases of a reference share
+its one cell. `typeArgs` are the instance's (`σ`, `α`); `args` are at the
+Reussir types of `params`. -/
+def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : Expr)
     (args : Array RR.Expr) : LowerM (Option RR.Expr) := do
   let resTy ← lowerType ret
-  let rt ← refType
-  let box := RR.Ty.box
+  -- The cell's value type (`refElemTy`): a `Box`, or with `typed-cells`
+  -- the element's own type.
+  let box ← refElemTy typeArgs
+  let rt ← refTypeOf box
   let tyOf (i : Nat) : LowerM RR.Ty := lowerType params[i]!
   let value (i : Nat) : LowerM RR.Expr := do coerce args[i]! (← tyOf i) box
   -- The reference `i`, at the reference type, bound to a variable.
@@ -705,9 +779,10 @@ def refGlue (orig : Name) (params : Array Expr) (ret : Expr)
     | _ =>
       let n ← fresh "rh"
       return .block ⟨#[(n, some rt, h)], ← k (.var n)⟩
-  -- Operation `op` on handle `i` (with value `v`): a `Box` (`u64` for `set`).
+  -- Operation `op` on handle `i` (with value `v`): a value of the cell's
+  -- type (`u64` for `set`).
   let onHandle (op : String) (i : Nat) (v : Option RR.Expr) : LowerM RR.Expr := do
-    handle i fun h => refCellOp op h v
+    handle i fun h => refCellOp op rt box h v
   match orig with
   | ``ST.Prim.mkRef =>
     return some (← wrapIOResult resTy (refNew rt (← value 0)) rt)

@@ -1,0 +1,8 @@
+# per kind: n = 2000 and 8000 modify/modifyGet steps on a reference whose value only the cell holds; in place, as natively (a copy per step would add n elements per step)
+arr 2000 | arr 8000 | 1 1000
+arrpt 2000 | arrpt 8000 | 1 1000
+str 2000 | str 8000 | 1 1000
+pt 2000 | pt 8000 | 1 1000
+list 2000 | list 8000 | 1 1000
+nat 2000 | nat 8000 | 1 1000
+u32 2000 | u32 8000 | 1 1000

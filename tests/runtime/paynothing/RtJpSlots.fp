@@ -1,15 +1,15 @@
 # Pay-nothing baseline of RtJpSlots (tests/runtime/RtJpSlots.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 109617
-bytes 2284296
-native-allocs 229964
-native-bytes 4374515
-items 214
-functions 149
+allocs 109619
+bytes 2284344
+native-allocs 229952
+native-bytes 4374339
+items 212
+functions 148
 conversion-fns 0
 conversion-sites 0
-box-sites 46
-box-variants 16
+box-sites 45
+box-variants 15
 unbox-fns 3
 unbox-sites 8
 item L2RFn_F3nNat3nNat 9ccee6d47cf1
@@ -19,7 +19,7 @@ item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
 item L2RFn_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 60f70f46f8fd
 item L2RFn_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 740940b50b1b
 item L2RFn_F7nL2RUnit«T_ST_Out_#~a6eff74e9f15» 7e4dae276967
-item L2RRef# 4bffac39b775
+item L2RRef# 9a8ce79d17bd
 item T_EST_Out_# 109df62ffcb5
 item T_Empty_# 271a60d78b9b
 item T_Float_Model_Format_# d03c39e60fa3
@@ -57,6 +57,7 @@ item Tuple# e294b45044b6
 item Tuple# e3eebdec68fc
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 006f0efa3349
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 035213e28a17
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 1361951c2d6f
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
@@ -64,10 +65,8 @@ item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 383e7b513954
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3a413da5f108
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 52a740c2da8e
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 5d895c52f576
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 638f14acce08
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 64194165c3a7
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 7649f3688788
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 8042c9da9fdc
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; af604745b4f4
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; cb053a5ddf21
@@ -80,9 +79,8 @@ item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 088dffee5ccf
 item l2r_any_rel_# 10b222f8e498
+item l2r_any_rel_# 2d121af0e1bc
 item l2r_any_rel_# 2fa8e9acdec6
-item l2r_any_rel_# 3190d4b509c2
-item l2r_any_rel_# 335f04c922c7
 item l2r_any_rel_# 4f6cfaeab687
 item l2r_any_rel_# 4fc9e1809c4d
 item l2r_any_rel_# 5a8b94be9b98
@@ -94,7 +92,7 @@ item l2r_any_rel_# c50983f8aa6e
 item l2r_any_rel_# d6cc8da4ddcc
 item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# e7f60d5b8ad4
-item l2r_any_releases cdc103343537
+item l2r_any_releases f776e813c160
 item l2r_ap1_F3nNat3nNat c961c9cc026d
 item l2r_ap1_F3nu324nbool bcd732154723
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
@@ -111,7 +109,7 @@ item l2r_fn_of_index_F3nu324nbool 519d44c3b77d
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 e04d029e0679
+item l2r_init_chunk_0 e2fc9f5cd668
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
@@ -203,7 +201,7 @@ item l_WellFounded_opaqueFix_u2083___at___00String_Slice_contains___at___00Strin
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_isNat_spec__0___l2r_#____redArg___l2r__flat 1e05eedf8850
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_toNat_x3f_spec__0___l2r_#____redArg___l2r__flat f626d4cb47f2
 item l___private_Init_Data_Array_Basic_0__Array_ofFn_go___l2r_#____redArg 4379f7f2e160
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ e322d66f0607
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l_addParenHeuristic___l2r_#_ 2716276de4fa
 item l_addParenHeuristic___l2r_#____closed__0 2c5b4ac3a3d2

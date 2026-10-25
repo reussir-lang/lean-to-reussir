@@ -1,3 +1,3 @@
-lean2rr: typed arrays: I:Res off: its elements (Res) may hold
-lean2rr: typed arrays: I:Cb off: its elements (Cb) may hold
-lean2rr: typed arrays: I:Job off: its elements (Job) may hold
+[typed-arrays,compact-arrays] lean2rr: typed arrays: I:Res off: its elements (Res) may hold
+[typed-arrays,compact-arrays] lean2rr: typed arrays: I:Cb off: its elements (Cb) may hold
+[typed-arrays,compact-arrays] lean2rr: typed arrays: I:Job off: its elements (Job) may hold

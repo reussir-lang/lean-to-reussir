@@ -10,7 +10,9 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   shared enum `S { pending(L2RUnit -> Box), busy, done(Box) }`, one for
   thunks and one for tasks (tasks also `bind(…)`), whatever `α` is: the
   value is boxed, so typed and uniform code share every cell and nothing
-  converts one. A shared enum holds closures too.
+  converts one. A shared enum holds closures too. (Optimization
+  `typed-cells` types references only, not these cells:
+  [../representations/typed-cells.md](../representations/typed-cells.md#thunks-tasks-and-promises-keep-their-cells-of-boxes).)
   `Thunk.mk f` is `pending(f)` (`f` wrapped to return a `Box`),
   `Thunk.pure a` is `done(a)` (boxed); `Thunk.get` swaps in `busy`, runs
   the closure, stores `done(v)`, and its caller unboxes `v`. The cell is

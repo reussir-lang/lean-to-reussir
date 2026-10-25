@@ -24,7 +24,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **What:** An inductive has one Reussir type whatever its type arguments
   (`nominalType`), so two binders of `List Nat` and `List α` hold the same
   value: nothing converts it; nor an array, a thunk or task, a reference
-  (one type each, over `Box`). Only a cast between two *different*
+  (one type each, over `Box`, or typed where `typed-arrays` or
+  `typed-cells` allows it, never converted). Only a cast between two *different*
   inductives can convert (`structConv`, [casts.md](casts.md)).
 - **Why:** With one type per instantiation, a value that crossed into
   uniform code was rebuilt node by node, without memory of the nodes

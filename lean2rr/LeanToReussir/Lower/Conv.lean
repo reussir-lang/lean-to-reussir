@@ -55,7 +55,7 @@ where
             if ← go ft seen then return true
         return false
       -- A reference, through its value.
-      if ← isRefType t then return ← go RR.Ty.box seen
+      if let some e ← refElem? t then return ← go e seen
       match ← tupleFields? n with
       | some fields =>
         for ft in fields do
@@ -243,9 +243,9 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
         let e ← if (← read).literalCache then strLitCached "" else strLit ""
         pure (some (.ofExpr e), inf)
       else if n == boxName then pure (some (.ofExpr (← boxZero)), inf)
-      else if ← isRefType t then
+      else if let some e ← refElem? t then
         -- A reference (never used: any cell will do).
-        let (vs?, l) ← fieldsZero #[RR.Ty.box]
+        let (vs?, l) ← fieldsZero #[e]
         pure (vs?.map fun vs => .ofExpr (refNew t vs[0]!), l)
       else if let some info := (← get).typeInfos[n]? then
         -- A constructor without fields, else the first whose fields have

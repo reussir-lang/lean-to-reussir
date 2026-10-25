@@ -1,0 +1,3 @@
+# typed code's modify on a reference that the package also reads at lcAny (every kind off: cells of boxes), n = 2000 and 8000 steps: in place, as natively
+arr 2000 | arr 8000 | 1 1000
+str 2000 | str 8000 | 1 1000

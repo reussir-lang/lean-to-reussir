@@ -4,11 +4,11 @@ allocs 9536
 bytes 3223136
 native-allocs 299445
 native-bytes 12739938
-items 151
+items 152
 functions 115
 conversion-fns 0
 conversion-sites 0
-box-sites 44
+box-sites 43
 box-variants 7
 unbox-fns 4
 unbox-sites 6
@@ -18,6 +18,7 @@ item L2RFn_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 60f70f46f8fd
 item L2RFn_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 740940b50b1b
 item L2RFn_F7nL2RUnit«T_ST_Out_#~a6eff74e9f15» 7e4dae276967
 item L2RRef# 4bffac39b775
+item L2RRef# 9a8ce79d17bd
 item T_EST_Out_# 109df62ffcb5
 item T_IO_Error_# 290727c6f059
 item T_IO_FS_Stream_# ad68d7fd4fa1
@@ -36,11 +37,11 @@ item Tuple# 9f0aaa56ba0d
 item Tuple# d4eee5540d99
 item Tuple# dcca1e39e413
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 035213e28a17
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3a413da5f108
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 5d895c52f576
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 7649f3688788
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 8042c9da9fdc
 item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
@@ -50,13 +51,13 @@ item extern "C" trampoline "l2r_task_run_one_c" = l2r_task_run_one; 7efa4a35bf26
 item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 088dffee5ccf
+item l2r_any_rel_# 2d121af0e1bc
 item l2r_any_rel_# 3190d4b509c2
-item l2r_any_rel_# 335f04c922c7
 item l2r_any_rel_# 5d9b3bfe95fc
 item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
-item l2r_any_releases 335a501a3bb0
+item l2r_any_releases d69c1eeef47b
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
 item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe
@@ -65,7 +66,7 @@ item l2r_err_string ca5b2a8474bb
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 e04d029e0679
+item l2r_init_chunk_0 e2fc9f5cd668
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
@@ -148,7 +149,7 @@ item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___closed__0_init 189a83e755cb
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__1___l2r_#____redArg___l2r__flat 54e8bc24ac0a
 item l___private_Init_Data_Nat_Control_0__Nat_forM_loop___at___00main_spec__2___l2r_#____redArg___l2r__flat cd9f48b71889
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ e322d66f0607
 item l___private_Init_System_IOError_0__IO_Error_downCaseFirst___l2r_#_ 5131e92a92b5
 item l___private_Qsort_0__partitionAux___at___00qsortAux___at___00main_spec__0_spec__0___l2r_#____l2r__flat bfed80da7f33
 item l_badRand___l2r_#_ 58f5f04afa61

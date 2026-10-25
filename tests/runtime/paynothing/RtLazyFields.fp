@@ -1,15 +1,15 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50265
-bytes 2214128
-native-allocs 64901
-native-bytes 2546035
-items 290
-functions 223
+allocs 50263
+bytes 2214080
+native-allocs 64913
+native-bytes 2546211
+items 288
+functions 222
 conversion-fns 0
 conversion-sites 0
-box-sites 207
-box-variants 15
+box-sites 206
+box-variants 14
 unbox-fns 6
 unbox-sites 16
 item L2RFn_F3nu324nbool 97c2f4999fe7
@@ -18,7 +18,7 @@ item L2RFn_F4aRVec1_2nu8F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 9c0c234ead50
 item L2RFn_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 60f70f46f8fd
 item L2RFn_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 740940b50b1b
 item L2RFn_F7nL2RUnit«T_ST_Out_#~a6eff74e9f15» 7e4dae276967
-item L2RRef# 4bffac39b775
+item L2RRef# 9a8ce79d17bd
 item T_EST_Out_# 109df62ffcb5
 item T_IO_Error_# 290727c6f059
 item T_IO_FS_Stream_# ad68d7fd4fa1
@@ -60,6 +60,7 @@ item Tuple# f3665032a092
 item Tuple# fd4a01cee92a
 item extern "C" trampoline "l2r_any_init_c" = l2r_any_init; a494cede80de
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 006f0efa3349
+item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 035213e28a17
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 079b0f39cca0
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 07d39b1f8a81
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 089399175044
@@ -68,8 +69,6 @@ item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 208f43455cd7
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 2aa16ae60f2c
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3f03f6ad69ec
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 3f90ae81a431
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 5d895c52f576
-item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 7649f3688788
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; 8042c9da9fdc
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; b6a2fc0fd801
 item extern "C" trampoline "l2r_any_rel_#_c" = l2r_any_rel_#; e122ebc32024
@@ -86,8 +85,7 @@ item l2r_any_rel_# 088dffee5ccf
 item l2r_any_rel_# 14705fb1e9c6
 item l2r_any_rel_# 1fe052126bca
 item l2r_any_rel_# 2457057329a7
-item l2r_any_rel_# 3190d4b509c2
-item l2r_any_rel_# 335f04c922c7
+item l2r_any_rel_# 2d121af0e1bc
 item l2r_any_rel_# 5848f841cb11
 item l2r_any_rel_# 5d9b3bfe95fc
 item l2r_any_rel_# 7febeb8aae0c
@@ -96,7 +94,7 @@ item l2r_any_rel_# ba250db4e619
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# e7f60d5b8ad4
-item l2r_any_releases 8b6f8817bd70
+item l2r_any_releases 9af6b15bb94b
 item l2r_ap1_F3nu324nbool bcd732154723
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
@@ -114,7 +112,7 @@ item l2r_fn_of_index_F3nu324nbool 519d44c3b77d
 item l2r_get_std_1 96a8f0c6702b
 item l2r_get_std_2 3818079a4a43
 item l2r_init_body d702415b04bc
-item l2r_init_chunk_0 951b6d6e6811
+item l2r_init_chunk_0 57bbfb665633
 item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
@@ -245,7 +243,7 @@ item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spe
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____l2r__split_0_ 031d43243166
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 4f99e19c7560
 item l___private_Init_Data_List_Impl_0__List_takeTR_go___l2r_#____redArg 89c914d9b550
-item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ ffd80adacb14
+item l___private_Init_Data_Random_0__initFn___l2r_#___x40_Init_Data_Random_2456098205____hygCtx___hyg_2__0_ e322d66f0607
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0 90aa8c56236c
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___closed__0_init e71bee722491
 item l___private_Init_Data_Range_Basic_0__Std_Legacy_Range_forIn_x27_loop___at___00main_spec__18___l2r_#____redArg___l2r__flat 5dc4e7927536

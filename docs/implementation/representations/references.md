@@ -6,9 +6,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 ### A reference is one record type around a Reussir cell of a `Box`
 
-- **What:** Every reference, whatever its contents' type, is the one
-  generated shared record `L2RRefN(Cell<Box>)` (N a fresh number) around a
-  Reussir cell, every alias sharing the record. `set` boxes the value,
+- **What:** Without optimization `typed-cells`, every reference, whatever
+  its contents' type, is the one generated shared record
+  `L2RRefN(Cell<Box>)` (N a fresh number) around a Reussir cell, every
+  alias sharing the record. With it (on by default), the cell holds the
+  element's own type where the whole-program check allows it, one record
+  type per cell type ([typed-cells.md](typed-cells.md)); every other
+  reference is this record of boxes. `set` boxes the value,
   `get` and `take` give a `Box` (the IO result's field holds it as it
   is). Mono types every reference `lcAny`, so a reference travels in a
   `Box`; an operation unboxes it (one variant: one reference type). The
@@ -19,10 +23,11 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   reference held in a `Box` went through a generated dispatch over every
   boxed reference type, and Stage 3 typed the references made at a
   precise type (`typedRef`) so that typed code avoided it.
-- **Where:** `LowerBase.lean`: `refType`, `isRefType`;
-  `Lower/LazyForce.lean`: `refNew`; `Lower/Externs.lean`: `refGlue`,
-  `refCellOp`, `refCellOpPlain`; `runtime/prelude.rr`: `l2r_rc_get`,
-  `l2r_rc_set_ref`, `l2r_rc_swap`.
+- **Where:** `LowerBase.lean`: `refType`, `refTypeOf`, `refElem?`,
+  `isRefType`; `Lower/LazyForce.lean`: `refNew`; `Lower/Externs.lean`:
+  `refGlue`, `refElemTy`, `refCellOp`, `refCellOpPlain`;
+  `runtime/prelude.rr`: `l2r_rc_get`, `l2r_rc_set_ref`, `l2r_rc_swap`
+  (generic over the cell's type).
 - **Remove only if:** never. (`LRef<T>` and the prelude's `l2r_ref_*`
   are no longer used by generated code: promises hold an `LCell`.)
 
@@ -30,7 +35,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 - **What:** `ST.Prim.Ref.take` swaps the placeholder `box(0)` into the
   cell and returns the old value, for every element type (a big
-  `Nat`/`Int` too, since mem-nat). Natively `lean_st_ref_take` stores a
+  `Nat`/`Int` too, since mem-nat); a typed cell gets the zero of its type
+  ([typed-cells.md](typed-cells.md#take-stores-the-placeholder-of-the-element-type)). Natively `lean_st_ref_take` stores a
   null pointer (Lean 4.34's `io.cpp`), which only unsafe code can see
   before the next store (`refCellOpPlain`'s comment).
 - **Why:** Lean's `modify` is take-then-set: a value only the cell holds
@@ -52,7 +58,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 ### `ST.Ref.ptrEq` is real identity
 
 - **What:** `ST.Ref.ptrEq` compares the addresses of the two references'
-  records (each unboxed first).
+  records (each unboxed first, at the record type of the instance's
+  element type).
 - **Why:** All aliases share one record.
 - **Where:** `Lower/Externs.lean`: `refGlue` (the `addr` operation);
   `LowerBase.lean`: `recordAddr` (`l2r_ptr_pass`, `l2r_ptr_passed`).

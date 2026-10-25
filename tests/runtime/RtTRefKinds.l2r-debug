@@ -1,0 +1,3 @@
+lean2rr: program casts: no
+lean2rr: program creates tasks: false
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: #[A(A(LStr)), A(LStr), A(box), I:List, I:Option, I:Pt, I:Shape, I:StdGen, Int, LStr, Nat, bool, f32, u16, u32, u8]

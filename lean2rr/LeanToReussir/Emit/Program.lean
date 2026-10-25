@@ -4,6 +4,7 @@ import LeanToReussir.PassConfig
 import LeanToReussir.Outline
 import LeanToReussir.MonoRetype
 import LeanToReussir.CompactArrays
+import LeanToReussir.TypedCells
 import LeanToReussir.PreludePrune
 
 /-!
@@ -533,6 +534,11 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let erased ← flowAnalysis decls casts.isSome inits
   let (compactKindsOn, compactOff, boxedArrayFields) := (ca.on, ca.off, ca.boxed)
   let typedKindsOn : Std.HashSet String := ca.ptrOn.foldl (·.insert ·) {}
+  -- `typed-cells`: the cell kinds whose references hold their own type.
+  let tc : TCResult ← if cfg.typedCells then
+      typedRefKinds decls keys casts compactKindsOn typedKindsOn
+    else pure {}
+  let refKindsOn : Std.HashSet String := tc.refOn.foldl (·.insert ·) {}
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
     if cfg.compactArrays then
@@ -545,6 +551,9 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
         for (k, why) in ca.ptrOff do IO.eprintln s!"lean2rr: typed arrays: {k} off: {why}"
         unless reverted == 0 do
           IO.eprintln s!"lean2rr: typed arrays: {reverted} map loop entries in place again (their kinds are off)"
+    if cfg.typedCells then
+      IO.eprintln s!"lean2rr: typed cells: references: {tc.refOn}"
+      for (k, why) in tc.refOff do IO.eprintln s!"lean2rr: typed cells: references: {k} off: {why}"
     IO.eprintln s!"lean2rr: program creates tasks: {createsTasks}"
     IO.eprintln s!"lean2rr: rule 4: {erased.eMarks.size} skeletons with a completion at an erased domain, {erased.reached.size} function types reached by a completion"
   let ctx : LowerCtx := { decls := decls.foldl (fun m d => m.insert d.name d) {}, keys, preludeFns,
@@ -555,7 +564,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
-                          convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields }
+                          convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields,
+                          refKindsOn }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

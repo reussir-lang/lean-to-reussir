@@ -1,0 +1,1 @@
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: #[A(u8), I:Pt, I:StdGen, LStr, Nat, bool]

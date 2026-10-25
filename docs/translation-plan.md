@@ -721,7 +721,7 @@ Stage 4 sees only mono types:
 | `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation for every `α` without a storage kind: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
 | `Array S`, `S` a scalar | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | optimization `compact-arrays`: per storage kind, when a whole-program check finds that no array of the kind meets an array of boxes; otherwise `RVec<Box>` (`docs/implementation/representations/compact-arrays.md`) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk`/`data` (and `FloatArray`'s) are the identity with a compact `Array UInt8` (`Array Float`); with an array of `Box`es they convert in one loop at the exact size, as natively they copy |
-| `ST.Ref σ α` | one generated shared record `L2RRefN(Cell<Box>)` (N a counter) around Reussir's mutable cell, whatever `α` is | a value is boxed when stored and unboxed when read at a precise type. Mono types a reference `lcAny`: it travels in a `Box`, and an operation unboxes it (one variant) |
+| `ST.Ref σ α` | a generated shared record `L2RRefN(Cell<Box>)` (N a counter) around Reussir's mutable cell, whatever `α` is; with optimization `typed-cells`, `L2RRefN(Cell<T>)` of `α`'s own type `T` when `α` is a shared record or enum, `Nat`, `Int`, `String`, an array or an immediate scalar and a whole-program check allows its kind (one record type per `T`) | in a cell of boxes a value is boxed when stored and unboxed when read at a precise type; a typed cell stores and reads `T`. Mono types a reference `lcAny`: it travels in a `Box`, and an operation unboxes it at its record type (`docs/implementation/representations/typed-cells.md`) |
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> Box), busy, done(Box), … }`, one for thunks and one for tasks, whatever `α` is | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
@@ -1022,7 +1022,15 @@ its value is stored as `Box`.
   types every reference `lcAny`, so it travels boxed, and each operation
   unboxes it (one variant) and acts on its one cell: `set` boxes the
   value, `get` gives a `Box` (which the IO result's field holds as it is).
-  `ST.Ref.ptrEq` compares the records' addresses.
+  `ST.Ref.ptrEq` compares the records' addresses. With optimization
+  `typed-cells` the cell of a reference holds its element's own type where
+  a whole-program check allows the element's kind: one record type per
+  cell type, each operation unboxing the reference at its own (a box keeps
+  its payload's type, so two record types never meet without a panic, and
+  the check, over the instances of the six reference primitives, makes
+  even that impossible: a make and an operation whose element types can
+  be one type up to `lcAny` must agree). A reference is still never
+  converted.
 - A partial application has the type of its target with the supplied
   arguments removed. Lambda lifting can give a lifted lambda the result type
   `lcAny` while its closure is used at `Nat × Int → Int`, or the reverse; the

@@ -22,6 +22,7 @@ import LeanToReussir.Opt.ConvLiveness
 import LeanToReussir.Opt.MergeFns
 import LeanToReussir.Opt.Flatten
 import LeanToReussir.Opt.SplitMapLoops
+import LeanToReussir.Opt.TypedCells
 import LeanToReussir.Opt.UnreadFields
 import LeanToReussir.Opt.PreludeLiveness
 import LeanToReussir.Opt.UnreadConsts
@@ -89,6 +90,7 @@ def optimizations : Array OptPass := #[
   -- Before `compact-arrays`, whose hooks read its switch.
   ⟨"typed-arrays", true, "an Array of a one-word counted type (a shared record or enum, Nat, Int, String, another array) whose elements hold nothing with an observable release is a typed RVec<T> of the element's own type, for each pointer kind no value of which can reach generic code (the whole-program check of compact-arrays, which it needs; ArrayKinds.ptrKind?); the loops of Array.map are typed at those element types too", TypedArrays.install⟩,
   ⟨"compact-arrays", true, "an Array of a scalar (UInt8, Bool and enumerations of at most 256 constructors as u8; UInt16; UInt32 and Char; UInt64 and USize; Float32; Float) is a compact RVec<u8|u16|u32|u64|f32|f64>, for each storage kind no value of which can reach generic code or a field of type Array α (a whole-program check, CompactArrays); the loops of Array.map are typed at their element types (Opt/SplitMapLoops)", CompactArrays.install⟩,
+  ⟨"typed-cells", true, "the cell of a reference (ST.Ref) whose element type is a shared record or enum, Nat, Int, String, an array, Bool, UInt8, UInt16, UInt32 or Float32 holds the element's own type (a record L2RRef(Cell<T>) per type) instead of a box, for each such cell kind that no reference operation at another representation can meet (an operation at lcAny, a cast) and whose values hold nothing with an observable release (a whole-program check over the reference primitives' instances, TypedCells)", TypedCells.install⟩,
   ⟨"placeholder-cache", true, "placeholders (box(0) at a type) that would allocate built once, in a once-cell", PlaceholderCache.install⟩,
   ⟨"boxed-consts", true, "a constant whose boxing allocates (a Float, a UInt64 from 2^63) boxed once, in a once-cell, as native Lean's _boxed_const", BoxedConsts.install⟩,
   ⟨"literal-consts", true, "a constant whose code is one string literal (many of Lean's closed terms), or one read of such a constant, gets no once-cell accessor: a read calls the runtime's literal cache (l2r_str_lit_cached), which makes the string at the first read and keeps it", LiteralConsts.install⟩,

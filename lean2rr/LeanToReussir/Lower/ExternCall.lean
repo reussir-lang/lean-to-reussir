@@ -306,7 +306,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
         if let some a ← erasedArg g then relevant := relevant.push (g, a)
   if let some e ← customExtern orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   if orig.getPrefix == `ST.Prim || orig.getPrefix == `ST.Prim.Ref then
-    if let some e ← refGlue orig (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
+    if let some e ← refGlue orig typeArgs (relevant.map (·.1)) ret (relevant.map (·.2)) then return e
   let sym ← externSymbol orig
   -- Which parameters the runtime receives: not erased ones, not the world,
   -- not proofs.

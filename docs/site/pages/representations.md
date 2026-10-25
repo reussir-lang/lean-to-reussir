@@ -33,7 +33,7 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | `Array S`, `S` a scalar | `RVec<u8>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`, `RVec<f32>`, `RVec<f64>`: one block | the scalars inline ([compact arrays](#compact-arrays)) |
 | `Array X`, `X` a record, an enum with fields, `Nat`, `Int`, `String` or an array | `RVec<T>` of `X`'s own type: one block | the pointers without boxes ([typed arrays](#typed-arrays)) |
 | `ByteArray`, `FloatArray` | `RVec<u8>`, `RVec<f64>` | `ByteArray.mk` and `.data` are the identity with a compact `Array UInt8`; with an array of boxes they copy the elements in one loop |
-| `ST.Ref`, `IO.Ref` | one generated record around a Reussir `Cell` of a box | for every element type; updates seen through every alias |
+| `ST.Ref`, `IO.Ref` | a generated record around a Reussir `Cell`: of the element's own type, or of a box | updates seen through every alias ([typed references](#typed-references)) |
 | `Thunk α`, `Task α` | `LCell<S>` holding a generated state | for every `α`: the value is a box; memoized thunks, deferred tasks |
 | `IO.Promise α` | `LPromise`, a runtime object | holds the cell of its task |
 | handles, processes, mutexes, sockets | `LHandle`, a runtime object | closed with the last reference |
@@ -189,6 +189,45 @@ without a test of a box's type, and a write stores it without a tag
 
 Status: a conversion for a typed array that generic code unboxes as an
 array of boxes (now a stop with a message) is a possible later extension.
+
+## Typed references
+
+The cell of a reference holds the element itself when the element type
+has a *cell kind*: `L2RRef_N(Cell<T_Pt>)` for an `IO.Ref Pt`,
+`Cell<Nat>`, `Cell<LStr>`, `Cell<RVec<Nat>>`. A `set` stores the value
+without a box, and a `take` (in `modify`) gives it back without a test of
+a box's type (pass `typed-cells`). Each cell type has its own record
+type. Other references keep one record type whose cell holds a box.
+
+- **Kinds.** A record or an enum with fields (all instances of one
+  inductive type have one kind), `Nat`, `Int`, `String`, an array (its
+  kind follows how the program stores the array's elements), and the
+  scalars that a box holds in its word: `Bool`, `UInt8`, `UInt16`,
+  `UInt32`, `Char`, `Float32`. `UInt64` and `Float` have no kind: their
+  box can need a heap cell, and `get` gives the value in the box field of
+  the IO result.
+- **The rule.** Mono code gives every reference the type `lcAny`, so a
+  reference always goes in a box, and each operation takes the reference
+  out of the box at its own record type. The check compares the six
+  primitives: `mkRef` (a *make*) and `get`, `set`, `swap`, `take`,
+  `ptrEq` (the *operations*), each at the element type of its instance.
+  When a make and an operation can have the same type (`lcAny` can be
+  every type), they must use the same representation. Otherwise both kinds
+  use boxes. So an operation at `lcAny` (the reference of an existential
+  package) makes every kind use boxes. In a program that casts, every
+  kind uses boxes.
+- **Releases.** When the reference goes, Reussir releases the value in
+  the cell in its own field order. Thus a kind is typed only when its
+  values can hold nothing whose release the program can see: no closure,
+  no box, no handle, no task, no reference.
+- **`take`.** A typed cell gets the zero of its type (a constant, or a
+  value built once), where a cell of boxes gets `box(0)`. The value taken
+  out is not shared, so `modify` changes an array or a string in place.
+- **Example.** In `r.modify fun p => { p with n := p.n + 1 }` with
+  `r : IO.Ref Pt`, the record goes out of the cell and back into it with
+  no box.
+
+Status: typed cells for thunks, tasks and promises are a possible later step.
 
 ## Records and enums
 

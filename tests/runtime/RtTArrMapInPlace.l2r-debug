@@ -1,1 +1,1 @@
-map loop entries in place again (their kinds are off)
+[typed-arrays,compact-arrays] map loop entries in place again (their kinds are off)

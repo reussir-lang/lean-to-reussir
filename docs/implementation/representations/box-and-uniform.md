@@ -4,7 +4,10 @@ A value whose type is `lcAny` in a relevant position (see
 [../types/uniform-types.md](../types/uniform-types.md)) is a `Box`: the
 `lcAny` binders of uniform code, and every field, array element, reference
 and thunk or task value of a parameter's type (one representation per
-type). A typed local never pays for it. `Box` is the prelude's `LAny`
+type; optimizations `typed-arrays` and `typed-cells` give the arrays and
+references of some element types the elements' own types:
+[typed-arrays.md](typed-arrays.md), [typed-cells.md](typed-cells.md)).
+A typed local never pays for it. `Box` is the prelude's `LAny`
 (`leanrt::any`): one word, as Lean's `lean_object*`. Paths are relative to
 `lean2rr/LeanToReussir/`. Plan
 [§5.1](../../translation-plan.md#51-type-translation), "The uniform type
@@ -591,7 +594,7 @@ type). A typed local never pays for it. `Box` is the prelude's `LAny`
     (`RecordType::hasFusedHeader`: a variant whose capability is not
     `value`);
   - a shared struct (`struct`, shape `.struct`, not `[value]`; the
-    reference record `L2RRef`; an `ElemBox`) whose alignment is 8: its
+    reference records `L2RRef`, typed or not; an `ElemBox`) whose alignment is 8: its
     members start at offset 8, after 4 bytes of padding (the box is
     `{i32 count, record}`). Its alignment is 8 when a member is 8-aligned
     (`rrAlign8`): a `u64`, `i64` or `f64`; a member Reussir stores as a

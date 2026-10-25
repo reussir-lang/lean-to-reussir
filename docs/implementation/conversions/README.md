@@ -6,7 +6,9 @@ and `Tree α` are one type, whose field of type `α` is a `Box`
 So a value of an inductive is never rebuilt to change its layout: it goes
 between a `Box` position and a typed position by boxing or unboxing. So
 does a value of an array, a thunk, a task or a reference: one type each,
-over `Box`. Only a function type still has several Reussir
+over `Box` (or, under `typed-arrays` and `typed-cells`, the element's own
+type for the arrays and references whose whole-program check allows it,
+never converted either). Only a function type still has several Reussir
 representations (`Nat → Nat` and `Box → Box`). And mono erases
 `unsafeCast`, so a value can meet code expecting another type that Lean
 represents alike. lean2rr inserts a conversion wherever a value's Reussir

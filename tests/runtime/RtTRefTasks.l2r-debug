@@ -1,0 +1,2 @@
+lean2rr: program creates tasks: true
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: #[A(I:Pt), I:StdGen, LStr, Nat]

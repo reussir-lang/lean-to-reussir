@@ -227,7 +227,10 @@ off by default (`unread-fields`), `.ffi.c` is C code for the native build
 only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
 expected in lean2rr's build output, `.l2r-debug` the same with lean2rr
 run under `L2R_DEBUG=1`, which prints its whole-program facts: whether the
-program can cast, the compact array kinds). Each
+program can cast, the compact array kinds; a line of either that starts
+with `[OPT,…] ` is checked only while none of those optimizations is
+turned off, so that a fact an optimization prints does not fail a run
+with it off). Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.
@@ -890,3 +893,32 @@ that go off).
 | RtTArrRelease | elements that can hold something whose release the program can observe stay boxed: records holding a file handle (shared between elements), a closure and a task, updated by `set!` and `pop` and dropped; an `Array String` beside them stays typed (`RtTArrRelease.l2r-debug`: the kinds and the reasons) | — |
 | RtTArrMapCaptureNames | a map whose lambda captures two arrays named `src` and `dst` (re-review probe SD2) beside maps whose kinds end up boxed: the revert finds the split's own parameters, not the captured ones (matched by those names, it dropped the wrong argument: an internal panic) | — |
 | RtTArrMapInPlace | rounds of `Array.map` between two pointer kinds (`String → Nat → String`, review probe D) whose kinds end up boxed: the split of the first `map` is entered in place again (`RtTArrMapInPlace.alloc`: bytes grow as natively; with the split, 96 bytes per element against native's 8) | passes |
+
+The lines of these `.l2r-debug` files start with
+`[typed-arrays,compact-arrays] `: `run.sh` checks them only while both
+optimizations are on (a line `[OPT,…] text` of an `.l2r-log` or
+`.l2r-debug` file is skipped when one of the optimizations it names is
+turned off for the run).
+
+### Typed references: the `RtTRef*` corpus
+
+Tests for typed references (optimization `typed-cells`, clean step B2):
+the cell of an `IO.Ref X` (`ST.Ref σ X`) of a one-word counted type (a
+structure, an inductive with fields, `Nat`, `Int`, `String`, an array) or
+of a scalar a box holds as an immediate (`Bool`, `UInt8`, `UInt16`,
+`UInt32`, `Char`, `Float32`) holds `X`'s own type, unless a reference
+operation at another representation can meet the references of the kind
+(an operation at `lcAny`, a cast) or the values can hold something whose
+release the program can observe. Each output must equal native's; the
+`.l2r-debug` files list the kinds that stay typed (and why some go off),
+in lines that `run.sh` checks only while `typed-cells` (and the array
+optimizations that decide the kinds of arrays) are on.
+
+| test | what | `alloc-check` |
+|---|---|---|
+| RtTRefKinds | every cell kind (a structure, an inductive with nullary constructors, `Nat` from 2^64 and 2^70, `Int`, `String`, `List Nat`, `Option Pt`, `Array Nat` (kind `A(box)` here: typed arrays turn `Nat` off in this program), `Array (Array String)`, `Bool`, `UInt8`, `UInt16`, `UInt32`, `Char`, `Float32`; `UInt64` and `Float` without a kind) through `get`, `set`, `swap`, `modify`, `modifyGet` and `ptrEq`, aliases, references in a structure, an array, a closure and an `initialize` constant, `ST.Ref` in `runST` | — |
+| RtTRefInPlace | a reference of each kind (`Array Nat` as `A(Nat)`, `Array Pt`, `String`, `Pt`, `List Nat`, `Nat`, `UInt32`) updated n times by `modify` and `modifyGet`, with `get`, `swap` and `set` every 100 steps: the value only the cell holds (an array, a string, a record, a list) is updated in place, and `take` stores a placeholder built once (`RtTRefInPlace.alloc`, one line per kind) | passes |
+| RtTRefInPlaceNoCache | RtTRefInPlace with `placeholder-cache` off (`.opts`): a typed cell's allocating placeholder is built once in its own once-cell (`cellZero`), so the updates stay in place (`RtTRefInPlaceNoCache.alloc`; a placeholder per `take` added one allocation per step) | passes |
+| RtTRefGeneric | the same element types also read through an existential package (operations at `lcAny`) and a reference made at an unknown type: every kind goes off and the cells hold boxes; typed code still updates arrays and strings in place (`RtTRefGeneric.alloc`) | passes |
+| RtTRefMixed | typed kinds (`Pt`, `Nat`, `String`, `Array Pt`) beside kinds that go off for their releases (`List (Nat → Nat)`, and so `List String`; the standard output stream; `Array (Nat → Nat)`) and element types without a kind (functions, thunks, `UInt64`, `Float`) | — |
+| RtTRefTasks | typed references updated by `modify` from six tasks and from `main` (each operation with its point in a program that creates tasks, at the typed record) | — |

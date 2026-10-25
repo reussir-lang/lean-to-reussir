@@ -43,7 +43,8 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
 2. [representations/](representations/README.md): `Nat`/`Int`, generated
    records and value types, arrays (compact arrays of scalars, typed
    arrays of one-word counted types), strings and the literal
-   table, `Box`, placeholders, function values, references, identity.
+   table, `Box`, placeholders, function values, references (typed
+   references), identity.
 3. [conversions/](conversions/README.md): where conversions go (a value
    of an inductive is never rebuilt: one type per inductive), lazy
    conversions of function values, thunks and tasks, unboxing, casts.

@@ -11,7 +11,9 @@ to `lean2rr/LeanToReussir/`. Plan
 
 - **What:** Unboxing to a nominal type, an array, a thunk or task, a
   reference or a word type accepts that type's own variant only (one type
-  per inductive, one per builtin generic type), besides the boxed-unit arm
+  per inductive, one per builtin generic type; with `typed-cells`, one per
+  reference record type, so a reference unboxed at another record type
+  stops the program: [../representations/typed-cells.md](../representations/typed-cells.md)), besides the boxed-unit arm
   (the target's zero) and, in a program that casts, the cast arms below.
   The generated unboxing function to a function type accepts every
   compatible function representation (wrapped). Each function also has an

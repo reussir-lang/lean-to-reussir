@@ -1,1 +1,1 @@
-lean2rr: typed arrays: #[A(A(LStr)), A(LStr), A(Nat), I:List, I:Option, I:Pt, I:Shape, Int, LStr, Nat]
+[typed-arrays,compact-arrays] lean2rr: typed arrays: #[A(A(LStr)), A(LStr), A(Nat), I:List, I:Option, I:Pt, I:Shape, Int, LStr, Nat]

@@ -649,11 +649,12 @@ partial def genPersist (t : RR.Ty) (gen : IO.Ref PersistGen) : LowerM (Option St
               (order := some (leanOrder l)))
           let b : RR.Block := .ofExpr (.mtch (.var "v") arms)
           pure (if ← persistCell t then marked b else b)
-      else if ← isRefType t then
-        -- A reference: its value (as native Lean, which pushes `m_value`).
-        let get ← refCellOpPlain "get" (.var "v") none
-        let rest ← each #[("x", RR.Ty.box)]
-        pure (marked ⟨#[("x", some RR.Ty.box, get)] ++ rest.lets, rest.result⟩)
+      else if let some e ← refElem? t then
+        -- A reference: its value (as native Lean, which pushes `m_value`),
+        -- of the cell's type (a `Box`, or with `typed-cells` the element's).
+        let get ← refCellOpPlain "get" t e (.var "v") none
+        let rest ← each #[("x", e)]
+        pure (marked ⟨#[("x", some e, get)] ++ rest.lets, rest.result⟩)
       else
         match ← tupleFields? n with
         | some fields =>

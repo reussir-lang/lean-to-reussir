@@ -61,6 +61,12 @@ structure PassConfig where
   `compactArrays` allows (`compactArrayKinds`'s `ptr`; nothing without
   `compactArrays`). Plain: such arrays hold boxes. -/
   typedArrays : Bool := false
+  /-- Whether the cell of a reference (`ST.Ref σ X`) holds `X`'s own type,
+  `L2RRef…(Cell<T>)`, for the cell kinds (`CellKinds.cellKind?`: a shared
+  record or enum, `Nat`, `Int`, `String`, an array, a scalar a box holds as
+  an immediate) that the whole-program check allows (`typedRefKinds`).
+  Plain: every reference's cell holds a `Box`. -/
+  typedCells : Bool := false
   /-- Passes over the checked mono declarations (after Stage 3, before
   lowering), in order; they get the instance keys. -/
   monoPasses : Array (NameMap InstKey → Array (Decl .pure) → Array (Decl .pure)) := #[]

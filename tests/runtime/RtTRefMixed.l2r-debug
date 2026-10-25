@@ -1,0 +1,4 @@
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: #[A(I:Pt), I:Pt, I:StdGen, LStr, Nat]
+[typed-cells] lean2rr: typed cells: references: I:List off: its contents (List (Nat -> Nat)) may hold
+[typed-cells] lean2rr: typed cells: references: I:IO.FS.Stream off: its contents (IO.FS.Stream) may hold
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: A(box) off: its contents (Array (Nat -> Nat)) may hold

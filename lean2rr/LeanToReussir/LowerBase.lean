@@ -7,6 +7,7 @@ import LeanToReussir.Collect
 import LeanToReussir.Mono
 import LeanToReussir.ErasedDomains
 import LeanToReussir.ArrayKinds
+import LeanToReussir.CellKinds
 
 /-!
 # Stage 4 foundations: state and type translation
@@ -24,7 +25,9 @@ Translation plan §5.1. Every mono type becomes a Reussir type:
   and a field of a parameter's type is a `Box`;
 * the generic builtin types have one representation each, over `Box`:
   `Array α` is `RVec<Box>`, `Thunk α` and `Task α` a cell of one state type
-  each, `ST.Ref σ α` one reference type holding a `Box`;
+  each, `ST.Ref σ α` one reference type holding a `Box` (with
+  `typed-cells`, a reference type per element type where the whole-program
+  check allows it, `refTypeOf`);
 * function types become curried closures;
 * `lcAny` (a type Lean itself does not know) becomes the uniform `Box`.
 -/
@@ -177,6 +180,12 @@ structure LowerCtx where
   `Box` instead of an array of boxes, because the program also stores a
   compact array there (`arrayFieldInductives`, `nominalType`). -/
   boxedArrayFields : NameSet := {}
+  /-- The cell kinds of references whose cells hold the element's own type
+  (`CellKinds.cellKind?`; optimization `typed-cells`, `typedRefKinds`): a
+  reference operation at an element type of one of these kinds acts on
+  `refTypeOf` of that type (`refElemTy`). Empty: every reference holds a
+  `Box`. -/
+  refKindsOn : Std.HashSet String := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -441,6 +450,13 @@ structure LowerState where
   lazyFnNames : Std.HashSet String := {}
   /-- The name of the reference type (see `refType`), once made. -/
   refName : Option String := none
+  /-- The typed reference types (`refTypeOf`, optimization `typed-cells`):
+  element type ↦ record name, and record name ↦ element type. -/
+  refTypes : Std.HashMap RR.Ty String := {}
+  refElems : Std.HashMap String RR.Ty := {}
+  /-- The once-cell accessors of the placeholders that `take` stores into
+  typed cells when `placeholder-cache` is off (`cellZero`), by type. -/
+  cellZeroFns : Std.HashMap RR.Ty String := {}
   counter : Nat := 0
   /-- The state of `conv-liveness` (Lower/Live; unused without it). -/
   live : LiveState := {}
@@ -572,15 +588,21 @@ def boxName : String := "LAny"
 /-- The uniform type. -/
 def RR.Ty.box : RR.Ty := .named boxName
 
+/-- Whether `n` names a reference record type (`refType`, or a typed one
+of `refTypeOf`). -/
+def isRefName (n : String) : LowerM Bool := do
+  let s ← get
+  return s.refName == some n || s.refElems.contains n
+
 /-- Whether `t` is a Reussir shared record (or enum): a type of the
 program that is neither an enumeration nor a value type, a reference (see
-`refType`), or a function value (a shared enum). At the FFI boundary its
-value is the record's one-word handle (`Bridge` over the record's own
-wrapper). -/
+`refType`, `refTypeOf`), or a function value (a shared enum). At the FFI
+boundary its value is the record's one-word handle (`Bridge` over the
+record's own wrapper). -/
 def isSharedRecordTy (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
-    if (← get).refName == some n then return true
+    if ← isRefName n then return true
     match (← get).typeInfos[n]? with
     | some info => return info.shape != .enumLike && !info.value
     | none => return false
@@ -687,10 +709,30 @@ def refType : LowerM RR.Ty := do
     typeItems := s.typeItems.push (.struct n false #[.app "Cell" #[RR.Ty.box]]) }
   return .named n
 
-/-- Whether `t` is the reference type (`refType`). -/
+/-- The reference type whose cell holds values of Reussir type `e`:
+`refType` for a `Box`; with `typed-cells`, one generated shared record
+`L2RRef_N(Cell<e>)` per element type `e` (the references of a cell kind the
+whole-program check allows, `LowerCtx.refKindsOn`, `refElemTy`). -/
+def refTypeOf (e : RR.Ty) : LowerM RR.Ty := do
+  if e == RR.Ty.box then return ← refType
+  if let some n := (← get).refTypes[e]? then return .named n
+  let n ← fresh "L2RRef"
+  modify fun s => { s with
+    refTypes := s.refTypes.insert e n
+    refElems := s.refElems.insert n e
+    typeItems := s.typeItems.push (.struct n false #[.app "Cell" #[e]]) }
+  return .named n
+
+/-- The type of the values in the cell of reference type `t` (`Box` for
+`refType`, the element type for one of `refTypeOf`), if `t` is one. -/
+def refElem? (t : RR.Ty) : LowerM (Option RR.Ty) := do
+  let .named n := t | return none
+  if (← get).refName == some n then return some RR.Ty.box
+  return (← get).refElems[n]?
+
+/-- Whether `t` is a reference type (`refType`, `refTypeOf`). -/
 def isRefType (t : RR.Ty) : LowerM Bool := do
-  let .named n := t | return false
-  return (← get).refName == some n
+  return (← refElem? t).isSome
 
 /-- The index of a value of an enumeration type (a generated `[value]`
 enum without fields), as `u64`: a generated `match`. -/
@@ -881,7 +923,7 @@ partial def rrAlign8 (t : RR.Ty) : LowerM Bool := do
   match t with
   | .named n =>
     if n ∈ ["u64", "i64", "f64", "Nat", "Int", "LStr", "LHandle", "LPromise", boxName] then return true
-    if (← get).refName == some n then return true
+    if ← isRefName n then return true
     match (← get).typeInfos[n]? with
     | some info =>
       if info.shape == .enumLike then return false
@@ -924,7 +966,7 @@ def boxIsWide (store : RR.Ty) : LowerM Bool := do
   -- the enum of its run-time type, which `fnTypeItems` checks.
   if store matches .fn .. then return store.rt matches .fn ..
   let .named n := store | return false
-  if (← get).refName == some n then return true
+  if ← isRefName n then return true
   match (← get).typeInfos[n]? with
   | some info =>
     if info.shape == .enumLike || info.value then return false

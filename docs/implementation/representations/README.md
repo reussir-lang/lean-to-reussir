@@ -36,9 +36,15 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   enums applied by generated functions.
 - [references.md](references.md): `ST.Ref` as a record around a Reussir
   cell.
+- [typed-cells.md](typed-cells.md): a reference whose cell holds the
+  element's own type (optimization `typed-cells`, clean step B2): the cell
+  kinds, the whole-program check over the instances of the reference
+  primitives, `take`'s placeholder, why thunks, tasks and promises keep
+  their cells of boxes, the costs.
 - [identity.md](identity.md): what `ptrAddrUnsafe` and `ptrEq` answer
   (identity and sharing are not preserved).
 
-Thunk and task cells are in [../tasks/cells.md](../tasks/cells.md).
+Thunk and task cells are in [../tasks/cells.md](../tasks/cells.md)
+(they keep one state type over `Box` each: [typed-cells.md](typed-cells.md#thunks-tasks-and-promises-keep-their-cells-of-boxes)).
 Conversions between representations are in
 [../conversions/](../conversions/README.md).

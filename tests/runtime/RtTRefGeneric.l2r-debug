@@ -1,0 +1,7 @@
+[typed-cells] lean2rr: typed cells: references: #[]
+[typed-cells] lean2rr: typed cells: references: Nat off: a reference made at Nat (
+[typed-cells] lean2rr: typed cells: references: LStr off: a reference made at String (
+[typed-cells] lean2rr: typed cells: references: I:Pt off: a reference made at Pt (
+[typed-cells] lean2rr: typed cells: references: I:List off: a reference made at List Nat (
+[typed-cells,typed-arrays,compact-arrays] lean2rr: typed cells: references: A(Nat) off: a reference made at Array Nat (
+[typed-cells] can reach an operation at lcAny (

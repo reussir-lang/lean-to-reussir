@@ -1,2 +1,2 @@
-lean2rr: typed arrays: #[A(I:Pt), A(f64), I:Pt, I:Wrap, LStr, Nat]
-lean2rr: typed arrays: I:Shape off: mkPack._l2r.0: Array Shape meets Array lcAny
+[typed-arrays,compact-arrays] lean2rr: typed arrays: #[A(I:Pt), A(f64), I:Pt, I:Wrap, LStr, Nat]
+[typed-arrays,compact-arrays] lean2rr: typed arrays: I:Shape off: mkPack._l2r.0: Array Shape meets Array lcAny

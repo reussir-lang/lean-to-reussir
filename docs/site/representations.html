@@ -20,6 +20,7 @@
 <li><a href="#strings-and-arrays">Strings and arrays</a></li>
 <li><a href="#compact-arrays">Compact arrays</a></li>
 <li><a href="#typed-arrays">Typed arrays</a></li>
+<li><a href="#typed-references">Typed references</a></li>
 <li><a href="#records-and-enums">Records and enums</a><ul>
 <li><a href="#an-example">An example</a></li>
 </ul>
@@ -120,8 +121,8 @@ heap cell. A <em><code>[value]</code></em> type is stored inline and is never al
 </tr>
 <tr>
 <td><code>ST.Ref</code>, <code>IO.Ref</code></td>
-<td>one generated record around a Reussir <code>Cell</code> of a box</td>
-<td>for every element type; updates seen through every alias</td>
+<td>a generated record around a Reussir <code>Cell</code>: of the element's own type, or of a box</td>
+<td>updates seen through every alias (<a href="#typed-references">typed references</a>)</td>
 </tr>
 <tr>
 <td><code>Thunk α</code>, <code>Task α</code></td>
@@ -322,6 +323,43 @@ without a test of a box's type, and a write stores it without a tag
 </ul>
 <p>Status: a conversion for a typed array that generic code unboxes as an
 array of boxes (now a stop with a message) is a possible later extension.</p>
+<h2 id="typed-references">Typed references</h2>
+<p>The cell of a reference holds the element itself when the element type
+has a <em>cell kind</em>: <code>L2RRef_N(Cell&lt;T_Pt&gt;)</code> for an <code>IO.Ref Pt</code>,
+<code>Cell&lt;Nat&gt;</code>, <code>Cell&lt;LStr&gt;</code>, <code>Cell&lt;RVec&lt;Nat&gt;&gt;</code>. A <code>set</code> stores the value
+without a box, and a <code>take</code> (in <code>modify</code>) gives it back without a test of
+a box's type (pass <code>typed-cells</code>). Each cell type has its own record
+type. Other references keep one record type whose cell holds a box.</p>
+<ul>
+<li><strong>Kinds.</strong> A record or an enum with fields (all instances of one
+  inductive type have one kind), <code>Nat</code>, <code>Int</code>, <code>String</code>, an array (its
+  kind follows how the program stores the array's elements), and the
+  scalars that a box holds in its word: <code>Bool</code>, <code>UInt8</code>, <code>UInt16</code>,
+  <code>UInt32</code>, <code>Char</code>, <code>Float32</code>. <code>UInt64</code> and <code>Float</code> have no kind: their
+  box can need a heap cell, and <code>get</code> gives the value in the box field of
+  the IO result.</li>
+<li><strong>The rule.</strong> Mono code gives every reference the type <code>lcAny</code>, so a
+  reference always goes in a box, and each operation takes the reference
+  out of the box at its own record type. The check compares the six
+  primitives: <code>mkRef</code> (a <em>make</em>) and <code>get</code>, <code>set</code>, <code>swap</code>, <code>take</code>,
+  <code>ptrEq</code> (the <em>operations</em>), each at the element type of its instance.
+  When a make and an operation can have the same type (<code>lcAny</code> can be
+  every type), they must use the same representation. Otherwise both kinds
+  use boxes. So an operation at <code>lcAny</code> (the reference of an existential
+  package) makes every kind use boxes. In a program that casts, every
+  kind uses boxes.</li>
+<li><strong>Releases.</strong> When the reference goes, Reussir releases the value in
+  the cell in its own field order. Thus a kind is typed only when its
+  values can hold nothing whose release the program can see: no closure,
+  no box, no handle, no task, no reference.</li>
+<li><strong><code>take</code>.</strong> A typed cell gets the zero of its type (a constant, or a
+  value built once), where a cell of boxes gets <code>box(0)</code>. The value taken
+  out is not shared, so <code>modify</code> changes an array or a string in place.</li>
+<li><strong>Example.</strong> In <code>r.modify fun p =&gt; { p with n := p.n + 1 }</code> with
+  <code>r : IO.Ref Pt</code>, the record goes out of the cell and back into it with
+  no box.</li>
+</ul>
+<p>Status: typed cells for thunks, tasks and promises are a possible later step.</p>
 <h2 id="records-and-enums">Records and enums</h2>
 <p>lean2rr chooses the shape of each inductive type from its constructors:</p>
 <table>
@@ -452,7 +490,7 @@ is a <code>match</code> that LLVM can inline. In a prototype, 10⁸ calls of sha
 function values took 0.09 s this way and 0.55 s with Reussir closures.</p>
 <h2 id="thunks-tasks-and-references">Thunks, tasks and references</h2>
 <figure class="fig" id="fig-lazy"><svg class="diagram" viewBox="0 0 900 300" width="900" role="img" aria-labelledby="lazy-title"><title id="lazy-title">Thunks and tasks</title><defs><marker id="lazy-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="44" width="64" height="34" rx="0" class="c-hdr"/><text x="42.0" y="66.0" text-anchor="middle" class="tc">count</text><text x="10" y="39" text-anchor="middle" class="to">0</text><rect x="74" y="44" width="64" height="34" rx="0" class="c-tag"/><text x="106.0" y="66.0" text-anchor="middle" class="tc">entry</text><text x="74" y="39" text-anchor="middle" class="to">4</text><rect x="138" y="44" width="128" height="34" rx="0" class="c-ptr"/><text x="202.0" y="66.0" text-anchor="middle" class="tc">state S</text><text x="138" y="39" text-anchor="middle" class="to">8</text><text x="266" y="39" text-anchor="middle" class="to">16</text><text x="10" y="26" text-anchor="start" class="t">LCell&lt;S&gt;: one runtime cell, seen through every alias</text><text x="10" y="104" text-anchor="start" class="ts">count: u32 reference count; entry: the task&#x27;s index in leanrt::task&#x27;s table (tasks only); state: the generated enum</text><rect x="20" y="140" width="150" height="50" rx="6" class="b-l2r"/><text x="95.0" y="162.5" text-anchor="middle" class="tb">pending(f)</text><text x="95.0" y="178.5" text-anchor="middle" class="ts">not run yet</text><line x1="170" y1="165" x2="260" y2="165" class="ar" marker-end="url(#lazy-ah)"/><text x="185" y="158" text-anchor="start" class="ts">forced</text><rect x="265" y="140" width="150" height="50" rx="6" class="b-rr"/><text x="340.0" y="162.5" text-anchor="middle" class="tb">busy</text><text x="340.0" y="178.5" text-anchor="middle" class="ts">f is running</text><line x1="415" y1="165" x2="505" y2="165" class="ar" marker-end="url(#lazy-ah)"/><text x="420" y="158" text-anchor="start" class="ts">f returns v</text><rect x="510" y="140" width="150" height="50" rx="6" class="b-ok"/><text x="585.0" y="162.5" text-anchor="middle" class="tb">done(v)</text><text x="585.0" y="178.5" text-anchor="middle" class="ts">value stored</text><rect x="20" y="225" width="230" height="50" rx="6" class="b-rt"/><text x="135.0" y="247.5" text-anchor="middle" class="tb">bind(f)</text><text x="135.0" y="263.5" text-anchor="middle" class="ts">a bind task not started</text><text x="280" y="245" text-anchor="start" class="ts">The value v is a box, so one state type serves</text><text x="280" y="262" text-anchor="start" class="ts">every Thunk α and every Task α.</text><text x="690" y="160" text-anchor="start" class="ts">busy forced again by its own</text><text x="690" y="176" text-anchor="start" class="ts">computation: waits forever,</text><text x="690" y="192" text-anchor="start" class="ts">as natively.</text></svg><figcaption><code>Thunk α</code> and <code>Task α</code> are a runtime cell (<code>LCell</code>) that holds a generated state. The closure runs at most once.</figcaption></figure>
-<figure class="fig" id="fig-ref"><svg class="diagram" viewBox="0 0 900 120" width="900" role="img" aria-labelledby="ref-title"><title id="ref-title">References</title><defs><marker id="ref-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="30" width="210" height="60" rx="6" class="b-l2r"/><text x="115.0" y="57.5" text-anchor="middle" class="tb">L2RRefN</text><text x="115.0" y="73.5" text-anchor="middle" class="ts">shared record (count, cell)</text><line x1="220" y1="60" x2="300" y2="60" class="ar" marker-end="url(#ref-ah)"/><rect x="305" y="30" width="230" height="60" rx="6" class="b-rr"/><text x="420.0" y="57.5" text-anchor="middle" class="tb">Cell&lt;LAny&gt;</text><text x="420.0" y="73.5" text-anchor="middle" class="ts">the value, a box</text><text x="560" y="55" text-anchor="start" class="ts">set: store the new value, then release the old one</text><text x="560" y="72" text-anchor="start" class="ts">take: move the value out, leave the placeholder</text></svg><figcaption><code>ST.Ref</code>/<code>IO.Ref</code>: a generated shared record around a Reussir cell. Every alias shares the record, so updates are seen everywhere. Two allocations (Lean: one).</figcaption></figure>
+<figure class="fig" id="fig-ref"><svg class="diagram" viewBox="0 0 900 120" width="900" role="img" aria-labelledby="ref-title"><title id="ref-title">References</title><defs><marker id="ref-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" class="ah"/></marker></defs><rect x="10" y="30" width="210" height="60" rx="6" class="b-l2r"/><text x="115.0" y="57.5" text-anchor="middle" class="tb">L2RRefN</text><text x="115.0" y="73.5" text-anchor="middle" class="ts">shared record (count, cell)</text><line x1="220" y1="60" x2="300" y2="60" class="ar" marker-end="url(#ref-ah)"/><rect x="305" y="30" width="230" height="60" rx="6" class="b-rr"/><text x="420.0" y="57.5" text-anchor="middle" class="tb">Cell&lt;T&gt; or Cell&lt;LAny&gt;</text><text x="420.0" y="73.5" text-anchor="middle" class="ts">the value: typed, or a box</text><text x="560" y="55" text-anchor="start" class="ts">set: store the new value, then release the old one</text><text x="560" y="72" text-anchor="start" class="ts">take: move the value out, leave the placeholder</text></svg><figcaption><code>ST.Ref</code>/<code>IO.Ref</code>: a generated shared record around a Reussir cell. Every alias shares the record, so updates are seen everywhere. Two allocations (Lean: one).</figcaption></figure>
 <h2 id="identity">Identity</h2>
 <p>lean2rr does not copy native pointer identity. <code>ptrAddrUnsafe x</code> answers:</p>
 <ul>
