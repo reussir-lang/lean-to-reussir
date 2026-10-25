@@ -8,7 +8,7 @@ patched.
 **Kind:** missed optimization. **Status:** documented only, no patch;
 lean2rr's output avoids the shape (see [What lean2rr does](#what-lean2rr-does)).
 
-**Upstream (2026-10-19):** Still reproduces on upstream 7954a367 with the series (2026-10-19: `bump` allocates 32,020 cells for 1,000 bumps, 129,488 for 4,000); open.
+**Upstream (2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `TokenReuse`; the repro was not run again. On upstream 7954a367 with the series it still reproduced (2026-10-19: `bump` allocates 32,020 cells for 1,000 bumps, 129,488 for 4,000); open.
 
 **Verdict: missed optimization, not a bug.** The output is correct, and
 TokenReuse documents its choice of donor as a heuristic. A dispatch arm

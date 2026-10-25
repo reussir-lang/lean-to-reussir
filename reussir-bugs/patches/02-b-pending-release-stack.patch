@@ -1,4 +1,4 @@
-From 2718e2ba452dd61431962cae6c1778f891c2d92a Mon Sep 17 00:00:00 2001
+From 3885b393b5f1c7d13d9adc58e1036745c3d5f032 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 10:10:05 -0400
 Subject: [PATCH 2/9] l2r-local: bug 13b: free cells deep through records with
@@ -397,10 +397,10 @@ index bbfc946c..778a1865 100644
      : ReussirRcOp<
            "create", [AttrSizedOperandSegments,
 diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-index 694add9c..07bbb375 100644
+index c941199f..6b591781 100644
 --- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-@@ -57,19 +57,21 @@ namespace reussir {
+@@ -59,19 +59,21 @@ namespace reussir {
  //===----------------------------------------------------------------------===//
  // Releases inside drop glue
  //===----------------------------------------------------------------------===//
@@ -435,7 +435,7 @@ index 694add9c..07bbb375 100644
  
  namespace {
  
-@@ -82,58 +84,9 @@ bool isPlainSharedRecordBox(RcType rcType) {
+@@ -84,58 +86,9 @@ bool isPlainSharedRecordBox(RcType rcType) {
    return record && record.getName() && record.getComplete();
  }
  
@@ -497,7 +497,7 @@ index 694add9c..07bbb375 100644
  }
  
  // The compound payload of arm `tag` of a variant (or the compound itself).
-@@ -148,30 +101,66 @@ RecordType compoundPayload(RecordType record, std::optional<size_t> tag) {
+@@ -150,30 +103,66 @@ RecordType compoundPayload(RecordType record, std::optional<size_t> tag) {
    return payload;
  }
  
@@ -578,7 +578,7 @@ index 694add9c..07bbb375 100644
    mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
    mlir::Value isOne = mlir::arith::CmpIOp::create(
        rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
-@@ -180,74 +169,39 @@ void emitGlueRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -182,74 +171,39 @@ void emitGlueRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
        ReussirExpectOp::create(rewriter, loc, isOne, true).getLikely(),
        /*withElseRegion=*/true);
    rewriter.setInsertionPoint(ifOp.thenBlock()->getTerminator());
@@ -681,7 +681,7 @@ index 694add9c..07bbb375 100644
  }
  
  // rc.dec of `rc` and the free of its token.
-@@ -287,33 +241,37 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -289,33 +243,37 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
        moduleOp->hasAttr(kSpecialPtrTagAttr) &&
        rcType.mayCarrySpecialPointerTag())
      return;
@@ -742,7 +742,7 @@ index 694add9c..07bbb375 100644
    }
    // Free the cell: a variant cell has its arm's size.
    auto layout =
-@@ -327,14 +285,18 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -329,14 +287,18 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
    mlir::Value token =
        ReussirRcReinterpretOp::create(rewriter, loc, tokenType, rc);
    ReussirTokenFreeOp::create(rewriter, loc, token);
@@ -763,7 +763,7 @@ index 694add9c..07bbb375 100644
                        record.getName().getValue().ltrim("_R") + "E")
                           .str();
    if (auto existing = moduleOp.lookupSymbol<mlir::func::FuncOp>(name))
-@@ -348,9 +310,11 @@ mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
+@@ -350,9 +312,11 @@ mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
    func->setAttr(kDropGlueAttr, rewriter.getUnitAttr());
    func->setAttr("llvm.linkage", rewriter.getAttr<mlir::LLVM::LinkageAttr>(
                                      mlir::LLVM::linkage::Linkage::LinkonceODR));
@@ -776,7 +776,7 @@ index 694add9c..07bbb375 100644
    inheritSanitizerPassthrough(moduleOp, func);
    func.setArgAttr(0, "llvm.nonnull", rewriter.getUnitAttr());
    func.setArgAttr(0, "llvm.noundef", rewriter.getUnitAttr());
-@@ -534,12 +498,11 @@ private:
+@@ -536,12 +500,11 @@ private:
    mlir::LogicalResult rewriteDropRc(RcType rcType, ReussirRefDropOp op,
                                      mlir::PatternRewriter &rewriter) const {
      if (auto func = op->getParentOfType<mlir::func::FuncOp>();
@@ -793,10 +793,10 @@ index 694add9c..07bbb375 100644
        return mlir::success();
      }
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index f39ff46d..51b1854e 100644
+index 1440c929..3bfedfc5 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -637,6 +637,54 @@ struct ReussirRcFetchSubConversionPattern
+@@ -640,6 +640,54 @@ struct ReussirRcFetchSubConversionPattern
    }
  };
  
@@ -851,7 +851,7 @@ index f39ff46d..51b1854e 100644
  struct ReussirRcSetConversionPattern
      : public mlir::OpConversionPattern<ReussirRcSetOp> {
    using OpConversionPattern::OpConversionPattern;
-@@ -4102,7 +4150,7 @@ struct ReussirConvertToLLVMPatternInterface
+@@ -4316,7 +4364,7 @@ struct ReussirConvertToLLVMPatternInterface
          ReussirClosureInspectPayloadOp, ReussirClosureCursorOp,
          ReussirClosureInstantiateOp, ReussirClosureVtableOp,
          ReussirClosureCreateOp, ReussirRcFetchOp, ReussirRcFetchSubOp,
@@ -860,7 +860,7 @@ index f39ff46d..51b1854e 100644
          ReussirStrCastOp, ReussirStrLenOp, ReussirStrUnsafeByteAtOp,
          ReussirStrUnsafeStartWithOp, ReussirStrSliceOp, ReussirStrRefEqOp,
          ReussirStrUnsafeMemcmpOp, ReussirConstSeqGlobalOp,
-@@ -4326,7 +4374,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
+@@ -4545,7 +4593,8 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
        ReussirClosureVtableOpConversionPattern,
        ReussirClosureCreateOpConversionPattern,
        ReussirRcReinterpretConversionPattern, ReussirRcFetchConversionPattern,
@@ -871,10 +871,10 @@ index f39ff46d..51b1854e 100644
        ReussirStrCastOpConversionPattern, ReussirStrLenOpConversionPattern,
        ReussirStrUnsafeByteAtOpConversionPattern,
 diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
-index cec3fa75..3c51a0dd 100644
+index b16debfa..e74d5370 100644
 --- a/lib/IR/ReussirOps.cpp
 +++ b/lib/IR/ReussirOps.cpp
-@@ -4241,9 +4241,16 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+@@ -4247,9 +4247,16 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
    dtor->setAttr(kDropGlueAttr, builder.getUnitAttr());
    dtor->setAttr("llvm.linkage", builder.getAttr<mlir::LLVM::LinkageAttr>(
                                      mlir::LLVM::linkage::Linkage::LinkonceODR));
@@ -894,7 +894,7 @@ index cec3fa75..3c51a0dd 100644
    if (retcon) {
      dtor->setAttr("reussir.retcon_drop", builder.getUnitAttr());
      dtor->setAttr("llvm.passthrough",
-@@ -4260,6 +4267,22 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+@@ -4266,6 +4273,22 @@ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
    auto ref = entryBlock->getArgument(0);
    ReussirRefDropOp::create(builder, builder.getUnknownLoc(), ref, true,
                             nullptr);

@@ -23,7 +23,16 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
   from `L2R_LEAN_TOOLCHAIN` (a toolchain directory), by default the elan
   toolchain the pin names, whatever elan's default is
   (`scripts/toolchain.sh`).
-- Reussir built from source (LLVM/MLIR 23), checked out into `reussir/`
+- Reussir built from source (LLVM/MLIR 23, Clang 23), checked out into
+  `reussir/`: upstream `0378b744` plus the patches of
+  `reussir-bugs/patches/series` (branch `l2r-base5`; see
+  [`reussir-bugs/README.md`](reussir-bugs/README.md#applying-the-patches)).
+  Its build needs GMP 6.2 or later (`gmp.h`, `libgmp`), a CMake that
+  knows `cxx_std_26` for Clang (CMake 4.4.4 works; Ubuntu 24.04's 3.28
+  does not) and the libstdc++ 14 headers (Ubuntu 24.04:
+  `libstdc++-14-dev`). After a change of the C++ headers, delete the
+  build directory and configure again
+  ([building Reussir](reussir-bugs/README.md#building-reussir)).
 - The shared runtime crate lean-runtime, a git submodule
   (`third_party/lean-runtime`): clone with `git clone --recurse-submodules`,
   or run `git submodule update --init` in a checkout, and again after a

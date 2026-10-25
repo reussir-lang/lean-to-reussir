@@ -15,14 +15,23 @@ builds apply to Reussir.
 - **Repros.** [`repros/`](repros/) holds the repro programs and `run.sh`,
   which builds and runs them ([running the repros](#running-the-repros)).
 
-**Base.** lean2rr's Reussir is upstream Reussir `7954a367` (`main` on
-2026-10-19) plus the 9 patches of the series. The checkout at
-`./reussir` is not part of this repository; its branch `l2r-base3`
-(head `4c490260`) is that stack (the series gives the same tree,
-`cc4a28d9`), and `scripts/l2r.py` stops with an error on a Reussir
-without it ([applying the patches](#applying-the-patches)).
+**Base.** lean2rr's Reussir is upstream Reussir `0378b744` (`main` on
+2026-10-24) plus the 9 patches of the series. The checkout at
+`./reussir` is not part of this repository; its branch `l2r-base5`
+(head `6bf9be85`) is that stack (the series gives the same tree,
+`cb4c6d48`), and `scripts/l2r.py` stops with an error on a Reussir
+without it ([applying the patches](#applying-the-patches)). This base
+needs GMP and newer build tools than the base before it
+([building Reussir](#building-reussir)).
 
-The base before it was `./reussir`'s branch `l2r-base2` (head
+The base before it was `./reussir`'s branch `l2r-base3` (head
+`4c490260`): upstream `7954a367` (2026-10-19) plus the same 9 patches.
+They apply to `0378b744` with no conflict; in the patch files only the
+line numbers and blob ids changed. The move to `0378b744` (2026-10-24)
+fixed no entry and changed no number
+([history](#history-the-move-to-0378b744-2026-10-24)).
+
+Before `l2r-base3`, the base was `./reussir`'s branch `l2r-base2` (head
 `b2e4a47e`): upstream `943f2195` plus 35 patches. Those 35 patch files,
 and the entries this directory had before 2026-10-19, are in git history
 and in that branch. On 2026-10-19 every entry that `7954a367` fixes was
@@ -42,10 +51,13 @@ only in part).
   entry. In the text, a patch is named by NN-x: 02-b is the second patch of
   issue 2.
 - **Patch file contents** are `git format-patch` output of the commits of
-  `l2r-base3` (made as branch `l2r-move`), against `7954a367`. A file's subject line is the subject of
-  its commit, and these subjects use the old numbers: "bug 13", "13b" and
-  "issue 13" mean entry 2, "bug 27" entry 2 (patch 02-d), "bug 34" entry 5,
-  "issue 38" entry 7; the subjects of 09-a and 10-a have no number. The
+  `l2r-base5`, against `0378b744`. The messages of 02-a and 02-b still
+  tell how they were rebased onto `7954a367` (2026-10-19); the move to
+  `0378b744` changed no line of code in them. A file's subject line is
+  the subject of its commit, and these subjects use the old numbers:
+  "bug 13", "13b" and "issue 13" mean entry 2, "bug 27" entry 2 (patch
+  02-d), "bug 34" entry 5, "issue 38" entry 7; the subjects of 09-a and
+  10-a have no number. The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
   new ones.
 - Older text says "bug NN" for every entry, whatever its kind: read it as
@@ -79,27 +91,32 @@ a feature), not a fix.
 One row per entry, grouped by kind. Column *Patches*: the entry's patch
 files in the series, or "none", or a parked patch
 ([parked patches](#parked-patches)). Column *Upstream*: what upstream
-`7954a367` does about it (checked 2026-10-19 where it says so).
+`0378b744` does about it. "Checked" means a check on `7954a367` on
+2026-10-19 (a repro run, or the source read). On 2026-10-24 the code of
+each entry was compared with `0378b744`: no upstream commit since
+`7954a367` fixes an entry
+([history](#history-the-move-to-0378b744-2026-10-24)); each entry's
+*Upstream* line gives the details.
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Upstream |
 |---|---|---|---|---|---|---|
 | [5](05-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes without the workaround | `scripts/l2r.py` passes `--relocation-mode pic` | [05-a](patches/05-a-pic-by-default.patch) | not fixed (pull request #758 open) |
 | [12](12-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling) | no: nothing calls it | - | none | unchanged; repro fails (checked) |
 | [13](13-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there | no: 64-bit targets only | - | none | unchanged (checked) |
-| [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | not rechecked |
+| [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | unchanged (source read at `0378b744`) |
 | [16](16-driver-stack-address-limit.md) | bug (under `ulimit -v`) | rrc's 1 GiB driver stack (#686) counts against an address-space limit: under `ulimit -v` 1250000 or 1600000 rrc aborts where it compiled before | no: lean2rr sets no such limit | - | none (parked: [16-a](patches/parked/16-a-driver-stack-rlimit.patch)) | open: #686 is the old 31-a; no pull request planned |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | still reproduces (checked) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | still reproduces (checked) |
 | [11](11-drop-run.md) | cost (run time) | a host frees one cell through 02-b's stack with a deferral and a drain: three calls, a push and a pop | yes, speed (about 5% of monadic-interp's instructions) | none possible | none (parked: [11-a](patches/parked/11-a-drop-run.patch)) | n/a: upstream has no such stack |
-| [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | not rechecked |
+| [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | not rechecked; no change to token reuse up to `0378b744` |
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | still reproduces (checked) |
-| [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | found on 7954a367 with the series; not reported |
-| [18](18-tail-padding-return.md) | missed optimization | a `[value]` struct's tail padding is an explicit byte array in the LLVM struct (`{ i64, i1, [7 x i8] }`); each byte counts as a returned value, so on aarch64 a result with more than 8 values comes back in memory (`sret`) | yes, speed (Unionfind +16% instructions on dev b874c365) | the tuple of a `flatten-structs` result keeps narrow values in `u64` members and no unit member (`tupleMemberTy`) | none | found on 7954a367 with the series; not reported |
+| [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | found on 7954a367 with the series; unchanged at `0378b744`; not reported |
+| [18](18-tail-padding-return.md) | missed optimization | a `[value]` struct's tail padding is an explicit byte array in the LLVM struct (`{ i64, i1, [7 x i8] }`); each byte counts as a returned value, so on aarch64 a result with more than 8 values comes back in memory (`sret`) | yes, speed (Unionfind +16% instructions on dev b874c365) | the tuple of a `flatten-structs` result keeps narrow values in `u64` members and no unit member (`tupleMemberTy`) | none | found on 7954a367 with the series; unchanged at `0378b744`; not reported |
 | [8](08-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias, never freed) as the donor | no longer | a field put back into a rebuilt node is boxed again | none | still reproduces (checked) |
 | [2](02-native-drop-order.md) | missing feature (partly fixed upstream) | drop glue does not release in native Lean's order and has no stack a host can share | yes: release order of resources; leanrt needs the stack to build | none | [02-a](patches/02-a-release-chains-in-loop.patch), [02-b](patches/02-b-pending-release-stack.patch), [02-c](patches/02-c-cheaper-pending-stack.patch), [02-d](patches/02-d-defer-nullable-member.patch), [02-e](patches/02-e-last-field-order.patch) | the stack depth is fixed (#677 to #679, another design, first field first); the order and the shared stack are not |
 | [7](07-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address | yes: the one-word `Box` needs it | none | [07-a](patches/07-a-tagged-top-bits.patch) | not fixed |
 | [9](09-drain-end-hook.md) | missing feature | Reussir's runtime does not tell the host when a drain ends | yes: `sync` dependents of a promise released inside a free | none | [09-a](patches/09-a-drain-end-hook.patch) | not fixed (upstream has no drain) |
-| [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the one-word `Nat` and `Int` need it | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed |
+| [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the one-word `Nat` and `Int` need it | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed (upstream's built-in `Nat` and `Int`, #776, are another way to one word; lean2rr does not use them) |
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44; checked) |
 
 **Counts.** 18 entries: 5 bugs, 3 costs, 5 missed optimizations, 4
@@ -123,16 +140,17 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base3 7954a367
+git -C reussir checkout -b l2r-base5 0378b744
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
 
-Checked on 2026-10-19: the series on `7954a367` gives tree `cc4a28d9`,
-the tree of `./reussir`'s `l2r-base3` (`4c490260`). The base before it
-(`l2r-base2`) was made the same way from the old series on `943f2195`
+Checked on 2026-10-24: the series on `0378b744` gives tree `cb4c6d48`,
+the tree of `./reussir`'s `l2r-base5` (`6bf9be85`). The base before it
+(`l2r-base3`) was made the same way from the same series on `7954a367`
+(tree `cc4a28d9`), and `l2r-base2` from the old series on `943f2195`
 (git history).
 
 Order and dependencies:
@@ -157,10 +175,39 @@ workaround in the driver.
 
 **Adding a patch.** Name the file after its entry: `NN-x-slug.patch`, with
 the next free letter of the entry (a new problem gets the next free entry
-number, 17). Put it in `patches/` and add its name as the last line of
+number, 19). Put it in `patches/` and add its name as the last line of
 `patches/series`. Write the *Patch* and *Upstream note* sections of the
 entry's file, and update the entry's row in the status table. Add a row to
 the [review table](#review) when its review is done.
+
+### Building Reussir
+
+Since `0378b744`, Reussir builds its rcgmp integration by default
+(`REUSSIR_ENABLE_RCGMP=ON`): the built-in `Nat` and `Int` on rcgmp,
+Reussir's arbitrary-precision integers (upstream #770 to #803).
+lean2rr's builds keep the default (the combined gate of 2026-10-24 used
+it). The build then needs these, in addition to LLVM, MLIR and Clang 23:
+
+- GMP 6.2 or later: `gmp.h` and `libgmp` where CMake finds them (on
+  Ubuntu, `libgmp-dev`). For GMP in another prefix, add the prefix to
+  `CMAKE_PREFIX_PATH`. Without GMP, configuration stops with an error
+  (`cmake/RCGMP.cmake`).
+- A CMake that knows `cxx_std_26` for Clang: rcgmp's C++ runtime asks
+  for it. CMake 3.28 (Ubuntu 24.04's) does not know it; CMake 4.4.4
+  works (for example from `pip install cmake` in a Python virtual
+  environment).
+- The libstdc++ 14 headers: rcgmp's runtime uses `std::add_sat`. Clang
+  uses the headers of the newest GCC installation that it finds; on
+  Ubuntu 24.04, install `libstdc++-14-dev`.
+- The rcgmp sources: at the first configuration, CMake fetches
+  mlir-rcgmp from GitHub into the build directory's `_deps`. An offline
+  build needs them there first.
+
+After a change of the C++ headers (for example after you install
+`libstdc++-14-dev`), delete the build directory and configure again. The
+C++ module files (`.pcm`) that the old headers made stay in the build
+directory, and the build then fails with "ambiguous deduction for
+std::span".
 
 ### Parked patches
 
@@ -170,16 +217,17 @@ it: the owner removed it from the series. Its file is in
 [`patches/series`](patches/series) and the counts above; its entry says
 why it is parked and describes the patch.
 
-| Patch | Entry | Kind | Parked | Why | On 7954a367 |
+| Patch | Entry | Kind | Parked | Why | On 0378b744 |
 |---|---|---|---|---|---|
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
 | [11-a](patches/parked/11-a-drop-run.patch) | [11](11-drop-run.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | applies with the series |
-| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `7954a367` and `l2r-base3` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `0378b744` and `l2r-base5` |
 
 The parked files 01-a, 06-a, 06-b and 11-a are against the stacks they
 were made on (`ef922049` plus earlier patches of the old series); 16-a
-will be against `7954a367`. To park a patch of the series,
+is against `7954a367`. The column *On 0378b744* was checked on
+2026-10-24 (`git apply --check`). To park a patch of the series,
 move its file to `patches/parked/`, delete its line from `patches/series`,
 rebuild the Reussir stack from the series, and update the entry, its row
 and the counts.
@@ -238,7 +286,9 @@ and snoc list of 40,000,000 cells; 1,000,000 links through `Nullable`
 REPRODUCES (open upstream too), 2, 5 and 7 FIXED. The same day, upstream alone (`7954a367` plus 10-a,
 05-a and 07-a) printed FIXED for the plain repros of issue 2 (the list
 shapes and the `Nullable` chain), so its stack depth is fixed upstream; its
-Lean repro needs leanrt, which does not build there.
+Lean repro needs leanrt, which does not build there. The repros were not
+run again on `l2r-base5` (2026-10-24); lean2rr's combined gate passed on
+it ([review](#review)).
 
 ## Policy
 
@@ -265,8 +315,8 @@ Lean repro needs leanrt, which does not build there.
   ([what lean2rr needs](#applying-the-patches)). The workarounds for
   entries that upstream `7954a367` fixed are listed in
   [`docs/implementation/reussir-workarounds/`](../docs/implementation/reussir-workarounds/README.md)
-  as "removable after the move". lean2rr's builds use that base, so each
-  can go, one change per workaround, with its test.
+  as "removable after the move". lean2rr's builds use a later base
+  (`0378b744`), so each can go, one change per workaround, with its test.
 
 ## Review
 
@@ -294,6 +344,44 @@ records), 02-a, 02-b and 02-d five small ones (listed in
 [issue 2](02-native-drop-order.md#patch)), and 02-b needed one line
 (the drain declaration in the shared symbol table). Tested: the repros
 above and 13 targeted lean2rr runtime tests (issue 2's entry lists them).
+
+The move to `0378b744` (2026-10-24) applied the same 9 commits with no
+conflict (`git cherry-pick`), so their code is the same as on
+`l2r-base3`. lean2rr's
+combined gate passed on `l2r-base5` (gate19, dev `0810b9ec`): 658 of
+660 runtime tests identical to native, 2 expected failures, all 15
+checks, the classic corpus with the optional passes on, with all 23 off
+and with `unread-fields`, and the raytracer.
+
+## History: the move to 0378b744 (2026-10-24)
+
+Upstream Reussir moved from `7954a367` to `0378b744` (43 commits). Most
+of them add the built-in `Nat` and `Int` on rcgmp (#770 to #803). The
+others add a registry of optional compiler features (#766 to #768), pin
+TPDE (#765), add PJRT parts (#764, #769) and constant sequences of
+aggregates (#754, #755), and change the drop executor (#763). The 9
+patches of the series applied with no conflict: `l2r-base5` is
+`0378b744` plus the same 9 commits. No entry is fixed, so no entry was
+deleted and no number changed.
+
+Upstream commits that touch the code of an entry:
+
+| Commit | Change | Entry | Effect on the entry |
+|---|---|---|---|
+| #763 `fe9f2379` | the executor of retcon drops keeps its slot table and arena for each thread between root drops (it fixes upstream issue #761) | 2, 9 | none: 02-a turns retcon drops off in lean2rr's builds; upstream still has no host deferral, no stack that a host can share and no drain-end hook |
+| #800 `810849d6` | after the acquire/drop expansion, a load is replaced by an equivalent load that dominates it | 3 | none: the first phase still writes the copy of a `[value]` record out in line; only line numbers in `pipeline.rs` moved |
+| #790 `e2f41986`, #801 `7cb5f58c` | the drop expansion and the inc/dec cancellation handle rcgmp integer members | 2 | none: lean2rr's `Nat` and `Int` are tagged FFI handles (10-a), not rcgmp integers |
+| #776 `af25863e` (with #770 to #803) | built-in `Nat` and `Int`: a small value is an immediate, a large one a counted heap object | 10 | not a fix: an opaque FFI handle must still be a pointer; the built-in types are another way to a one-word `Nat` and `Int`, which lean2rr does not use yet |
+
+The other entries' code has no change: token reuse (1, 8), the MLIR
+printer (4), the relocation model of rrc's linked products (5; #772
+only adds the rcgmp runtime to the link), import trampolines (6), the
+inline count increment of a tagged handle (7),
+reussir-rt's `nullable.rs` and its small-allocation path (12, 13; #771
+adds only rcgmp's allocation hooks to `alloc.rs`), `formatInto` (14),
+the `libmimalloc-sys` pin (15, still 0.1.44), the 1 GiB driver stack
+(16) and the record layout (17, 18; the type converter only adds the
+rcgmp types). Pull request #758 (05-a) is still open.
 
 ## History: the renumbering of 2026-10-19
 
@@ -435,7 +523,8 @@ is in git history).
   itself, so the list is always empty and the bonus never applies (a
   missed optimization; with only the first mistake corrected,
   `reussir-opt --reussir-token-reuse` crashes on a result-less dispatch).
-  Not rechecked on `7954a367`. [Issue 8](08-alias-release-donor.md) is a
+  Not rechecked on `7954a367`; token reuse has no change up to
+  `0378b744`. [Issue 8](08-alias-release-donor.md) is a
   case where the bonus would decide for the matched cell.
 
 ## Missing features that cost lean2rr performance
@@ -445,7 +534,8 @@ Not bugs, but each one costs lean2rr measurably:
 - **Borrowed parameters.** Reads of arrays and strings through the runtime
   take the container owned, so each read retains and releases it.
   Traversals that keep unchanged nodes pay the same on fields (about 1.5x
-  native on an `Expr.replace`-style DAG traversal).
+  native on an `Expr.replace`-style DAG traversal). Reported upstream as
+  issue #762 (open at `0378b744`).
 - **A one-word `Nat`** (done locally: [issue 10](10-tagged-ffi-objects.md),
   patch 10-a, tagged opaque handles; `Nat` and `Int` are one tagged word,
   as natively).

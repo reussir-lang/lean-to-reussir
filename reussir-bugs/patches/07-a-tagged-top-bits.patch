@@ -1,4 +1,4 @@
-From 60ea575e31078878c7e4c5a11475feb9956f5428 Mon Sep 17 00:00:00 2001
+From 2b5e3ffc6140c1d963f7775e5067ad03e02a87d4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
 Subject: [PATCH 8/9] l2r-local: issue 38: tagged FFI objects: clear the top 16
@@ -67,10 +67,10 @@ index 3468211f..a6984a97 100644
    let parameters = (ins "::mlir::StringAttr":$ffiName,
        "::mlir::FlatSymbolRefAttr":$cleanupHook,
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 2fe34ff8..2547f1d5 100644
+index 468632f4..54c9c64a 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -303,6 +303,26 @@ bool isTaggedFFIObject(RcType rcType) {
+@@ -306,6 +306,26 @@ bool isTaggedFFIObject(RcType rcType) {
    return ffiTy && ffiTy.getTagged();
  }
  
@@ -97,7 +97,7 @@ index 2fe34ff8..2547f1d5 100644
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1741,6 +1761,12 @@ struct ReussirRcIncConversionPattern
+@@ -1744,6 +1764,12 @@ struct ReussirRcIncConversionPattern
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
        refcntPtr = adaptor.getRcPtr();

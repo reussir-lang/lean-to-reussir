@@ -4,8 +4,9 @@ One entry per bug: what lean2rr does, which Reussir change fixes it, and
 whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
-numbers). lean2rr's builds use that base (`./reussir` branch
-`l2r-base3`, `4c490260`); the workarounds stay until each is removed.
+numbers). lean2rr's builds use a later base, upstream `0378b744` with
+the series (`./reussir` branch `l2r-base5`, `6bf9be85`); the
+workarounds stay until each is removed.
 The last entry, the drain-end hook, is a local addition for an open issue
 (9). Issues 1 (a missed optimization) and 2 (a missing feature), which
 are not bugs, are in [limitations.md](limitations.md). The open issue
@@ -33,12 +34,13 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   Reussir #663 (commit `823a7b29`, formerly a local patch) fixes it:
   `opaquePayloadType` in `lib/Conversion/TypeConverter/TypeConverter.cpp`
   makes the payload an array of alignment-sized integers when a move of
-  the representative would lose another arm's bytes. lean2rr's base
-  `7954a367` has it, and `scripts/l2r.py` stops on a Reussir checkout
-  without lean2rr's series on that base (patch 02-a's switch, which plain
-  upstream and the old base lack). Checked on `l2r-base3` (2026-10-19)
-  with a minimal program: a `[value]` enum of six arms of different sizes
-  (`f64`, `bool`, `u8`, `u16`, padding, a counted pointer, a nested
+  the representative would lose another arm's bytes. Reussir has it
+  since `7954a367` (so lean2rr's base `0378b744` has it), and
+  `scripts/l2r.py` stops on a Reussir checkout without lean2rr's series
+  (patch 02-a's switch, which plain upstream and the old base lack).
+  Checked on `l2r-base3` (2026-10-19) with a minimal program: a
+  `[value]` enum of six arms of different sizes (`f64`, `bool`, `u8`,
+  `u16`, padding, a counted pointer, a nested
   `[value]` struct with padding and a nested `[value]` enum), moved
   through two loops (self tail calls), calls, a `[value]` struct's field,
   a shared record's field and matches, at `-O none`, `default` and

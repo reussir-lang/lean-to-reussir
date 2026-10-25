@@ -1,4 +1,4 @@
-From 1883119d7257c0a1d795aad1aaa0ba8c1e1a533a Mon Sep 17 00:00:00 2001
+From df405709c86304cddf02663e006b7f799afbc889 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 22:09:42 -0400
 Subject: [PATCH 5/9] l2r-local: drop: call the host's function when a drain

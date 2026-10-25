@@ -33,15 +33,18 @@ the table below.
 
 ## Summary
 
-lean2rr's builds use upstream Reussir `7954a367` (2026-10-19) plus the
-9 patches of the series: `./reussir`'s branch `l2r-base3` (head
-`4c490260`). The base before it was `l2r-base2` (head `b2e4a47e`),
-Reussir `943f2195` plus the 35 patches of the old series, whose files are
-in git history and in that branch. The files in `reussir-bugs/` describe
-the state at `7954a367`: it fixes 30 of the old entries in full, so
-their files are gone and the open entries have new numbers (the mapping
-is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
-series there has 9 patches on `7954a367`: 02-a to 02-e (native release
+lean2rr's builds use upstream Reussir `0378b744` (2026-10-24) plus the
+9 patches of the series: `./reussir`'s branch `l2r-base5` (head
+`6bf9be85`). The base before it was `l2r-base3` (head `4c490260`):
+upstream `7954a367` (2026-10-19) plus the same 9 patches; the move to
+`0378b744` fixed no open issue and needs no change of a workaround.
+Before that it was `l2r-base2` (head `b2e4a47e`), Reussir `943f2195`
+plus the 35 patches of the old series, whose files are in git history
+and in that branch. The files in `reussir-bugs/` describe the state at
+`0378b744`: `7954a367` fixed 30 of the old entries in full, so their
+files are gone and the open entries have new numbers (the mapping is in
+[`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
+series there has 9 patches on `0378b744`: 02-a to 02-e (native release
 order, issue 2), 09-a (the drain-end hook,
 [issue 9](../../../reussir-bugs/09-drain-end-hook.md)), 10-a (tagged
 opaque handles, [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)),
@@ -53,8 +56,9 @@ bug lean2rr does not reach), are parked, outside the series
 ([parked patches](../../../reussir-bugs/README.md#parked-patches)).
 
 A workaround for an issue that Reussir `7954a367` fixes is marked
-"removable after the move to Reussir 7954a367": lean2rr's builds use
-that base, so it can go (one change per workaround, with its test).
+"removable after the move to Reussir 7954a367": lean2rr's builds use a
+later base (`0378b744`), so it can go (one change per workaround, with
+its test).
 
 Column "Needed with the patch?": whether lean2rr's workaround is still
 needed once the patch is applied. By the policy above, workarounds stay

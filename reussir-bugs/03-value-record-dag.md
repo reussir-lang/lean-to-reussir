@@ -8,7 +8,7 @@ output is correct, and there is no patch.
 **Kind:** cost (build time; the expansion is deliberate). **Status:** does
 not affect lean2rr (its `[value]` records are shallow). No patch.
 
-**Upstream (2026-10-19):** Still reproduces on upstream 7954a367 with the series (2026-10-19: `--emit mlir-llvm` 7,341 lines at K = 8, 28,875 at K = 10, 3.93x); open.
+**Upstream (2026-10-24):** Unchanged at upstream 0378b744 (by the source; the repro was not run again): #800 (`810849d6`) changes `AcquireDropExpansion.cpp`, but only after the expansion (it replaces a load by an equivalent load that dominates it); the first phase still writes the copy out in line. On upstream 7954a367 with the series the repro still reproduced (2026-10-19: `--emit mlir-llvm` 7,341 lines at K = 8, 28,875 at K = 10, 3.93x); open.
 
 **Verdict: cost of a deliberate design, not a defect.** Copying or dropping
 a `[value]` record retains or releases every counted value inside it.
@@ -53,9 +53,9 @@ SCF lowering: the code is as large as before.
 ## Cause
 
 rrc's pipeline (`crates/reussir-backend/src/pipeline.rs`) runs
-`AcquireDropExpansion` twice: the first phase (`(false, false)`, line 411)
-before `ConvertToSTD` and the inc/dec cancellation, the second
-(`(true, true)`, line 419) after them. The first phase expands each
+`AcquireDropExpansion` twice: the first phase (`(false, false)`, line 424
+at 0378b744) before `ConvertToSTD` and the inc/dec cancellation, the
+second (`(true, true)`, line 437) after them. The first phase expands each
 `ref.acquire` and `ref.drop` of a `[value]` record in line:
 `emitOwnershipAcquisition` (`lib/IR/ReussirOps.cpp`) and the drop patterns
 (`lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp`,
@@ -91,7 +91,7 @@ the patches, leave unpatched". lean2rr does not meet it.
 
 ## Upstream note
 
-The first `AcquireDropExpansion` phase (pipeline.rs:411) expands a
+The first `AcquireDropExpansion` phase (pipeline.rs:424 at 0378b744) expands a
 `[value]` record's acquire/drop in line through every nested `[value]`
 member, so records sharing sub-records in a DAG (`D(i) = { D(i-1), D(i-1)
 }`) cost 2^K at each copy (K = 12: 115k lines of LLVM dialect for one

@@ -167,8 +167,8 @@ files, `runtime/` and `scripts/` from the repository root.
   pending stack that patch 02-b adds (`reussir_rt::drop`), and needs it to
   build; 02-a and 02-c complete it.
 - **Why:** A missing feature, not a bug: Reussir's drop glue recursed once
-  per cell (upstream Reussir `7954a367` frees in bounded stack now, its
-  own way, first field first), and Lean frees iteratively, last field
+  per cell (upstream Reussir frees in bounded stack since `7954a367`,
+  its own way, first field first), and Lean frees iteratively, last field
   first. Patches 02-a to 02-e (applied) free in Lean's order through a
   stack the runtime shares
   ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md)).

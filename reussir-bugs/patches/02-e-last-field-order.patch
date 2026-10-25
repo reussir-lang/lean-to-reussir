@@ -1,4 +1,4 @@
-From 4c490260a3679f13eba0229d0c2ba32c9820f459 Mon Sep 17 00:00:00 2001
+From 6bf9be8528f93e575646258dada3fe2609078962 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 06:02:30 -0400
 Subject: [PATCH 9/9] l2r-local: issue 13: keep a cell's last record box for
@@ -44,10 +44,10 @@ cells with a [value] record after the link, freed on an 8 MB stack.
  create mode 100644 tests/integration/frontend/drop_member_order.rr
 
 diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-index e8f3094e..f39bb55a 100644
+index a6f08f18..a382ef3e 100644
 --- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-@@ -70,8 +70,11 @@ namespace reussir {
+@@ -72,8 +72,11 @@ namespace reussir {
  // drain, frees a cell whose count was read as 1: per arm it releases the
  // members (deferring the record boxes) but the last non-leaf record box
  // (plain or in a `Nullable`), frees the cell, and then releases that last
@@ -61,7 +61,7 @@ index e8f3094e..f39bb55a 100644
  
  namespace {
  
-@@ -257,17 +260,40 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -259,17 +262,40 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
    // record box, plain or `Nullable` (whose box would otherwise be deferred
    // like a plain one), so the members are released in the same order either
    // way and a chain through either kind of link is a loop.

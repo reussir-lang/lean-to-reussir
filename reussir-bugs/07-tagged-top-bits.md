@@ -11,7 +11,7 @@ patched (07-a), not yet applied in `./reussir`; lean2rr's generated code
 does not use the feature yet (the probe of the one-word `Box`, track E of
 the dependent-type work, does).
 
-**Upstream (2026-10-19):** Not upstream. 07-a stays in the series on 7954a367 (it applies unchanged). The old base (`l2r-base2`) had it as old 38-a.
+**Upstream (2026-10-24):** Not upstream at 0378b744. 07-a stays in the series on 0378b744 (it applies unchanged). The base before 7954a367 (`l2r-base2`) had it as old 38-a.
 
 lean2rr's one-word `Box` (`leanrt::any::LAny`, runtime/prelude.rr section
 "The one-word box") is a `tagged` opaque type. An odd word is an

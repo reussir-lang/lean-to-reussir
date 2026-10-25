@@ -1,4 +1,4 @@
-From cc7d720a7e615d2d6a3558b05f4c5eec66f14b7a Mon Sep 17 00:00:00 2001
+From 002c2488a6f884b5056f9e5f1e63709405e0c1dc Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 17:30:45 -0400
 Subject: [PATCH 7/9] l2r-local: bug 34: compile link products
@@ -36,7 +36,7 @@ built without `--relocation-mode`: no TEXTREL in the dynamic section).
  create mode 100644 tests/integration/codegen/executable_pic_default.rr
 
 diff --git a/crates/reussir-compiler/src/driver.rs b/crates/reussir-compiler/src/driver.rs
-index 3e01b77f..a18712c9 100644
+index 7808350e..94706000 100644
 --- a/crates/reussir-compiler/src/driver.rs
 +++ b/crates/reussir-compiler/src/driver.rs
 @@ -20,7 +20,7 @@ use std::process::ExitCode;
@@ -70,10 +70,10 @@ index 3e01b77f..a18712c9 100644
          triple: cli.target_triple.clone(),
          cpu: cli.target_cpu.clone(),
 diff --git a/crates/reussir-compiler/src/driver/cli.rs b/crates/reussir-compiler/src/driver/cli.rs
-index 053b3fac..b3f6689c 100644
+index 1c33ce1c..f7a65bf5 100644
 --- a/crates/reussir-compiler/src/driver/cli.rs
 +++ b/crates/reussir-compiler/src/driver/cli.rs
-@@ -127,6 +127,9 @@ pub(crate) struct Cli {
+@@ -128,6 +128,9 @@ pub(crate) struct Cli {
      pub(crate) opt: String,
  
      /// Relocation model: `default`, `pic`, `static`, or `dynamic-no-pic`.

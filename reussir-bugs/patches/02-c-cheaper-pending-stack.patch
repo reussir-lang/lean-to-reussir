@@ -1,4 +1,4 @@
-From 4b709bf751bbeba384c53ee1abb468c584aed50e Mon Sep 17 00:00:00 2001
+From 248f2317b1bb93ab0a1bb5a70d62b318612d2419 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Thu, 1 Oct 2026 21:01:52 -0400
 Subject: [PATCH 3/9] l2r-local: bug 13b (runtime): cheaper pending stack, same

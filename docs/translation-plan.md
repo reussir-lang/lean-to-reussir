@@ -2921,9 +2921,9 @@ Probe results (Reussir at the pinned commit):
   was lowered to LLVM as its tag plus one representative arm's struct, and
   moved as that aggregate, so bytes of another arm that fall on the
   representative's padding or on a `bool` field were lost (`enum [value] M { A(u8), B(bool) }` read `A(42)`
-  back as 0). Reussir `7954a367`, lean2rr's base, has the fix, and since
-  2026-10-19 lean2rr no longer avoids the shape: `Outline`'s step enums
-  are `[value]` whatever their fields (before, they were shared unless a
+  back as 0). Reussir has the fix since `7954a367` (lean2rr's base is
+  `0378b744`), and since 2026-10-19 lean2rr no longer avoids the shape:
+  `Outline`'s step enums are `[value]` whatever their fields (before, they were shared unless a
   layout model showed that the representative arm carried every byte of
   the other arms), and so is the entry enum of a `state-machines` state
   machine whose variant keeps a field (§5.6). The core form's J4 entry

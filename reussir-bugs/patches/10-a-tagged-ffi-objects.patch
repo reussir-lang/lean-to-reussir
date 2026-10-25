@@ -1,4 +1,4 @@
-From 7e14cc70ccf136f085a4c6a210f66a2a3e98995b Mon Sep 17 00:00:00 2001
+From 381e95065b77832231de7aacde0ba2b8aca2d7b9 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
 Subject: [PATCH 6/9] l2r-local: tagged FFI objects: an odd handle is an
@@ -66,10 +66,10 @@ tests.
  create mode 100644 tests/integration/frontend/ffi_tagged.rr
 
 diff --git a/crates/reussir-backend-sys/src/lib.rs b/crates/reussir-backend-sys/src/lib.rs
-index 8e4399e0..28c8abe5 100644
+index f519f306..a5ceff86 100644
 --- a/crates/reussir-backend-sys/src/lib.rs
 +++ b/crates/reussir-backend-sys/src/lib.rs
-@@ -376,6 +376,7 @@ unsafe extern "C" {
+@@ -393,6 +393,7 @@ unsafe extern "C" {
          context: MlirContext,
          ffi_name: MlirAttribute,
          cleanup_hook: MlirAttribute,
@@ -105,10 +105,10 @@ index f5116f30..f3a18e1d 100644
      }
  }
 diff --git a/crates/reussir-codegen/src/lower/ty.rs b/crates/reussir-codegen/src/lower/ty.rs
-index ae12e746..1f4dda72 100644
+index fb24f3b0..3b11b53f 100644
 --- a/crates/reussir-codegen/src/lower/ty.rs
 +++ b/crates/reussir-codegen/src/lower/ty.rs
-@@ -339,11 +339,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -353,11 +353,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
      }
  
      /// The `!reussir.ffi_object<…>` payload type of an opaque instance.
@@ -127,7 +127,7 @@ index ae12e746..1f4dda72 100644
          )
      }
  
-@@ -430,7 +436,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -444,7 +450,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
              mir::RecordLayout::Opaque {
                  rust_name,
                  drop_hook,
@@ -138,10 +138,10 @@ index ae12e746..1f4dda72 100644
          let name = StringAttribute::new(self.context, self.program.symbol(rec.symbol));
          let record = record_incomplete(self.context, name, kind);
 diff --git a/crates/reussir-core/src/full/mir.rs b/crates/reussir-core/src/full/mir.rs
-index 6a05856e..237ac2cb 100644
+index 61ee1dab..a305b111 100644
 --- a/crates/reussir-core/src/full/mir.rs
 +++ b/crates/reussir-core/src/full/mir.rs
-@@ -150,10 +150,13 @@ pub enum RecordLayout<'tcx> {
+@@ -204,10 +204,13 @@ pub enum RecordLayout<'tcx> {
      Compound(&'tcx [Member<'tcx>]),
      Variant(&'tcx [VariantDef<'tcx>]),
      /// An opaque `#[ffi]` record instance: the rendered Rust type name (the
@@ -157,7 +157,7 @@ index 6a05856e..237ac2cb 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mir/build.rs b/crates/reussir-core/src/full/mir/build.rs
-index b31d81bb..28cef999 100644
+index 82c7ef5f..be718288 100644
 --- a/crates/reussir-core/src/full/mir/build.rs
 +++ b/crates/reussir-core/src/full/mir/build.rs
 @@ -203,9 +203,11 @@ impl<'tcx> Builder<'_, 'tcx> {
@@ -172,7 +172,7 @@ index b31d81bb..28cef999 100644
              },
          };
          mir::RecordInstance {
-@@ -1201,6 +1203,23 @@ mod tests {
+@@ -1243,6 +1245,23 @@ mod tests {
          );
      }
  
@@ -197,7 +197,7 @@ index b31d81bb..28cef999 100644
      fn roundtrips_ffi_trait_glue() {
          let text = concat!(
 diff --git a/crates/reussir-core/src/full/mir/grammar.lalrpop b/crates/reussir-core/src/full/mir/grammar.lalrpop
-index 0105877f..252dc49c 100644
+index 08dc9156..8792cf13 100644
 --- a/crates/reussir-core/src/full/mir/grammar.lalrpop
 +++ b/crates/reussir-core/src/full/mir/grammar.lalrpop
 @@ -83,11 +83,13 @@ RecordBody: (raw::Ty, raw::RecordBody, bool) = {
@@ -216,7 +216,7 @@ index 0105877f..252dc49c 100644
          }, false),
  };
  
-@@ -133,6 +135,7 @@ BareName: &'input str = {
+@@ -135,6 +137,7 @@ BareName: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -224,7 +224,7 @@ index 0105877f..252dc49c 100644
      "texture" => "texture",
      "glue" => "glue",
      "trait" => "trait",
-@@ -492,6 +495,7 @@ extern {
+@@ -498,6 +501,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -233,7 +233,7 @@ index 0105877f..252dc49c 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/full/mir/print.rs b/crates/reussir-core/src/full/mir/print.rs
-index 7bfa6406..768b396c 100644
+index 9c74bffb..922e87a1 100644
 --- a/crates/reussir-core/src/full/mir/print.rs
 +++ b/crates/reussir-core/src/full/mir/print.rs
 @@ -237,13 +237,15 @@ impl Render<'_> {
@@ -255,7 +255,7 @@ index 7bfa6406..768b396c 100644
              }
          };
 diff --git a/crates/reussir-core/src/full/mir/raw.rs b/crates/reussir-core/src/full/mir/raw.rs
-index 393373e0..76233a11 100644
+index fd85b28f..82f68441 100644
 --- a/crates/reussir-core/src/full/mir/raw.rs
 +++ b/crates/reussir-core/src/full/mir/raw.rs
 @@ -114,10 +114,12 @@ pub enum RecordBody {
@@ -273,10 +273,10 @@ index 393373e0..76233a11 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mono.rs b/crates/reussir-core/src/full/mono.rs
-index dc725d18..56aecd5a 100644
+index e26acdc5..2a22487c 100644
 --- a/crates/reussir-core/src/full/mono.rs
 +++ b/crates/reussir-core/src/full/mono.rs
-@@ -720,6 +720,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+@@ -807,6 +807,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
                      let layout = mir::RecordLayout::Opaque {
                          rust_name: mir::Symbol(driver.symbols.get_or_intern(&rust_name)),
                          drop_hook: mir::Symbol(driver.symbols.get_or_intern(&hook_name)),
@@ -285,7 +285,7 @@ index dc725d18..56aecd5a 100644
                      ffi_textures.push(mir::FfiTexture {
                          anchor: symbol,
 diff --git a/crates/reussir-core/src/ir_lex.rs b/crates/reussir-core/src/ir_lex.rs
-index a8ebe5fa..5b38416a 100644
+index 57d7b1b2..e38bafca 100644
 --- a/crates/reussir-core/src/ir_lex.rs
 +++ b/crates/reussir-core/src/ir_lex.rs
 @@ -36,6 +36,8 @@ pub enum Token<'a> {
@@ -298,7 +298,7 @@ index a8ebe5fa..5b38416a 100644
      Extern,
      #[token("trampoline")]
 diff --git a/crates/reussir-core/src/semi/ctxt.rs b/crates/reussir-core/src/semi/ctxt.rs
-index e2e6bdd1..b9f2e04f 100644
+index 1f5f9af4..c3805710 100644
 --- a/crates/reussir-core/src/semi/ctxt.rs
 +++ b/crates/reussir-core/src/semi/ctxt.rs
 @@ -83,7 +83,9 @@ enum FfiSpec {
@@ -323,7 +323,7 @@ index e2e6bdd1..b9f2e04f 100644
      pub fields: Option<RecordFields<'tcx>>,
      /// Generics that must be instantiated regional because they appear as the
      /// element of a `[field]` link (e.g. `inner: [field] T`). Checked at the
-@@ -2424,9 +2430,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2526,9 +2532,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
          seen && valid
      }
  
@@ -337,7 +337,7 @@ index e2e6bdd1..b9f2e04f 100644
      fn ffi_attr(&mut self, attrs: &[surface::Attribute]) -> Option<FfiSpec> {
          let mut spec = None;
          for attr in attrs {
-@@ -2441,12 +2448,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2543,12 +2550,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              match (attr.args.as_slice(), attr.values.as_slice()) {
                  ([arg], []) if self.sym(*arg) == "import" => spec = Some(FfiSpec::Import),
                  ([], [(k, path)]) if self.sym(*k) == "rust" => {
@@ -356,7 +356,7 @@ index e2e6bdd1..b9f2e04f 100644
                  ),
              }
          }
-@@ -2552,13 +2562,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2654,13 +2664,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      }
  
      /// Check the `#[ffi(rust = "path")]` rules on a record and return the
@@ -373,7 +373,7 @@ index e2e6bdd1..b9f2e04f 100644
          let opaque = matches!(rec.fields, surface::RecordFields::Opaque);
          let Some(spec) = ffi else {
              if opaque {
-@@ -2570,7 +2581,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2672,7 +2683,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              }
              return None;
          };
@@ -382,7 +382,7 @@ index e2e6bdd1..b9f2e04f 100644
              self.error(span, "`#[ffi(import)]` may only be attached to a function");
              return None;
          };
-@@ -2587,7 +2598,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2689,7 +2700,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              self.error(span, "an `#[ffi(rust = ...)]` record is always `[shared]`");
              return None;
          }
@@ -391,7 +391,7 @@ index e2e6bdd1..b9f2e04f 100644
      }
  
      /// Check the `#[ffi(import)]` rules on a function; returns whether the
-@@ -2786,7 +2797,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2888,7 +2899,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      fn scan_record(
          &mut self,
          rec: &surface::Record,
@@ -400,7 +400,7 @@ index e2e6bdd1..b9f2e04f 100644
          span: Option<Span>,
      ) -> Option<DefId> {
          let ty_params = self.collect_generics(&rec.ty_params, span);
-@@ -2835,7 +2846,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2937,7 +2948,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              repr_fixed,
              placement: rec.placement.clone(),
              launch: rec.launch,
@@ -411,7 +411,7 @@ index e2e6bdd1..b9f2e04f 100644
              regional_generics: Vec::new(),
              span,
 diff --git a/crates/reussir-core/src/semi/externs.rs b/crates/reussir-core/src/semi/externs.rs
-index 447c6310..8d390b4b 100644
+index 13a3aac0..a1e3bf14 100644
 --- a/crates/reussir-core/src/semi/externs.rs
 +++ b/crates/reussir-core/src/semi/externs.rs
 @@ -273,6 +273,7 @@ impl<'tcx> Elaborator<'_, 'tcx> {
@@ -423,10 +423,10 @@ index 447c6310..8d390b4b 100644
                  regional_generics: remap.generic_ids(&rec.regional_generics),
                  span: rec.span,
 diff --git a/crates/reussir-core/src/semi/hir/build.rs b/crates/reussir-core/src/semi/hir/build.rs
-index 7eccd076..643046c4 100644
+index 85090047..1c336d46 100644
 --- a/crates/reussir-core/src/semi/hir/build.rs
 +++ b/crates/reussir-core/src/semi/hir/build.rs
-@@ -627,11 +627,11 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -643,11 +643,11 @@ impl<'tcx> Builder<'_, 'tcx> {
                      })
                      .collect(),
              ),
@@ -442,7 +442,7 @@ index 7eccd076..643046c4 100644
          };
          let record = Record {
              def,
-@@ -648,6 +648,7 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -664,6 +664,7 @@ impl<'tcx> Builder<'_, 'tcx> {
              placement: r.placement.clone(),
              launch: r.launch,
              ffi,
@@ -450,7 +450,7 @@ index 7eccd076..643046c4 100644
              fields: Some(fields),
              regional_generics,
              span: span_of(r.span),
-@@ -1694,6 +1695,26 @@ mod tests {
+@@ -1764,6 +1765,26 @@ mod tests {
          );
      }
  
@@ -478,7 +478,7 @@ index 7eccd076..643046c4 100644
      fn roundtrips_cells() {
          roundtrip(
 diff --git a/crates/reussir-core/src/semi/hir/grammar.lalrpop b/crates/reussir-core/src/semi/hir/grammar.lalrpop
-index c17ca309..8674204e 100644
+index 3488ae0b..08ee0519 100644
 --- a/crates/reussir-core/src/semi/hir/grammar.lalrpop
 +++ b/crates/reussir-core/src/semi/hir/grammar.lalrpop
 @@ -79,9 +79,10 @@ RecordDecl: raw::Record = {
@@ -503,7 +503,7 @@ index c17ca309..8674204e 100644
      },
      // Only an enum may carry the `fixed` marker (`#[repr(fixed)]`).
      <lang:LangAttr?> <placement:("placement" <"quoted">)?> <launch:LaunchConfig?> <p:"pub"?> <default_cap:DefaultCap> "enum" <fixed:"fixed"?> "#" <path:QPath> <generics:Generics?> <loc:ItemLoc?>
-@@ -359,6 +360,7 @@ Name: &'input str = {
+@@ -375,6 +376,7 @@ Name: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -511,7 +511,7 @@ index c17ca309..8674204e 100644
      "texture" => "texture",
      "glue" => "glue",
      "interface" => "interface",
-@@ -669,6 +671,7 @@ extern {
+@@ -689,6 +691,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -520,10 +520,10 @@ index c17ca309..8674204e 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/semi/hir/print.rs b/crates/reussir-core/src/semi/hir/print.rs
-index 8ac96eb8..e60194f9 100644
+index 47e15a57..fea53db3 100644
 --- a/crates/reussir-core/src/semi/hir/print.rs
 +++ b/crates/reussir-core/src/semi/hir/print.rs
-@@ -505,8 +505,13 @@ impl<'a> Printer<'a> {
+@@ -508,8 +508,13 @@ impl<'a> Printer<'a> {
                      .collect();
                  comma_sep(parts)
              }
@@ -540,7 +540,7 @@ index 8ac96eb8..e60194f9 100644
              None => Doc::Null,
          }
 diff --git a/crates/reussir-core/src/semi/hir/raw.rs b/crates/reussir-core/src/semi/hir/raw.rs
-index ae3232f9..b1af2a9c 100644
+index dbf38010..33273498 100644
 --- a/crates/reussir-core/src/semi/hir/raw.rs
 +++ b/crates/reussir-core/src/semi/hir/raw.rs
 @@ -208,8 +208,9 @@ pub enum RecordBody {
@@ -631,10 +631,10 @@ index cb9115e6..1cb126cc 100644
  
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope) {
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 51b1854e..2fe34ff8 100644
+index 3bfedfc5..468632f4 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -264,6 +264,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
+@@ -267,6 +267,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
    rewriter.setInsertionPointToStart(contBlock);
  }
  
@@ -680,7 +680,7 @@ index 51b1854e..2fe34ff8 100644
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1693,6 +1732,11 @@ struct ReussirRcIncConversionPattern
+@@ -1696,6 +1735,11 @@ struct ReussirRcIncConversionPattern
        return mlir::success();
      }
      mlir::Value refcntPtr;
@@ -692,7 +692,7 @@ index 51b1854e..2fe34ff8 100644
      // If inner element type is a FFI object, we do not reuse gep to expose
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
-@@ -1767,6 +1811,8 @@ struct ReussirRcIncConversionPattern
+@@ -1770,6 +1814,8 @@ struct ReussirRcIncConversionPattern
            isTaggedImmediate(top, op.getLoc(), rewriter));
      }
      mlir::LLVM::AssumeOp::create(rewriter, op.getLoc(), geOne);
@@ -701,7 +701,7 @@ index 51b1854e..2fe34ff8 100644
  
      rewriter.eraseOp(op);
      return mlir::success();
-@@ -2555,6 +2601,17 @@ struct ReussirRcDecOpConversionPattern
+@@ -2558,6 +2604,17 @@ struct ReussirRcDecOpConversionPattern
      }
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
        mlir::FlatSymbolRefAttr cleanupHook = eleTy.getCleanupHook();

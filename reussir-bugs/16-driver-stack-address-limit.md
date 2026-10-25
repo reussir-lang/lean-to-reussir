@@ -8,7 +8,9 @@ outside the series ([parked option](#parked-option-16-a)). It does not
 affect lean2rr: lean2rr's builds set no address-space limit that rrc
 comes near ([lean2rr](#lean2rr)).
 
-**Upstream (2026-10-19):** Open in upstream 7954a367. Upstream #686
+**Upstream (2026-10-24):** Open at upstream 0378b744: the driver's stack
+code (`crates/reussir-compiler/src/main.rs`) has no change since
+7954a367. Upstream #686
 (`3e34334f`) is our old patch 31-a, which fixed the stack overflow on
 deep expressions (old entry 31); this entry is the part of old 31 that
 remains. No pull request is planned (owner, 2026-10-19: no more
@@ -83,7 +85,8 @@ finite limit below 2 GiB. A sum of 8000 terms still compiles there.
 
 Patch file:
 [`patches/parked/16-a-driver-stack-rlimit.patch`](patches/parked/16-a-driver-stack-rlimit.patch)
-(on `7954a367`; it applies to `l2r-base3` too). No build applies it.
+(on `7954a367`; it applies to `0378b744` and `l2r-base5` too, checked
+2026-10-24). No build applies it.
 
 The patch changes #686's code in `crates/reussir-compiler/src/main.rs`:
 

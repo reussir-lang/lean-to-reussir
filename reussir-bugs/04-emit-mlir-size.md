@@ -8,7 +8,7 @@ correct, only large; builds are not affected, and there is no patch.
 **Kind:** cost (debug output). **Status:** open (debug output only). No
 patch.
 
-**Upstream (2026-10-19):** Still reproduces on upstream 7954a367 with the series (2026-10-19: `--emit mlir` 2,133 KB at K = 10, 8,532 KB at K = 12, 3.99x); open.
+**Upstream (2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes the printer of record types (`RecordType::print`, `lib/IR/ReussirTypes.cpp`); the repro was not run again. On upstream 7954a367 with the series it still reproduced (2026-10-19: `--emit mlir` 2,133 KB at K = 10, 8,532 KB at K = 12, 3.99x); open.
 
 **Verdict: cost of the textual format, not a defect.** The MLIR printer
 writes a named record's body at every place the record occurs, so a

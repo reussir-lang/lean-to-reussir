@@ -12,8 +12,10 @@ value, so it has no tail padding (`tupleMemberTy` in
 without `--no-pack-record-members`: with Reussir's packed order the
 narrow members come last, so the padding is at the end.
 
-**Upstream (2026-10-20):** Found on upstream 7954a367 with the series
-(`l2r-base3`); not reported upstream.
+**Upstream (2026-10-24):** Found on upstream 7954a367 with the series
+(`l2r-base3`, 2026-10-20). Unchanged at 0378b744: the type converter
+only adds the rcgmp types (the repro was not run again). Not reported
+upstream.
 
 ## Repro
 

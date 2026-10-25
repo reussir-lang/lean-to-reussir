@@ -38,10 +38,17 @@ in git history.
    `__reussir_drop_defer_wide` and `__reussir_drop_drain`. leanrt does not
    build without it.
 
-**Upstream 7954a367.** Upstream frees deep values in bounded stack (below)
-but releases a record's members first field first, and keeps the state of
-each free local to that free. It has no API through which a host can push
-work into a running free. So items 1 and 2 are not fixed upstream.
+**Upstream 0378b744 (2026-10-24).** Upstream frees deep values in bounded
+stack since 7954a367 (below) but releases a record's members first field
+first, and keeps the state of each free local to that free. It has no API
+through which a host can push work into a running free. So items 1 and 2
+are not fixed upstream. The changes to upstream's drops since 7954a367
+change neither the order nor the host API: #763 (`fe9f2379`, it fixes
+upstream issue #761) lets the executor of retcon drops keep its slot
+table and arena for each thread between root drops (a free still has its
+own state); #790 and #801 add rcgmp integer members to the drop
+expansion and the inc/dec cancellation; #800 reuses a dominating load
+after the expansion.
 
 ## What upstream fixed
 
@@ -74,13 +81,14 @@ build there.
 
 ## Patch
 
-The five patches are one mechanism. On upstream 7954a367 (the series in
-[`patches/series`](patches/series)):
+The five patches are one mechanism. On upstream 0378b744 (the series in
+[`patches/series`](patches/series); rebased onto 7954a367 on 2026-10-19,
+applied to 0378b744 with no change on 2026-10-24):
 
 - **02-a** (was 13-a): inside drop glue, a release calls a per-type
   function, `drop_and_free_in_drain`, which frees the cell first and
   releases the member that continues the chain last (a tail call, so a
-  loop). On 7954a367 it also turns off upstream's tail-recursive and retcon
+  loop). Since 7954a367 it also turns off upstream's tail-recursive and retcon
   drop lowering in rrc's pipeline (`crates/reussir-backend/src/pipeline.rs`)
   and in the C++ bridge (`lib/Bridge/Bridge.cppm`), as upstream's TPDE mode
   does: this glue replaces both.
@@ -90,7 +98,7 @@ The five patches are one mechanism. On upstream 7954a367 (the series in
   `__reussir_drop_defer` or `_wide`) instead of freed by a call; the
   outermost non-atomic dtor drains the stack (`__reussir_drop_drain`), last
   pushed first. Hosts share the stack (`active`, `depth`, `defer_step`,
-  `run_step`). On 7954a367 the declaration of `__reussir_drop_drain` is
+  `run_step`). Since 7954a367 the declaration of `__reussir_drop_drain` is
   registered in the pass's shared symbol table when it is made (upstream
   #671 shares one table per pass; without the registration the second dtor
   declared the function again: "redefinition of symbol named
@@ -117,12 +125,15 @@ checked with Miri (same machine code), not reviewed yet; 27-a passed
 (review-0069: no defect). The rebase onto 7954a367 (2026-10-19) had five
 mechanical conflicts (the hooks in `rewriteDropRc` and the `Nullable` arm,
 `createDtorIfNotExists`, the module lists of `lib.rs` and `symbols.rs`, the
-converted-op list); it is not reviewed yet.
+converted-op list); it is not reviewed yet. The move to 0378b744
+(2026-10-24) applied the five patches with no conflict.
 
 Tested on 7954a367 with the series (2026-10-19): the repros of this entry
 (below) and 13 targeted lean2rr runtime tests pass, among them
 `RtDropOrderRec`, `RtNestedArrayFreeOrder`, `RtArrayFreeDirectOrder`,
-`RtPromiseFreeGlue`, `RtArrayDeepSharedFree` and `RtRefSetOrder`.
+`RtPromiseFreeGlue`, `RtArrayDeepSharedFree` and `RtRefSetOrder`. On
+`l2r-base5` (0378b744 with the series) lean2rr's combined gate passed
+(2026-10-24), these tests among its 660 runtime tests.
 
 ## lean2rr
 
@@ -133,13 +144,15 @@ Tested on 7954a367 with the series (2026-10-19): the repros of this entry
   in `pipeline.rs`, `options.tailRecursiveDrops = false` in `Bridge.cppm`,
   and no `OptLevel::Tpde` argument left in the passes), 02-e and 09-a.
 - A planned port of leanrt to upstream's drop design would drop 02-a to
-  02-e and patch 09-a. Upstream's executor offers no host deferral, no
-  "is a free running" test and no end-of-free hook; leanrt would keep its
-  own stack for its own objects. Native order would then hold inside every
-  free that starts at a leanrt object, but not among the members of a
-  record that user code drops by itself (as today), unless Reussir also
-  tells the host where the outermost drop glue starts and ends (a small
-  patch, not written).
+  02-e and patch 09-a. It waits for upstream issue #759: with upstream's
+  retcon drops on, rrc's drop expansion runs out of memory on some of
+  lean2rr's programs (open at 0378b744). Upstream's executor offers no
+  host deferral, no "is a free running" test and no end-of-free hook;
+  leanrt would keep its own stack for its own objects. Native order would
+  then hold inside every free that starts at a leanrt object, but not
+  among the members of a record that user code drops by itself (as
+  today), unless Reussir also tells the host where the outermost drop
+  glue starts and ends (a small patch, not written).
 
 ## Repros
 

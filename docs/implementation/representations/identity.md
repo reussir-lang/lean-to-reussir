@@ -87,8 +87,8 @@ start with `runtime/`.
   the program, a reference, a function value) lean2rr calls the record
   texture `l2r_dbg_trace_if_shared_rec`, and `leanrt::is_shared_record`
   answers from the record's handle word, with no Rust type name. It reads
-  only what Reussir states for foreign code (Reussir l2r-base3, upstream
-  7954a367): a nullary constructor of a type with a nullary variant may be
+  only what Reussir states for foreign code (Reussir l2r-base5, upstream
+  0378b744): a nullary constructor of a type with a nullary variant may be
   an immediate, a scalar natively and never shared
   (`lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`): under `tbi`,
   aarch64's default, its top byte is the tag + 1 ("Foreign code may

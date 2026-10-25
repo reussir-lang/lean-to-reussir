@@ -6,7 +6,7 @@
 (unreachable: nothing calls the function, and no `Nullable` value reaches
 Rust code).
 
-**Upstream (2026-10-19):** Unchanged in upstream 7954a367; its repro fails both tests there (2026-10-19); open.
+**Upstream (2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `crates/reussir-rt/src/nullable.rs`. On upstream 7954a367 its repro failed both tests (2026-10-19); open.
 
 **Verdict: bug.** `reussir_rt::nullable::Nullable<T>` is the Rust side of
 Reussir's `Nullable<T>` (a pointer that may be null, one word).

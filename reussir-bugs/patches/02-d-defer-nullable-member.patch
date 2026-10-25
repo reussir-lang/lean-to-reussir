@@ -1,4 +1,4 @@
-From 03042afe71bf6b17d0f35a648422efb3f33bb908 Mon Sep 17 00:00:00 2001
+From f6f48457c2eb2f19ba6fa36879f7e0fba00dd933 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 3 Oct 2026 00:53:33 -0400
 Subject: [PATCH 4/9] l2r-local: bug 27: defer a nullable member's release in
@@ -59,10 +59,10 @@ Os and release Ob after the free, like that of `{ Os, Ob }`.
  create mode 100644 tests/integration/frontend/drop_long_nullable_chain.rr
 
 diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-index 07bbb375..e8f3094e 100644
+index 6b591781..a6f08f18 100644
 --- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
-@@ -68,9 +68,9 @@ namespace reussir {
+@@ -70,9 +70,9 @@ namespace reussir {
  // `drop_in_place` (the glue entry: it drops a record's contents) drains the
  // stack before returning. `drop_and_free`, which only ever runs from that
  // drain, frees a cell whose count was read as 1: per arm it releases the
@@ -75,7 +75,7 @@ index 07bbb375..e8f3094e 100644
  // (whose tokens may be reused) are unchanged.
  
  namespace {
-@@ -253,10 +253,20 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -255,10 +255,20 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
                                         rewriter.getIndexAttr(idx))
          .getResult();
    };
@@ -97,7 +97,7 @@ index 07bbb375..e8f3094e 100644
        last = idx;
    mlir::Value lastValue;
    if (last)
-@@ -285,8 +295,26 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
+@@ -287,8 +297,26 @@ void emitCellRelease(mlir::PatternRewriter &rewriter, mlir::Location loc,
    mlir::Value token =
        ReussirRcReinterpretOp::create(rewriter, loc, tokenType, rc);
    ReussirTokenFreeOp::create(rewriter, loc, token);
@@ -125,7 +125,7 @@ index 07bbb375..e8f3094e 100644
  }
  
  mlir::func::FuncOp getOrCreateDropAndFree(mlir::ModuleOp moduleOp,
-@@ -664,6 +692,18 @@ private:
+@@ -666,6 +694,18 @@ private:
            &dispatcher.getNonNullRegion(), dispatcher.getNonNullRegion().begin(),
            {nullableType.getPtrTy()}, {op.getLoc()});
        rewriter.setInsertionPointToStart(nonNullBlock);
