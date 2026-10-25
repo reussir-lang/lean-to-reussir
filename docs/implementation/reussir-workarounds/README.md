@@ -33,10 +33,14 @@ the table below.
 
 ## Summary
 
-lean2rr's builds use upstream Reussir `ea240b19` (2026-10-25) plus the
+lean2rr's builds use upstream Reussir `00906e38` (2026-10-25) plus the
 8 patches of the series: `./reussir`'s branch `l2r-base5` (head
-`e1680f65`). Until 2026-10-25, `l2r-base5` was upstream `0378b744`
-(2026-10-24) plus 9 patches (head `6bf9be85`); upstream `ea240b19` is
+`c4a5df4b`). Upstream `00906e38` (#804) only moves the commit of
+mlir-rcgmp that Reussir's build fetches; the move to it changed no issue
+and no workaround. Before it, `l2r-base5` was upstream `ea240b19` plus
+the same 8 patches (head `e1680f65`), and until the move to `ea240b19`
+(2026-10-25), upstream `0378b744` (2026-10-24) plus 9 patches (head
+`6bf9be85`); upstream `ea240b19` is
 our pull request #758, the change of patch 05-a, so the move dropped
 05-a, deleted issue 5 (its number is retired) and needed no change of
 a workaround. The base before `0378b744` was `l2r-base3` (head
@@ -45,10 +49,10 @@ the move to `0378b744` fixed no open issue and needed no change of a
 workaround. Before that it was `l2r-base2` (head `b2e4a47e`), Reussir
 `943f2195` plus the 35 patches of the old series, whose files are in git
 history and in that branch. The files in `reussir-bugs/` describe the
-state at `ea240b19`: `7954a367` fixed 30 of the old entries in full, so
+state at `00906e38`: `7954a367` fixed 30 of the old entries in full, so
 their files are gone and the open entries have new numbers (the mapping
 is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
-series there has 8 patches on `ea240b19`: 02-a to 02-e (native release
+series there has 8 patches on `00906e38`: 02-a to 02-e (native release
 order, issue 2), 09-a (the drain-end hook,
 [issue 9](../../../reussir-bugs/09-drain-end-hook.md)), 10-a (tagged
 opaque handles, [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md))
@@ -61,7 +65,7 @@ bug lean2rr does not reach), are parked, outside the series
 
 A workaround for an issue that Reussir `7954a367` fixes is marked
 "removable after the move to Reussir 7954a367": lean2rr's builds use a
-later base (`ea240b19`), so it can go (one change per workaround, with
+later base (`00906e38`), so it can go (one change per workaround, with
 its test).
 
 Column "Needed with the patch?": whether lean2rr's workaround is still

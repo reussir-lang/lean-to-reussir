@@ -595,13 +595,17 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `ea240b19` (2026-10-25) plus the 8 patches
+Its base is upstream Reussir `00906e38` (2026-10-25) plus the 8 patches
 of the series: branch `l2r-base5` of the checkout in `./reussir` (head
-`e1680f65`). Since `0378b744`, Reussir's build needs GMP 6.2 or later,
+`c4a5df4b`). Since `0378b744`, Reussir's build needs GMP 6.2 or later,
 a CMake that knows `cxx_std_26` for Clang (CMake 4.4.4 works; 3.28 does
 not) and the libstdc++ 14 headers, for its built-in rcgmp integers
-([building Reussir](../reussir-bugs/README.md#building-reussir)). Until
-2026-10-25, `l2r-base5` was upstream `0378b744` (2026-10-24) plus 9
+([building Reussir](../reussir-bugs/README.md#building-reussir)).
+Upstream `00906e38` (#804) only moves the commit of mlir-rcgmp that the
+build fetches; lean2rr's programs use no rcgmp integers, and the move to
+it changed no issue and no patch. Before it, `l2r-base5` was upstream
+`ea240b19` plus the same 8 patches (head `e1680f65`), and until the move
+to `ea240b19` (2026-10-25), upstream `0378b744` (2026-10-24) plus 9
 patches (head `6bf9be85`). Upstream `ea240b19` is lean2rr's pull request
 #758, the change of patch 05-a: it fixes issue 5 (executables linked
 with text relocations), whose number is retired, and the move dropped
@@ -615,14 +619,14 @@ was branch `l2r-base2` (head `b2e4a47e`), Reussir `943f2195` plus the 35
 patches of the old series; the old patch files are in git history and
 in that branch.
 [`../reussir-bugs/`](../reussir-bugs/README.md) describes the state at
-`ea240b19`: upstream `7954a367` fixed 30 of the old
+`00906e38`: upstream `7954a367` fixed 30 of the old
 issues in full (most of them lean2rr's own fixes, sent as pull requests
 #651 to #663 or adapted by Reussir's author from lean2rr's patches), so
 their files are gone, and the 16 issues that stayed open got new
 numbers (1 to 16; `ea240b19` later fixed issue 5). The
 series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-8 patches on `ea240b19`, in that order; each patch file is named after
+8 patches on `00906e38`, in that order; each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct

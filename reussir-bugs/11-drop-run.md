@@ -12,7 +12,7 @@ for a local Reussir patch (owner, 2026-10-07). The patch 11-a is parked
 outside the series ([parked option](#parked-option-11-a)); no build
 applies it, and lean2rr does not need it.
 
-**Upstream (2026-10-24):** Still about [issue 2](02-native-drop-order.md)'s pending stack (02-b, 02-c), which upstream 0378b744 does not have. The parked 11-a applies on 0378b744 with the series (checked 2026-10-24), and on ea240b19 with the series (checked 2026-10-25).
+**Upstream (2026-10-24):** Still about [issue 2](02-native-drop-order.md)'s pending stack (02-b, 02-c), which upstream 0378b744 does not have. The parked 11-a applies on 0378b744 with the series (checked 2026-10-24), and on ea240b19 and 00906e38 with the series (checked 2026-10-25).
 
 The pending stack of issue 2 (patches 02-b and 02-c,
 `crates/reussir-rt/src/drop.rs`) lets a host push a cell

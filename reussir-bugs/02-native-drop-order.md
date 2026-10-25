@@ -81,10 +81,10 @@ build there.
 
 ## Patch
 
-The five patches are one mechanism. On upstream ea240b19 (the series in
+The five patches are one mechanism. On upstream 00906e38 (the series in
 [`patches/series`](patches/series); rebased onto 7954a367 on 2026-10-19,
-applied to 0378b744 with no change on 2026-10-24, and to ea240b19 on
-2026-10-25):
+applied to 0378b744 with no change on 2026-10-24, and to ea240b19 and
+00906e38 on 2026-10-25):
 
 - **02-a** (was 13-a): inside drop glue, a release calls a per-type
   function, `drop_and_free_in_drain`, which frees the cell first and
@@ -127,8 +127,8 @@ checked with Miri (same machine code), not reviewed yet; 27-a passed
 mechanical conflicts (the hooks in `rewriteDropRc` and the `Nullable` arm,
 `createDtorIfNotExists`, the module lists of `lib.rs` and `symbols.rs`, the
 converted-op list); it is not reviewed yet. The moves to 0378b744
-(2026-10-24) and ea240b19 (2026-10-25) applied the five patches with no
-conflict.
+(2026-10-24), ea240b19 and 00906e38 (2026-10-25) applied the five
+patches with no conflict.
 
 Tested on 7954a367 with the series (2026-10-19): the repros of this entry
 (below) and 13 targeted lean2rr runtime tests pass, among them

@@ -365,7 +365,7 @@ def build_lean_runtime(out):
 # right place: (patch, file of the Reussir checkout, a text the patch adds
 # there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
 # (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
-# ea240b19 plus reussir-bugs/patches/series. Plain upstream fails the first
+# 00906e38 plus reussir-bugs/patches/series. Plain upstream fails the first
 # check. 02-a: both acquire/drop expansion passes of rrc's lowering pipeline
 # (pipeline.rs, and its C++ copy in Bridge.cppm) run with upstream's
 # tail-recursive and retcon drops (#677, #679) off, so that upstream's drop
@@ -386,7 +386,7 @@ REQUIRED_REUSSIR_PATCHES = [
     # later field pushes work (reussir-bugs/02-native-drop-order.md).
     ("02-e", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
 ]
-REUSSIR_HELP = ("build with upstream Reussir ea240b19 plus the patches of "
+REUSSIR_HELP = ("build with upstream Reussir 00906e38 plus the patches of "
                 "reussir-bugs/patches/series (reussir-bugs/README.md)")
 
 

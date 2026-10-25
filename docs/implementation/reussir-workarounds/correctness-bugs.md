@@ -4,8 +4,8 @@ One entry per bug: what lean2rr does, which Reussir change fixes it, and
 whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
-numbers). lean2rr's builds use a later base, upstream `ea240b19` with
-the series (`./reussir` branch `l2r-base5`, `e1680f65`); the
+numbers). lean2rr's builds use a later base, upstream `00906e38` with
+the series (`./reussir` branch `l2r-base5`, `c4a5df4b`); the
 workarounds stay until each is removed.
 The last entry, the drain-end hook, is a local addition for an open issue
 (9). Issues 1 (a missed optimization) and 2 (a missing feature), which
@@ -35,7 +35,7 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   `opaquePayloadType` in `lib/Conversion/TypeConverter/TypeConverter.cpp`
   makes the payload an array of alignment-sized integers when a move of
   the representative would lose another arm's bytes. Reussir has it
-  since `7954a367` (so lean2rr's base `ea240b19` has it), and
+  since `7954a367` (so lean2rr's base `00906e38` has it), and
   `scripts/l2r.py` stops on a Reussir checkout without lean2rr's series
   (patch 02-a's switch, which plain upstream and the old base lack).
   Checked on `l2r-base3` (2026-10-19) with a minimal program: a

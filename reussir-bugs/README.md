@@ -15,17 +15,24 @@ builds apply to Reussir.
 - **Repros.** [`repros/`](repros/) holds the repro programs and `run.sh`,
   which builds and runs them ([running the repros](#running-the-repros)).
 
-**Base.** lean2rr's Reussir is upstream Reussir `ea240b19` (`main` on
+**Base.** lean2rr's Reussir is upstream Reussir `00906e38` (`main` on
 2026-10-25) plus the 8 patches of the series. The checkout at
 `./reussir` is not part of this repository; its branch `l2r-base5`
-(head `e1680f65`) is that stack (the series gives the same tree,
-`734cf027`), and `scripts/l2r.py` stops with an error on a Reussir
+(head `c4a5df4b`) is that stack (the series gives the same tree,
+`402845d1`), and `scripts/l2r.py` stops with an error on a Reussir
 without it ([applying the patches](#applying-the-patches)). Since
 `0378b744`, the base needs GMP and newer build tools
 ([building Reussir](#building-reussir)).
 
-Until 2026-10-25, `l2r-base5` was upstream `0378b744` (2026-10-24) plus
-9 patches (head `6bf9be85`, tree `cb4c6d48`). Upstream `ea240b19` is
+Before the move to `00906e38` (2026-10-25), `l2r-base5` was upstream
+`ea240b19` plus the same 8 patches (head `e1680f65`, tree `734cf027`).
+Upstream `00906e38` (#804) only moves the commit of mlir-rcgmp that
+Reussir's build fetches: no entry and no patch changed
+([history](#history-the-move-to-00906e38-2026-10-25)).
+
+Until the move to `ea240b19` (2026-10-25), `l2r-base5` was upstream
+`0378b744` (2026-10-24) plus 9 patches (head `6bf9be85`, tree
+`cb4c6d48`). Upstream `ea240b19` is
 our pull request #758, which has the change of patch 05-a. The move to
 `ea240b19` (2026-10-25) dropped 05-a, deleted entry 5 and retired its
 number; the other 8 patches apply with no conflict, and in their files
@@ -62,12 +69,12 @@ only in part).
   entry. In the text, a patch is named by NN-x: 02-b is the second patch of
   issue 2.
 - **Patch file contents** are `git format-patch` output of the commits of
-  `l2r-base5`, against `ea240b19`. The messages of 02-a and 02-b still
+  `l2r-base5`, against `00906e38`. The messages of 02-a and 02-b still
   tell how they were rebased onto `7954a367` (2026-10-19); the moves to
-  `0378b744` and `ea240b19` changed no line of code in them. A file's
-  subject line is the subject of its commit, and these subjects use the
-  old numbers: "bug 13", "13b" and "issue 13" mean entry 2, "bug 27"
-  entry 2 (patch 02-d), "issue 38" entry 7; the subjects of 09-a and
+  `0378b744`, `ea240b19` and `00906e38` changed no line of code in them.
+  A file's subject line is the subject of its commit, and these subjects
+  use the old numbers: "bug 13", "13b" and "issue 13" mean entry 2, "bug
+  27" entry 2 (patch 02-d), "issue 38" entry 7; the subjects of 09-a and
   10-a have no number. The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
   new ones.
@@ -109,17 +116,19 @@ a feature), not a fix.
 One row per entry, grouped by kind. Column *Patches*: the entry's patch
 files in the series, or "none", or a parked patch
 ([parked patches](#parked-patches)). Column *Upstream*: what upstream
-`ea240b19` does about it. "Checked" means a check on `7954a367` on
+`00906e38` does about it. "Checked" means a check on `7954a367` on
 2026-10-19 (a repro run, or the source read). On 2026-10-24 the code of
 each entry was compared with `0378b744`: no upstream commit since
 `7954a367` fixes an entry
 ([history](#history-the-move-to-0378b744-2026-10-24)); each entry's
-*Upstream* line gives the details. The only upstream commit after
-`0378b744`, `ea240b19` (2026-10-25), changes only the default relocation
-model of rrc's linked products: it fixes entry 5 in full (deleted, its
-number retired) and changes no code of another entry, so the *Upstream*
-lines of the entries are true for `ea240b19` too
-([history](#history-the-move-to-ea240b19-2026-10-25)).
+*Upstream* line gives the details. The two upstream commits after
+`0378b744` (both 2026-10-25) change no code of another entry, so the
+*Upstream* lines of the entries are true for `00906e38` too:
+`ea240b19` changes only the default relocation model of rrc's linked
+products and fixes entry 5 in full (deleted, its number retired;
+[history](#history-the-move-to-ea240b19-2026-10-25)), and `00906e38`
+changes only the commit of mlir-rcgmp that the build fetches
+([history](#history-the-move-to-00906e38-2026-10-25)).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Upstream |
 |---|---|---|---|---|---|---|
@@ -163,17 +172,19 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base5 ea240b19
+git -C reussir checkout -b l2r-base5 00906e38
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
 
-Checked on 2026-10-25: the series on `ea240b19` gives tree `734cf027`,
-the tree of `./reussir`'s `l2r-base5` (`e1680f65`). Until 2026-10-25,
-`l2r-base5` was made the same way from the series of 9 patches (with
-05-a) on `0378b744` (tree `cb4c6d48`, head `6bf9be85`); `l2r-base3`
+Checked on 2026-10-25: the series on `00906e38` gives tree `402845d1`,
+the tree of `./reussir`'s `l2r-base5` (`c4a5df4b`). Before that,
+`l2r-base5` was made the same way from the same series on `ea240b19`
+(tree `734cf027`, head `e1680f65`), and before that from the series of
+9 patches (with 05-a) on `0378b744` (tree `cb4c6d48`, head
+`6bf9be85`); `l2r-base3`
 from that series on `7954a367` (tree `cc4a28d9`), and `l2r-base2` from
 the old series on `943f2195` (git history).
 
@@ -226,8 +237,10 @@ it). The build then needs these, in addition to LLVM, MLIR and Clang 23:
   uses the headers of the newest GCC installation that it finds; on
   Ubuntu 24.04, install `libstdc++-14-dev`.
 - The rcgmp sources: at the first configuration, CMake fetches
-  mlir-rcgmp from GitHub into the build directory's `_deps`. An offline
-  build needs them there first.
+  mlir-rcgmp from GitHub into the build directory's `_deps`, at the
+  commit that `cmake/RCGMP.cmake` pins (`GIT_TAG`; `ca288d5e` since
+  `00906e38`, `c2a68d81` before). An offline build needs them there
+  first.
 
 After a change of the C++ headers (for example after you install
 `libstdc++-14-dev`), delete the build directory and configure again. The
@@ -243,21 +256,21 @@ it: the owner removed it from the series. Its file is in
 [`patches/series`](patches/series) and the counts above; its entry says
 why it is parked and describes the patch.
 
-| Patch | Entry | Kind | Parked | Why | On ea240b19 |
+| Patch | Entry | Kind | Parked | Why | On 00906e38 |
 |---|---|---|---|---|---|
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
 | [11-a](patches/parked/11-a-drop-run.patch) | [11](11-drop-run.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | applies with the series |
-| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `ea240b19` and `l2r-base5` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `00906e38` and `l2r-base5` |
 
 The parked files 01-a, 06-a, 06-b and 11-a are against the stacks they
 were made on (`ef922049` plus earlier patches of the old series); 16-a
-is against `7954a367`. The column *On ea240b19* was checked on
-2026-10-25 (`git apply --check`; on `0378b744` on 2026-10-24, with the
-same results). To park a patch of the series,
-move its file to `patches/parked/`, delete its line from `patches/series`,
-rebuild the Reussir stack from the series, and update the entry, its row
-and the counts.
+is against `7954a367`. The column *On 00906e38* was checked on
+2026-10-25 (`git apply --check`; on `0378b744` on 2026-10-24 and on
+`ea240b19` on 2026-10-25, with the same results). To park a patch of
+the series, move its file to `patches/parked/`, delete its line from
+`patches/series`, rebuild the Reussir stack from the series, and update
+the entry, its row and the counts.
 
 ## Running the repros
 
@@ -315,8 +328,8 @@ REPRODUCES (open upstream too), 2, 5 and 7 FIXED. The same day, upstream alone (
 shapes and the `Nullable` chain), so its stack depth is fixed upstream; its
 Lean repro needs leanrt, which does not build there. The repros were not
 run again on `l2r-base5`, neither on `0378b744` (2026-10-24) nor on
-`ea240b19` (2026-10-25); lean2rr's combined gate passed on it
-([review](#review)).
+`ea240b19` or `00906e38` (2026-10-25); lean2rr's combined gate passed
+on it ([review](#review)).
 
 ## Policy
 
@@ -347,7 +360,7 @@ run again on `l2r-base5`, neither on `0378b744` (2026-10-24) nor on
   entries that upstream `7954a367` fixed are listed in
   [`docs/implementation/reussir-workarounds/`](../docs/implementation/reussir-workarounds/README.md)
   as "removable after the move". lean2rr's builds use a later base
-  (`ea240b19`), so each can go, one change per workaround, with its test.
+  (`00906e38`), so each can go, one change per workaround, with its test.
 
 ## Review
 
@@ -392,6 +405,29 @@ as 05-a's `matches!`. The other differences between the two heads
 two codegen tests. lean2rr's last combined gates (2026-10-24 and
 2026-10-25) ran on `6bf9be85`.
 
+The move to `00906e38` (2026-10-25) applied the same 8 commits with no
+conflict. The only difference between the heads `e1680f65` and
+`c4a5df4b` is the `GIT_TAG` of mlir-rcgmp in `cmake/RCGMP.cmake`
+(`git diff e1680f65 c4a5df4b`).
+
+## History: the move to 00906e38 (2026-10-25)
+
+Upstream `00906e38` (#804, 2026-10-25), the only upstream commit after
+`ea240b19`, moves the commit of mlir-rcgmp that Reussir's build fetches
+(`cmake/RCGMP.cmake`, `GIT_TAG`) from `c2a68d81` to `ca288d5e`. That
+mlir-rcgmp commit has #48: shorter fast paths for immediates in rcgmp's
+integer operations, upstream's answer to our mlir-rcgmp #47. `l2r-base5`
+is now `00906e38` plus the same 8 commits (head `c4a5df4b`, tree
+`402845d1`; before, head `e1680f65`, tree `734cf027` on `ea240b19`).
+They apply with no conflict; in their patch files only the commit ids
+changed.
+
+No entry is affected and no patch changed: `00906e38` changes only the
+build file, and lean2rr's programs use no rcgmp integers (their `Nat`
+and `Int` are tagged FFI handles, 10-a), so the code that rrc makes for
+them does not change. The parked patches apply as before (11-a with the
+series, 16-a to `00906e38` and `l2r-base5`; 01-a, 06-a and 06-b do not).
+
 ## History: the move to ea240b19 (2026-10-25)
 
 Upstream merged our pull request #758 as `ea240b19` (2026-10-25), the
@@ -401,8 +437,8 @@ when `--relocation-mode` is `default`, `rrc --emit executable` and
 kept, and the other outputs keep the default of the target. Upstream
 fixes entry 5 in full, so:
 
-- 05-a is not in the series any more: `l2r-base5` is `ea240b19` plus
-  the other 8 commits (head `e1680f65`, tree `734cf027`; before, head
+- 05-a is not in the series any more: `l2r-base5` became `ea240b19`
+  plus the other 8 commits (head `e1680f65`, tree `734cf027`; before, head
   `6bf9be85`, tree `cb4c6d48` on `0378b744`). They apply with no
   conflict; in their patch files only the commit ids and the patch
   counts changed.

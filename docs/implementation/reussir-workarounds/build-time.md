@@ -7,8 +7,8 @@ bugs: rrc's output is correct, though a superlinear cost can make large
 builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
-lean2rr's builds use a later base, upstream `ea240b19` with the series
-(`./reussir` branch `l2r-base5`, `e1680f65`); the workarounds stay until
+lean2rr's builds use a later base, upstream `00906e38` with the series
+(`./reussir` branch `l2r-base5`, `c4a5df4b`); the workarounds stay until
 each is removed (the removed ones are [at the end](#removed-workarounds)).
 The open issue files are in
 [`reussir-bugs/`](../../../reussir-bugs/README.md); plan
