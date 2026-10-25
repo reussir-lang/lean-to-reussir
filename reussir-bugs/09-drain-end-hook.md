@@ -11,7 +11,7 @@ lean2rr requires the patch since its switch step 6: `scripts/l2r.py` stops
 with an error when the Reussir checkout lacks it
 (`REQUIRED_REUSSIR_PATCHES`), and leanrt names the patch's symbol.
 
-**Upstream (2026-10-24):** Not upstream: upstream's new drop design (#675 to #682) frees each value with an executor local to that free, so it has no drain to end and no hook. #763 (`fe9f2379`, in 0378b744) lets the executor keep its slot table and arena for each thread between root drops; it adds no hook. 09-a stays in the series on 0378b744 (it applies unchanged) as long as [issue 2](02-native-drop-order.md)'s pending stack stays.
+**Upstream (2026-10-24):** Not upstream: upstream's new drop design (#675 to #682) frees each value with an executor local to that free, so it has no drain to end and no hook. #763 (`fe9f2379`, in 0378b744) lets the executor keep its slot table and arena for each thread between root drops; it adds no hook. 09-a stays in the series on 0378b744 and ea240b19 (2026-10-25; it applies unchanged) as long as [issue 2](02-native-drop-order.md)'s pending stack stays.
 
 Until 2026-10-06 this patch had no entry: it was one of the two "local
 additions" (file `local-additions.md`, now entries 9 and

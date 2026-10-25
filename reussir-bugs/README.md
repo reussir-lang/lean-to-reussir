@@ -15,18 +15,26 @@ builds apply to Reussir.
 - **Repros.** [`repros/`](repros/) holds the repro programs and `run.sh`,
   which builds and runs them ([running the repros](#running-the-repros)).
 
-**Base.** lean2rr's Reussir is upstream Reussir `0378b744` (`main` on
-2026-10-24) plus the 9 patches of the series. The checkout at
+**Base.** lean2rr's Reussir is upstream Reussir `ea240b19` (`main` on
+2026-10-25) plus the 8 patches of the series. The checkout at
 `./reussir` is not part of this repository; its branch `l2r-base5`
-(head `6bf9be85`) is that stack (the series gives the same tree,
-`cb4c6d48`), and `scripts/l2r.py` stops with an error on a Reussir
-without it ([applying the patches](#applying-the-patches)). This base
-needs GMP and newer build tools than the base before it
+(head `e1680f65`) is that stack (the series gives the same tree,
+`734cf027`), and `scripts/l2r.py` stops with an error on a Reussir
+without it ([applying the patches](#applying-the-patches)). Since
+`0378b744`, the base needs GMP and newer build tools
 ([building Reussir](#building-reussir)).
 
-The base before it was `./reussir`'s branch `l2r-base3` (head
+Until 2026-10-25, `l2r-base5` was upstream `0378b744` (2026-10-24) plus
+9 patches (head `6bf9be85`, tree `cb4c6d48`). Upstream `ea240b19` is
+our pull request #758, which has the change of patch 05-a. The move to
+`ea240b19` (2026-10-25) dropped 05-a, deleted entry 5 and retired its
+number; the other 8 patches apply with no conflict, and in their files
+only the commit ids and the patch counts changed
+([history](#history-the-move-to-ea240b19-2026-10-25)).
+
+The base before `0378b744` was `./reussir`'s branch `l2r-base3` (head
 `4c490260`): upstream `7954a367` (2026-10-19) plus the same 9 patches.
-They apply to `0378b744` with no conflict; in the patch files only the
+They applied to `0378b744` with no conflict; in the patch files only the
 line numbers and blob ids changed. The move to `0378b744` (2026-10-24)
 fixed no entry and changed no number
 ([history](#history-the-move-to-0378b744-2026-10-24)).
@@ -42,27 +50,37 @@ only in part).
 
 ## Names
 
-- **Entry numbers** run from 1 to 18. The next free number is 19. (Old
-  number 37 was reserved for another track's patch, value records across
-  the FFI boundary; that track takes the next free number.)
+- **Entry numbers** run from 1 to 18. Number 5 is retired: upstream
+  `ea240b19` fixed entry 5 in full (2026-10-25), and no other entry gets
+  its number. The other entries keep their numbers. The next free number
+  is 19. (Old number 37 was reserved for another track's patch, value
+  records across the FFI boundary; that track takes the next free
+  number.)
 - **A patch file** is named `NN-x-slug.patch`. NN is the number of its
   entry. The letter x gives the order of the entry's patches (a, b, c,
   ...). The slug is a short description. Every patch belongs to exactly one
   entry. In the text, a patch is named by NN-x: 02-b is the second patch of
   issue 2.
 - **Patch file contents** are `git format-patch` output of the commits of
-  `l2r-base5`, against `0378b744`. The messages of 02-a and 02-b still
-  tell how they were rebased onto `7954a367` (2026-10-19); the move to
-  `0378b744` changed no line of code in them. A file's subject line is
-  the subject of its commit, and these subjects use the old numbers:
-  "bug 13", "13b" and "issue 13" mean entry 2, "bug 27" entry 2 (patch
-  02-d), "bug 34" entry 5, "issue 38" entry 7; the subjects of 09-a and
+  `l2r-base5`, against `ea240b19`. The messages of 02-a and 02-b still
+  tell how they were rebased onto `7954a367` (2026-10-19); the moves to
+  `0378b744` and `ea240b19` changed no line of code in them. A file's
+  subject line is the subject of its commit, and these subjects use the
+  old numbers: "bug 13", "13b" and "issue 13" mean entry 2, "bug 27"
+  entry 2 (patch 02-d), "issue 38" entry 7; the subjects of 09-a and
   10-a have no number. The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
   new ones.
 - Older text says "bug NN" for every entry, whatever its kind: read it as
   "issue NN". Text inside the entries that names an entry or patch deleted
   on 2026-10-19 says "old NN" with the upstream pull request that fixed it.
+  Text that names entry 5 or patch 05-a (old 34, 34-a) records the time
+  before 2026-10-25. The entry, its patch and its repro are in git
+  history, with no change since commit `0f9e1b05`:
+  `reussir-bugs/05-executable-textrel.md`,
+  `reussir-bugs/patches/05-a-pic-by-default.patch` and
+  `reussir-bugs/repros/bug05-executable-textrel.rr` (for example
+  `git show 0f9e1b05:reussir-bugs/05-executable-textrel.md`).
 
 ## Kinds
 
@@ -91,16 +109,20 @@ a feature), not a fix.
 One row per entry, grouped by kind. Column *Patches*: the entry's patch
 files in the series, or "none", or a parked patch
 ([parked patches](#parked-patches)). Column *Upstream*: what upstream
-`0378b744` does about it. "Checked" means a check on `7954a367` on
+`ea240b19` does about it. "Checked" means a check on `7954a367` on
 2026-10-19 (a repro run, or the source read). On 2026-10-24 the code of
 each entry was compared with `0378b744`: no upstream commit since
 `7954a367` fixes an entry
 ([history](#history-the-move-to-0378b744-2026-10-24)); each entry's
-*Upstream* line gives the details.
+*Upstream* line gives the details. The only upstream commit after
+`0378b744`, `ea240b19` (2026-10-25), changes only the default relocation
+model of rrc's linked products: it fixes entry 5 in full (deleted, its
+number retired) and changes no code of another entry, so the *Upstream*
+lines of the entries are true for `ea240b19` too
+([history](#history-the-move-to-ea240b19-2026-10-25)).
 
 | # | Kind | Effect | Affects lean2rr output? | lean2rr workaround | Patches | Upstream |
 |---|---|---|---|---|---|---|
-| [5](05-executable-textrel.md) | bug (link) | `rrc --emit executable` compiles static code but links a PIE: text relocations (GNU ld), a link error (lld, and on x86-64) | yes without the workaround | `scripts/l2r.py` passes `--relocation-mode pic` | [05-a](patches/05-a-pic-by-default.patch) | not fixed (pull request #758 open) |
 | [12](12-nullable-as-ref.md) | bug | reussir-rt's `Nullable::as_ref` returns a reference to a local copy of the pointer word (dangling) | no: nothing calls it | - | none | unchanged; repro fails (checked) |
 | [13](13-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there | no: 64-bit targets only | - | none | unchanged (checked) |
 | [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | unchanged (source read at `0378b744`) |
@@ -119,11 +141,12 @@ each entry was compared with `0378b744`: no upstream commit since
 | [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the one-word `Nat` and `Int` need it | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed (upstream's built-in `Nat` and `Int`, #776, are another way to one word; lean2rr does not use them) |
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44; checked) |
 
-**Counts.** 18 entries: 5 bugs, 3 costs, 5 missed optimizations, 4
-missing features, 1 dependency issue. 5 entries have patches in the
-series, 9 patch files in all (five for entry 2, one each for 5, 7, 9 and
-10): 1 bug fix and 8 features. 5 parked patches lie outside the series
-(01-a, 06-a, 06-b, 11-a, 16-a).
+**Counts.** 17 entries (numbers 1 to 18; number 5 is retired): 4 bugs,
+3 costs, 5 missed optimizations, 4 missing features, 1 dependency issue.
+4 entries have patches in the series, 8 patch files in all (five for
+entry 2, one each for 7, 9 and 10): all 8 are features; the series has
+no bug fix. 5 parked patches lie outside the series (01-a, 06-a, 06-b,
+11-a, 16-a).
 
 Status words used in the entries' summaries:
 
@@ -140,18 +163,19 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base5 0378b744
+git -C reussir checkout -b l2r-base5 ea240b19
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
 
-Checked on 2026-10-24: the series on `0378b744` gives tree `cb4c6d48`,
-the tree of `./reussir`'s `l2r-base5` (`6bf9be85`). The base before it
-(`l2r-base3`) was made the same way from the same series on `7954a367`
-(tree `cc4a28d9`), and `l2r-base2` from the old series on `943f2195`
-(git history).
+Checked on 2026-10-25: the series on `ea240b19` gives tree `734cf027`,
+the tree of `./reussir`'s `l2r-base5` (`e1680f65`). Until 2026-10-25,
+`l2r-base5` was made the same way from the series of 9 patches (with
+05-a) on `0378b744` (tree `cb4c6d48`, head `6bf9be85`); `l2r-base3`
+from that series on `7954a367` (tree `cc4a28d9`), and `l2r-base2` from
+the old series on `943f2195` (git history).
 
 Order and dependencies:
 
@@ -160,7 +184,7 @@ Order and dependencies:
   deferral to `Nullable` members, and 02-e changes `emitCellRelease`,
   02-b's code as 02-d amended it.
 - 09-a changes 02-b's runtime (`drop.rs`): it comes after 02-c.
-- 10-a, 05-a and 07-a touch none of entry 2's files. 07-a needs 10-a (the
+- 10-a and 07-a touch none of entry 2's files. 07-a needs 10-a (the
   tagged handles whose increment it masks).
 - The series is the order in which the patches were made, not entry
   order.
@@ -170,8 +194,10 @@ What lean2rr needs: its runtime needs 02-b to build (`leanrt::drop` uses
 checkout lacks 02-a (with upstream's tail-recursive and retcon drops
 off), 09-a, 07-a or 02-e (`REQUIRED_REUSSIR_PATCHES`), so plain upstream
 fails there; its
-prelude needs 10-a (it declares `Nat` and `Int` `tagged`). 05-a has a
-workaround in the driver.
+prelude needs 10-a (it declares `Nat` and `Int` `tagged`). The driver
+also passes `--relocation-mode pic`, the workaround for entry 5 (retired):
+since `ea240b19` this is rrc's default for executables, so the flag is
+redundant but harmless; it stays for older bases.
 
 **Adding a patch.** Name the file after its entry: `NN-x-slug.patch`, with
 the next free letter of the entry (a new problem gets the next free entry
@@ -217,17 +243,18 @@ it: the owner removed it from the series. Its file is in
 [`patches/series`](patches/series) and the counts above; its entry says
 why it is parked and describes the patch.
 
-| Patch | Entry | Kind | Parked | Why | On 0378b744 |
+| Patch | Entry | Kind | Parked | Why | On ea240b19 |
 |---|---|---|---|---|---|
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
 | [11-a](patches/parked/11-a-drop-run.patch) | [11](11-drop-run.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | applies with the series |
-| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `0378b744` and `l2r-base5` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `ea240b19` and `l2r-base5` |
 
 The parked files 01-a, 06-a, 06-b and 11-a are against the stacks they
 were made on (`ef922049` plus earlier patches of the old series); 16-a
-is against `7954a367`. The column *On 0378b744* was checked on
-2026-10-24 (`git apply --check`). To park a patch of the series,
+is against `7954a367`. The column *On ea240b19* was checked on
+2026-10-25 (`git apply --check`; on `0378b744` on 2026-10-24, with the
+same results). To park a patch of the series,
 move its file to `patches/parked/`, delete its line from `patches/series`,
 rebuild the Reussir stack from the series, and update the entry, its row
 and the counts.
@@ -287,22 +314,26 @@ REPRODUCES (open upstream too), 2, 5 and 7 FIXED. The same day, upstream alone (
 05-a and 07-a) printed FIXED for the plain repros of issue 2 (the list
 shapes and the `Nullable` chain), so its stack depth is fixed upstream; its
 Lean repro needs leanrt, which does not build there. The repros were not
-run again on `l2r-base5` (2026-10-24); lean2rr's combined gate passed on
-it ([review](#review)).
+run again on `l2r-base5`, neither on `0378b744` (2026-10-24) nor on
+`ea240b19` (2026-10-25); lean2rr's combined gate passed on it
+([review](#review)).
 
 ## Policy
 
 - Every Reussir problem lean2rr meets is documented here, with a repro,
   until upstream fixes it. When upstream fixes an entry fully, the entry,
-  its patches and its repros are deleted (they stay in git history); an
-  entry upstream fixes in part keeps only the part that remains, with a
-  reduced patch.
+  its patches and its repros are deleted (they stay in git history), and
+  its number is retired: the other entries keep their numbers (since
+  2026-10-25, entry 5; on 2026-10-19 the remaining entries were
+  renumbered). An entry upstream fixes in part keeps only the part that
+  remains, with a reduced patch.
 - A real Reussir bug (verified reproducible erroneous behaviour) gets a
   small local patch, reviewed adversarially, even if lean2rr never
   triggers it or works around it.
 - Only bug fixes and major items stay in the series (owner, 2026-10-07):
-  the bug fixes (05-a) and the features lean2rr needs (02-a to 02-e, 07-a,
-  09-a and 10-a). A fix of a bug that lean2rr does not reach is parked (16-a); no
+  the bug fixes (none since 2026-10-25: the only one, 05-a, is upstream as
+  #758) and the features lean2rr needs (02-a to 02-e, 07-a, 09-a and
+  10-a). A fix of a bug that lean2rr does not reach is parked (16-a); no
   upstream pull requests after #758 (owner, 2026-10-19).
 - A patch that only buys a small run-time gain on a few programs is
   parked, not kept (01-a, 06-a with 06-b, 11-a). Costs whose removal would
@@ -316,7 +347,7 @@ it ([review](#review)).
   entries that upstream `7954a367` fixed are listed in
   [`docs/implementation/reussir-workarounds/`](../docs/implementation/reussir-workarounds/README.md)
   as "removable after the move". lean2rr's builds use a later base
-  (`0378b744`), so each can go, one change per workaround, with its test.
+  (`ea240b19`), so each can go, one change per workaround, with its test.
 
 ## Review
 
@@ -334,7 +365,6 @@ reviewed under their old names, on the old base:
 | 02-c (13-c) | round 5 | `perf0014-review/` | passed; the fix of old entry 47 (pointer provenance, 2026-10-09) checked with Miri (the same machine code), not reviewed yet |
 | 02-d (27-a), 09-a (40-a) | RV7-P22 round 2; RV8 | `rv7/p22/round2/FINDINGS.txt`, `rv8/reussir/FINDINGS.txt` | RV7P-05 led to 27-a; no defect in 40-a; RV8R-01 (27-a, release order, low) fixed in the amended 27-a |
 | 02-e (13-d) | review-0069 | `review-0069/` | no defect |
-| 05-a (34-a) | RV8 bug34 | `rv8/reussir/bug34/FINDINGS.txt` | no defect; N1: obj and staticlib outputs keep the static default (scope note); N2: the .text change is linker veneer padding |
 | 07-a (38-a) | review-anybox r1 | `review-anybox/r1` | no defect; the atomic case was added to the patch's test |
 | 10-a (41-a) | mem-nat review, RV8 | `mem/nat/review/FINDINGS.txt`, `rv8/nat/FINDINGS.txt` | no defect (the optional hardening is in) |
 
@@ -352,6 +382,47 @@ combined gate passed on `l2r-base5` (gate19, dev `0810b9ec`): 658 of
 660 runtime tests identical to native, 2 expected failures, all 15
 checks, the classic corpus with the optional passes on, with all 23 off
 and with `unread-fields`, and the raytracer.
+
+The move to `ea240b19` (2026-10-25) dropped 05-a and applied the other 8
+commits with no conflict, so their code is the same as on `0378b744`.
+rrc on `e1680f65` behaves as on `6bf9be85`: upstream's condition for PIC,
+`target.is_linked()`, is `Stage::Dynlib | Stage::Executable`, the same
+as 05-a's `matches!`. The other differences between the two heads
+(`git diff 6bf9be85 e1680f65`, 5 files) are comments, the CHANGELOG and
+two codegen tests. lean2rr's last combined gates (2026-10-24 and
+2026-10-25) ran on `6bf9be85`.
+
+## History: the move to ea240b19 (2026-10-25)
+
+Upstream merged our pull request #758 as `ea240b19` (2026-10-25), the
+only upstream commit after `0378b744`. It has the change of patch 05-a:
+when `--relocation-mode` is `default`, `rrc --emit executable` and
+`--emit dynlib` compile position-independent code. An explicit mode is
+kept, and the other outputs keep the default of the target. Upstream
+fixes entry 5 in full, so:
+
+- 05-a is not in the series any more: `l2r-base5` is `ea240b19` plus
+  the other 8 commits (head `e1680f65`, tree `734cf027`; before, head
+  `6bf9be85`, tree `cb4c6d48` on `0378b744`). They apply with no
+  conflict; in their patch files only the commit ids and the patch
+  counts changed.
+- Entry 5 and its repro (`repros/bug05-executable-textrel.rr`, its
+  function in `run.sh`) are deleted. Number 5 is retired: the other
+  entries keep their numbers, and the next free number stays 19. The
+  deleted files are in git history (commit `0f9e1b05`; see
+  [names](#names)).
+- lean2rr's workaround stays: `scripts/l2r.py` still passes
+  `--relocation-mode pic`. On `ea240b19` and later this is rrc's
+  default for executables, so the flag is redundant but harmless; it
+  stays for older bases. `tests/runtime/run.sh` still fails a test whose
+  executable has text relocations.
+
+Nothing else changed: `ea240b19` touches only rrc's driver
+(`driver.rs`, `driver/cli.rs`), the CHANGELOG and two codegen tests
+(`executable_pic_default.rr`, `executable_pic_default_retcon.rr`), and
+no code of another entry. The parked patches apply as before (11-a with
+the series, 16-a to `ea240b19` and `l2r-base5`; 01-a, 06-a and 06-b do
+not).
 
 ## History: the move to 0378b744 (2026-10-24)
 
@@ -381,7 +452,8 @@ reussir-rt's `nullable.rs` and its small-allocation path (12, 13; #771
 adds only rcgmp's allocation hooks to `alloc.rs`), `formatInto` (14),
 the `libmimalloc-sys` pin (15, still 0.1.44), the 1 GiB driver stack
 (16) and the record layout (17, 18; the type converter only adds the
-rcgmp types). Pull request #758 (05-a) is still open.
+rcgmp types). Pull request #758 (05-a) is still open (upstream merged
+it on 2026-10-25 as `ea240b19`: [the next move](#history-the-move-to-ea240b19-2026-10-25)).
 
 ## History: the renumbering of 2026-10-19
 
@@ -399,7 +471,7 @@ Kept entries, old number to new:
 | 13 (with 27 and 47) | 2 | 38 | 7 | 42 | 11 |
 | 25 | 3 | 39 | 8 | 43 | 12 |
 | 32 | 4 | 40 | 9 | 44 | 13 |
-| 34 | 5 | | | 45, 46 | 14, 15 |
+| 34 | 5 (retired 2026-10-25) | | | 45, 46 | 14, 15 |
 | 31 (partly: see 16) | 16 | | | | |
 
 Old 31 (rrc overflowed its stack on deep expressions) is fixed upstream

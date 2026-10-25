@@ -1,7 +1,7 @@
-From f0ec7242c70159920a055a7de40e4f4b6d6c0608 Mon Sep 17 00:00:00 2001
+From 5c23b40826f987884421a83ea77837d039a3a7ce Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 30 Sep 2026 20:38:56 -0400
-Subject: [PATCH 1/9] l2r-local: bug 13: release chains of cells in a loop in
+Subject: [PATCH 1/8] l2r-local: bug 13: release chains of cells in a loop in
  the drop glue
 
 A member release in drop glue expanded to "count == 1 -> call the member's

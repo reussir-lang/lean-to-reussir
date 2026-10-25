@@ -365,7 +365,7 @@ def build_lean_runtime(out):
 # right place: (patch, file of the Reussir checkout, a text the patch adds
 # there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
 # (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
-# 0378b744 plus reussir-bugs/patches/series. Plain upstream fails the first
+# ea240b19 plus reussir-bugs/patches/series. Plain upstream fails the first
 # check. 02-a: both acquire/drop expansion passes of rrc's lowering pipeline
 # (pipeline.rs, and its C++ copy in Bridge.cppm) run with upstream's
 # tail-recursive and retcon drops (#677, #679) off, so that upstream's drop
@@ -386,7 +386,7 @@ REQUIRED_REUSSIR_PATCHES = [
     # later field pushes work (reussir-bugs/02-native-drop-order.md).
     ("02-e", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
 ]
-REUSSIR_HELP = ("build with upstream Reussir 0378b744 plus the patches of "
+REUSSIR_HELP = ("build with upstream Reussir ea240b19 plus the patches of "
                 "reussir-bugs/patches/series (reussir-bugs/README.md)")
 
 
@@ -562,12 +562,15 @@ def main():
                # the packed record layout moves (RcCreateFusion copy
                # avoidance): keep declaration-order layouts until that is fixed.
                + ["--no-pack-record-members"]
-               # rrc compiles with LLVM's static relocation model unless told
-               # otherwise, but links a position-independent executable, so
-               # read-only data with absolute addresses (closure vtables) needs
-               # text relocations (DT_TEXTREL) with GNU ld and fails with lld
-               # (Reussir issue 5, patch 05-a). Native Lean executables are PIEs
-               # without text relocations.
+               # Before upstream Reussir ea240b19 (#758), rrc compiled with
+               # LLVM's static relocation model unless told otherwise, but
+               # linked a position-independent executable, so read-only data
+               # with absolute addresses (closure vtables) needed text
+               # relocations (DT_TEXTREL) with GNU ld and failed with lld
+               # (Reussir issue 5, now retired; once patch 05-a). Since
+               # ea240b19, PIC is rrc's default for executables: the flag is
+               # redundant there but harmless, and kept for older bases.
+               # Native Lean executables are PIEs without text relocations.
                + ["--relocation-mode", "pic"]
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
                + os.environ.get("L2R_RRC_FLAGS", "").split())

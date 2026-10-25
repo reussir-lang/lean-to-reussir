@@ -13,9 +13,10 @@ code (`crates/reussir-compiler/src/main.rs`) has no change since
 7954a367. Upstream #686
 (`3e34334f`) is our old patch 31-a, which fixed the stack overflow on
 deep expressions (old entry 31); this entry is the part of old 31 that
-remains. No pull request is planned (owner, 2026-10-19: no more
-upstream pull requests after #758); the entry and the parked patch
-document it.
+remains. Upstream `ea240b19` (#758, 2026-10-25) changes rrc's
+`driver.rs`, not this stack code. No pull request is planned (owner,
+2026-10-19: no more upstream pull requests after #758); the entry and
+the parked patch document it.
 
 **Verdict: bug.** Since #686, rrc runs its driver on a thread with a
 1 GiB stack. The stack is reserved address space, and an address-space
@@ -85,8 +86,9 @@ finite limit below 2 GiB. A sum of 8000 terms still compiles there.
 
 Patch file:
 [`patches/parked/16-a-driver-stack-rlimit.patch`](patches/parked/16-a-driver-stack-rlimit.patch)
-(on `7954a367`; it applies to `0378b744` and `l2r-base5` too, checked
-2026-10-24). No build applies it.
+(on `7954a367`; it applies to `0378b744` and the `l2r-base5` of then
+too, checked 2026-10-24, and to `ea240b19` and `l2r-base5` on it,
+checked 2026-10-25). No build applies it.
 
 The patch changes #686's code in `crates/reussir-compiler/src/main.rs`:
 

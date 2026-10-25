@@ -1,7 +1,7 @@
-From 6bf9be8528f93e575646258dada3fe2609078962 Mon Sep 17 00:00:00 2001
+From e1680f65aa94bd86dcc87fd51e3472f6f47873c5 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 06:02:30 -0400
-Subject: [PATCH 9/9] l2r-local: issue 13: keep a cell's last record box for
+Subject: [PATCH 8/8] l2r-local: issue 13: keep a cell's last record box for
  last only when nothing after it pushes work
 
 drop_and_free (0014, as 0027 amended it) releases the members of a cell

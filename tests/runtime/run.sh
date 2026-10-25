@@ -2,7 +2,8 @@
 # Runtime tests: build each tests/runtime/*.lean natively (lean + leanc) and
 # through lean2rr + Reussir (scripts/l2r.py), run both, and compare stdout,
 # stderr and the exit code exactly. The lean2rr executable must also have no
-# text relocations (DT_TEXTREL), as native Lean's has none (Reussir issue 5).
+# text relocations (DT_TEXTREL), as native Lean's has none (Reussir issue 5,
+# fixed upstream in ea240b19; the number is retired).
 #
 #   tests/runtime/run.sh [NAME...]       (default: every Rt*.lean)
 #
@@ -221,7 +222,8 @@ for t in "${TESTS[@]}"; do
       fi
     done
     # Like native Lean's, the executable is a PIE without text relocations
-    # (Reussir issue 5: rrc compiled static code into a PIE).
+    # (Reussir issue 5, fixed upstream in ea240b19: rrc compiled static code
+    # into a PIE).
     if readelf -d "$d/l2r" 2>/dev/null | grep -q TEXTREL; then
       status=fail; why="$why the executable has text relocations (readelf -d $d/l2r);"
     fi

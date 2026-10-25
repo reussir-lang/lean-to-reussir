@@ -9,12 +9,12 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
-# line here: 1 to 8, 12, 17 and 18. Entries 9 and 10 (missing features) have no
-# repro: their patches carry their own tests; 11 is a run-time cost of
-# entry 2's stack; 13 needs a 32-bit target, 14 MLIR written by hand, and
-# 15 is shown by lean2rr's runtime test RtArenaPurge. Entry 2's Miri test
-# (bug02-unlink-provenance.rs) is run by hand (its header). Each repro
-# prints one line:
+# line here: 1 to 4, 6 to 8, 12, 17 and 18 (number 5 is retired). Entries
+# 9 and 10 (missing features) have no repro: their patches carry their own
+# tests; 11 is a run-time cost of entry 2's stack; 13 needs a 32-bit
+# target, 14 MLIR written by hand, and 15 is shown by lean2rr's runtime
+# test RtArenaPurge. Entry 2's Miri test (bug02-unlink-provenance.rs) is
+# run by hand (its header). Each repro prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
@@ -249,18 +249,6 @@ bug04() {
     elif le "$r" 1.5; then say_line FIXED 04 "$msg"
     else say_line OTHER 04 "$msg"; fi
 }
-bug05() {
-    # Built as lean2rr builds: --emit executable, no --relocation-mode.
-    rr bug05-executable-textrel.rr 05 -O aggressive
-    if [ $RC != 0 ]; then say_line OTHER 05 "$(build_fail 05)" "-O aggressive"; return; fi
-    if ! command -v readelf > /dev/null; then say_line SKIPPED 05 "no readelf"; return; fi
-    exe 05
-    local tr
-    tr=$(readelf -d "$WORK/out/05" 2> /dev/null | grep -c TEXTREL)
-    if [ "$OUT_TXT" != 6 ]; then say_line OTHER 05 "prints '$OUT_TXT' ($(signame $EXIT)), expected 6" "-O aggressive"
-    elif [ "$tr" -gt 0 ]; then say_line REPRODUCES 05 "the executable needs text relocations (DT_TEXTREL); prints 6" "-O aggressive"
-    else say_line FIXED 05 "no text relocations; prints 6" "-O aggressive"; fi
-}
 bug06() {
     # The textures built as scripts/l2r.py builds them: for the CPU rrc
     # compiles for (NATIVE_FLAGS), else LLVM inlines no texture at all
@@ -354,7 +342,7 @@ bug18() {
     else say_line FIXED 18 "both functions return in registers" "-O aggressive --no-pack-record-members"; fi
 }
 
-ALL="01 02 03 04 05 06 07 08 12 17 18"
+ALL="01 02 03 04 06 07 08 12 17 18"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

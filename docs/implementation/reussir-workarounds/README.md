@@ -21,9 +21,9 @@ the table below.
 - [correctness-bugs.md](correctness-bugs.md): workarounds for bugs that
   affected the program rather than its build time (wrong values, rrc
   crashes or rejected programs), all fixed upstream at Reussir
-  `7954a367`, and the drain-end hook (patch 09-a). For issue 5,
-  `scripts/l2r.py` passes `--relocation-mode pic` (patch 05-a makes it
-  rrc's default for linked products; table below).
+  `7954a367`, and the drain-end hook (patch 09-a). For issue 5 (fixed
+  upstream at `ea240b19`, number retired), `scripts/l2r.py` still passes
+  `--relocation-mode pic` (below the table).
 - [build-time.md](build-time.md): workarounds for a build-time bug and
   build-time costs, all fixed upstream at Reussir `7954a367`.
 - [limitations.md](limitations.md): Reussir behaviour that is not a bug
@@ -33,22 +33,26 @@ the table below.
 
 ## Summary
 
-lean2rr's builds use upstream Reussir `0378b744` (2026-10-24) plus the
-9 patches of the series: `./reussir`'s branch `l2r-base5` (head
-`6bf9be85`). The base before it was `l2r-base3` (head `4c490260`):
-upstream `7954a367` (2026-10-19) plus the same 9 patches; the move to
-`0378b744` fixed no open issue and needs no change of a workaround.
-Before that it was `l2r-base2` (head `b2e4a47e`), Reussir `943f2195`
-plus the 35 patches of the old series, whose files are in git history
-and in that branch. The files in `reussir-bugs/` describe the state at
-`0378b744`: `7954a367` fixed 30 of the old entries in full, so their
-files are gone and the open entries have new numbers (the mapping is in
-[`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
-series there has 9 patches on `0378b744`: 02-a to 02-e (native release
+lean2rr's builds use upstream Reussir `ea240b19` (2026-10-25) plus the
+8 patches of the series: `./reussir`'s branch `l2r-base5` (head
+`e1680f65`). Until 2026-10-25, `l2r-base5` was upstream `0378b744`
+(2026-10-24) plus 9 patches (head `6bf9be85`); upstream `ea240b19` is
+our pull request #758, the change of patch 05-a, so the move dropped
+05-a, deleted issue 5 (its number is retired) and needed no change of
+a workaround. The base before `0378b744` was `l2r-base3` (head
+`4c490260`): upstream `7954a367` (2026-10-19) plus the same 9 patches;
+the move to `0378b744` fixed no open issue and needed no change of a
+workaround. Before that it was `l2r-base2` (head `b2e4a47e`), Reussir
+`943f2195` plus the 35 patches of the old series, whose files are in git
+history and in that branch. The files in `reussir-bugs/` describe the
+state at `ea240b19`: `7954a367` fixed 30 of the old entries in full, so
+their files are gone and the open entries have new numbers (the mapping
+is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
+series there has 8 patches on `ea240b19`: 02-a to 02-e (native release
 order, issue 2), 09-a (the drain-end hook,
 [issue 9](../../../reussir-bugs/09-drain-end-hook.md)), 10-a (tagged
-opaque handles, [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)),
-05-a and 07-a. The owner keeps only bug fixes and major items in the
+opaque handles, [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md))
+and 07-a. The owner keeps only bug fixes and major items in the
 series: the optimizations 01-a (issue 1), 06-a and 06-b (issue 6) and
 11-a (issue 11), and the fix 16-a
 ([issue 16](../../../reussir-bugs/16-driver-stack-address-limit.md), a
@@ -57,7 +61,7 @@ bug lean2rr does not reach), are parked, outside the series
 
 A workaround for an issue that Reussir `7954a367` fixes is marked
 "removable after the move to Reussir 7954a367": lean2rr's builds use a
-later base (`0378b744`), so it can go (one change per workaround, with
+later base (`ea240b19`), so it can go (one change per workaround, with
 its test).
 
 Column "Needed with the patch?": whether lean2rr's workaround is still
@@ -70,7 +74,6 @@ either way.
 | [2](../../../reussir-bugs/02-native-drop-order.md) | missing feature (the stack depth is fixed upstream; native release order is not) | runtime frees through 02-b's stack | 02-a to 02-e | n/a: the runtime needs 02-b, and `scripts/l2r.py` requires 02-a and 02-e |
 | [3](../../../reussir-bugs/03-value-record-dag.md) | cost | none (lean2rr's `[value]` records are shallow) | none (cost) | n/a |
 | [4](../../../reussir-bugs/04-emit-mlir-size.md) | cost | none (affects `--emit mlir` only) | none (cost) | n/a |
-| [5](../../../reussir-bugs/05-executable-textrel.md) | bug | `scripts/l2r.py` passes `--relocation-mode pic` (as native Lean, a PIE without text relocations) | 05-a | keep: harmless with 05-a, and needed without it |
 | [6](../../../reussir-bugs/06-trampoline-inline.md) | missed optimization | read textures kept small (the view protocol, [ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view)); the reads of a box and of a `Nat` or `Int` element (at its type, or from a typed array) stay calls at a cold call site, which `tests/runtime/ffi-inline-check.sh` allows in `RtReadsDeep` only | none (06-a and 06-b parked: the gain is too small) | n/a |
 | [7](../../../reussir-bugs/07-tagged-top-bits.md) | missing feature | none: the one-word `Box` keeps its payload's type number in the top 16 bits | 07-a | n/a: `scripts/l2r.py` requires it |
 | [8](../../../reussir-bugs/08-alias-release-donor.md) | missed optimization | avoided: a field put back into a rebuilt node is boxed again from its unboxed value ([records.md](../representations/records.md#a-field-is-read-at-its-binders-type-once)); passing the field's own box (commit 3f0cb30, reverted) left a dead release of the unboxed value that token reuse preferred to the matched cell (`RtProbeBump`) | none (missed optimization) | n/a |
@@ -83,6 +86,18 @@ either way.
 Issues 11 to 14 and 16 (a cost of 02-b's stack; three bugs of Reussir's
 runtime and hand-written MLIR; rrc's driver stack under an address-space
 limit, which lean2rr's builds do not set) need nothing from lean2rr.
+
+Issue 5 (a bug: `rrc --emit executable` compiled static code but linked
+a PIE, so the executable had text relocations with GNU ld, and lld
+refused to link it) is fixed upstream in full by #758
+(`ea240b19`, the change of the local patch 05-a). Its file and its patch
+are deleted (in git history, commit `0f9e1b05`), and number 5 is
+retired. lean2rr's workaround stays: `scripts/l2r.py` passes
+`--relocation-mode pic`, so the executable is a PIE without text
+relocations, as native Lean's is. On `ea240b19` and later this is rrc's
+default for executables, so the flag is redundant but harmless; it stays
+for older bases. `tests/runtime/run.sh` fails a test whose executable
+has text relocations.
 
 The workarounds for issues that Reussir `7954a367` fixes (old entry
 numbers; the details are in [correctness-bugs.md](correctness-bugs.md),

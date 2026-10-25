@@ -595,33 +595,40 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `0378b744` (2026-10-24) plus the 9 patches
+Its base is upstream Reussir `ea240b19` (2026-10-25) plus the 8 patches
 of the series: branch `l2r-base5` of the checkout in `./reussir` (head
-`6bf9be85`). Since `0378b744`, Reussir's build needs GMP 6.2 or later,
+`e1680f65`). Since `0378b744`, Reussir's build needs GMP 6.2 or later,
 a CMake that knows `cxx_std_26` for Clang (CMake 4.4.4 works; 3.28 does
 not) and the libstdc++ 14 headers, for its built-in rcgmp integers
-([building Reussir](../reussir-bugs/README.md#building-reussir)). The
-base before it was branch `l2r-base3` (head `4c490260`): upstream
-`7954a367` (2026-10-19) plus the same 9 patches, which apply to
-`0378b744` with no conflict; the move fixed no issue. Before that it was
-branch `l2r-base2` (head `b2e4a47e`), Reussir `943f2195` plus the 35
+([building Reussir](../reussir-bugs/README.md#building-reussir)). Until
+2026-10-25, `l2r-base5` was upstream `0378b744` (2026-10-24) plus 9
+patches (head `6bf9be85`). Upstream `ea240b19` is lean2rr's pull request
+#758, the change of patch 05-a: it fixes issue 5 (executables linked
+with text relocations), whose number is retired, and the move dropped
+05-a; lean2rr's driver still passes `--relocation-mode pic`, now rrc's
+default for executables (redundant but harmless; kept for older
+bases). The
+base before `0378b744` was branch `l2r-base3` (head `4c490260`):
+upstream `7954a367` (2026-10-19) plus the same 9 patches, which applied
+to `0378b744` with no conflict; that move fixed no issue. Before that it
+was branch `l2r-base2` (head `b2e4a47e`), Reussir `943f2195` plus the 35
 patches of the old series; the old patch files are in git history and
 in that branch.
 [`../reussir-bugs/`](../reussir-bugs/README.md) describes the state at
-`0378b744`: upstream `7954a367` fixed 30 of the old
+`ea240b19`: upstream `7954a367` fixed 30 of the old
 issues in full (most of them lean2rr's own fixes, sent as pull requests
 #651 to #663 or adapted by Reussir's author from lean2rr's patches), so
-their files are gone, and the 16 open issues have new numbers. The
+their files are gone, and the 16 issues that stayed open got new
+numbers (1 to 16; `ea240b19` later fixed issue 5). The
 series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-9 patches on `0378b744`, in that order; each patch file is named after
+8 patches on `ea240b19`, in that order; each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct
-output, and their patches are optimizations or features, not fixes.
+output, and their patches are optimizations or features, not fixes. No
+bug fix is in the series since 2026-10-25.
 
-- **A real bug with a patch (1 patch):** executables linked with text
-  relocations (5: lean2rr's driver also passes `--relocation-mode pic`).
 - **Missing features, not bugs, implemented locally (8 patches):**
   freeing long or deep structures in native Lean's order, through a stack
   of pending work that lean2rr's runtime shares (2, five patches; the

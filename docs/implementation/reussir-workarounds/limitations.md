@@ -205,7 +205,11 @@ files, `runtime/` and `scripts/` from the repository root.
 
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
   `--no-reuse-across-call` (with the retry for old bug 4);
-  `--no-pack-record-members` (old bug 2); closure devirtualization stays
+  `--no-pack-record-members` (old bug 2); `--relocation-mode pic` (issue
+  5, now retired: before upstream `ea240b19`, rrc compiled static code into
+  the PIE it linked; since then PIC is rrc's default for executables, so
+  the flag is redundant but harmless, kept for older bases, see
+  [README.md](README.md)); closure devirtualization stays
   on (old issue 10's `--no-closure-wpd` is removed,
   [build-time.md](build-time.md#old-issue-10-cost-closure-devirtualization-printed-types-exponentially));
   `L2R_RRC_FLAGS` appends flags for experiments. rrc runs

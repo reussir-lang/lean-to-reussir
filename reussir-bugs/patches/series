@@ -4,6 +4,5 @@
 02-d-defer-nullable-member.patch
 09-a-drain-end-hook.patch
 10-a-tagged-ffi-objects.patch
-05-a-pic-by-default.patch
 07-a-tagged-top-bits.patch
 02-e-last-field-order.patch
