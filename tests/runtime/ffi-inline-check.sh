@@ -68,6 +68,9 @@ if "reads" in kinds:
     # The reads of an element at a type (an immediate without a copy of its
     # box: lean2rr's boxWordRead?).
     names |= {f"lean_array_{op}_as" for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
+    # The reads at an index word (lean2rr's bindReadIndex under rcgmp).
+    names |= {"lean_array_fget_w", "lean_array_get_w", "lean_byte_array_fget_w", "lean_byte_array_get_w",
+              "lean_array_fget_as_w", "lean_array_get_as_w"}
 if "sets" in kinds:
     names |= {"l2r_array_set"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")

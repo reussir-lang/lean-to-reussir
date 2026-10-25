@@ -204,7 +204,22 @@ def readExternSyms : List String := [
   "lean_string_utf8_next", "lean_string_utf8_next_fast", "lean_string_utf8_prev",
   "lean_string_utf8_at_end", "lean_string_is_valid_pos", "lean_string_get_byte_fast"]
 
-/-- The call `mk args` of the extern `sym`; for a read extern
+/-- The prelude's twin of the read extern `sym` at an index word (`_w`:
+the index or position as `u64`, `l2r_nat_index` of the `Nat`), which
+`bindReadIndex` calls under `--int-backend rcgmp`. The twin means what the
+read means; `_borrowed` reads are the owned ones in the prelude. -/
+def wordReadSym? : String → Option String
+  | "lean_array_fget" | "lean_array_fget_borrowed" => some "lean_array_fget_w"
+  | "lean_array_get" | "lean_array_get_borrowed" => some "lean_array_get_w"
+  | "lean_byte_array_fget" => some "lean_byte_array_fget_w"
+  | "lean_byte_array_get" => some "lean_byte_array_get_w"
+  | "lean_string_utf8_get" => some "lean_string_utf8_get_w"
+  | "lean_string_utf8_get_fast" => some "lean_string_utf8_get_fast_w"
+  | "lean_string_utf8_next_fast" => some "lean_string_utf8_next_fast_w"
+  | "lean_string_utf8_at_end" => some "lean_string_utf8_at_end_w"
+  | _ => none
+
+/-- The call `mk sym args` of the extern `sym`; for a read extern
 (`readExternSyms`), each argument that is a variable passed to a parameter
 of type `Nat` is bound by a `let` first: `let k = i; read(a, k)`. That is
 the index. A parameter declared at a type variable (`get!`'s default, at
@@ -221,12 +236,33 @@ increment and the read's decrement: LLVM reloaded the count and kept both
 stores (lean-zip's LZ77 loop). Bound first, the index is incremented at the
 `let`, and the container's increment is the last store before the read.
 The arguments are those of the parameters (the extern's parameter types)
-that `mask` passes. -/
+that `mask` passes; `mk` builds the call of a symbol.
+
+Under `--int-backend rcgmp`, a read that has a twin at an index word
+(`wordReadSym?`) gets the word instead: its `Nat` argument (each such read
+has one, the index or position), a variable or not, is bound as
+`let k : u64 = l2r_nat_index(i)` (the value below 2^63, `u64::MAX` from
+there, which every such read treats as out of range; it releases `i`), and
+the twin is called with `k`. The `Nat` read kept the index until after the
+read: the heap path of its conversion (rcgmp's limb loads) and the release
+of a big index (a call) sat between the caller's increment of the container
+and the read's decrement, and LLVM kept both (each read loaded, incremented
+and stored the count, and restored it). With the word, nothing but the read
+follows the container's increment, and the pair cancels. Under `leanrt`
+nothing changes. -/
 def bindReadIndex (sym : String) (mask : Array Bool) (atVar : Array Bool) (params : Array Expr)
-    (args : Array RR.Expr) (mk : Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
-  unless readExternSyms.contains sym do return mk args
+    (args : Array RR.Expr) (mk : String → Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
+  unless readExternSyms.contains sym do return mk sym args
   let isNat := (mask.zip params).zipIdx.filterMap fun ((m, p), i) =>
     if m then some (!(atVar[i]?.getD false) && p.consumeMData.isConstOf ``Nat) else none
+  let natArgs := (List.range args.size).filter fun i => isNat[i]? == some true
+  if (← read).intBackend == .rcgmp then
+    if let (some wsym, [ni]) := (wordReadSym? sym, natArgs) then
+      unless (← read).preludeFns.contains wsym do
+        throwError "lean2rr: the prelude has no {wsym}, the read {sym} at an index word (internal error)"
+      let k ← fresh "ix"
+      let args' := args.set! ni (.var k)
+      return .block ⟨#[(k, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[args[ni]!])], mk wsym args'⟩
   let mut lets := #[]
   let mut args' := #[]
   for (a, i) in args.zipIdx do
@@ -236,7 +272,7 @@ def bindReadIndex (sym : String) (mask : Array Bool) (atVar : Array Bool) (param
       lets := lets.push (k, some (RR.Ty.named "Nat"), a)
       args' := args'.push (.var k)
     | _, _ => args' := args'.push a
-  return if lets.isEmpty then mk args else .block ⟨lets, mk args'⟩
+  return if lets.isEmpty then mk sym args else .block ⟨lets, mk sym args'⟩
 
 /-- The mono types of the parameters of extern `orig` in its declaration
 (type arguments and proofs erased, a value of a type parameter `lcAny`);
@@ -427,7 +463,7 @@ def lowerExternCall (orig : Name) (typeArgs : Array Expr) (params : Array Expr) 
     unless (← get).missingExterns.any (·.1 == sym) do
       modify fun s => { s with missingExterns := s.missingExterns.push (sym, orig) }
   let atVar := params.mapIdx fun i _ => (uses[i]?.join).isSome
-  let call ← bindReadIndex sym mask atVar params passed fun passed => RR.Expr.call sym storage passed
+  let call ← bindReadIndex sym mask atVar params passed fun s passed => RR.Expr.call s storage passed
   match storageOf retUse with
   | some st =>
     let rt ← lowerType ret

@@ -37,36 +37,41 @@ the table below.
 ## Summary
 
 lean2rr's builds use upstream Reussir `00906e38` (2026-10-25) plus the
-13 patches of the series: `./reussir`'s branch `l2r-stepd` (head
-`e3b96e03`). The series has 13 patches since 2026-10-25, when step D's
-5 patches (issue 20, for `Nat` and `Int` on rcgmp) were added after the
-other 8, the stack `l2r-base5` (head `c4a5df4b`); they need no change of
-a workaround. Upstream `00906e38` (#804) only moves the commit of
-mlir-rcgmp that Reussir's build fetches; the move to it changed no issue
-and no workaround. Before it, `l2r-base5` was upstream `ea240b19` plus
-the same 8 patches (head `e1680f65`), and until the move to `ea240b19`
-(2026-10-25), upstream `0378b744` (2026-10-24) plus 9 patches (head
-`6bf9be85`); upstream `ea240b19` is
-our pull request #758, the change of patch 05-a, so the move dropped
-05-a, deleted issue 5 (its number is retired) and needed no change of
-a workaround. The base before `0378b744` was `l2r-base3` (head
-`4c490260`): upstream `7954a367` (2026-10-19) plus the same 9 patches;
-the move to `0378b744` fixed no open issue and needed no change of a
-workaround. Before that it was `l2r-base2` (head `b2e4a47e`), Reussir
-`943f2195` plus the 35 patches of the old series, whose files are in git
-history and in that branch. The files in `reussir-bugs/` describe the
-state at `00906e38`: `7954a367` fixed 30 of the old entries in full, so
-their files are gone and the open entries have new numbers (the mapping
-is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
-series there has 13 patches on `00906e38`: 02-a to 02-e (native release
-order, issue 2), 09-a (the drain-end hook,
+14 patches of the series: `./reussir`'s head `8e9a6293` (branch
+`l2r-stepd` plus 21-a). The series has 14 patches since 2026-10-25: that
+day step D's 5 patches (issue 20, for `Nat` and `Int` on rcgmp) were
+added after the other 8, the stack `l2r-base5` (head `c4a5df4b`), and
+then 21-a (issue 21, an optimization of code with rcgmp integers) after
+them, the 13 being the stack `l2r-stepd` (head `e3b96e03`); they need no
+change of a workaround. Upstream `00906e38` (#804) only moves the commit
+of mlir-rcgmp that Reussir's build fetches; the move to it changed no
+issue and no workaround. Before it, `l2r-base5` was upstream `ea240b19`
+plus the same 8 patches (head `e1680f65`), and until the move to
+`ea240b19` (2026-10-25), upstream `0378b744` (2026-10-24) plus 9 patches
+(head `6bf9be85`); upstream `ea240b19` is our pull request #758, the
+change of patch 05-a, so the move dropped 05-a, deleted issue 5 (its
+number is retired) and needed no change of a workaround. The base before
+`0378b744` was `l2r-base3` (head `4c490260`): upstream `7954a367`
+(2026-10-19) plus the same 9 patches; the move to `0378b744` fixed no
+open issue and needed no change of a workaround. Before that it was
+`l2r-base2` (head `b2e4a47e`), Reussir `943f2195` plus the 35 patches of
+the old series, whose files are in git history and in that branch. The
+files in `reussir-bugs/` describe the state at `00906e38`: `7954a367`
+fixed 30 of the old entries in full, so their files are gone and the
+open entries have new numbers (the mapping is in
+[`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The series
+there has 14 patches on `00906e38`: 02-a to 02-e (native release order,
+issue 2), 09-a (the drain-end hook,
 [issue 9](../../../reussir-bugs/09-drain-end-hook.md)), 10-a (tagged
-opaque handles, [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)),
-07-a, and 20-a to 20-e (the interface for `Nat` and `Int` on rcgmp,
-[issue 20](../../../reussir-bugs/20-rcgmp-integration.md), for step D).
-The owner keeps only bug fixes and major items in the
-series: the optimizations 01-a (issue 1), 06-a and 06-b (issue 6) and
-11-a (issue 11), and the fix 16-a
+opaque handles,
+[issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a, 20-a
+to 20-e (the interface for `Nat` and `Int` on rcgmp,
+[issue 20](../../../reussir-bugs/20-rcgmp-integration.md), for step D)
+and 21-a (inc/dec cancellation of integer members of `[value]` records,
+[issue 21](../../../reussir-bugs/21-value-record-member-retains.md)).
+The owner keeps only bug fixes and major items in the series: the
+optimizations 01-a (issue 1), 06-a and 06-b (issue 6) and 11-a (issue
+11), and the fix 16-a
 ([issue 16](../../../reussir-bugs/16-driver-stack-address-limit.md), a
 bug lean2rr does not reach), are parked, outside the series
 ([parked patches](../../../reussir-bugs/README.md#parked-patches)).
@@ -94,7 +99,8 @@ either way.
 | [15](../../../reussir-bugs/15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7, so free arena memory goes back to the OS at once ([startup/entry.md](../startup/entry.md#free-arena-memory-goes-back-to-the-os-at-once-mimalloc-v218-to-v227)) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | n/a: with a fixed mimalloc the workaround turns itself off; delete it then |
 | [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | every generated tuple (a join point's, J2; a `flatten-structs` result) has its fields in decreasing alignment, as records have (`memberOrder`, `field-order`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [18](../../../reussir-bugs/18-tail-padding-return.md) | missed optimization | the tuple of a `flatten-structs` result keeps a `bool`, `u8`, `u16` or `u32` in a `u64` member and has no member for a unit value, so it has no tail padding (`tupleMemberTy`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
-| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (`--int-backend rcgmp`, not on dev yet) uses the interface the patches add | 20-a to 20-e | n/a: step D needs 20-a and 20-b (`check_rcgmp` there); the default backend, `leanrt`, needs none |
+| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (`--int-backend rcgmp`, on dev since `1e57ed53`, 2026-10-25) uses the interface the patches add | 20-a to 20-e | n/a: step D needs 20-a and 20-b (`check_rcgmp` there); the default backend, `leanrt`, needs none |
+| [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: under `--int-backend rcgmp` the pairs stay without the patch | 21-a | n/a: an optimization; nothing requires it |
 
 Issues 11 to 14 and 16 (a cost of 02-b's stack; three bugs of Reussir's
 runtime and hand-written MLIR; rrc's driver stack under an address-space

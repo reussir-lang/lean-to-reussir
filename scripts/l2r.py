@@ -399,6 +399,9 @@ def build_lean_runtime(out):
 # stores in `__reussir_drop_drained` once it is over; leanrt resolves the
 # promises a free dropped there (runtime/README.md, "The scheduler").
 # leanrt's reference to the symbol would also fail to compile without it.
+# 21-a (entry 21, inc/dec cancellation of integer members of [value]
+# records) is an optimization of code with rcgmp integers: nothing needs it,
+# so it is not checked.
 REQUIRED_REUSSIR_PATCHES = [
     ("02-a", "crates/reussir-backend/src/pipeline.rs", "l2r-local: no tail-recursive or retcon drops"),
     ("02-a", "lib/Bridge/Bridge.cppm", "options.tailRecursiveDrops = false"),

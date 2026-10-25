@@ -1,0 +1,694 @@
+From 8e9a6293a858bf2fb144e4921f239e2d9b11c121 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 07:38:16 -0400
+Subject: [PATCH] l2r-local: entry 21: cancel rcgmp retains of [value] record
+ members against the record's drop
+
+A by-value record (or tuple) taken apart retains each member it extracts
+and then drops the record:
+
+  %a = reussir.record.extract(%t) [0] ; rcgmp.retain %a
+  ...
+  reussir.ref.drop(reussir.ref.spilled(%t))
+
+The first acquire/drop expansion turns the drop into one release per
+member, each read back through the record's spill:
+
+  %s = reussir.ref.spilled(%t)
+  rcgmp.release (reussir.ref.load (reussir.ref.project %s [0]))
+  ...
+
+With rc members the same shape cancels completely in the second inc/dec
+cancellation run: EquivalenceAnalysis knows that `record.extract %t[i]`
+and the load at [i] through `ref.spilled %t` are the same value (its rule
+for rc pointers, `valueRecordField`). With integer members (`!rcgmp.mpz`)
+every retain and every member release stayed, for two reasons:
+
+- cancelCountedWordRetains (#801) scans from the retain only across
+  retains and operations that are pure or only read memory
+  (`leavesCountsAlone`). `ref.spilled` allocates its stack slot and writes
+  the value into it, so the scan stopped there, before every member
+  release.
+- EquivalenceAnalysis applied the extract/spill rule to rc pointers only.
+  Values of other types were equivalent only when both were loads, so the
+  retained extract and the released load were never MustAlias.
+
+So a loop that builds a [value] record or a tuple of Nats and takes it
+apart in every step kept a retain and a release per member and step, each
+with its immediate test: 20 tag branches in the loop of a four-member
+record, where the same loop with rc members has none.
+
+The change:
+
+- EquivalenceAnalysis::decideLoadedEquivalent (values of the types other
+  than ref, rc and nullable) also accepts the same field of the same
+  by-value record read by extract on one side and through the record's
+  spill on the other, the rule rc pointers already have.
+- leavesCountsAlone also accepts an operation whose only effects other
+  than reads are an Allocate and a Write on its own result: it changes no
+  count and no stored value. That is `ref.spilled`, which the record's
+  drop releases its members through, but the scan now also crosses the
+  other operations of that kind: `reussir.token.alloc`,
+  `reussir.region.create`, `rcgmp.extsi`/`extui`/`fptosi`,
+  `rcgmp.bridge.mpz.promote`, `memref.alloc`/`alloca`.
+- leavesCountsAlone rejects `rcgmp.bridge.mpz.is_unique`, which it
+  accepted before as a read: it reads the count that the retain makes
+  shared, so the scan stops there, as the rc scan stops at `rc.is_unique`.
+  No pipeline reaches it today (the op appears only in the
+  `__reussir_rcgmp_ffi_is_unique` glue, inside an `scf.if`); the stop is
+  defensive.
+
+The other rules stay: the scan stops at the first release of any word, at
+calls, at operations with regions and at every operation that writes or
+frees other memory (an operation with a fresh result that consumes its
+operands, such as `rcgmp.addi`, or `reussir.token.free`), and the release
+must be MustAlias the retained word. As for rc members, a member
+extracted out of field order keeps its pair (the scan meets another
+member's release first). The equivalence change only reaches the alias
+queries of the counted-word cancellation: the other users of the analysis
+ask about refs, rc pointers and nullables, or compare loads with loads.
+
+Effect: the four-member loop (and its tuple twin) loses its 4 member
+retains and 4 member releases (asm at -O aggressive 384 to 295 lines, 36
+to 22 test-and-branch instructions), on this base (l2r-stepd, with the
+drop patches) as on l2r-base7: the first acquire/drop expansion releases a
+by-value record's integer members through its spill here too. lean2rr dev
+2c4083d9 under --int-backend rcgmp, the same .rr compiled with and without
+this patch (valgrind builds, instruction counts; the native outputs
+identical): L12 (sieve, 5*10^7) 11.739G to 10.617G (-9.6%), L17 17.544G to
+16.170G (-7.8%), Z01c 22.910G to 21.525G (-6.0%).
+
+Tests: conversion/inc_dec_cancellation_counted_word_value_record.mlir (a
+four-member record, a tuple, a record with a trivial member: nothing left;
+one extracted member: only the other member's release; a member used
+twice: one retain left; an `rcgmp.extui` between the retain and the drop
+is crossed; the pair stays when an `rcgmp.addi` of other words or a
+`reussir.token.free` sits between them, when the member's count is read by
+`rcgmp.bridge.mpz.is_unique`, when the member escapes into a call, the
+record escapes into a call, the member is consumed while the record is
+read again, the dropped record is another one, or the release is another
+field's), frontend/bigint_value_record_members.rr (+ .c: the loop with a
+record and with a tuple, a member used twice, a record still used after
+the extract, a record with Nat, u64 and Int members; each test takes its
+seed from the C driver (1 and 2, both branches), so the heap and immediate
+integers are computed and the records chosen at run time and nothing folds
+to a constant; run at the default level and at -O aggressive) and its ASan
+twin sanitizer/bigint-value-record-members-asan.rr (counts balanced: no
+use after free, no leak).
+---
+ include/Reussir/IR/ReussirOps.h               |   4 +
+ lib/Analysis/EquivalenceAnalysis.cpp          |  10 +
+ lib/IR/RCGMPMembers.cpp                       |   7 +
+ .../IncDecCancellation/IncDecCancellation.cpp |  32 ++-
+ ...ancellation_counted_word_value_record.mlir | 263 ++++++++++++++++++
+ .../frontend/bigint_value_record_members.c    |  38 +++
+ .../frontend/bigint_value_record_members.rr   | 112 ++++++++
+ .../bigint-value-record-members-asan.rr       |  10 +
+ 8 files changed, 473 insertions(+), 3 deletions(-)
+ create mode 100644 tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
+ create mode 100644 tests/integration/frontend/bigint_value_record_members.c
+ create mode 100644 tests/integration/frontend/bigint_value_record_members.rr
+ create mode 100644 tests/integration/sanitizer/bigint-value-record-members-asan.rr
+
+diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
+index a79d3ae7..d4e38df2 100644
+--- a/include/Reussir/IR/ReussirOps.h
++++ b/include/Reussir/IR/ReussirOps.h
+@@ -105,6 +105,10 @@ void emitRCGMPRelease(mlir::OpBuilder &builder, mlir::Location loc,
+ mlir::Value getRCGMPRetainedValue(mlir::Operation *op);
+ mlir::Value getRCGMPReleasedValue(mlir::Operation *op);
+ 
++// Whether `op` reads the count of an `!rcgmp.mpz` handle
++// (`rcgmp.bridge.mpz.is_unique`).
++bool isRCGMPCountObserver(mlir::Operation *op);
++
+ /// The memref type `reussir.array.view` produces for an array: identity
+ /// layout for a static shape, a fully dynamic strided layout for a
+ /// dynamic-extent one (the box header carries the strided encoding).
+diff --git a/lib/Analysis/EquivalenceAnalysis.cpp b/lib/Analysis/EquivalenceAnalysis.cpp
+index ec52ffa3..b946bcef 100644
+--- a/lib/Analysis/EquivalenceAnalysis.cpp
++++ b/lib/Analysis/EquivalenceAnalysis.cpp
+@@ -293,7 +293,17 @@ bool isImmutableRecordStorage(Value ref) {
+ // Values of any other type agree when both are loaded from equivalent
+ // storage inside a record box or a spilled value: such storage is never
+ // written while it is reachable, by the same argument as for RC pointers.
++// They also agree, as RC pointers do (case 3 above), when they are the same
++// field of the same by-value record, read by extract on one side and through
++// the record's spill on the other. That pairs a counted word's retain (e.g.
++// an integer member, retained on the extract) with the release that the
++// record's drop issues on the spill's load.
+ bool EquivalenceAnalysis::decideLoadedEquivalent(Value lhs, Value rhs) {
++  auto lhsField = valueRecordField(lhs);
++  auto rhsField = valueRecordField(rhs);
++  if (lhsField && rhsField && *lhsField == *rhsField &&
++      lhs.getType() == rhs.getType())
++    return true;
+   auto lhsOp = llvm::dyn_cast_if_present<ReussirRefLoadOp>(lhs.getDefiningOp());
+   auto rhsOp = llvm::dyn_cast_if_present<ReussirRefLoadOp>(rhs.getDefiningOp());
+   if (!lhsOp || !rhsOp || lhs.getType() != rhs.getType())
+diff --git a/lib/IR/RCGMPMembers.cpp b/lib/IR/RCGMPMembers.cpp
+index da8c57a0..104c13dc 100644
+--- a/lib/IR/RCGMPMembers.cpp
++++ b/lib/IR/RCGMPMembers.cpp
+@@ -25,6 +25,7 @@
+ #include "Reussir/IR/ReussirTypes.h"
+ 
+ #ifdef REUSSIR_ENABLE_RCGMP
++#include "RCGMP/IR/RCGMPBridgeOps.h"
+ #include "RCGMP/IR/RCGMPDialect.h"
+ #include "RCGMP/IR/RCGMPOps.h"
+ #include "RCGMP/IR/RCGMPTypes.h"
+@@ -92,6 +93,10 @@ mlir::Value getRCGMPReleasedValue(mlir::Operation *op) {
+   auto release = llvm::dyn_cast<mlir::rcgmp::ReleaseOp>(op);
+   return release ? release.getValue() : mlir::Value{};
+ }
++
++bool isRCGMPCountObserver(mlir::Operation *op) {
++  return llvm::isa<mlir::rcgmp::bridge::MpzIsUniqueOp>(op);
++}
+ #else
+ void registerRCGMPExternalModels(mlir::DialectRegistry &) {}
+ 
+@@ -107,6 +112,8 @@ void emitRCGMPRelease(mlir::OpBuilder &, mlir::Location, mlir::Value) {
+ mlir::Value getRCGMPRetainedValue(mlir::Operation *) { return {}; }
+ 
+ mlir::Value getRCGMPReleasedValue(mlir::Operation *) { return {}; }
++
++bool isRCGMPCountObserver(mlir::Operation *) { return false; }
+ #endif
+ 
+ } // namespace reussir
+diff --git a/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp b/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
+index 86741392..509050c3 100644
+--- a/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
++++ b/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
+@@ -20,6 +20,7 @@
+ #include "Reussir/IR/ReussirOps.h"
+ #include "Reussir/IR/ReussirTypes.h"
+ 
++#include <llvm/ADT/SmallPtrSet.h>
+ #include <mlir/Dialect/SCF/IR/SCF.h>
+ #include <mlir/IR/Dominance.h>
+ #include <mlir/IR/Value.h>
+@@ -197,8 +198,15 @@ mlir::Operation *findPostDominantAliasedRelease(
+ }
+ 
+ // Whether `op` leaves every count and every stored value alone: it only
+-// adds references or at most reads memory.
++// adds references, reads memory, or allocates fresh storage and writes into
++// it (`reussir.ref.spilled`, which a by-value record's expanded drop releases
++// its members through, but also e.g. `reussir.token.alloc` or `rcgmp.extui`).
++// A count observer (`rcgmp.bridge.mpz.is_unique`) does not: as at
++// `rc.is_unique` for rc pointers, the retain is what makes it see the word as
++// shared.
+ bool leavesCountsAlone(mlir::Operation *op) {
++  if (isRCGMPCountObserver(op))
++    return false;
+   if (llvm::isa<ReussirRcIncOp>(op) || getRCGMPRetainedValue(op))
+     return true;
+   if (op->getNumRegions() > 0 || llvm::isa<mlir::CallOpInterface>(op))
+@@ -206,13 +214,31 @@ bool leavesCountsAlone(mlir::Operation *op) {
+   if (mlir::isMemoryEffectFree(op))
+     return true;
+   auto effects = llvm::dyn_cast<mlir::MemoryEffectOpInterface>(op);
+-  return effects && effects.onlyHasEffect<mlir::MemoryEffects::Read>();
++  if (!effects)
++    return false;
++  llvm::SmallVector<mlir::MemoryEffects::EffectInstance> instances;
++  effects.getEffects(instances);
++  llvm::SmallPtrSet<mlir::Value, 2> fresh;
++  for (const mlir::MemoryEffects::EffectInstance &instance : instances)
++    if (llvm::isa<mlir::MemoryEffects::Allocate>(instance.getEffect()) &&
++        instance.getValue() && instance.getValue().getDefiningOp() == op)
++      fresh.insert(instance.getValue());
++  return llvm::all_of(
++      instances, [&](const mlir::MemoryEffects::EffectInstance &instance) {
++        if (llvm::isa<mlir::MemoryEffects::Read>(instance.getEffect()))
++          return true;
++        return llvm::isa<mlir::MemoryEffects::Allocate,
++                         mlir::MemoryEffects::Write>(instance.getEffect()) &&
++               fresh.contains(instance.getValue());
++      });
+ }
+ 
+ // A counted word's retain cancels with a release of the same word under the
+ // rules `rc.inc` follows: a release in the unique branch of an expanded
+ // decrement moves the retain into the shared branch, and a directly
+-// following release cancels it outright.
++// following release cancels it outright. The latter covers a member of a
++// by-value record retained on its extract and released by the record's
++// expanded drop through the record's spill, as for an rc member.
+ void cancelCountedWordRetains(mlir::func::FuncOp func,
+                               mlir::AliasAnalysis &aliasAnalysis,
+                               mlir::PostDominanceInfo &postDominanceInfo) {
+diff --git a/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir b/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
+new file mode 100644
+index 00000000..54480ee9
+--- /dev/null
++++ b/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
+@@ -0,0 +1,263 @@
++// REQUIRES: rcgmp
++// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-acquire-drop-expansion,func.func(reussir-inc-dec-cancellation))' | %FileCheck %s
++
++// A by-value record consumed by extracting its members retains each integer
++// member on its extract, and the record's drop expands to a release of each
++// member read back through the record's spill:
++//
++//   %m = record.extract %t[0] ; rcgmp.retain %m
++//   ref.drop(ref.spilled %t)  ; expands to rcgmp.release of
++//                             ;   ref.load(ref.project(ref.spilled %t, [0]))
++//
++// Both read the same member, so the retain and the release cancel, as for an
++// rc member (inc_dec_cancellation_through_spilled_extract.mlir).
++
++!t4 = !reussir.record<compound "T4" [value] {!rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz}>
++!tuple = !reussir.record<compound  [value] {!rcgmp.mpz, !rcgmp.mpz}>
++!mixed = !reussir.record<compound "Mixed" [value] {!rcgmp.mpz, i64, !rcgmp.mpz}>
++!pair = !reussir.record<compound "Pair" [value] {!rcgmp.mpz, !rcgmp.mpz}>
++
++module attributes { dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i64, dense<64> : vector<2xi64>>, #dlti.dl_entry<i8, dense<8> : vector<2xi64>>> } {
++  func.func private @use4(!rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++  func.func private @use2(!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++  func.func private @consume(!rcgmp.mpz)
++  func.func private @peek(!reussir.ref<!pair>)
++
++  // Every member is extracted and the record dropped: nothing is left.
++  // CHECK-LABEL: func.func @record_members
++  // CHECK-NOT: rcgmp.retain
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @record_members(%t : !t4) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !t4) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %b = reussir.record.extract(%t : !t4) [1] : !rcgmp.mpz
++    rcgmp.retain %b : !rcgmp.mpz
++    %c = reussir.record.extract(%t : !t4) [2] : !rcgmp.mpz
++    rcgmp.retain %c : !rcgmp.mpz
++    %d = reussir.record.extract(%t : !t4) [3] : !rcgmp.mpz
++    rcgmp.retain %d : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !t4) : !reussir.ref<!t4>
++    reussir.ref.drop(%s : !reussir.ref<!t4>)
++    %r = func.call @use4(%a, %b, %c, %d) : (!rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // A destructured tuple is an anonymous by-value record.
++  // CHECK-LABEL: func.func @tuple_members
++  // CHECK-NOT: rcgmp.retain
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @tuple_members(%t : !tuple) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !tuple) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %b = reussir.record.extract(%t : !tuple) [1] : !rcgmp.mpz
++    rcgmp.retain %b : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !tuple) : !reussir.ref<!tuple>
++    reussir.ref.drop(%s : !reussir.ref<!tuple>)
++    %r = func.call @use2(%a, %b) : (!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // A trivial member between the integers releases nothing.
++  // CHECK-LABEL: func.func @mixed_members
++  // CHECK-NOT: rcgmp.retain
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @mixed_members(%t : !mixed) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !mixed) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %c = reussir.record.extract(%t : !mixed) [2] : !rcgmp.mpz
++    rcgmp.retain %c : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !mixed) : !reussir.ref<!mixed>
++    reussir.ref.drop(%s : !reussir.ref<!mixed>)
++    %r = func.call @use2(%a, %c) : (!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // Only the extracted member's retain has a partner: the other member's
++  // release stays.
++  // CHECK-LABEL: func.func @one_member
++  // CHECK-NOT: rcgmp.retain
++  // CHECK: reussir.ref.project({{.*}}) [1]
++  // CHECK-NEXT: %[[F1:.+]] = reussir.ref.load
++  // CHECK-NEXT: rcgmp.release %[[F1]]
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @one_member(%t : !pair) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return %a : !rcgmp.mpz
++  }
++
++  // A member used twice is retained twice; the record's drop pays for one of
++  // the retains only.
++  // CHECK-LABEL: func.func @member_twice
++  // CHECK: %[[A:.+]] = reussir.record.extract
++  // CHECK-NEXT: rcgmp.retain %[[A]]
++  // CHECK-NOT: rcgmp.retain
++  // CHECK: reussir.ref.project({{.*}}) [1]
++  // CHECK-NEXT: %[[F1:.+]] = reussir.ref.load
++  // CHECK-NEXT: rcgmp.release %[[F1]]
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @member_twice(%t : !pair) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    %r = func.call @use2(%a, %a) : (!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // The scan crosses an operation that only allocates its result and writes
++  // into it, like the record's spill: here a new integer from an i64.
++  // CHECK-LABEL: func.func @fresh_result_between
++  // CHECK-NOT: rcgmp.retain
++  // CHECK: rcgmp.extui
++  // CHECK: reussir.ref.project({{.*}}) [1]
++  // CHECK-NEXT: %[[F1:.+]] = reussir.ref.load
++  // CHECK-NEXT: rcgmp.release %[[F1]]
++  // CHECK-NOT: rcgmp.release
++  // CHECK: return
++  func.func @fresh_result_between(%t : !pair, %i : i64) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %n = rcgmp.extui %i : i64 to !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    %r = func.call @use2(%a, %n) : (!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // An operation with a fresh result that consumes other words still stops
++  // the scan: the pair stays.
++  // CHECK-LABEL: func.func @fresh_result_consumed_operands
++  // CHECK: rcgmp.retain
++  // CHECK: rcgmp.addi
++  // CHECK-COUNT-2: rcgmp.release
++  // CHECK: return
++  func.func @fresh_result_consumed_operands(%t : !pair, %x : !rcgmp.mpz, %y : !rcgmp.mpz) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %n = rcgmp.addi %x, %y : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    %r = func.call @use2(%a, %n) : (!rcgmp.mpz, !rcgmp.mpz) -> !rcgmp.mpz
++    return %r : !rcgmp.mpz
++  }
++
++  // So does an operation that frees other memory.
++  // CHECK-LABEL: func.func @free_between
++  // CHECK: rcgmp.retain
++  // CHECK: reussir.token.free
++  // CHECK-COUNT-2: rcgmp.release
++  // CHECK: return
++  func.func @free_between(%t : !pair, %k : !reussir.token<align : 8, size : 16>) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    reussir.token.free(%k : !reussir.token<align : 8, size : 16>)
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return %a : !rcgmp.mpz
++  }
++
++  // A uniqueness test of the member reads its count, which the retain makes
++  // shared: the pair stays, as for `rc.is_unique`.
++  // CHECK-LABEL: func.func @count_observed
++  // CHECK: rcgmp.retain
++  // CHECK: rcgmp.bridge.mpz.is_unique
++  // CHECK-COUNT-2: rcgmp.release
++  // CHECK: return
++  func.func @count_observed(%t : !pair) -> i1 {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %u = rcgmp.bridge.mpz.is_unique %a : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    func.call @consume(%a) : (!rcgmp.mpz) -> ()
++    return %u : i1
++  }
++
++  // The member escapes into a call before the record's drop: the call may
++  // consume it, so the pair stays.
++  // CHECK-LABEL: func.func @member_escapes
++  // CHECK: rcgmp.retain
++  // CHECK: call @consume
++  // CHECK: rcgmp.release
++  // CHECK: rcgmp.release
++  func.func @member_escapes(%t : !pair) {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    func.call @consume(%a) : (!rcgmp.mpz) -> ()
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return
++  }
++
++  // The record escapes into a call before its drop: the pair stays.
++  // CHECK-LABEL: func.func @record_escapes
++  // CHECK: rcgmp.retain
++  // CHECK: call @peek
++  // CHECK: rcgmp.release
++  // CHECK: rcgmp.release
++  func.func @record_escapes(%t : !pair) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    func.call @peek(%s) : (!reussir.ref<!pair>) -> ()
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return %a : !rcgmp.mpz
++  }
++
++  // Consuming the member before the record's drop could update it in place
++  // once the retain is gone, while the record still holds it and is read
++  // again: the pair stays.
++  // CHECK-LABEL: func.func @member_consumed_before_drop
++  // CHECK: rcgmp.retain
++  // CHECK: rcgmp.addi
++  // CHECK: rcgmp.cmpi
++  // CHECK-COUNT-3: rcgmp.release
++  // CHECK: return
++  func.func @member_consumed_before_drop(%t : !pair, %x : !rcgmp.mpz) -> i1 {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %n = rcgmp.addi %a, %x : !rcgmp.mpz
++    %a2 = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    %eq = rcgmp.cmpi eq, %n, %a2 : !rcgmp.mpz
++    rcgmp.release %n : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return %eq : i1
++  }
++
++  // The dropped record is another record: its members are unrelated.
++  // CHECK-LABEL: func.func @other_record
++  // CHECK: rcgmp.retain
++  // CHECK: rcgmp.release
++  // CHECK: rcgmp.release
++  func.func @other_record(%t : !pair, %u : !pair) -> !rcgmp.mpz {
++    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
++    rcgmp.retain %a : !rcgmp.mpz
++    %s = reussir.ref.spilled(%u : !pair) : !reussir.ref<!pair>
++    reussir.ref.drop(%s : !reussir.ref<!pair>)
++    return %a : !rcgmp.mpz
++  }
++
++  // Another field of the record: its release is not the member's.
++  // CHECK-LABEL: func.func @other_field
++  // CHECK: rcgmp.retain
++  // CHECK: rcgmp.release
++  func.func @other_field(%t : !pair) -> !rcgmp.mpz {
++    %b = reussir.record.extract(%t : !pair) [1] : !rcgmp.mpz
++    rcgmp.retain %b : !rcgmp.mpz
++    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
++    %p = reussir.ref.project(%s : !reussir.ref<!pair>) [0] : !reussir.ref<!rcgmp.mpz>
++    %f = reussir.ref.load(%p : !reussir.ref<!rcgmp.mpz>) : !rcgmp.mpz
++    rcgmp.release %f : !rcgmp.mpz
++    return %b : !rcgmp.mpz
++  }
++}
+diff --git a/tests/integration/frontend/bigint_value_record_members.c b/tests/integration/frontend/bigint_value_record_members.c
+new file mode 100644
+index 00000000..083f5e32
+--- /dev/null
++++ b/tests/integration/frontend/bigint_value_record_members.c
+@@ -0,0 +1,38 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++// Driver for bigint_value_record_members.rr: each test returns 1 when its
++// checks hold. The argument reaches the tests at run time, so their integers
++// and records cannot fold to constants; 1 and 2 take both branches.
++
++#include <stdio.h>
++#include <stdlib.h>
++
++extern unsigned long long test_record_loop_ffi(unsigned long long k);
++extern unsigned long long test_tuple_loop_ffi(unsigned long long k);
++extern unsigned long long test_shared_members_ffi(unsigned long long k);
++extern unsigned long long test_mixed_ffi(unsigned long long k);
++
++static void expect(const char *name, unsigned long long k,
++                   unsigned long long got) {
++  if (got != 1) {
++    fprintf(stderr, "%s(%llu): got %llu, want 1\n", name, k, got);
++    exit(1);
++  }
++}
++
++int main(void) {
++  for (unsigned long long k = 1; k <= 2; ++k) {
++    expect("record_loop", k, test_record_loop_ffi(k));
++    expect("tuple_loop", k, test_tuple_loop_ffi(k));
++    expect("shared_members", k, test_shared_members_ffi(k));
++    expect("mixed", k, test_mixed_ffi(k));
++  }
++  return 0;
++}
+diff --git a/tests/integration/frontend/bigint_value_record_members.rr b/tests/integration/frontend/bigint_value_record_members.rr
+new file mode 100644
+index 00000000..4cb3a25b
+--- /dev/null
++++ b/tests/integration/frontend/bigint_value_record_members.rr
+@@ -0,0 +1,112 @@
++// `Nat` and `Int` members of by-value records and tuples taken apart: each
++// member is retained when it is extracted and released when the record is
++// dropped, and inc/dec cancellation removes such a pair (see
++// conversion/inc_dec_cancellation_counted_word_value_record.mlir). The tests
++// mix immediates with heap integers (2^61 is the smallest heap `Nat` on a
++// 64-bit target), so a cancelled pair that was still needed shows up as a use
++// after free, and a lost release as a leak, under
++// sanitizer/bigint-value-record-members-asan.rr.
++
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/bigint_value_record_members.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -o %t.opt.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.opt.o %S/bigint_value_record_members.c -o %t.opt.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++
++fn big() -> Nat { 2305843009213693952 }
++
++struct [value] T4(Nat, Nat, Nat, Nat)
++
++// Every third step builds the record from new and passed-on members, the
++// other steps from the parameters; the members are extracted and the record
++// is dropped.
++fn record_loop(n : u64, i : u64, a : Nat, b : Nat, c : Nat, d : Nat) -> Nat {
++    if i < n {
++        let t : T4 = { if i % 3 == 0 { T4{a + 1, b + a, i as Nat, d} } else { T4{a, b, c, d} } };
++        let a2 : Nat = t.0;
++        let b2 : Nat = t.1;
++        let c2 : Nat = t.2;
++        let d2 : Nat = t.3;
++        record_loop(n, i + 1, a2, b2, c2, d2)
++    } else { a + b + c + d }
++}
++
++// Each test takes `k` (at least 1) from the C driver, so the integers are
++// computed at run time (`n` is a heap `Nat`) and the records are chosen at
++// run time: none of them folds to a constant.
++pub fn test_record_loop(k : u64) -> u64 {
++    let n : Nat = big() * (k as Nat);
++    let s : Nat = k as Nat;
++    if record_loop(10, 0, n, n * 2, n * 3, n * 5) == n * 12 + 19
++        && record_loop(10, 0, s, s * 2, s * 3, s * 5) == s * 12 + 19 { 1 } else { 0 }
++}
++extern "C" trampoline "test_record_loop_ffi" = test_record_loop;
++
++// The same with a destructured tuple.
++fn tuple_loop(n : u64, i : u64, a : Nat, b : Nat, c : Nat, d : Nat) -> Nat {
++    if i < n {
++        let (a2, b2, c2, d2) : (Nat, Nat, Nat, Nat) =
++            { if i % 3 == 0 { (a + 1, b + a, i as Nat, d) } else { (a, b, c, d) } };
++        tuple_loop(n, i + 1, a2, b2, c2, d2)
++    } else { a + b + c + d }
++}
++
++pub fn test_tuple_loop(k : u64) -> u64 {
++    let n : Nat = big() * (k as Nat);
++    let s : Nat = k as Nat;
++    if tuple_loop(10, 0, n, n * 2, n * 3, n * 5) == n * 12 + 19
++        && tuple_loop(10, 0, s, s * 2, s * 3, s * 5) == s * 12 + 19 { 1 } else { 0 }
++}
++extern "C" trampoline "test_tuple_loop_ffi" = test_tuple_loop;
++
++// A member used twice needs a reference more than the record gives it.
++fn twice(t : T4) -> Nat {
++    let a : Nat = t.0;
++    let b : Nat = t.1;
++    a * a + b
++}
++
++// The record stays live after a member is extracted.
++fn sum4(t : T4) -> Nat { t.0 + t.1 + t.2 + t.3 }
++
++fn kept(t : T4) -> Nat {
++    let a : Nat = t.0;
++    a + sum4(t)
++}
++
++pub fn test_shared_members(k : u64) -> u64 {
++    let n : Nat = big() * (k as Nat);
++    let x : Nat = n * 3;
++    let odd : bool = k % 2 == 1;
++    // `x` sits in the record twice and is read again afterwards.
++    let t : T4 = { if odd { T4{n, n * 2, x, x} } else { T4{n * 2, n, x, x} } };
++    let want : Nat = { if odd { n * n + n * 2 } else { n * 2 * (n * 2) + n } };
++    let u : T4 = { if odd { T4{n, 1, n * 2, 3} } else { T4{n, 3, n * 2, 1} } };
++    if twice(t) == want && kept(u) == n * 4 + 4 && x == n * 3 { 1 } else { 0 }
++}
++extern "C" trampoline "test_shared_members_ffi" = test_shared_members;
++
++// An `Int` and a trivial member beside a `Nat`.
++struct [value] Mixed(Nat, u64, Int)
++
++fn mixed(m : Mixed) -> Int {
++    let x : Nat = m.0;
++    let y : Int = m.2;
++    (x as Int) + y
++}
++
++pub fn test_mixed(k : u64) -> u64 {
++    let n : Nat = big() * (k as Nat);
++    let s : Nat = k as Nat;
++    let odd : bool = k % 2 == 1;
++    let heap : Mixed = {
++        if odd { Mixed{n * 4, k, -((n * 3) as Int)} }
++        else { Mixed{n * 5, k, -((n * 4) as Int)} }
++    };
++    let small : Mixed = { if odd { Mixed{s + 1, k, -5} } else { Mixed{s, k, -4} } };
++    if mixed(heap) == (n as Int) && mixed(small) == (s as Int) - 4 { 1 } else { 0 }
++}
++extern "C" trampoline "test_mixed_ffi" = test_mixed;
+diff --git a/tests/integration/sanitizer/bigint-value-record-members-asan.rr b/tests/integration/sanitizer/bigint-value-record-members-asan.rr
+new file mode 100644
+index 00000000..a24b8ac0
+--- /dev/null
++++ b/tests/integration/sanitizer/bigint-value-record-members-asan.rr
+@@ -0,0 +1,10 @@
++// REQUIRES: asan, rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %S/../frontend/bigint_value_record_members.rr --package-name bigint --extern core=%t.core.rri -o %t.ll -t llvm-ir --relocation-mode pic --sanitizer address --nullary-variant-encoding arch-independent
++// RUN: %cc %asan_flags -c -x ir %t.ll -o %t.o
++// RUN: %cc %asan_flags %t.o %S/../frontend/bigint_value_record_members.c %reussir_rt_asan %rcgmp_runtime -o %t.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.exe
++
++// Integer members of by-value records and tuples whose extract retains cancel
++// against the record's drop: ASan reports a cancelled retain that was still
++// needed as a use after free, and its leak check a lost release.
+-- 
+2.43.0
+

@@ -11,3 +11,4 @@
 20-c-mpz-inline-glue.patch
 20-d-mpz-is-shared.patch
 20-e-hex-bigint-literals.patch
+21-a-value-record-member-retains.patch

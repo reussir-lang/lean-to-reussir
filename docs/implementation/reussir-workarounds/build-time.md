@@ -8,8 +8,9 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `00906e38` with the series
-(`./reussir` branch `l2r-stepd`, `e3b96e03`); the workarounds stay until
-each is removed (the removed ones are [at the end](#removed-workarounds)).
+(`./reussir` head `8e9a6293`, `l2r-stepd` plus 21-a); the workarounds
+stay until each is removed (the removed ones are
+[at the end](#removed-workarounds)).
 One cost here is current, with no entry in `reussir-bugs/`:
 [the inliner's copies of a callee into one function](#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function).
 The open issue files are in

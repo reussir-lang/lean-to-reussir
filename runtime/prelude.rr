@@ -287,7 +287,8 @@ fn l2r_any_nat_big(a : LAny) -> Nat [{ leanrt::rcgmp::unbox_big(a, leanrt::any::
 fn l2r_any_int_big(a : LAny) -> Int [{ leanrt::rcgmp::unbox_big(a, leanrt::any::NUM_INT) }];
 
 fn l2r_any_of_nat(x : Nat) -> LAny {
-    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(x);
+    let (vs, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(x);
+    let v : u64 = vs as u64;
     if !wide && (v >> 63) == 0 { l2r_any_imm(v) } else { l2r_any_of_nat_big(x) }
 }
 fn l2r_any_of_int(x : Int) -> LAny {
@@ -1056,9 +1057,21 @@ fn l2r_int_repr(a : Int) -> LStr [{ leanrt::nat::int_repr(a.into_raw()) }];
 // functions that need the value of a big position (`String.Pos.Raw.next`
 // and `prev` past the end), a word's decoding in Rust or the native word
 // itself (`ptrAddrUnsafe`) have their own rcgmp versions further down.
+//
+// The index and position reads truncate to `i64` (`trunci_overflow` to
+// `(i64, bool)`, then the bits as `u64`): an rcgmp immediate always fits
+// `i64`, so their immediate path has no overflow test. The bits are the
+// same as a `u64` truncation's; only the flag differs, for a value in
+// [2^63, 2^64), which every such read treats as one from 2^64 (out of
+// range, the big case: `l2r_index_sat`, `w || (v >> 63) != 0`), or does not
+// read (`lean_string_memcmp`, `lean_string_get_byte_fast`: the low 64
+// bits). Not for the reads that tell [2^63, 2^64) apart (`l2r_nat_sat`,
+// `l2r_replicate_len`, `lean_nat_pow`). In run 13's rcgmp profile: Z01c
+// -733 million instructions.
 
 fn l2r_nat_raw(n : Nat) -> u64 {
-    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    let (vs, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    let v : u64 = vs as u64;
     if wide || (v >> 63) != 0 { 18446744073709551615 } else { v }
 }
 fn l2r_nat_drop_raw(w : u64) -> u64 { 0 }
@@ -1079,6 +1092,16 @@ fn l2r_index_sat(v : u64, wide : bool) -> u64 { if wide || (v >> 63) != 0 { 1844
 // A value below 2^63 (lean2rr's small literals), and any word.
 fn l2r_nat_small(x : u64) -> Nat { x as Nat }
 fn l2r_nat_of_u64(x : u64) -> Nat { x as Nat }
+
+// A size, or a position below 2^61, as a `Nat`: the mask to 61 bits tells
+// LLVM that the value is an rcgmp immediate, so `as Nat` has no range test
+// and no promotion call. For array and string sizes and lengths (below
+// 2^48: memory) and the string positions that `next`, `next_fast` and
+// `prev` give for a position below 2^60 (from 2^60 a position is past the
+// end of every string, where they give it plus or minus one, computed on
+// the `Nat`). In run 13's rcgmp
+// profile: L17 -801 and Z01c -979 million instructions.
+fn l2r_nat_size(x : u64) -> Nat { (x & 2305843009213693951) as Nat }
 
 // (A `Nat` literal of any size is Reussir's own under rcgmp: lean2rr's
 // `natLiteral` emits no `l2r_nat_of_decimal_lstr`.)
@@ -1147,7 +1170,8 @@ fn lean_nat_shiftl(a : Nat, b : Nat) -> Nat {
 // every value (none has that many bits); any shift of a big value is
 // computed (LB-04 lifted).
 fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
-    let (s, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let (ss, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let s : u64 = ss as u64;
     if wide || (s >> 63) != 0 { 0 } else { a >> (s as i64) }
 }
 
@@ -1961,8 +1985,14 @@ fn l2r_string_size(s : LStr) -> u64 [{ { let r = s.utf8().len() as u64; leanrt::
 #[ffi(import)]
 fn l2r_string_length(s : LStr) -> u64 [{ { let r = leanrt::string::length(&s); leanrt::rc_release(s); r } }];
 
+// @int-backend leanrt
 fn lean_string_utf8_byte_size(s : LStr) -> Nat { l2r_nat_small(l2r_string_size(s)) }
 fn lean_string_length(s : LStr) -> Nat { l2r_nat_small(l2r_string_length(s)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_string_utf8_byte_size(s : LStr) -> Nat { l2r_nat_size(l2r_string_size(s)) }
+fn lean_string_length(s : LStr) -> Nat { l2r_nat_size(l2r_string_length(s)) }
+// @int-backend end
 
 // The string rules are lean-runtime's (`sem::string`, on the bytes and
 // `u64` positions); a big `Nat` position is passed as `u64::MAX`
@@ -2020,6 +2050,37 @@ fn l2r_pos_of_nat(p : Nat) -> u64 {
 fn l2r_pos_of_word(x : u64) -> u64 {
     if l2r_nat_word_is_small(x) { l2r_nat_word_val(x) } else { 18446744073709551615 }
 }
+// @int-backend rcgmp
+// Reads at an index word, for `--int-backend rcgmp` (the lowering calls
+// them only there; they use no encoding of the leanrt backend and can move
+// out of the block when it does): `l2r_nat_index(n)` is `n`'s value below
+// 2^63 and `u64::MAX` from there (out of range for every array and string),
+// and releases `n`. lean2rr computes it before it passes the container to a
+// `_w` read, so that a big index's release,
+// a call, never comes between the caller's increment of the container and
+// the read's decrement, and LLVM can cancel that pair. The `_w` reads mean
+// what the reads at a `Nat` mean; `fget`, `get_fast` and `next_fast` take
+// an index that a proof keeps in range, so `u64::MAX` is unreachable code
+// there, as for the word reads.
+fn l2r_nat_index(n : Nat) -> u64 {
+    // The flag of the truncation to `i64` is set exactly from 2^63 (a `Nat`
+    // is never negative), so one select gives the word.
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(n);
+    if w { 18446744073709551615 } else { ks as u64 }
+}
+
+// `String.Pos.Raw.get`, `get'`/`Pos.get` (`get_fast`), `next'`/`Pos.next`
+// (`next_fast`) and `atEnd` at an index word.
+fn lean_string_utf8_get_w(s : LStr, k : u64) -> u32 { l2r_string_get(s, k) }
+fn lean_string_utf8_get_fast_w(s : LStr, k : u64) -> u32 {
+    if (k >> 63) != 0 { l2r_unreachable<u32>() } else { l2r_string_get_fast(s, k) }
+}
+fn lean_string_utf8_next_fast_w(s : LStr, k : u64) -> Nat {
+    // A valid position is below 2^60 (see `lean_string_utf8_next_fast`).
+    if (k >> 60) != 0 { l2r_unreachable<Nat>() } else { l2r_nat_size(l2r_string_next_fast(s, k)) }
+}
+fn lean_string_utf8_at_end_w(s : LStr, k : u64) -> bool { l2r_string_at_end(s, k) }
+// @int-backend end
 
 // `String.Pos.Raw.get`: the character at byte `p`, or `'A'`.
 // @int-backend leanrt
@@ -2032,7 +2093,8 @@ fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_get(s : LStr, p : Nat) -> u32 {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     let c = l2r_string_get(s, l2r_index_sat(v, w));
     let d = l2r_consume<Nat>(p);
     c
@@ -2050,7 +2112,8 @@ fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
 // @int-backend end
 // @int-backend rcgmp
 fn l2r_string_utf8_get_opt(s : LStr, p : Nat) -> u32 {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     let c = l2r_string_get_opt(s, l2r_index_sat(v, w));
     let d = l2r_consume<Nat>(p);
     c
@@ -2068,7 +2131,8 @@ fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_get_bang(s : LStr, p : Nat) -> u32 {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     let c = l2r_string_get_bang(s, l2r_index_sat(v, w));
     let d = l2r_consume<Nat>(p);
     if c == 1114112 { let ignored = l2r_panic_code(1); l2r_char_default() } else { c }
@@ -2083,7 +2147,8 @@ fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast_wor
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     if w || (v >> 63) != 0 { l2r_unreachable<u32>() } else {
         let c = l2r_string_get_fast(s, v);
         let d = l2r_consume<Nat>(p);
@@ -2103,11 +2168,15 @@ fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
-    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
-    if wide || (v >> 63) != 0 { p + 1 } else {
+    let (vs, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
+    // A position from 2^60 is past the end of every string (sizes stay
+    // below 2^48), where `next` is `p + 1`; below, the result is at most
+    // the size plus 3 or `v + 1`, below 2^61.
+    if wide || (v >> 60) != 0 { p + 1 } else {
         let r = l2r_string_next(s, v);
         let d = l2r_consume<Nat>(p);
-        l2r_nat_of_u64(r)
+        l2r_nat_size(r)
     }
 }
 // @int-backend end
@@ -2119,11 +2188,14 @@ fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_stri
 #[ffi(import)]
 fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next_fast(b, i)) }];
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
-    if w || (v >> 63) != 0 { l2r_unreachable<Nat>() } else {
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
+    // A valid position (the proof) is below the size, so below 2^60 (sizes
+    // stay below 2^48), and the result at most the size plus 3.
+    if w || (v >> 60) != 0 { l2r_unreachable<Nat>() } else {
         let r = l2r_string_next_fast(s, v);
         let d = l2r_consume<Nat>(p);
-        l2r_nat_small(r)
+        l2r_nat_size(r)
     }
 }
 // @int-backend end
@@ -2136,11 +2208,14 @@ fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_prev(s : LStr, p : Nat) -> Nat {
-    let (v, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
-    if wide || (v >> 63) != 0 { p - 1 } else {
+    let (vs, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
+    // From 2^60, past the end of every string, `prev` is `p - 1`; below,
+    // the result is below `v` (or 0).
+    if wide || (v >> 60) != 0 { p - 1 } else {
         let r = l2r_string_prev(s, v);
         let d = l2r_consume<Nat>(p);
-        l2r_nat_small(r)
+        l2r_nat_size(r)
     }
 }
 // @int-backend end
@@ -2155,7 +2230,8 @@ fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_at_end(s : LStr, p : Nat) -> bool {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     let r = l2r_string_at_end(s, l2r_index_sat(v, w));
     let d = l2r_consume<Nat>(p);
     r
@@ -2172,7 +2248,8 @@ fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_is_valid_pos(s : LStr, p : Nat) -> bool {
-    let (v, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    let v : u64 = vs as u64;
     let r = l2r_string_is_valid_pos(s, l2r_index_sat(v, w));
     let d = l2r_consume<Nat>(p);
     r
@@ -2190,8 +2267,10 @@ fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_extract(s : LStr, b : Nat, e : Nat) -> LStr {
-    let (bv, bw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
-    let (ev, ew) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    let (bvs, bw) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let bv : u64 = bvs as u64;
+    let (evs, ew) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    let ev : u64 = evs as u64;
     let r = l2r_string_extract(s, l2r_index_sat(bv, bw), l2r_index_sat(ev, ew));
     let d = l2r_consume<Nat>(b) + l2r_consume<Nat>(e);
     r
@@ -2206,8 +2285,10 @@ fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
-    let (bv, bw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
-    let (ev, ew) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    let (bvs, bw) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(b);
+    let bv : u64 = bvs as u64;
+    let (evs, ew) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(e);
+    let ev : u64 = evs as u64;
     if bw || ew || ((bv | ev) >> 63) != 0 { l2r_unreachable<LStr>() } else {
         let r = l2r_string_extract_fast(s, bv, ev);
         let d = l2r_consume<Nat>(b) + l2r_consume<Nat>(e);
@@ -2226,7 +2307,8 @@ fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, l
 // @int-backend end
 // @int-backend rcgmp
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let r = l2r_string_get_byte(s, k);
     let d = l2r_consume<Nat>(i);
     r
@@ -2269,9 +2351,12 @@ fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool
 // @int-backend rcgmp
 fn lean_string_memcmp(a : LStr, b : LStr, ls : Nat, rs : Nat, len : Nat) -> bool {
     // `lean_usize_of_nat` of each (the low 64 bits), read without consuming.
-    let (lk, lw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(ls);
-    let (rk, rw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(rs);
-    let (nk, nw) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(len);
+    let (lks, lw) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(ls);
+    let lk : u64 = lks as u64;
+    let (rks, rw) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(rs);
+    let rk : u64 = rks as u64;
+    let (nks, nw) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(len);
+    let nk : u64 = nks as u64;
     let r = l2r_string_memcmp(a, b, lk, rk, nk);
     let d = l2r_consume<Nat>(ls) + l2r_consume<Nat>(rs) + l2r_consume<Nat>(len);
     r
@@ -2404,7 +2489,12 @@ fn l2r_mk_empty_with_capacity<T>(n : Nat, elem : u64) -> RVec<T> {
 
 fn lean_mk_empty_array_with_capacity<T>(n : Nat) -> RVec<T> { l2r_mk_empty_with_capacity<T>(n, 8) }
 
+// @int-backend leanrt
 fn lean_array_get_size<T>(v : RVec<T>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_array_get_size<T>(v : RVec<T>) -> Nat { l2r_nat_size(l2r_array_size(v)) }
+// @int-backend end
 fn lean_array_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 
 // @int-backend leanrt
@@ -2418,7 +2508,8 @@ fn lean_array_fget_borrowed<T>(v : RVec<T>, i : Nat) -> T { l2r_array_get_nat(v,
 // `l2r_array_get_word` at the `Nat` index `i`, released after the read
 // (`l2r_index_sat`); the failing branch as `l2r_index_fail`.
 fn l2r_array_get_nat<T>(v : RVec<T>, i : Nat) -> T {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<T>(v);
     let n = l2r_view_size(p);
     if !w && k < n {
@@ -2500,7 +2591,8 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<T>(v);
     if !w && k < l2r_view_size(p) {
         let r = l2r_view_take<T>(p, k);
@@ -2510,6 +2602,28 @@ fn lean_array_get<T>(dflt : T, v : RVec<T>, i : Nat) -> T {
         let ignored = l2r_panic_code(0);
         let e = l2r_view_end<T>(p);
         let d = l2r_consume<Nat>(i);
+        dflt
+    }
+}
+// `Array.get` (`fget`) and `get!` at an index word (`l2r_nat_index`): as
+// `lean_array_fget` and `lean_array_get`.
+fn lean_array_fget_w<T>(v : RVec<T>, k : u64) -> T {
+    let p = l2r_array_give<T>(v);
+    let n = l2r_view_size(p);
+    if k < n { l2r_view_take<T>(p, k) } else { l2r_index_fail_w<T>(k, n) }
+}
+fn l2r_index_fail_w<T>(k : u64, n : u64) -> T {
+    if (k >> 63) != 0 { l2r_unreachable<T>() } else { l2r_array_index_bug<T>(k, n) }
+}
+fn lean_array_get_w<T>(dflt : T, v : RVec<T>, k : u64) -> T {
+    let p = l2r_array_give<T>(v);
+    if k < l2r_view_size(p) {
+        let r = l2r_view_take<T>(p, k);
+        let d = l2r_consume<T>(dflt);
+        r
+    } else {
+        let ignored = l2r_panic_code(0);
+        let e = l2r_view_end<T>(p);
         dflt
     }
 }
@@ -2589,7 +2703,8 @@ fn lean_array_fget_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_nat_as<T>
 fn lean_array_fget_borrowed_as<T>(v : RVec<LAny>, i : Nat) -> T { l2r_array_get_nat_as<T>(v, i) }
 
 fn l2r_array_get_nat_as<T>(v : RVec<LAny>, i : Nat) -> T {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<LAny>(v);
     let n = l2r_view_size(p);
     if !w && k < n {
@@ -2622,7 +2737,8 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<LAny>(v);
     if !w && k < l2r_view_size(p) {
         let r = l2r_view_take_as<T>(p, k);
@@ -2632,6 +2748,27 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
         let ignored = l2r_panic_code(0);
         let e = l2r_view_end<LAny>(p);
         let d = l2r_consume<Nat>(i);
+        l2r_any_take_as<T>(dflt)
+    }
+}
+// `fget` and `get!` at a type at an index word (`l2r_nat_index`): as
+// `lean_array_fget_as` and `lean_array_get_as`; lean2rr's `boxWordRead?`
+// of `lean_array_fget_w` and `lean_array_get_w`, which it calls only under
+// rcgmp.
+fn lean_array_fget_as_w<T>(v : RVec<LAny>, k : u64) -> T {
+    let p = l2r_array_give<LAny>(v);
+    let n = l2r_view_size(p);
+    if k < n { l2r_view_take_as<T>(p, k) } else { l2r_index_fail_w<T>(k, n) }
+}
+fn lean_array_get_as_w<T>(dflt : LAny, v : RVec<LAny>, k : u64) -> T {
+    let p = l2r_array_give<LAny>(v);
+    if k < l2r_view_size(p) {
+        let r = l2r_view_take_as<T>(p, k);
+        let d = l2r_consume<LAny>(dflt);
+        r
+    } else {
+        let ignored = l2r_panic_code(0);
+        let e = l2r_view_end<LAny>(p);
         l2r_any_take_as<T>(dflt)
     }
 }
@@ -2683,7 +2820,12 @@ fn lean_mk_array<T>(n : Nat, x : T) -> RVec<T> { l2r_array_replicate(l2r_replica
 // ---- ByteArray (RVec<u8>) ----
 
 fn lean_mk_empty_byte_array(n : Nat) -> RVec<u8> { l2r_mk_empty_with_capacity<u8>(n, 1) }
+// @int-backend leanrt
 fn lean_byte_array_size(v : RVec<u8>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_byte_array_size(v : RVec<u8>) -> Nat { l2r_nat_size(l2r_array_size(v)) }
+// @int-backend end
 fn lean_sarray_size<T>(v : RVec<T>) -> u64 { l2r_array_size(v) }
 fn lean_byte_array_uget(v : RVec<u8>, i : u64) -> u8 { l2r_array_get(v, i) }
 // @int-backend leanrt
@@ -2706,7 +2848,8 @@ fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<u8>(v);
     if !w && k < l2r_view_size(p) {
         let r = l2r_view_take<u8>(p, k);
@@ -2715,6 +2858,15 @@ fn lean_byte_array_get(v : RVec<u8>, i : Nat) -> u8 {
     } else {
         let e = l2r_view_end<u8>(p);
         let d = l2r_consume<Nat>(i);
+        0
+    }
+}
+// `ByteArray.get` (`fget`) and `get!` at an index word (`l2r_nat_index`).
+fn lean_byte_array_fget_w(v : RVec<u8>, k : u64) -> u8 { lean_array_fget_w<u8>(v, k) }
+fn lean_byte_array_get_w(v : RVec<u8>, k : u64) -> u8 {
+    let p = l2r_array_give<u8>(v);
+    if k < l2r_view_size(p) { l2r_view_take<u8>(p, k) } else {
+        let e = l2r_view_end<u8>(p);
         0
     }
 }
@@ -2771,7 +2923,12 @@ fn l2r_boxes_all_float_words(src : RVec<LAny>) -> bool [{ leanrt::array::boxes_a
 // ---- FloatArray (RVec<f64>) ----
 
 fn lean_mk_empty_float_array(n : Nat) -> RVec<f64> { l2r_mk_empty_with_capacity<f64>(n, 8) }
+// @int-backend leanrt
 fn lean_float_array_size(v : RVec<f64>) -> Nat { l2r_nat_small(l2r_array_size(v)) }
+// @int-backend end
+// @int-backend rcgmp
+fn lean_float_array_size(v : RVec<f64>) -> Nat { l2r_nat_size(l2r_array_size(v)) }
+// @int-backend end
 fn lean_float_array_uget(v : RVec<f64>, i : u64) -> f64 { l2r_array_get(v, i) }
 // @int-backend leanrt
 fn lean_float_array_fget(v : RVec<f64>, i : Nat) -> f64 { l2r_array_get_word(v, l2r_nat_raw(i)) }
@@ -2793,7 +2950,8 @@ fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
 // @int-backend end
 // @int-backend rcgmp
 fn lean_float_array_get(v : RVec<f64>, i : Nat) -> f64 {
-    let (k, w) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    let k : u64 = ks as u64;
     let p = l2r_array_give<f64>(v);
     if !w && k < l2r_view_size(p) {
         let r = l2r_view_take<f64>(p, k);

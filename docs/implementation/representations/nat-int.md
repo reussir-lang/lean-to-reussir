@@ -147,6 +147,47 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
     (`String.Pos.Raw.next`/`prev`), Rust's decoding of a word (the
     `get_fast`/`next_fast` textures) or the native word (`l2r_addr_nat`,
     `l2r_addr_int`) and `l2r_int_sat_i64` have rcgmp versions of their own.
+  - The index and position reads truncate to `i64` (`trunci_overflow` to
+    `(i64, bool)`, the bits then as `u64`): an rcgmp immediate always fits
+    `i64`, so their immediate path has no overflow test. The bits equal a
+    `u64` truncation's; the flag differs only for a value in [2^63, 2^64),
+    which each of these reads treats as one from 2^64 (out of range, the
+    big case) or does not read (`memcmp`, `get_byte_fast`: the low 64
+    bits). `l2r_nat_sat`, `l2r_replicate_len` and `lean_nat_pow` keep the
+    `u64` truncation: they tell [2^63, 2^64) apart.
+  - Sizes become a `Nat` through a mask to 61 bits (`l2r_nat_size`): LLVM
+    then knows that the value is an rcgmp immediate, so `as Nat` has no
+    range test and no promotion call. For `String.utf8ByteSize`,
+    `String.length`, the sizes of `Array`, `ByteArray` and `FloatArray`
+    (below 2^48: memory), and the results of `String.Pos.Raw.next`,
+    `next'` (`next_fast`) and `prev` for a position below 2^60. From 2^60
+    a position is past the end of every string, where `next` and `prev`
+    give it plus or minus one, computed on the `Nat` (`p + 1`, `p - 1`),
+    which a mask would cut (test `RtNatPosEdges`); for `next'` a position
+    there is unreachable (its proof keeps it below the size). Run 13's rcgmp profile measured the two changes by
+    hand: L17 -801 million instructions (sizes), Z01c -979 million (sizes)
+    and -733 million (truncation).
+  - Reads at an index word (`_w`): `l2r_nat_index(n)` gives `n`'s value
+    below 2^63 and `u64::MAX` from there, and releases `n`;
+    `lean_array_fget_w`, `lean_array_get_w`, `lean_byte_array_fget_w`,
+    `lean_byte_array_get_w`, `lean_string_utf8_get_w`, `_get_fast_w`,
+    `_next_fast_w` and `_at_end_w` read at such a word (in the rcgmp
+    blocks, as the lowering calls them only under rcgmp, so the leanrt
+    prelude is unchanged; they use no encoding of the leanrt backend;
+    `u64::MAX` is out of range, unreachable code for `fget`, `get_fast` and
+    `next_fast`). `l2r_nat_index` is one truncation to `i64` and one
+    select (`if w { u64::MAX } else { k }`): the flag is set exactly from
+    2^63, since rcgmp tests the signed range and a `Nat` is never
+    negative. With `l2r_pos_of_nat` instead (its tests of bit 63, in
+    `l2r_nat_raw` and on its result), about 5 more instructions per read
+    stayed after the immediate and big paths joined (X07 +25%, L17 +10%,
+    Z01c +6.6% instructions with the lowering's `_w` reads). There is no
+    leanrt `l2r_nat_index` and no leanrt `_w` read. The lowering computes
+    the word before it passes the container, so that a big index's release
+    never comes between the container's increment and the read's decrement
+    (the lowering's entry below). `lean_array_fget_as_w` and
+    `lean_array_get_as_w` (in the rcgmp blocks too) are the reads at a type
+    (`boxWordRead?`) of `lean_array_fget_w` and `lean_array_get_w`.
   - Boxes stay Lean's: a `Nat` below 2^63 and an `Int` in the `int32` range
     are immediates (`l2r_any_of_nat`, `l2r_any_of_int`, tested in Reussir
     code); a bigger value is a leanrt cell of kind 1 or 2 that holds an
@@ -293,6 +334,56 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
     them, in the generated items and in the prelude's text. Test hook:
     `L2R_TEST_NAT_TYPE_ARGS=1` lowers as with `--rcgmp-type-args` but
     keeps the check on (`tests/runtime/int-backend-check.sh`).
+  - **Reads at an index word.** `bindReadIndex` (`Lower/ExternCall.lean`)
+    calls the prelude's `_w` twin of a read at a `Nat` index or position
+    (`wordReadSym?`: `Array` `fget`/`get!` and their `_borrowed` symbols,
+    `ByteArray` `fget`/`get!`, `String.Pos.Raw.get`, `get'`, `next'`,
+    `atEnd`), with the word computed first:
+
+    ```
+    let x750 : u32 = {
+        let ix749 : u64 = l2r_nat_index(a747);
+        lean_array_fget_w<u32>(a745, ix749)
+    };
+    ```
+
+    where the default lowering binds `let ix749 : Nat = a747;` and calls
+    `lean_array_fget<u32>(a745, ix749)`. Every `Nat` argument of such a
+    read is converted, a variable or not (a string position is a `Nat`
+    here: `String.Pos.Raw` has one field). The `Nat` read kept the index
+    until after the read, so the heap path of its conversion and the
+    release of a big index (a call) sat between the caller's increment of
+    the container and the read's decrement, and LLVM kept both: a load,
+    an add and a store of the count before each read, and a store after
+    it (Z01c's eight `ByteArray` reads of `ugetUInt64LE`, unrolled into
+    the hash loop). With the word, the read follows the increment
+    directly and the pair cancels. A read of an array of boxes at a type
+    (`boxWordRead?`) becomes `lean_array_fget_as_w`/`lean_array_get_as_w`
+    (`boxWordReadAs`; `boxWordReadBack?` maps them back). Reads without
+    a twin keep the `Nat` (`FloatArray`, `get!` of a string, `next`,
+    `prev`, `isValid`, `get_byte_fast`); an index that is already a word
+    (`uget`, `USize`) is unchanged. Instruction counts (cachegrind, the
+    SVE-free builds of the profile, on top of the prelude's own change):
+    Z01c -2.07 billion (-9.8%), L17 -0.47 billion (-2.8%), X07 +11
+    million (+3.9%). X07's partition loop had no count traffic before,
+    and its read is as short as before (LLVM threads the select of
+    `l2r_nat_index` on the immediate path), but the big index's path
+    now rejoins before the loop's later uses of the index, so LLVM no
+    longer knows there that the index is an immediate: `i + 1` tests the
+    tag of its result again, and the swap path tests the index's tag
+    once more and copies two registers (2.6 + 8.7 million). The
+    variants tried against it were worse: the big case of
+    `l2r_nat_index` out of line (a cold call; the read stays short, but
+    X07 +13.7 million, Z01c and L17 32 and 56 million above the select),
+    and converting only where the container is retained around the read
+    does not tell X07 from Z01c (both containers are used after the
+    read). rcgmp has no test of an immediate that Reussir code could use
+    to keep the big path apart. Under leanrt nothing changes (the `.rr`
+    is byte-identical). `tests/runtime/int-backend-check.sh` checks the
+    shape on `RtNatIdxWord`: every `_w` read called, each after its
+    `l2r_nat_index`, and no read at a `Nat` that has a twin. A read whose
+    `Nat` arguments are not exactly one would keep the `Nat` read without
+    a message, and RtNatIdxWord's output is the same either way.
 - **Why:** Reussir renders a built-in integer at a polyffi type argument
   as the raw handle and releases it after the call (its `rcgmp_handle`
   comes from the substituted parameter type): `l2r_once_put<Nat>` stored a
@@ -309,14 +400,16 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `LowerBase.lean` (`LowerCtx.intBackend`, `natIntTypeArgs`,
   `mentionsNatInt`, `isFfiTypeArgTy`, `cellStorage`, `onceCell`,
   `natIntBoxFns?`, `boxValue`, `boxTake`, `boxUnboxWith`, `boxUnboxed?`,
-  `boxAllocates`, `arrayPtrKindOf`); `ArrayKinds.lean` (`ptrKind?`);
+  `boxAllocates`, `arrayPtrKindOf`, `boxWordReadAs`);
+  `Lower/ExternCall.lean` (`bindReadIndex`, `wordReadSym?`);
+  `ArrayKinds.lean` (`ptrKind?`);
   `CompactArrays.lean`, `Opt/SplitMapLoops.lean`, `MonoRetype.lean`
   (`natIntKinds`); `CellKinds.lean`, `TypedCells.lean`, `Lower/Externs.lean`
   (`refElemTy`); `Lower/Values.lean` (`natLiteral`); `Lower/Conv.lean`
   (`zeroTry`); `Lower/Live.lean`; `Opt/CheapConsts.lean`;
   `Opt/ModPow2.lean` (`minLitExp`); `Emit/IntBackendCheck.lean`. Tests:
   `RtNatImmEdges`, `RtNatDivZero`, `RtNatLitHuge`, `RtNatGenericFfi`,
-  `RtNatGenericBig`, `tests/runtime/int-backend-check.sh`; run.sh's
+  `RtNatGenericBig`, `RtNatIdxWord`, `tests/runtime/int-backend-check.sh`; run.sh's
   `int:NAME` items of an expectation line's `[OPT,…]` prefix and
   `NAME.int-backend`.
 - **Remove only if:** the rcgmp backend becomes the default (then the

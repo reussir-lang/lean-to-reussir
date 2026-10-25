@@ -8,9 +8,16 @@
 #   shares no instance or specialization with the program, and a new entry
 #   point `l2rDetRoot` that runs the program's `main` and then prints that
 #   function's result; translated with `--root l2rDetRoot`), every
-#   function translated from the
-#   program's own Lean code, except `main` itself (`l_main___*`, now called
-#   by the new entry point), is unchanged up to lean2rr's numbering: the
+#   function translated from the program's own Lean code, `main` included,
+#   is unchanged up to lean2rr's numbering. The program is translated
+#   with an entry point `l2rDetRoot` too, that runs `main` and then prints
+#   a number, so that `main` is a called function in both translations and
+#   its call has the same shape: an entry point is translated differently
+#   from a called function (the `flatten` pass splits only the result of
+#   a declaration that a call reaches, and that can change its decision
+#   for a function whose result `main` returns, such as RtNatPosEdges'
+#   `List.forIn'.loop._at_.main.spec_1`). Only `l2rDetRoot`
+#   (`l_l2rDetRoot*`) is not compared. The
 #   generated names that come from lean2rr's one counter (types such as
 #   `T_List_15`, helpers such as `l2r_zero_836`, local names) shift when a
 #   definition is added, so the functions are compared in the canonical
@@ -64,7 +71,6 @@ for p in "${PROGRAMS[@]}"; do
   if [ -f "$HERE/$p.lean" ]; then src=$HERE/$p.lean; else src=$ROOT/tests/classic/$p.lean; fi
   if [ ! -f "$src" ]; then echo "FAIL $p: no $HERE/$p.lean or tests/classic/$p.lean"; status=1; continue; fi
   d=$OUT/$p; rm -rf "$d"; mkdir -p "$d/a" "$d/b"
-  cp "$src" "$d/a/$p.lean"
   # The variant: the unrelated definition and the new entry point after
   # the program; the entry point has the type of the program's `main`.
   sig=$(grep -E '^(unsafe )?def main( |$)' "$src" | tail -1)
@@ -72,13 +78,31 @@ for p in "${PROGRAMS[@]}"; do
     "unsafe "*) un="unsafe " ;;
     *) un="" ;;
   esac
-  case $sig in
-    *"(args : List String) : IO Unit"*) hdr="(args : List String) : IO Unit"; call="main args"; n="args.length"; ret="" ;;
-    *"(args : List String) : IO UInt32"*) hdr="(args : List String) : IO UInt32"; call="let r ← main args"; n="args.length"; ret="  return r" ;;
-    *": IO Unit"*) hdr=": IO Unit"; call="main"; n="3"; ret="" ;;
-    *": IO UInt32"*) hdr=": IO UInt32"; call="let r ← main"; n="3"; ret="  return r" ;;
-    *) echo "FAIL $p: unrecognized main: $sig"; status=1; continue ;;
-  esac
+  # The arguments' name is the program's (`args`, `xs`, ...).
+  re_args='^(unsafe )?def main \(([[:alnum:]_]+) : List String\) : IO (Unit|UInt32)( |$)'
+  re_none='^(unsafe )?def main : IO (Unit|UInt32)( |$)'
+  if [[ $sig =~ $re_args ]]; then
+    x=${BASH_REMATCH[2]}; t=${BASH_REMATCH[3]}
+    hdr="($x : List String) : IO $t"; m="main $x"; n="$x.length"
+  elif [[ $sig =~ $re_none ]]; then
+    t=${BASH_REMATCH[2]}
+    hdr=": IO $t"; m="main"; n="3"
+  else
+    echo "FAIL $p: unrecognized main: $sig"; status=1; continue
+  fi
+  if [ "$t" = UInt32 ]; then call="let r ← $m"; ret="  return r"; else call="$m"; ret=""; fi
+  # The program: the entry point after it, printing a number where the
+  # variant prints its function's result.
+  {
+    cat "$src"
+    cat <<EOF
+
+${un}def l2rDetRoot $hdr := do
+  $call
+  IO.println ($n)
+$ret
+EOF
+  } > "$d/a/$p.lean"
   {
     cat "$src"
     cat <<EOF
@@ -105,7 +129,7 @@ EOF
       || { echo "FAIL $p: lean failed on the $( [ $v = a ] && echo program || echo variant) (see $d/$v/lean.log)"; status=1; ok=""; }
   done
   [ -n "$ok" ] || continue
-  if ! translate "$d/a" "$p" main "$d/a/one.rr" || ! translate "$d/a" "$p" main "$d/a/two.rr"; then
+  if ! translate "$d/a" "$p" l2rDetRoot "$d/a/one.rr" || ! translate "$d/a" "$p" l2rDetRoot "$d/a/two.rr"; then
     echo "FAIL $p: lean2rr failed (see $d/a/one.rr.log, $d/a/two.rr.log)"; status=1; continue
   fi
   if ! cmp -s "$d/a/one.rr" "$d/a/two.rr"; then
@@ -114,7 +138,7 @@ EOF
   if ! translate "$d/b" "$p" l2rDetRoot "$d/b/extra.rr"; then
     echo "FAIL $p: lean2rr failed on the variant (see $d/b/extra.rr.log)"; status=1; continue
   fi
-  $FP compare "$d/a/one.rr" "$d/b/extra.rr" --ignore l_main___ > "$d/compare.txt" 2>&1 || true
+  $FP compare "$d/a/one.rr" "$d/b/extra.rr" --ignore l_l2rDetRoot > "$d/compare.txt" 2>&1 || true
   sum=$(grep '^summary:' "$d/compare.txt" || echo "summary: (none)")
   if [ "$sum" = "summary: (none)" ]; then
     echo "FAIL $p: rr-fingerprint.py failed (see $d/compare.txt)"; status=1

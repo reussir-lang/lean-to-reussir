@@ -24,6 +24,17 @@
 # `l2r_boxed_N`; the others are boxed in line (`constIsImmediate`; review of
 # step D: `k5 : Nat := 5` had one). Under leanrt none has one (boxing a
 # `Nat` or `Int` never allocates there).
+# Also the reads at an index word (lean2rr's `bindReadIndex`) on
+# tests/runtime/RtNatIdxWord, with its .opts (`typed-arrays` and
+# `compact-arrays` off): under rcgmp (with `--rcgmp-type-args`, as
+# scripts/l2r.py passes it) each of the ten `_w` reads of the prelude is
+# called (`Array` fget/get! and their reads at a type, `ByteArray`
+# fget/get!, `String.Pos.Raw` get, get', next', atEnd), each call's index
+# is the variable of the `let ixN : u64 = l2r_nat_index(...)` on the line
+# before it, and the generated code calls none of the reads at a `Nat`
+# that have a twin (RtNatIdxWord passes run.sh under rcgmp without the
+# lowering too, so only this pins it); under leanrt the .rr has no
+# `l2r_nat_index` and no `_w` read.
 #   tests/runtime/int-backend-check.sh
 # Environment: as determinism-check.sh (L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
@@ -96,6 +107,77 @@ else
   else
     echo "ok   $P --int-backend leanrt: no boxed constant"
   fi
+fi
+# The reads at an index word. idxword OUT.rr BACKEND: the shape of
+# RtNatIdxWord's generated code (after `// ---- generated types ----`).
+idxword() {
+  python3 - "$1" "$2" <<'EOF'
+import re, sys
+rr, backend = sys.argv[1], sys.argv[2]
+text = open(rr).read()
+parts = text.split("// ---- generated types ----\n", 1)
+if len(parts) != 2:
+    print("no generated part"); sys.exit(1)
+gen = parts[1]
+twins = ["lean_array_fget_w", "lean_array_get_w", "lean_array_fget_as_w", "lean_array_get_as_w",
+         "lean_byte_array_fget_w", "lean_byte_array_get_w", "lean_string_utf8_get_w",
+         "lean_string_utf8_get_fast_w", "lean_string_utf8_next_fast_w", "lean_string_utf8_at_end_w"]
+call = re.compile(r"\b(" + "|".join(twins) + r")\b(<[^()]*>)?\(")
+errs = []
+if backend == "leanrt":
+    if "l2r_nat_index" in text or call.search(text):
+        errs.append("l2r_nat_index or a _w read in the .rr")
+else:
+    # The reads at a Nat that have a twin (lean2rr's wordReadSym?, and the
+    # reads at a type of the array reads).
+    nat = re.compile(r"\b(lean_array_(fget|get)(_borrowed)?(_as)?<|lean_byte_array_(fget|get)\(|"
+                     r"lean_string_utf8_(get|get_fast|next_fast|at_end)\()")
+    seen = dict.fromkeys(twins, 0)
+    lines = gen.split("\n")
+    for i, l in enumerate(lines):
+        m = nat.search(l)
+        if m:
+            errs.append(f"a read at a Nat: {l.strip()}")
+        for m in call.finditer(l):
+            seen[m.group(1)] += 1
+            # The arguments, to the matching parenthesis; the index is the last.
+            depth, j = 1, m.end()
+            while j < len(l) and depth:
+                depth += {"(": 1, ")": -1}.get(l[j], 0); j += 1
+            last = l[m.end():j - 1].split(",")[-1].strip()
+            prev = lines[i - 1].strip() if i else ""
+            if not re.fullmatch(r"ix\d+", last) or not prev.startswith(f"let {last} : u64 = l2r_nat_index("):
+                errs.append(f"{m.group(1)} without the index word on the line before: {prev} / {l.strip()}")
+    errs += [f"no call of {t}" for t, k in seen.items() if k == 0]
+    if not errs:
+        print(f"{sum(seen.values())} reads at an index word, each after its l2r_nat_index")
+for e in errs:
+    print(e)
+sys.exit(1 if errs else 0)
+EOF
+}
+P=RtNatIdxWord
+OUT=$BASE/$P
+mkdir -p "$OUT"
+cp "$HERE/$P.lean" "$OUT/"
+opts=()
+for o in $(tr ', \n' '   ' < "$HERE/$P.opts"); do opts+=(--disable-opt "$o"); done
+if ! (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1; then
+  echo "FAIL $P: lean failed (see $OUT/lean.log)"; status=1
+else
+  for be in rcgmp leanrt; do
+    flags=(--int-backend "$be"); [ "$be" = rcgmp ] && flags+=(--rcgmp-type-args)
+    if ! translate "$OUT/$be.rr" "${flags[@]}" "${opts[@]}"; then
+      echo "FAIL $P: --int-backend $be did not translate $P (see $OUT/$be.rr.log)"; status=1
+    elif ! idxword "$OUT/$be.rr" "$be" > "$OUT/$be.shape" 2>&1; then
+      echo "FAIL $P --int-backend $be: the reads at an index word, $(wc -l < "$OUT/$be.shape") problems (see $OUT/$be.shape), the first and last:"
+      awk -v n="$(wc -l < "$OUT/$be.shape")" 'NR <= 3 || NR > n - 3 { print "  " $0 }' "$OUT/$be.shape"; status=1
+    elif [ "$be" = rcgmp ]; then
+      echo "ok   $P --int-backend rcgmp: $(cat "$OUT/$be.shape"), no read at a Nat with a twin"
+    else
+      echo "ok   $P --int-backend leanrt: no l2r_nat_index and no _w read"
+    fi
+  done
 fi
 [ $status -eq 0 ] && echo "PASS  int-backend-check"
 exit $status

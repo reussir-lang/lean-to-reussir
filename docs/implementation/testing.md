@@ -153,16 +153,27 @@ Paths are relative to the repository root.
 
 - **What:** the variant of each program appends a structure of two numbers,
   a recursive function over it that uses only `Nat` arithmetic, and an
-  entry point `l2rDetRoot` with `main`'s type that runs `main` and prints
-  the function's result; it is translated with `--root l2rDetRoot`.
-  Functions named `l_main___*` are not compared.
+  entry point `l2rDetRoot` with `main`'s type (its parameter named as in
+  `main`) that runs `main` and prints the function's result; it is
+  translated with `--root l2rDetRoot`. The program it is compared with is
+  translated with an entry point `l2rDetRoot` too, that runs `main` and
+  prints a number. Only the functions named `l_l2rDetRoot*` are not
+  compared; `main` is.
 - **Why:** a call added inside `main` would change `main`'s code and its
   specializations. A first version of the added function folded an
   `Array String` with a sum of lengths: Lean's specializer reused the
   program's own specialization of that fold (same lambda), so the
   "unrelated" code added a typed caller and `uniformParams` stopped
   making that helper's parameter uniform (the C03R-01 shape), which is
-  sharing, not non-locality.
+  sharing, not non-locality. The program gets the entry point too because
+  an entry point is translated differently from a called function:
+  `flatten` splits only the result of a declaration that a call reaches,
+  so with `main` as the program's entry point and a called function in
+  the variant, `flatten` decided differently for RtNatPosEdges'
+  `List.forIn'.loop._at_.main.spec_1`, whose result `main` returns (it
+  was compared with `l_main___*` left out, and failed). The parameter's
+  name: the script matched `(args : List String)` literally, so Qsort's
+  `def main (xs : List String)` got a variant that did not compile.
 - **Where:** `tests/runtime/determinism-check.sh`.
 - **Remove only if:** never.
 

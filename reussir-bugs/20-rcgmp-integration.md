@@ -17,7 +17,10 @@ rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a to
 **Upstream (2026-10-25):** Not upstream at 00906e38. Reussir's
 maintainer asked that the Reussir-side changes for lean2rr be made first
 as patches on lean2rr's tree; he takes them from this directory himself.
-This entry is written to be read on its own for that purpose. (20-a's
+This entry is written to be read on its own for that purpose. Under the
+owner's rule of 2026-10-25 (rcgmp-related fixes and optimizations may go
+upstream as pull requests of at most 300 changed lines each), its
+patches are prepared as pull request candidates, not opened. (20-a's
 `nonnegative` part drops if upstream sets the attribute itself.)
 
 | Patch | Step D name | `l2r-stepd` commit | Kind | What it adds |
@@ -305,11 +308,15 @@ decimal integer attribute (`bigint_constant`, `narrowest`), and
 attribute. `Attribute::parse` reads decimal text through LLVM's
 `StringRef::consumeInteger`: one full `APInt` multiplication per digit,
 cubic in the length (also on LLVM's main branch). Hexadecimal text goes
-through shifts.
+through one shift of the whole value per digit: quadratic, with a small
+constant (`mlir-opt` reads one constant of 100k, 200k and 400k hexadecimal
+digits in 0.36, 1.31 and 5.18 s). The patch's code comments and commit
+message still say "linear" for this parse; they are corrected when the
+series is next rebuilt.
 
 **The patch.** `literal::mlir_integer_attr_text`
 (`crates/reussir-core/src/literal.rs`) writes the attribute text in
-hexadecimal, `0x…` or `-0x…` (malachite's `LowerHex`, linear), at the
+hexadecimal, `0x…` or `-0x…` (malachite's `LowerHex`; writing the text is linear), at the
 same narrowest signed width. Codegen uses it for constants and match
 keys, and `rcgmp::match_arms` takes the keys' text instead of parsed
 attributes. The MLIR attributes do not change: the MLIR of a 10k-digit

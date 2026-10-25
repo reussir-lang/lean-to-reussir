@@ -1241,10 +1241,16 @@ def boxWithWord (b : RR.Expr) (k : String → LowerM RR.Expr) : LowerM RR.Expr :
 
 /-- The prelude's reads of an element of an array of boxes (`RVec<Box>`)
 that have a variant reading the element at a type, an immediate without a
-copy of the box (`<name>_as<T>`, `l2r_view_take_as`). -/
+copy of the box (`boxWordReadAs`, `l2r_view_take_as`); the reads at an
+index word (`_w`) are those of `bindReadIndex` under rcgmp. -/
 def boxWordReads : List String :=
   ["lean_array_fget", "lean_array_fget_borrowed", "lean_array_get", "lean_array_get_borrowed",
-   "lean_array_uget", "lean_array_uget_borrowed"]
+   "lean_array_uget", "lean_array_uget_borrowed", "lean_array_fget_w", "lean_array_get_w"]
+
+/-- The read at a type of the `boxWordReads` read `f`: `<name>_as<T>`, and
+`<name>_as_w<T>` for a read at an index word `<name>_w`. -/
+def boxWordReadAs (f : String) : String :=
+  if f.endsWith "_w" then (f.dropEnd 2).toString ++ "_as_w" else f ++ "_as"
 
 /-- The array read `b` (a call of a `boxWordReads` read at `Box`, maybe in
 the block of `bindReadIndex`) as the read of the element at `at` (`u64`:
@@ -1254,7 +1260,7 @@ of bit 0, no reference counting (`boxUnbox`). -/
 partial def boxWordRead? (b : RR.Expr) (at_ : RR.Ty) : Option RR.Expr :=
   match b with
   | .call f #[t] args =>
-    if t == RR.Ty.box && boxWordReads.contains f then some (.call (f ++ "_as") #[at_] args) else none
+    if t == RR.Ty.box && boxWordReads.contains f then some (.call (boxWordReadAs f) #[at_] args) else none
   | .block ⟨lets, r⟩ => (boxWordRead? r at_).map fun r' => .block ⟨lets, r'⟩
   | _ => none
 
@@ -1468,7 +1474,7 @@ def boxUnbox (b : RR.Expr) (t : RR.Ty) (zeroOf : RR.Ty → LowerM RR.Expr)
 partial def boxWordReadBack? (w : RR.Expr) : Option RR.Expr :=
   match w with
   | .call f #[_] args =>
-    match boxWordReads.find? (· ++ "_as" == f) with
+    match boxWordReads.find? (boxWordReadAs · == f) with
     | some r => some (.call r #[RR.Ty.box] args)
     | none => none
   | .block ⟨lets, r⟩ => (boxWordReadBack? r).map fun r' => .block ⟨lets, r'⟩

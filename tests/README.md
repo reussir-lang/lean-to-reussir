@@ -442,11 +442,18 @@ results, so each runs at two sizes.
   programs (`lean2rr --emit rr`, no Reussir build) twice and requires
   byte-identical `.rr` files; then it adds an unrelated definition (a
   structure of two numbers and a recursive function over it, with a new
-  entry point `l2rDetRoot` that runs `main` and then the function,
-  translated with `--root l2rDetRoot`) and requires every function
-  translated from the program's own code, except `main`, to be unchanged
-  in the canonical form below. A program known to fail is listed in the
-  script's `KNOWN` table with the reason (XFAIL).
+  entry point `l2rDetRoot` that runs `main` and then prints the
+  function's result, translated with `--root l2rDetRoot`) and requires
+  every function translated from the program's own code, `main`
+  included, to be unchanged in the canonical form below. The program
+  itself is translated with an entry point `l2rDetRoot` too, that runs
+  `main` and then prints a number, so that `main` is a called function in
+  both translations (an entry point's result is not flattened, and that
+  changed the decision for a function whose result `main` returns:
+  RtNatPosEdges' `List.forIn'.loop._at_.main.spec_1`); only `l2rDetRoot`
+  is not compared. `main`'s parameter keeps the program's name (Qsort's
+  `xs`). A program known to fail is listed in the script's `KNOWN` table
+  with the reason (XFAIL).
 - `tests/runtime/rr-fingerprint.py` gives each item of the generated part
   of a `.rr` file (functions, types, `extern` lines) a hash of a canonical
   form that does not change when only lean2rr's numbering changes: one
@@ -908,6 +915,8 @@ both):
 | RtNatMatch | case splits on `Nat`, under rcgmp `match`es on the built-in integer (`int-match`): `0`/`n+1`, nested splits fused (`0`, `1`, `n+2`; `0`, `1`, `2`, `n+3`), chains of literal tests (literals from 2^61 on among them) ending in a default or in `n+1`, the scrutinee named in each kind of arm, used after the split, a test whose result is used twice, tail recursion, Ackermann; immediates, rcgmp's immediate edges and heap values |
 | RtIntMatch | case splits on `Int` (`ofNat`/`negSucc`, the fields' splits fused: `0`, `ofNat (n+1)`, `-1`, `negSucc (m+1)`), the scrutinee named in each arm, `Int.repr`, `toNat`, `natAbs`, a sign split in a loop; small values of both signs, ±2^61 and neighbours, ±2^63, ±2^64, ±10^30 |
 | RtIntMatchNoExtract | `Int` literal matches with `compiler.extract_closed false`, so a negative literal is computed in place (`Int.neg (Int.ofNat 6)`) and an arm returns the literal it was tested against; literal tests before the `Int` split with nested fields; ±2^70 (review of 762c2ac6: an arm kept the literal's `let` but not the `let`s it reads, and lean2rr stopped with an internal error) |
+| RtNatPosEdges | string positions and indices at 2^60, 2^61, 2^62, 2^63 and 2^64 and around, through `String.Pos.Raw` `next`, `prev`, `get`, `get?`, `atEnd`, `isValid`, `extract` and `Array`/`ByteArray` `[i]?`/`getD`, and the sizes of `String`, `Array`, `ByteArray`, `FloatArray`: under rcgmp the prelude makes sizes and small positions a `Nat` through a mask to 61 bits (`l2r_nat_size`), which past the end (`next` gives the position plus one) would cut 2^61 to 0, and truncates indices to `i64` |
+| RtNatIdxWord | reads at a `Nat` index or position from arrays of boxes (`.opts`: `typed-arrays` and `compact-arrays` off) at small indices and at 2^61, 2^62, 2^63, 2^64, 2^70: `a[i]`, `a[i]!` (panic and default), `a[i]?` of `Nat`, `UInt8`, `UInt32`, `Bool` (read at a type, `boxWordRead?`), `Option Nat`, `List UInt8`; `ByteArray` `get`/`get!`; `String.Pos.Raw` `get`, `get'`, `next'`, `atEnd`: under rcgmp lean2rr computes the index word first (`l2r_nat_index`) and calls the prelude's `_w` reads (`lean_array_fget_as_w`, `lean_array_get_as_w` at a type) |
 
 `tests/runtime/int-backend-check.sh` checks lean2rr's guard of rcgmp
 without `--rcgmp-type-args` (translation only, no Reussir): on
@@ -917,7 +926,15 @@ type argument of the runtime's generic FFI functions; with
 with the check's internal error (`Emit/IntBackendCheck`); with
 `--rcgmp-type-args` it translates. It also checks `boxed-consts` on
 `RtNatBoxedConsts`: under rcgmp only the `Nat` and `Int` constants whose box
-is a cell get a once-cell (`l2r_boxed_N`), under leanrt none.
+is a cell get a once-cell (`l2r_boxed_N`), under leanrt none. And the reads
+at an index word on `RtNatIdxWord` (with its `.opts`): under rcgmp (with
+`--rcgmp-type-args`) the generated code calls each of the prelude's ten
+`_w` reads, each with the index word of the `let ixN : u64 =
+l2r_nat_index(...)` on the line before it, and none of the reads at a
+`Nat` that have a twin (`lean_array_fget<`, `lean_byte_array_get(`,
+`lean_string_utf8_get(`, `lean_string_utf8_at_end(`, ...); under leanrt
+the `.rr` has no `l2r_nat_index` and no `_w` read. RtNatIdxWord's output
+is the same without the lowering, so run.sh alone does not pin it.
 
 `tests/runtime/int-match-check.sh` checks the shapes of `int-match`
 (translation only, no Reussir): under rcgmp `RtNatMatch`'s and
