@@ -37,7 +37,8 @@ translate() {
 # body FILE NAME: the generated function of Lean definition NAME (its first instance).
 body() { awk -v f="fn l_$2___l2r_0_(" 'index($0, f) == 1 { on = 1 } on { print } on && /^}/ { exit }' "$1"; }
 status=0
-fail() { echo "FAIL $P: $*"; status=1; }
+fails=0
+fail() { echo "FAIL $P: $*"; status=1; fails=$((fails + 1)); }
 # has FILE NAME TEXT...: each TEXT occurs in NAME's function; lacks: none does.
 has() { local f=$1 n=$2; shift 2; local b; b=$(body "$f" "$n")
   [ -n "$b" ] || { fail "no function for $n"; return; }
@@ -51,7 +52,7 @@ for P in RtNatMatch RtIntMatch; do
   cp "$HERE/$P.lean" "$OUT/"
   (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1 \
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
-  before=$status
+  before=$fails
   if ! translate "$OUT/on.rr" --int-backend rcgmp --rcgmp-type-args; then
     fail "--int-backend rcgmp did not translate (see $OUT/on.rr.log)"
   elif [ $P = RtNatMatch ]; then
@@ -81,7 +82,7 @@ for P in RtNatMatch RtIntMatch; do
   elif ! cmp -s "$OUT/leanrt.rr" "$OUT/leanrt-off.rr"; then
     fail "under leanrt int-match changed the .rr"
   fi
-  [ $status -eq $before ] && echo "ok   $P: matches under rcgmp, none with int-match off, leanrt unchanged"
+  [ $fails -eq $before ] && echo "ok   $P: matches under rcgmp, none with int-match off, leanrt unchanged"
 done
 [ $status -eq 0 ] && echo "PASS  int-match-check"
 exit $status
