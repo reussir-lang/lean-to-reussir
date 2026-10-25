@@ -114,7 +114,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   [representations/nat-int.md](representations/nat-int.md#--int-backend-rcgmp-the-lowering-in-progress).
   Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
-  repros of three Reussir costs, fixed upstream in #672, #670 and #674),
+  repros of three Reussir costs, fixed upstream in #672, #670 and #674,
+  and of the inliner's copies into one function, `RtJpWide` under
+  `--int-backend rcgmp`),
   `L2R_ALLOW_MISSING_EXTERNS`
   turns the rejection of a program that reaches an extern lean2rr cannot
   serve into a warning (the generated program then does not build: a
@@ -126,8 +128,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   test `tests/runtime/int-backend-check.sh`),
   `L2R_DEBUG` prints whether the
   program can cast and why, each declaration Stage 1 could not
-  recompile from source, with the error, and what the optimization
-  `unread-fields` kept; with that optimization on,
+  recompile from source, with the error, what the optimization
+  `unread-fields` kept, and the functions that `inline-anchors` keeps out
+  of rrc's inliner for their copies; with that optimization on,
   `L2R_UNREAD_FIELDS_WHY` prints, for each extern of the `Lean` package
   that kept code reaches, the chain of declarations and reasons that
   keeps it ([optional-passes.md](optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).

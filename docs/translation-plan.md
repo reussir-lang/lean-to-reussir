@@ -1306,6 +1306,32 @@ application appears.
   line, a conversion, an unboxing, or the application of a wrapped value or of
   a value of uniform type costs a call (until LLVM inlines it); all are rare
   outside uniform code, and typed function values are unaffected.
+  Last, on the final functions, a generated function whose copies would
+  make one function too large is kept out too. rrc's inliner inlines a
+  callee of at most 256 operations at every call, whatever the number of
+  calls, bottom-up (a callee's callees first), and LLVM's passes are
+  superlinear in the size of one function: an outlined join point called
+  from hundreds of arms of one `match` (§5.6, J3) made a build of 740 s
+  instead of 5 s. So lean2rr visits the functions callees first, and at
+  each function `g` sums (calls in `g` - 1) × size over the callees that
+  rrc can inline into it (not anchored, not refused by the inliner, a
+  lower bound of their size at most 256) and that are not small (size over
+  32; a copy is about as small as the call); while the sum is over 4000,
+  the callee that adds the most is kept out. The size counts the
+  operations of the function's own code and the sizes of the callees that
+  rrc may inline into it first; the lower bound leaves out the recursive
+  callees, which rrc may not inline. MLIR's inliner refuses a callee that
+  calls itself or calls its caller back directly, and Reussir's the calls
+  that an inlining copied in; other calls inside a cycle of the call graph
+  count. The copies are summed per caller (copies spread over many
+  functions add code linearly), over all the callees (several that each
+  stay under the budget can be over it together). A function that calls
+  itself is kept out like any other: Reussir's unique-carrying
+  specialization can make it non-recursive before the inliner runs. On the
+  shared benchmark set and the classic corpus this marks one function in
+  lean-zip, which rrc did not inline anyway (the executables are
+  byte-identical), and two or three of `Std.Time`'s parsers in Cedar
+  (instruction counts unchanged) (Emit/CopyAnchors).
 
 ### 5.4 `let`, `return`, literals
 
@@ -1584,6 +1610,18 @@ them under those names. An alternative may name a matched variable anew
 matched after its conversion), but the old name stays in scope there: a
 join point outlined inside such an alternative whose body jumps to `j`
 captures the old name too, not just the variables the alternative names.
+
+rrc's MLIR inliner inlines every function of at most 256 operations at
+every call, and so would copy an outlined join point back into every jump.
+When one function calls outlined join points so often that their copies
+would add more than 4000 operations to it (Σ (calls - 1) × size, for those
+of more than 32 operations), the ones that add the most are kept out of
+the inliner (§5.3, "Kept out of rrc's MLIR inliner"): after an 800-arm
+`match` on a `Nat`
+(`int-match` under `--int-backend rcgmp`), three join points of about 160
+operations, each called about 266 times from the arms, made one LLVM
+function of about a million blocks, and the build took 740 s instead of
+5 s (tests/runtime/RtJpWide).
 
 **Sinking first.** Before choosing, every join point is moved down to the
 smallest part of its scope that contains all its jumps: past `let`s, into
@@ -3200,7 +3238,10 @@ Each item says what differs and when.
   conversions, unboxings and the applications of wrapped and uniform
   function values out of rrc's MLIR inliner (§5.3; a Reussir cost, fixed
   upstream in Reussir #674, after which the towers still take 2 to 4
-  times the rrc time and memory without the anchors). The
+  times the rrc time and memory without the anchors), and so are the
+  functions whose copies would make one function too large (§5.3; rrc's
+  inliner copies a callee of up to 256 operations into every call, and
+  `RtJpWide` under `--int-backend rcgmp` built in 740 s, now 5 s). The
   towers of the adversarial rounds then build in 15 s to 2.5 minutes and at
   most 3 GB, the whole build (a single `StateT` tower used at `IO`: 21 s,
   0.4 GB, where it did not build in 30 minutes; five towers in one program:

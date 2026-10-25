@@ -25,7 +25,10 @@ the table below.
   upstream at `ea240b19`, number retired), `scripts/l2r.py` still passes
   `--relocation-mode pic` (below the table).
 - [build-time.md](build-time.md): workarounds for a build-time bug and
-  build-time costs, all fixed upstream at Reussir `7954a367`.
+  build-time costs, all fixed upstream at Reussir `7954a367`, and one
+  current cost with no entry in `reussir-bugs/`: the inliner copies a
+  callee into every call of one function (lean2rr's copy anchors,
+  required practice `inline-anchors`).
 - [limitations.md](limitations.md): Reussir behaviour that is not a bug
   but shapes lean2rr's output: the 16-byte alignment of Rust allocations,
   a missed optimization (1), a missing feature (2), the FFI boundary,

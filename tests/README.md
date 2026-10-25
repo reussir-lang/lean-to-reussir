@@ -91,6 +91,7 @@ The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/runtime/conv-count-check.sh`, `tests/runtime/alloc-check.sh`,
 `tests/runtime/paynothing-check.sh`, `tests/runtime/determinism-check.sh`,
 `tests/runtime/int-backend-check.sh`, `tests/runtime/int-match-check.sh`,
+`tests/runtime/inline-anchors-check.sh`,
 `tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
 `scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
 (`lean2rr/lean-toolchain`, the elan toolchain
@@ -925,6 +926,33 @@ literal arms, a copy of the scrutinee where an `n+1` arm names it, the
 fused `Int` splits) and no test or `Nat.sub` is left in them; with
 `--disable-opt int-match` no `match` on a `Nat` or `Int` is left; under
 leanrt the pass changes nothing.
+
+`tests/runtime/inline-anchors-check.sh` checks the functions that the
+required practice `inline-anchors` keeps out of rrc's inliner for their
+copies (translation only, no Reussir; under both representations): at
+each function, while the copies of its callees that rrc can inline (a
+lower bound of their size, without their recursive callees, at most 256;
+their size, with what rrc may inline into them first, over 32) add more
+than 4000, Σ (calls - 1) × size, the callee that adds the most is kept
+out. Under rcgmp, `RtJpWide`'s 800-arm `match` is one function whose
+arms call three outlined join points about 266 times each: those three
+are `#[transform_anchor]`, no other join point is. Under leanrt `Outline`
+cuts that `match` (a chain of tests) into functions of a few arms, and
+none is. `RtJpAnchors` (a join point of 23 operations called from 300
+arms, and a larger one called from 4) has none under either; under rcgmp
+the small one is over the budget, so the exemption of small functions is
+what keeps it inlinable. `RtCopyAnchors` (64-arm `match`es on an
+enumeration) has six under both: two of three functions whose copies are
+each under the budget but together over it, a wrapper of 5 operations
+that is mid-size once `big` is inlined into it, a function that calls
+itself, a function under 256 on its own but over it with the recursive
+function it calls once (which rrc does not inline into it), and a
+function in a cycle of three (`fa` → `fb` → `fc` → `fa`) that `fb` calls
+from every arm. The check reads lean2rr's `L2R_DEBUG` lines, fails when a program
+lacks the shapes it looks at, and checks itself: `RtJpWide` with
+`L2R_NO_INLINE_ANCHORS` (no anchors) must fail it. The build time it
+guards against: `RtJpWide` under rcgmp took 740 s to build with the
+three join points inlined into every arm, and 5 s without.
 
 ### Typed arrays: the `RtTArr*` corpus
 

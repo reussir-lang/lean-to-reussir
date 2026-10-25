@@ -6,7 +6,11 @@ alternative of the next `match`; the early return keeps those join points
 from being J2. Each is small, but when only one copy was bounded, it was
 copied into all 800 arms: 11.7 MB of .rr, and rrc ran out of memory at
 16 GB. lean2rr now bounds what all the copies add, so these join points
-are outlined (0.6 MB of .rr). -/
+are outlined (0.6 MB of .rr). Under `--int-backend rcgmp` the 800-arm
+`match` is one function (`int-match`), and rrc's inliner copied the
+outlined join points back into every arm (a 740 s build): they are kept
+out of it (`inline-anchors`, Emit/CopyAnchors; checked by
+inline-anchors-check.sh). -/
 
 inductive RtJpWideS where
   | a

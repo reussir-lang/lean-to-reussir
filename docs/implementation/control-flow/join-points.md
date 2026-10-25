@@ -201,6 +201,34 @@ relative to `lean2rr/LeanToReussir/`. Plan
   ([../types/lean-passes.md](../types/lean-passes.md#join-point-parameters-are-put-in-the-order-of-their-first-use)).
 - **Remove only if:** never.
 
+### An outlined join point with many calls in one function stays a function
+
+- **What:** An outlined join point (J3) is a function, and rrc's MLIR
+  inliner inlines a function of at most 256 operations at every call.
+  When one function calls outlined join points so often that their
+  copies would add more than 4000 operations to it (Σ (calls - 1) × size,
+  over the callees of more than 32 operations), lean2rr marks the join
+  points that add the most `#[transform_anchor]`, until the rest is under
+  4000, and the inliner leaves them out of line. The rule is not specific
+  to join points: it applies to every generated function (required
+  practice `inline-anchors`).
+- **Why:** `jp-small` outlines a join point whose copies would be too much
+  code, and the inliner then copied it back into every jump. `RtJpWide`
+  under `--int-backend rcgmp` (one `match` with 800 arms, three outlined
+  join points of about 160 operations, about 266 calls each) took 740 s
+  to build, because LLVM's passes are superlinear in the size of the one
+  function that got all the copies; with the join points out of line,
+  5 s. Under `leanrt` that `match` is a chain of tests that
+  `Outline` cuts into functions of a few arms each, so no function calls
+  a join point more than 3 times and nothing is marked.
+- **Where:** `Emit/CopyAnchors.lean`; the entry in
+  [../reussir-workarounds/build-time.md](../reussir-workarounds/build-time.md#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function).
+  Tests: `tests/runtime/inline-anchors-check.sh` (`RtJpWide`;
+  `RtJpAnchors`: a small join point with 300 calls and a larger one with
+  4 calls, neither marked; `RtCopyAnchors`: functions, not join points).
+- **Remove only if:** rrc's inliner bounds the code that its copies of a
+  callee add to one function.
+
 ### A local `fun` left after lambda lifting is a raw closure
 
 - **What:** A local function (lambda lifting normally removes them all) is

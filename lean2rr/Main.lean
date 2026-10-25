@@ -195,10 +195,25 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- the program text. `L2R_NO_OUTLINE` and
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
   -- the repros of three Reussir costs (fixed upstream in Reussir #672,
-  -- #670 and #674; their repros are in git history).
+  -- #670 and #674; their repros are in git history) and of the inliner's
+  -- copies (`RtJpWide` under `--int-backend rcgmp`).
+  let noAnchors := (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
-  let prog := if (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome then { prog with anchored := {} } else prog
+  let prog := if noAnchors then { prog with anchored := {} } else prog
   let prog := prog.runRRPasses cfg
+  -- `inline-anchors`, last, on the final functions and calls: the
+  -- functions whose inlined copies would make one function too large
+  -- (Emit/CopyAnchors).
+  let prog ← if noAnchors then pure prog else do
+    let (prog, d) := prog.anchorCopies
+    if (← IO.getEnv "L2R_DEBUG").isSome then
+      let fmt (as : Array CopyAnchor) : String :=
+        String.join (as.toList.map fun a => s!" {a.fn} (size {a.size}, own {a.own}, {a.calls} calls in {a.caller})")
+      IO.eprintln s!"lean2rr: inline-anchors: {d.anchored.size} function(s) kept out of rrc's inliner for their copies{fmt d.anchored}"
+      IO.eprintln s!"lean2rr: inline-anchors: the most that copies add to one function before anchoring: {d.largest.1}{if d.largest.1 == 0 then "" else s!" (in {d.largest.2})"}"
+      unless d.small.isEmpty do
+        IO.eprintln s!"lean2rr: inline-anchors: {d.small.size} small function(s) left to rrc's inliner over the budget{fmt d.small}"
+    pure prog
   -- `--int-backend rcgmp` without `--rcgmp-type-args`: no `Nat` or `Int`
   -- left at a type argument of the runtime's generic FFI functions
   -- (Emit/IntBackendCheck).

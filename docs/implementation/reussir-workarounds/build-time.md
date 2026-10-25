@@ -10,6 +10,8 @@ costs 11 and 23, which had no workaround), so their files in
 lean2rr's builds use a later base, upstream `00906e38` with the series
 (`./reussir` branch `l2r-stepd`, `e3b96e03`); the workarounds stay until
 each is removed (the removed ones are [at the end](#removed-workarounds)).
+One cost here is current, with no entry in `reussir-bugs/`:
+[the inliner's copies of a callee into one function](#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function).
 The open issue files are in
 [`reussir-bugs/`](../../../reussir-bugs/README.md); plan
 [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features)
@@ -85,13 +87,127 @@ lean2rr's files.
   function, so that variant is parked.
 - **Where:** `Lower/Finish.lean`: `anchoredFns`; `Emit/Program.lean`:
   `LoweredProgram.render`; `lean2rr/Main.lean`: `pipeline`
-  (`L2R_NO_INLINE_ANCHORS` empties the set, the size anchors too, for
-  the repro); required part
+  (`L2R_NO_INLINE_ANCHORS` empties the set, the size anchors and the
+  [copy anchors](#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function)
+  too, for the repro); required part
   `inline-anchors` in `Opt/Registry.lean`.
 - **Remove only if:** a no-inline attribute replaces the anchor, or the
   inliner's ordinary one-level inlining of this code stops costing build
   time and memory (on Reussir `7954a367`: 2.2 to 4 times the rrc time and
   2 to 2.9 times the memory on the tower repros without the anchors).
+
+### Current cost: the inliner copies a callee into every call of one function
+
+- **What:** lean2rr marks `#[transform_anchor]` the callees whose copies
+  would make a function too large. It visits the generated functions
+  callees first. At each function `g`, the callees that rrc can inline
+  into it (not anchored, not refused by the inliner, a lower bound of
+  their size at most 256) and that are not small (size over 32) add Σ
+  (calls in `g` - 1) × size; while that is over 4000, the callee that adds
+  the most is marked. The size is lean2rr's count of the operations of the
+  function's own code plus the sizes of the functions that rrc may inline
+  into it first (rrc's inliner works bottom-up), at most 256 a copy; the
+  lower bound leaves out the recursive callees. The rule runs last, on the
+  final
+  functions (after `Outline` and the passes over the generated functions),
+  under both representations of `Nat` and `Int`. It is part of the
+  required practice `inline-anchors`, with the anchors above.
+- **Why:** Reussir's default inliner inlines every callee of at most 256
+  operations at every call; it does not count the calls. `RtJpWide` under
+  `--int-backend rcgmp` has one function with an 800-arm `match` on a
+  `Nat` (`int-match`), whose arms call three outlined join points (J3) of
+  about 160 operations, about 266 times each. The inliner copied them into
+  every arm: one LLVM function of about a million blocks. LLVM's
+  CorrelatedValuePropagation builds the dominator tree again for each
+  `switch` that it changes, so the time is about quadratic in the number
+  of arms (rrc on a synthetic `match` whose arms call those three join
+  points, 100 arms 18 s, 200 arms 51 s, 400 arms 189 s, 800 arms 771 s and
+  3.4 GB, with 17,600 `switch`es; 0.4 to 2.7 s with the join points out of
+  line). The full build of `RtJpWide` (lean2rr, rrc and the link) took
+  740 s and 3.5 GB; with the anchors 5 s and 0.54 GB, and an executable of
+  6.0 MB instead of 9.6 MB. Under `leanrt` the `.rr` is unchanged (6.4 s).
+  lean2rr outlined those join points because their copies were too much
+  code (`jp-small`'s bound), and the inliner copied them in again. A cost,
+  not a bug: rrc's output is correct.
+- **Why the details:**
+  - The copies are summed per caller, because the cost is in the size of
+    one function: copies spread over many functions add code linearly
+    (lean-zip's hash updates, `updateHashesMergedFast`, 226 calls in 61
+    functions, at most 20 in one). Summed over the callees, because
+    several callees that each stay under the budget can be over it
+    together: `RtJpWide` cut to 75 arms (three join points, 24 or 25 calls
+    each, 3840 each, 11,500 together) built in 9.6 s and 411 MB under
+    rcgmp; with two of them marked (the third adds 3816), 4.1 s and 208
+    MB.
+  - Two sizes. The size of a copy counts what rrc may inline into the
+    function first: a wrapper of 5 operations that calls a function of
+    175 once is a function of 180 after the bottom-up inlining. Called
+    from a 500-arm `match` on an enumeration, it built in 7.5 s; marked,
+    1.1 s (leanrt). The size that decides whether rrc can inline a
+    function at all is a lower bound: it leaves out the recursive callees,
+    which rrc may not inline into it. A function of 89 operations that
+    calls a recursive one of 175 once is 264 with it, over the inliner's
+    limit, but rrc inlined it at all 500 arms: 2.7 s and 185 MB; marked,
+    1.0 s and 112 MB (leanrt). Both sizes leave out the functions marked
+    so far. A function that a later caller marks can still count in a
+    size computed before it: the size of a copy is then too large (more
+    marks, the safe side), and for the lower bound the pass is repeated,
+    with every function marked so far marked from the start, until it
+    marks nothing new. A function whose lower bound is over 256 is taken
+    to be over the inliner's limit (lean2rr's count is lower than rrc's:
+    no reference counting); a copy counts at most 256.
+  - A small function (size 32 or less) is never marked: a copy is about as
+    small as the call, and LLVM inlines it again anyway. (`RtJpAnchors`:
+    a join point of size 23 called from 300 arms, 299 × 23 = 6877, stays
+    inlinable.)
+  - A function that calls itself is marked like any other. MLIR's inliner
+    does not inline a self-recursive function, but under `-O aggressive`
+    Reussir's unique-carrying specialization, which runs before the
+    inliner, can redirect its self calls to a specialized copy; the
+    function is then no longer recursive, and it is inlined (a list
+    builder called from 150 arms: 2.1 s, marked 1.2 s, leanrt).
+  - In a cycle of the call graph, MLIR's inliner refuses only a callee
+    that calls itself or calls its caller back directly, and Reussir's
+    declines only the calls that an inlining copied in. In a cycle of
+    three functions `fa` → `fb` → `fc` → `fa` whose `fb` calls `fc` from
+    100 arms, rrc inlined `fc` (with `fa`) into every arm: 3.5 s and 179
+    MB; with `fc` marked, 1.0 s and 106 MB (leanrt). So such calls count,
+    with the callee's sizes before the cycle's decisions (its own size and
+    the callees outside the cycle).
+  - The budget is `jp-small`'s bound for a loop's continuation (4000
+    nodes), the most that lean2rr's own copies of a join point may add.
+- **Measured:** on the shared benchmark set (53 programs, `unread-fields`
+  on) and the classic corpus (18), under both representations, 128 of the
+  142 translations give the same `.rr` as before the rule. The other 14:
+  - lean-zip (Z01c, Z01d, Z01r, Z01t under each representation): one
+    function marked, `updateHashesMergedFast` (size 118 under leanrt, 107
+    under rcgmp; 20 calls in the deflate loop's state machine, whose sum is
+    5255 to 5898). The executables (`Survey.Main`, `ZipBench`, under both
+    representations) are byte-identical to those built without the mark:
+    rrc did not inline that function there anyway.
+  - Cedar (Z06d, Z06g, Z06t, one program `CedarBench`): `Std.Time`'s
+    parsers called from `parseWith` (`parseNatToBounded` 19 times,
+    `parseSigned` 6 times, and under leanrt `parseNum` 5 times; sums 9509
+    and 10,388) are marked, 3 functions under leanrt, 2 under rcgmp. Under
+    rcgmp the executable is byte-identical. Under leanrt it differs in
+    `Std.Time`'s parsers (`parseWith` 75 KB instead of 85 KB) and two
+    application functions of `Cedar.Spec.Proto` (12 bytes each); the
+    output is the same, the instruction counts (cachegrind, SVE off) are
+    -0.006% (Z06t), -0.008% (Z06g) and -0.014% (Z06d), and the build
+    takes 78.8 s instead of 80.6 s.
+  The largest sum elsewhere is 2534 (`IO.Error.toString`).
+- **Where:** `Emit/CopyAnchors.lean`: `LoweredProgram.anchorCopies`,
+  `copyAnchors`, `copyAnchorPass`, `callGraph`, `CallGraph.refused`,
+  `calleeCounts`, `fnSize`, `exprSize`, `copyAnchorSmallSize`,
+  `copyAnchorBudget`, `copyAnchorInlineLimit`;
+  `lean2rr/Main.lean`: `pipeline` (`L2R_NO_INLINE_ANCHORS` turns it off;
+  `L2R_DEBUG` prints the functions it marks, the small ones it leaves over
+  the budget, and the largest sum). Tests:
+  `tests/runtime/inline-anchors-check.sh` (`RtJpWide`, `RtJpAnchors`,
+  `RtCopyAnchors`).
+- **Remove only if:** Reussir's inliner bounds the code that its copies
+  add to one function (a count of the calls), and `RtJpWide` under rcgmp
+  builds in seconds without the anchors.
 
 ### Old issue 35 (cost): every texture was compiled again on every build
 

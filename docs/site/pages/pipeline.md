@@ -368,7 +368,7 @@ What lean2rr uses from Reussir:
 | tagged opaque handles | one-word `Nat` and `Int` |
 | textures (`#[ffi(import)]` functions with a Rust body) | the prelude's calls into `leanrt`; inlined when compiled for the same CPU |
 | token reuse, `--reuse-across-call` | in-place updates, as Lean's reset/reuse |
-| `#[transform_anchor]` | keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner |
+| `#[transform_anchor]` | keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner, and also functions that one function calls so often that their copies would make it too large |
 
 The driver builds the shared crate `lean-runtime` (the pinned submodule,
 with cargo) and the runtime crate `leanrt`, each one cached. Then it runs

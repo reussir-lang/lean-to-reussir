@@ -444,7 +444,7 @@ glue and LLVM code generation. <code>rrc</code> is its compiler driver.</p>
 </tr>
 <tr>
 <td><code>#[transform_anchor]</code></td>
-<td>keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner</td>
+<td>keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner, and also functions that one function calls so often that their copies would make it too large</td>
 </tr>
 </tbody>
 </table>

@@ -384,7 +384,9 @@ types inlinable, four towers in one program (`Cn3PolyScalar`) still took
 after Reussir's passes, still inlines them where it pays): the unboxing of
 statically unknown values and the conversions are slow paths anyway, and
 wrapped applications and function values of uniform types are rare outside
-such programs. -/
+such programs. (After `Outline` and the passes over the generated
+functions, `Emit/CopyAnchors` adds the functions whose inlined copies would
+make one function too large.) -/
 def anchoredFns : LowerM (Std.HashSet String) := do
   let st ← get
   let wraps (t : RR.Ty) : Bool := (st.fnVariants.getD t.rt #[]).any (· matches .wrap ..)

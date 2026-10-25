@@ -11,7 +11,8 @@ to [§5.6](../../translation-plan.md#56-join-points), and "Build time" in
 - [cases.md](cases.md): `cases` lowering and the match shapes that help
   Reussir reuse cells.
 - [join-points.md](join-points.md): the J1/J2/J1′/J3 strategy, sinking,
-  the bounds on duplication, captures of outlined join points.
+  the bounds on duplication, captures of outlined join points, outlined
+  join points kept out of rrc's inliner when one function calls them often.
 - [state-machines.md](state-machines.md): J4, loops through outlined join
   points as one function.
 - [outline.md](outline.md): deep and long functions cut into parts after
