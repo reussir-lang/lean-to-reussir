@@ -1,3 +1,4 @@
-# 5000 levels of a recursion through `walk2` and `step2` on a 1 MiB stack (natively: Lean's main stack); then the default run (1000 levels).
+# 5000 levels of a recursion through `walk2` and `step2` on a 1 MiB stack (natively: Lean's main stack); a million tail calls of `la`, `lb`, `lh` on a 1 MiB stack (natively: sibling calls); then the default run (1000 levels).
 LEAN_STACK_SIZE_KB=1024 $BIN 5000; echo "5000 levels (1 MiB stack): exit $?"
+LEAN_STACK_SIZE_KB=1024 $BIN loop 1000000; echo "loop (1 MiB stack): exit $?"
 $BIN; echo "exit $?"

@@ -268,8 +268,8 @@ this form; the hooks handle it and leave other forms to the earlier ones. -/
 def Opt.StateMachines.install (c : PassConfig) : PassConfig :=
   let prev := c.lower.stateMachine
   { c with lower := { c.lower with stateMachine :=
-      { plan := fun d body outlined pnames cycle =>
-          (prev.plan d body outlined pnames cycle).map ({ · with form := alongsideForm })
+      { plan := fun d body outlined pnames entryFn? =>
+          (prev.plan d body outlined pnames entryFn?).map ({ · with form := alongsideForm })
         emit := fun d sm params ret block =>
           if sm.form == alongsideForm then emitStateMachineAlongside d sm params ret block
           else prev.emit d sm params ret block

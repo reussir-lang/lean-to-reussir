@@ -1,18 +1,24 @@
-/-! Runtime test (expected failure): a deep recursion that is not a tail
-call but passes a tail call between two declarations of a cycle of tail
-calls at every level, in a cycle with a big declaration. `walk2` calls
-`step2` (`step2 (n - 1) .. + 1`, not a tail call), `step2` tail-calls
-`walk2`, `walk2` tail-calls `heavy2` (48 live values, 13 parameters), and
-`heavy2` tail-calls `step2`. lean2rr runs the cycle in one state machine
-(translation plan §5.6): the tail call of `walk2` in `step2`'s own
-function enters it, and the state machine's frame, which LLVM sizes for
-all its arms (`heavy2`'s), is on the stack at every level of the recursion,
-with `step2`'s: about 450 bytes per level instead of about 47 (each
-function on its own), so 5000 levels overflow a 1 MiB stack
-(`.pipe`), where native Lean (its main stack) and lean2rr with each
-declaration a function of its own pass. From the review of fix-sm-mutual
-(2026-10-21; 100000 levels on an 8 MiB stack). `.xfail` until the state
-machine's arms are functions of their own (state-machines.md). -/
+/-! Runtime test: a deep recursion that is not a tail call but passes a
+tail call between two declarations of a cycle of tail calls at every
+level, in a cycle with a big declaration. `walk2` calls `step2`
+(`step2 (n - 1) .. + 1`, not a tail call), `step2` tail-calls `walk2`,
+`walk2` tail-calls `heavy2` (48 live values, 13 parameters), and `heavy2`
+tail-calls `step2`. lean2rr runs the cycle in one state machine
+(translation plan §5.6), whose frame LLVM sizes for all its arms
+(`heavy2`'s). When the tail call of `walk2` in `step2`'s own function
+entered it, that frame was on the stack at every level of the recursion,
+with `step2`'s: about 450 bytes per level instead of about 47, and 5000
+levels overflowed a 1 MiB stack (`.pipe`), where native Lean (its main
+stack) passes. Now `walk2` and `step2`, the light declarations of the
+cycle, also run in a light state machine of their own (`lowerGroup`),
+which their own functions' tail calls of each other enter; its tail calls
+of `heavy2` enter the cycle's state machine (`.l2r-debug`: both). From the
+review of fix-sm-mutual (2026-10-21; 100000 levels on an 8 MiB stack).
+`loop`: a cycle of tail calls with two light declarations (`la`, `lb`)
+and a heavy one (`lh`, eight parameters), a million calls on a 1 MiB
+stack, entered at each declaration: the light state machine loops, its tail calls of `lh` enter
+the cycle's state machine, which then runs the cycle (natively: sibling
+calls, constant stack). -/
 
 mutual
 @[noinline] partial def walk2 (n : Nat) (acc : UInt64) : Nat :=
@@ -76,7 +82,49 @@ mutual
   step2 (n - 1) (x0 ^^^ x1 ^^^ x2 ^^^ x3 ^^^ x4 ^^^ x5 ^^^ x6 ^^^ x7 ^^^ x8 ^^^ x9 ^^^ x10 ^^^ x11 ^^^ x12 ^^^ x13 ^^^ x14 ^^^ x15 ^^^ x16 ^^^ x17 ^^^ x18 ^^^ x19 ^^^ x20 ^^^ x21 ^^^ x22 ^^^ x23 ^^^ x24 ^^^ x25 ^^^ x26 ^^^ x27 ^^^ x28 ^^^ x29 ^^^ x30 ^^^ x31 ^^^ x32 ^^^ x33 ^^^ x34 ^^^ x35 ^^^ x36 ^^^ x37 ^^^ x38 ^^^ x39 ^^^ x40 ^^^ x41 ^^^ x42 ^^^ x43 ^^^ x44 ^^^ x45 ^^^ x46 ^^^ x47 ^^^ l ^^^ w.toUInt64)
 end
 
+-- loop: light `la`, `lb` and heavy `lh` call each other in tail position only (their
+-- arguments are `UInt64`s, eight at most, so that natively each call is a sibling call too)
+mutual
+@[noinline] partial def la (n acc : UInt64) : Nat :=
+  if n == 0 then acc.toNat
+  else if n % 1000 == 0 then lh n acc 1 2 3 4 5 6
+  else lb (n - 1) (acc + 1)
+@[noinline] partial def lb (n acc : UInt64) : Nat :=
+  la n (acc * 3 % 1000003 + 1)
+@[noinline] partial def lh (n acc a b c d e f : UInt64) : Nat :=
+  let x0 := acc * 3 + a
+  let x1 := x0 * 5 + b
+  let x2 := x1 * 7 + c
+  let x3 := x2 * 9 + d
+  let x4 := x3 * 11 + e
+  let x5 := x4 * 13 + f
+  let x6 := x5 * 15 + a
+  let x7 := x6 * 17 + b
+  let x8 := x7 * 19 + c
+  let x9 := x8 * 21 + d
+  let x10 := x9 * 23 + e
+  let x11 := x10 * 25 + f
+  let x12 := x11 * 27 + a
+  let x13 := x12 * 29 + b
+  let x14 := x13 * 31 + c
+  let x15 := x14 * 33 + d
+  let x16 := x15 * 35 + e
+  let x17 := x16 * 37 + f
+  let x18 := x17 * 39 + a
+  let x19 := x18 * 41 + b
+  let x20 := x19 * 43 + c
+  let x21 := x20 * 45 + d
+  let x22 := x21 * 47 + e
+  let x23 := x22 * 49 + f
+  lb (n - 1) ((x0 ^^^ x1 ^^^ x2 ^^^ x3 ^^^ x4 ^^^ x5 ^^^ x6 ^^^ x7 ^^^ x8 ^^^ x9 ^^^ x10 ^^^ x11 ^^^ x12 ^^^ x13 ^^^ x14 ^^^ x15 ^^^ x16 ^^^ x17 ^^^ x18 ^^^ x19 ^^^ x20 ^^^ x21 ^^^ x22 ^^^ x23) % 1000003)
+end
+
 def main (args : List String) : IO Unit := do
-  let n := (args.head? >>= String.toNat?).getD 1000
-  IO.println s!"walk2 {walk2 n 0}"
-  IO.println s!"heavy2 {heavy2 2 5 1 2 3 4 5 6 7 8 9 10 11}"
+  match args with
+  | ["loop", m] =>
+    let n := m.toNat!.toUInt64
+    IO.println s!"loop {la n 0} {lb n 5} {lh n 1 1 2 3 4 5 6}"
+  | _ =>
+    let n := (args.head? >>= String.toNat?).getD 1000
+    IO.println s!"walk2 {walk2 n 0}"
+    IO.println s!"heavy2 {heavy2 2 5 1 2 3 4 5 6 7 8 9 10 11}"

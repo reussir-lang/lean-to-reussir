@@ -72,9 +72,22 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   until it returns (`borrowKeeps`; resource programs,
   [../ownership.md](../ownership.md)): natively it is no tail call either,
   as Lean's borrow inference keeps tail calls only for a declaration's
-  calls of itself (`InferBorrow.preserveTailCall`). `L2R_DEBUG=1` prints
+  calls of itself (`InferBorrow.preserveTailCall`). A cycle whose
+  declarations' frames differ much also gets a light state machine,
+  `<f>_lit_sm`, of its light declarations (entry functions `<g>_lit`),
+  built the same way: a declaration is light when its weight (its
+  parameters and the `let`s of its longest path, `cycleWeight`) is at most
+  32 or at most twice the lightest one's (`lightMembers`), and the light
+  state machine exists when two or more light declarations tail-call each
+  other and one or more declarations are heavy. Then the own functions'
+  tail calls of a light declaration enter the light state machine; in it,
+  a tail call of a light declaration re-enters it, and one of a heavy
+  declaration enters the cycle's state machine (a call: one more frame per
+  entry), where the cycle then runs; the own functions' tail calls of a
+  heavy declaration enter the cycle's state machine. `L2R_DEBUG=1` prints
   each group (`lean2rr: one state machine for a cycle of tail calls:
-  ...`).
+  ...`) and each light state machine (`lean2rr: a light state machine for
+  the cycle of tail calls ...: ...`).
 
   ```
   mutual
@@ -124,18 +137,40 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   by 5 KB (of 26.9 MB), with 8 more helper functions, and lean2rr's peak
   RSS by 13 MB (of 4.98 GB), against dev 0810b9ec. The shared bench set's
   47 programs and the classic corpus have no such cycle (their `.rr` are
-  unchanged). Residual cost: a recursion that is not a tail call but
-  passes a tail call between two declarations of the cycle at every level
-  (`f` calls `g` not in tail position, `g` tail-calls `f`) enters the
+  unchanged). The light state machine: a recursion that is not a tail call
+  but passes a tail call between two declarations of the cycle at every
+  level (`f` calls `g` not in tail position, `g` tail-calls `f`) enters a
   state machine at every level, and its frame, sized for all its arms, is
   on the stack at every level with `g`'s. When one declaration of the
-  cycle is big, that is about 450 bytes per level instead of about 47,
-  enough to overflow a small stack where each declaration as a function
-  of its own passes: `RtTailCyclesStack2` (`walk2` calls `step2` not in
-  tail position, `step2` tail-calls `walk2`, in a cycle with `heavy2`)
-  overflows a 1 MiB stack at 5000 levels; at 100000 levels on an 8 MiB
-  stack it overflows with a peak RSS of 55.1 MB, where each declaration as
-  a function of its own uses 11.3 MB and native Lean 17.2 MB.
+  cycle is big, the cycle's state machine needs about 450 bytes per level
+  where each declaration as a function of its own needs about 47:
+  `RtTailCyclesStack2` (`walk2` calls `step2` not in tail position,
+  `step2` tail-calls `walk2`, in a cycle with `heavy2`, 48 live values and
+  13 parameters) overflowed a 1 MiB stack at 5000 levels, and at 100000
+  levels an 8 MiB stack (peak RSS 55.1 MB on the default stack; native
+  Lean 17.1 MB). In the light state machine of `walk2` and `step2`, about
+  80 bytes per level (10000 levels pass on 1 MiB); at 100000 levels 14.3
+  MB, also on an 8 MiB stack. A tail cycle of the light declarations runs
+  in the light state machine, which passes fewer slots: 18.0 instructions
+  per step instead of 23.0 (cachegrind, two light declarations and a heavy
+  one). Cycles without heavy declarations get the same code as before
+  (`RtTailCycles`, `RtOutlineStates`, `RtTailCyclesStack`,
+  `RtTailCyclesBorrow`: identical `.rr`). Cost: in such a cycle, each light
+  declaration's code is lowered three times. Not done: a trampoline (each
+  arm a function of its own that returns the next step, `Outline`'s step
+  values, called by a small loop) does not keep the frame small. Reussir's
+  inliner (callees of at most 256 operations) and LLVM's (a function
+  called once) put the arms back into the loop (`RtTailCyclesStack2`: a
+  576-byte frame), and Reussir's language has no attribute that stops them;
+  with the arms kept apart (functions with external linkage, the arms'
+  calls into the cycle made to the loop itself), the step that an arm
+  returns through memory is as wide as the widest declaration's parameters
+  (13 words), and the loop's frame was 384 bytes: per level as much as
+  before. Residual: a recursion whose every level passes a tail call into
+  a heavy declaration enters the cycle's state machine at every level, as
+  the heavy declaration's own frame would be there natively too; with two
+  heavy declarations of different sizes, the smaller one's levels use the
+  bigger one's frame.
   Tests: `RtTailCycles` (`.pipe`: a million calls on a 1 MiB stack:
   multi-word results, a cycle of three, two state machines with different
   slot counts; `.l2r-debug`: the groups; `sm-slots-check.sh`: the slots
@@ -144,19 +179,20 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   1 MiB stack), `RtTailCyclesBorrow` (handles passed owned to borrowed
   parameters in a cycle of two and one of three, and in the state
   machine's arms of both declarations of a cycle), `RtTailCyclesStack2`
-  (the residual cost, `.xfail`).
-- **Status:** the residual cost is accepted for now. Planned fix: a small
-  trampoline loop that calls each arm as a function of its own, which
-  returns the next step (the step values that `Outline` uses), so that
-  the state machine's frame stays small.
+  (`.pipe`: 5000 levels on a 1 MiB stack; `loop`: a million tail calls of
+  two light declarations and a heavy one on a 1 MiB stack, entered at each
+  of them, through the light and the cycle's state machine; `.l2r-debug`:
+  the light state machines).
 - **Where:** `Lower/StateMachine.lean`: `tailCallees`, `tailCallGroups`,
-  `stateMachinePlan` (`cycle`: the names `_cyc`), `emitStateMachine`
+  `stateMachinePlan` (`entryFn?`: the names `_cyc`, `_lit`),
+  `longestPathLets`, `cycleWeight`, `lightMembers`, `emitStateMachine`
   (`StateMachine.entryFn`, the entry functions of the other
   declarations); `Lower/Ctx.lean`: `SmMember`, `StateMachine.members`,
-  `StateMachine.entryFn`, `CodeCtx.decl`, `CodeCtx.cycle`;
+  `StateMachine.entryFn`, `CodeCtx.decl`, `CodeCtx.cycles`;
   `Lower/Code.lean`: `tailCallEntry` (re-entry in a state machine, entry
-  from a declaration's own function, the borrow check), `DeclSetup`,
-  `setupDecl`, `lowerDeclCode`, `lowerDecl` (`cycle?`), `lowerGroup`;
+  from a declaration's own function or from the light state machine, the
+  borrow check), `DeclSetup`, `setupDecl`, `lowerDeclCode`, `lowerDecl`
+  (`cycles`), `cycleMachine`, `lowerGroup`;
   `Opt/StateMachines.lean`: `emitStateMachineAlongside` (the entry
   functions); `Emit/Program.lean`: the lowering loop. Required part
   `loop-state-machines`.

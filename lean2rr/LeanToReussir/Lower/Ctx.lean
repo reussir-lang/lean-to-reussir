@@ -42,8 +42,8 @@ structure SmMember where
   /-- Its parameters (the variant's fields): names and types. -/
   params : Array (String × RR.Ty)
   /-- The function, with its parameters, that enters the state machine at
-  `variant` (`fnName name ++ "_cyc"`; the declaration's own function is
-  `fnName name`). -/
+  `variant` (`fnName name ++ "_cyc"`, `_lit` for the light state machine;
+  the declaration's own function is `fnName name`). -/
   entryFn : String
   deriving Inhabited
 
@@ -60,7 +60,8 @@ call between separate functions uses stack per call unless LLVM makes it a
 sibling call. That state machine is named apart from the first
 declaration's own (`entryFn`): each declaration keeps its own function,
 and only its tail calls of the others enter the cycle's state machine
-(`CodeCtx.cycle`). Planned and emitted by the lowering hook
+(`CodeCtx.cycles`), or its light state machine, of its light
+declarations, when it has one (`lowerGroup`). Planned and emitted by the lowering hook
 `LowerHooks.stateMachine`; `lowerCode` re-enters it when the context has
 one. -/
 structure StateMachine where
@@ -82,7 +83,8 @@ structure StateMachine where
   entry : String := "e"
   /-- The function, with the declaration's parameters, that enters the
   state machine at `entry`: the declaration's own function (`fnName self`),
-  or for the state machine of a cycle of tail calls `fnName self ++ "_cyc"`. -/
+  or for a state machine of a cycle of tail calls `fnName self ++ "_cyc"`
+  (`_lit` for its light state machine). -/
   entryFn : String
   /-- The other declarations of its cycle of tail calls (`SmMember`), in
   the order of their entry variants; none for a single declaration. -/
@@ -114,11 +116,15 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   no tail call natively when the caller keeps an argument until it returns
   (`borrowKeeps`), and stays a call. -/
   decl : Name := .anonymous
-  /-- While a declaration's own function is lowered: the state machine of
-  its cycle of tail calls (`lowerGroup`), if any. A tail call of another
-  declaration of the cycle enters it (calls that declaration's entry
-  function, `StateMachine.entryFn`, `SmMember.entryFn`). -/
-  cycle : Option StateMachine := none
+  /-- The state machines of the cycle of tail calls of the declaration
+  being lowered that its tail calls enter (`lowerGroup`), in order of
+  preference: while its own function is lowered, the cycle's light state
+  machine, if any, then the cycle's state machine; while its arm of the
+  light state machine is lowered, the cycle's state machine. A tail call of
+  another declaration of the cycle enters the first of them that has it
+  (calls that declaration's entry function of that state machine,
+  `StateMachine.entryFn`, `SmMember.entryFn`). -/
+  cycles : Array StateMachine := #[]
   /-- Variables that a hook bound again, in the current alternative, to a
   value of its own equal to theirs (Opt/NullaryScrutinee): other hooks must
   not bind them again there. -/

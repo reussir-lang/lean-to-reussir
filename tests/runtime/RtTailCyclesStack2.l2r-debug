@@ -1,0 +1,4 @@
+lean2rr: one state machine for a cycle of tail calls: #[heavy2, step2, walk2]
+lean2rr: a light state machine for the cycle of tail calls #[heavy2, step2, walk2]: #[step2, walk2]
+lean2rr: one state machine for a cycle of tail calls: #[la, lb, lh]
+lean2rr: a light state machine for the cycle of tail calls #[la, lb, lh]: #[la, lb]

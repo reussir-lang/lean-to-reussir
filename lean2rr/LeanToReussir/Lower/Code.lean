@@ -116,10 +116,11 @@ translation plan §5.6):
   entry, and one of another declaration of its cycle of tail calls at that
   declaration's variant (`StateMachine.members`): a self tail call of the
   dispatching function, which LLVM turns into a loop;
-- in a declaration's own function, a tail call of another declaration of
-  its cycle (`CodeCtx.cycle`) calls that declaration's entry function of
-  the cycle's state machine (`StateMachine.entryFn`, `SmMember.entryFn`),
-  where the cycle then runs.
+- in a declaration's own function, or in its arm of the cycle's light
+  state machine, a tail call of another declaration of its cycle calls that
+  declaration's entry function (`StateMachine.entryFn`, `SmMember.entryFn`)
+  of the first state machine of `CodeCtx.cycles` that has it, where the
+  cycle then runs.
 A tail call of another declaration than the one whose code it is
 (`CodeCtx.decl`) stays a call when the caller keeps an argument until it
 returns (`borrowKeeps`, Lower/Borrow): natively no tail call either (Lean's
@@ -129,11 +130,11 @@ def tailCallEntry (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) : LowerM
   let inMachine : Option (Nat × (Array RR.Expr → LowerM RR.Expr)) := ctx.sm.bind fun sm =>
     if f == sm.self then some (sm.arity, H.stateMachine.selfCall sm)
     else (sm.members.find? (·.name == f)).map fun mb => (mb.arity, H.stateMachine.jumpCall sm mb.variant)
-  let intoCycle : Option (Nat × (Array RR.Expr → LowerM RR.Expr)) := ctx.cycle.bind fun cy =>
-    let call (fn : String) (vals : Array RR.Expr) : LowerM RR.Expr := pure (.call fn #[] vals)
-    if f == ctx.decl then none
-    else if f == cy.self then some (cy.arity, call cy.entryFn)
-    else (cy.members.find? (·.name == f)).map fun mb => (mb.arity, call mb.entryFn)
+  let intoCycle : Option (Nat × (Array RR.Expr → LowerM RR.Expr)) :=
+    if f == ctx.decl then none else ctx.cycles.findSome? fun cy =>
+      let call (fn : String) (vals : Array RR.Expr) : LowerM RR.Expr := pure (.call fn #[] vals)
+      if f == cy.self then some (cy.arity, call cy.entryFn)
+      else (cy.members.find? (·.name == f)).map fun mb => (mb.arity, call mb.entryFn)
   let some (arity, enter) := inMachine <|> intoCycle | return none
   if args.size != arity then return none
   if f != ctx.decl then
@@ -516,12 +517,12 @@ def setupDecl (d : Decl .pure) (body : Code .pure) : LowerM DeclSetup := do
   return { body, resTy := r, ret, params, vars, loop, outlined }
 
 /-- Lower the code of declaration `d` (set up as `su`) in state machine
-`sm?`, if any; `cycle?`: the state machine of its cycle of tail calls, when
-this is its own function (`CodeCtx.cycle`). -/
+`sm?`, if any; `cycles`: the state machines of its cycle of tail calls that
+its tail calls enter (`CodeCtx.cycles`). -/
 def lowerDeclCode (d : Decl .pure) (su : DeclSetup) (sm? : Option StateMachine)
-    (cycle? : Option StateMachine := none) : LowerM RR.Block := do
+    (cycles : Array StateMachine := #[]) : LowerM RR.Block := do
   let ctx : CodeCtx := { vars := su.vars, sm := sm?, loop := su.loop, used := codeUses su.body {},
-                         boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycle := cycle? }
+                         boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycles }
   -- The body of a declaration without parameters runs once: a constant
   -- boxed there is boxed in line (`boxOf`), not given a once-cell.
   modify fun s => { s with inConstBody := d.params.isEmpty }
@@ -536,10 +537,10 @@ def ownLowering (d : Decl .pure) : LowerM Bool := do
   let orig := ((← read).keys.find? d.name).map (·.decl) |>.getD d.name
   return !(orig == ``IO.Process.output && d.params.size == 3)
 
-/-- Lower a declaration with code to a Reussir function; `cycle?`: the
-state machine of its cycle of tail calls (`lowerGroup`), which its tail
-calls of the cycle's other declarations enter. -/
-def lowerDecl (d : Decl .pure) (cycle? : Option StateMachine := none) : LowerM Unit := do
+/-- Lower a declaration with code to a Reussir function; `cycles`: the
+state machines of its cycle of tail calls (`lowerGroup`), which its tail
+calls of the cycle's other declarations enter (`CodeCtx.cycles`). -/
+def lowerDecl (d : Decl .pure) (cycles : Array StateMachine := #[]) : LowerM Unit := do
   let .code body := d.value | return
   -- A constant whose code is one string literal (or one read of such a
   -- constant) has no function: its reads call the literal cache
@@ -556,9 +557,9 @@ def lowerDecl (d : Decl .pure) (cycle? : Option StateMachine := none) : LowerM U
     return
   -- J4: the declaration as one state machine when an outlined join point
   -- calls it back in tail position (`LowerHooks.stateMachine`).
-  let sm? := H.stateMachine.plan d su.body su.outlined (params.map (·.1)) false
+  let sm? := H.stateMachine.plan d su.body su.outlined (params.map (·.1)) none
   modify fun s => { s with smArms := #[] }
-  let block ← lowerDeclCode H d su sm? cycle?
+  let block ← lowerDeclCode H d su sm? cycles
   if let some sm := sm? then
     H.stateMachine.emit d sm params ret block
     return
@@ -582,15 +583,41 @@ def sourceDeclName (keys : NameMap InstKey) (n : Name) : Name :=
     | .str p _ | .num p _ => if p.isAnonymous then n else sourceDeclName keys p
     | .anonymous => n
 
+/-- A state machine of a cycle of tail calls (`lowerGroup`) over its
+declarations `ds` (set up as `sus`, in program order), entered by functions
+named with `suffix`: planned for the first declaration whatever its join
+points, with an entry variant per declaration (the first one's is the
+entry), whose fields are its parameters and whose arm is its lowered code,
+and an entry function per declaration (`fnName d ++ suffix`,
+`StateMachine.entryFn`, `SmMember.entryFn`). In it, a tail call of one of
+`ds` re-enters it at that declaration's variant (`tailCallEntry`), and one
+of another declaration of the cycle enters the first state machine of
+`cycles` that has it. Emitted here. -/
+def cycleMachine (ds : Array (Decl .pure)) (sus : Array DeclSetup) (suffix : String)
+    (cycles : Array StateMachine) : LowerM (Option StateMachine) := do
+  let d0 := ds[0]!
+  let su0 := sus[0]!
+  let some sm0 := H.stateMachine.plan d0 su0.body su0.outlined (su0.params.map (·.1)) (some (fnName d0.name ++ suffix))
+    | return none
+  let mut members : Array SmMember := #[]
+  for i in [1:ds.size] do
+    members := members.push { name := ds[i]!.name, variant := ← fresh "e", arity := ds[i]!.params.size,
+                              params := sus[i]!.params, entryFn := fnName ds[i]!.name ++ suffix }
+  let sm : StateMachine := { sm0 with members }
+  modify fun s => { s with smArms := #[] }
+  let block ← lowerDeclCode H d0 su0 (some sm) cycles
+  for i in [1:ds.size] do
+    let b ← lowerDeclCode H ds[i]! sus[i]! (some sm) cycles
+    modify fun s => { s with smArms := s.smArms.push (members[i - 1]!.variant, sus[i]!.params, b) }
+  H.stateMachine.emit d0 sm su0.params su0.ret block
+  return some sm
+
 /-- Lower the declarations `ds` of a cycle of tail calls (`tailCallGroups`,
 in program order): each as its own function (`lowerDecl`), as if alone,
-and the cycle as one more state machine (J4, translation plan §5.6), named
-after the first declaration (`_cyc`) and planned whatever its join points,
-with an entry variant per declaration (the first one's is the entry),
-whose fields are its parameters and whose arm is its lowered code, and an
-entry function per declaration (`StateMachine.entryFn`, `SmMember.entryFn`).
-In a declaration's own function, a tail call of another declaration of the
-cycle calls that declaration's entry function (`CodeCtx.cycle`); in the
+and the cycle as one more state machine (J4, translation plan §5.6,
+`cycleMachine`), named after the first declaration (`_cyc`). In a
+declaration's own function, a tail call of another declaration of the
+cycle calls that declaration's entry function (`CodeCtx.cycles`); in the
 state machine, a tail call of a declaration of the cycle re-enters it at
 that declaration's variant, a self tail call of the function, which LLVM
 turns into a loop (`tailCallEntry`). So the cycle runs in one frame, where
@@ -599,10 +626,20 @@ make one (not with a multi-word result whose returns LLVM merged, nor with
 more stack arguments than the caller's), and use stack per call. A call
 that is not a tail call calls the declaration's own function, also from
 the state machine: a deep recursion of a declaration uses its own frame per
-level, not the state machine's, which LLVM sizes for every arm (a small
-declaration in a cycle with a big one). When the results have different
-Reussir types, or one of them has no code of its own (`ownLowering`), the
-cycle has no state machine. -/
+level, not the state machine's, which LLVM sizes for every arm.
+
+A cycle whose declarations' frames differ much (`cycleWeight`,
+`lightMembers`), with two or more light declarations that tail-call each
+other and one or more heavy ones, also gets a light state machine of its
+light declarations (`_lit`): their own functions' tail calls of each other
+enter it instead, and in it, a tail call of a heavy declaration enters the
+cycle's state machine (one more frame per entry, and the cycle then runs
+there). So a deep recursion that passes a tail call between two light
+declarations at every level enters the light state machine at every level,
+whose frame is small, not the cycle's state machine, whose frame is sized
+for the heavy declarations' arms. When the results have different Reussir
+types, or one of them has no code of its own (`ownLowering`), the cycle
+has no state machine. -/
 def lowerGroup (ds : Array (Decl .pure)) : LowerM Unit := do
   let mut sus : Array DeclSetup := #[]
   for d in ds do
@@ -611,28 +648,28 @@ def lowerGroup (ds : Array (Decl .pure)) : LowerM Unit := do
       if (← ownLowering d) && !(← read).litConsts.contains d.name then
         sus := sus.push (← setupDecl H d body)
     | .extern _ => pure ()
-  let mut cycle? : Option StateMachine := none
+  let mut cycles : Array StateMachine := #[]
   if sus.size == ds.size && ds.size ≥ 2 && sus.all (·.ret == sus[0]!.ret) then
-    let d0 := ds[0]!
-    let su0 := sus[0]!
-    if let some sm0 := H.stateMachine.plan d0 su0.body su0.outlined (su0.params.map (·.1)) true then
-      let mut members : Array SmMember := #[]
-      for i in [1:ds.size] do
-        members := members.push { name := ds[i]!.name, variant := ← fresh "e", arity := ds[i]!.params.size,
-                                  params := sus[i]!.params, entryFn := fnName ds[i]!.name ++ "_cyc" }
-      let sm : StateMachine := { sm0 with members }
-      if (← IO.getEnv "L2R_DEBUG").isSome then
-        let keys := (← read).keys
-        let names := (ds.map (sourceDeclName keys ·.name |>.toString)).qsort (· < ·)
-        IO.eprintln s!"lean2rr: one state machine for a cycle of tail calls: {names}"
-      modify fun s => { s with smArms := #[] }
-      let block ← lowerDeclCode H d0 su0 (some sm)
-      for i in [1:ds.size] do
-        let b ← lowerDeclCode H ds[i]! sus[i]! (some sm)
-        modify fun s => { s with smArms := s.smArms.push (members[i - 1]!.variant, sus[i]!.params, b) }
-      H.stateMachine.emit d0 sm su0.params su0.ret block
-      cycle? := some sm
-  for d in ds do lowerDecl H d cycle?
+    let debug := (← IO.getEnv "L2R_DEBUG").isSome
+    let keys := (← read).keys
+    let names (xs : Array (Decl .pure)) := (xs.map (sourceDeclName keys ·.name |>.toString)).qsort (· < ·)
+    if let some sm := ← cycleMachine H ds sus "_cyc" #[] then
+      if debug then IO.eprintln s!"lean2rr: one state machine for a cycle of tail calls: {names ds}"
+      cycles := #[sm]
+      -- The light state machine, of the light declarations, when two of
+      -- them tail-call each other and the cycle has a heavy one.
+      let light := lightMembers ((ds.zip sus).map fun ((d, su) : Decl .pure × DeclSetup) => cycleWeight d su.body)
+      let lds := (ds.zip light).filterMap fun ((d, l) : Decl .pure × Bool) => if l then some d else none
+      let lsus := (sus.zip light).filterMap fun ((su, l) : DeclSetup × Bool) => if l then some su else none
+      let lightNames : NameSet := lds.foldl (fun m (d : Decl .pure) => m.insert d.name) {}
+      let linked := (lsus.zip lds).any fun ((su, d) : DeclSetup × Decl .pure) =>
+        (tailCallees su.body).any fun (g, _) => g != d.name && lightNames.contains g
+      if lds.size ≥ 2 && lds.size < ds.size && linked then
+        if let some lsm := ← cycleMachine H lds lsus "_lit" #[sm] then
+          if debug then
+            IO.eprintln s!"lean2rr: a light state machine for the cycle of tail calls {names ds}: {names lds}"
+          cycles := #[lsm, sm]
+  for d in ds do lowerDecl H d cycles
 
 end
 

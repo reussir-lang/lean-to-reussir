@@ -1650,10 +1650,16 @@ machine's frame for all its arms, and a deep recursion of a small
 declaration in a cycle with a big one would use the big frame at every
 level (test `RtTailCyclesStack`). So the state machine is entered only by
 a tail call between two declarations of the cycle. A recursion that is not
-a tail call but passes such a tail call at every level still enters it at
-every level, with its big frame (test `RtTailCyclesStack2`, an expected
-failure; planned: each arm a function of its own that returns the next
-step, run by a small trampoline loop). No state machine:
+a tail call but passes such a tail call at every level enters it at every
+level. So a cycle whose declarations' frames differ much (an estimate:
+parameters and the `let`s of the longest path), with two or more light
+declarations that tail-call each other and one or more heavy ones, also
+gets a light state machine of its light declarations (`f_lit_sm`, entry
+functions `g_lit`): their own functions' tail calls of each other enter
+it, and its tail calls of a heavy declaration enter the cycle's state
+machine, where the cycle then runs (one more frame per entry). A
+recursion through tail calls between light declarations then uses a small
+frame per level (test `RtTailCyclesStack2`). No state machine:
 declarations with different result types. A tail call of another
 declaration (the first one too) that keeps an argument until it returns
 stays a call of the callee's own function (§5.8): natively it is no tail

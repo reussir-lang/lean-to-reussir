@@ -111,21 +111,47 @@ def tailCallGroups (decls : Array (Decl .pure)) : NameMap (Array Name) := Id.run
 `outlined`, parameter names `pnames`): J4 when an outlined join point
 tail-calls the declaration, so that a loop passes through it, also from a
 join point inlined into it. (Other calls need no state machine; going
-through its entry wrapper would only cost an allocation per call.) When
-`cycle`, the state machine of the cycle of tail calls whose first
-declaration is `d` (`lowerGroup`), whatever its join points: named apart
-from `d`'s own (`_cyc`), with an entry function of its own
-(`StateMachine.entryFn`), as `d` keeps its function. -/
+through its entry wrapper would only cost an allocation per call.) With
+`entryFn? = some fn`, a state machine of a cycle of tail calls whose first
+declaration is `d` (`lowerGroup`), whatever its join points: entered by
+function `fn`, named after it (`fn_sm`, `fn_mode`), as `d` keeps its own
+function. -/
 def stateMachinePlan (d : Decl .pure) (body : Code .pure) (outlined : FVarIdSet) (pnames : Array String)
-    (cycle : Bool) : Option StateMachine :=
+    (entryFn? : Option String) : Option StateMachine :=
   let bodies := jpBodiesOf body
-  let callsBack := cycle || (outlinedBodies body outlined).any fun c =>
+  let callsBack := entryFn?.isSome || (outlinedBodies body outlined).any fun c =>
     (withInlinedJps bodies outlined c).any (hasSelfTailCall d.name d.params.size)
   if !callsBack || d.params.isEmpty then none
   else
-    let entryFn := if cycle then fnName d.name ++ "_cyc" else fnName d.name
+    let entryFn := entryFn?.getD (fnName d.name)
     some { fn := entryFn ++ "_sm", mode := entryFn ++ "_mode", self := d.name, arity := d.params.size,
            params := pnames, entryFn }
+
+/-- The `let`s of the longest path through code `c` (a join point's body
+continues the paths of its scope; a `cases` counts its longest
+alternative): with the parameters, `cycleWeight`. -/
+partial def longestPathLets : Code .pure → Nat
+  | .let _ k => longestPathLets k + 1
+  | .fun _ k _ => longestPathLets k
+  | .jp d k => longestPathLets d.value + longestPathLets k
+  | .cases cs => cs.alts.foldl (fun n alt => max n (longestPathLets alt.getCode)) 0
+  | _ => 0
+
+/-- An estimate of the stack frame of declaration `d` (code `body`): its
+parameters and the `let`s of its longest path (`longestPathLets`), the
+values its frame may have to hold at once. `lightMembers` compares the
+declarations of a cycle of tail calls by it. -/
+def cycleWeight (d : Decl .pure) (body : Code .pure) : Nat :=
+  d.params.size + longestPathLets body
+
+/-- Which declarations of a cycle of tail calls are light (their
+`cycleWeight`s `ws`): at most 32, or at most twice the lightest one's. The
+cycle gets a light state machine of its light declarations
+(`lowerGroup`) when it has two or more light and one or more heavy
+declarations. -/
+def lightMembers (ws : Array Nat) : Array Bool :=
+  let wmin := ws.foldl min (ws[0]?.getD 0)
+  ws.map (· ≤ max 32 (2 * wmin))
 
 /-- A self tail call of the state machine's declaration with arguments
 `args`: entering it at the declaration's own entry, which carries them. -/

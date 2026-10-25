@@ -259,8 +259,10 @@ The choice matters for two reasons:
   such a loop one function again. J4 also makes one more function for
   declarations that call each other in tail position: each declaration
   gets an entry in it, and their tail calls of each other go into it.
-  Each declaration keeps its own function for its other calls. With the
-  optional pass `state-machines`, the entry point of that function is an integer, and the values of the
+  Each declaration keeps its own function for its other calls. When some
+  of these declarations are much bigger than the others, the small ones
+  also get one more function of this kind, with a small stack frame. With
+  the optional pass `state-machines`, the entry point of that function is an integer, and the values of the
   loop go in parameter slots. A jump changes only the slots that it fills.
   On an integer entry point, LLVM threads the loop: a jump goes directly to
   the code that it enters.
