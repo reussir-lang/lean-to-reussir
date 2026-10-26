@@ -1,5 +1,5 @@
-/-! Runtime test: case splits on `Int`, which under `--int-backend rcgmp`
-are Reussir `match`es on the built-in integer (optimization `int-match`,
+/-! Runtime test: case splits on `Int`, which lean2rr lowers to Reussir
+`match`es on the built-in integer (optimization `int-match`,
 Lower/IntMatch): `ofNat` and `negSucc` (`Int::OfNat(m)`, whose binder is
 the scrutinee itself, and `Int::NegSucc(m)`, whose binder is `-i - 1`),
 splits of the field fused into one match (`0`, `ofNat (n+1)`, `-1`,
@@ -9,8 +9,8 @@ and `Int.natAbs` (Lean's own splits), and a sign split in a loop. Inputs:
 small values of both signs, the edges of rcgmp's immediates (±2^61 and
 their neighbours, -2^61 - 1 is the first negative heap value), and heap
 values (±2^63, ±2^64, ±10^30), some computed at run time from the number
-of arguments. Every line must equal native Lean's, under both
-representations. -/
+of arguments, so that no split is decided at compile time. Every line
+must equal native Lean's. -/
 
 def sign : Int → Int
   | .ofNat 0 => 0

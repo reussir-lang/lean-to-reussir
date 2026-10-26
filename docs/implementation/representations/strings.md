@@ -85,6 +85,62 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   `leanrt/src/string.rs`: `set`, `set_slow`, `copy_shared`, `append`.
 - **Remove only if:** never (speed only).
 
+### A position plus a character adds 1 for ASCII in a branch of its own (`utf8-size-add`)
+
+- **What:** `p + c` for a `String.Pos.Raw` and a `Char` (or `c + p`) is
+  `p.byteIdx + c.utf8Size`, and `String.Pos.Raw` has one field, so its
+  mono code is `Nat.add p s` with `s` bound to a call of `Char.utf8Size`:
+  `String.map`'s step (`Pos.pastModify`, `Pos.pastSet`), the legacy string
+  functions, a program's own `p + c.utf8Size`. The optimization
+  `utf8-size-add` (`Opt/Utf8SizeAdd`, a pass over the mono code after
+  Stage 3) rewrites each `Nat.add p s` or `Nat.add s p` whose `s` is such a
+  call in the same declaration to `L2RNat.addUtf8Size p c`, an extern that
+  the pass adds (as `mod-pow2` adds its own), which calls the prelude's
+  `l2r_nat_add_utf8_size`:
+
+  ```
+  fn l2r_nat_add_utf8_size(p : Nat, c : u32) -> Nat {
+      if c <= 127 { p + 1 } else {
+          let n : Nat = if c <= 2047 { 2 } else { if c <= 65535 { 3 } else { 4 } };
+          p + n
+      }
+  }
+  ```
+
+  The `let` of `s` goes when nothing else uses it (then the function
+  `Char.utf8Size` itself often goes too). Other uses of `Char.utf8Size`
+  stay calls: a comparison (`1 < c.utf8Size`, E05), `p - c`
+  (`String.Pos.Raw - Char`), a size stored. The pass rewrites only the calls
+  of an instance of `Char.utf8Size` whose mono code is Lean's rule
+  (`isLeanRule`: the tests `UInt32.decLe c k` of the literals 127, 2047
+  and 65535, with the results 1, 2, 3 and 4), which the prelude's function
+  repeats; `L2R_DEBUG=1` prints the number of additions rewritten and
+  names an instance whose code differs.
+- **Why:** Under rcgmp the literals 1 to 4 are constants in line, so once
+  rrc inlines `Char.utf8Size`, LLVM turns its chain of tests into selects,
+  and the next position depends on them. In `String.map` the next
+  position is the old one plus the size of the new character, so each
+  step waited for the read, the mapping, the selects and the add before
+  the next read could start: about 17 cycles per character against 5.6
+  under the old representation, where the sizes were boxed values (the
+  wall-time analysis of 2026-10-26: L17 14% slower than under leanrt,
+  about 70 of its 96 extra ms in its three `String.mapAux` loops, each 3
+  times slower). With a branch for ASCII, which the predictor follows,
+  the next position is one add on `p`. L17 (strings, size 10^6; bench-flag
+  builds, median of 7 interleaved runs pinned to one core): 659.8 to
+  581.0 ms (-11.9%); instructions (cachegrind, the SVE-free builds) 14.31
+  to 13.95 billion (-2.6%). lean-regex (Z03d, Z03l, Z03b) has one such
+  addition, off its hot paths: instructions and times unchanged; the
+  other programs of the bench set have none.
+- **Where:** `lean2rr/LeanToReussir/Opt/Utf8SizeAdd.lean` (`run`,
+  `rewrite`, `isLeanRule`, `addDecl'`); `Opt/Registry.lean`; `prelude.rr`:
+  `l2r_nat_add_utf8_size`; runtime test `RtUtf8SizeAdd` (every edge of the
+  sizes, positions up to and past 2^64, `String.map` with functions that
+  change each character's size; `RtUtf8SizeAdd.l2r-debug` pins the number
+  of additions rewritten).
+- **Remove only if:** LLVM keeps the branch of `Char.utf8Size`'s first
+  test by itself (speed only; without the pass the results are the same).
+
 ### `String.ofList` makes the string at its exact size
 
 - **What:** `String.ofList` and `String.mk` (`lean_string_mk`) first sum

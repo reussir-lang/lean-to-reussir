@@ -1,7 +1,7 @@
 From 0fef47d167f29e3619af309ca897ba9efa7d434c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:37:20 -0400
-Subject: [PATCH 13/24] l2r-local: entry 23-e: worklist drops: nullable members
+Subject: [PATCH 13/25] l2r-local: entry 23-e: worklist drops: nullable members
  and locked cells
 
 Fourth step: worklist glue (23-d) defers every box of its record's cycle

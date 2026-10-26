@@ -24,17 +24,18 @@
  * startup) and after it: compare two runs of one build, not the absolute
  * numbers of the two builds.
  *
- * lean2rr's builds also wrap the allocation hooks of Reussir's integer
- * runtime (rcgmp's `rcgmp_allocate` and `rcgmp_dealloc`, which reussir-rt
- * defines: one heap `Nat` or `Int` each) and count them apart, the heap
- * integers made less those freed (alloccount.sh's AC_RRC; native builds do
- * not wrap them). When any was made, a second line follows the first:
+ * lean2rr's builds also link alloccount_rcgmp.c, which wraps the
+ * allocation hooks of Reussir's integer runtime (rcgmp's `rcgmp_allocate`
+ * and `rcgmp_dealloc`, which reussir-rt defines: one heap `Nat` or `Int`
+ * each) and counts the heap integers made less those freed (alloccount.sh's
+ * AC_RRC; native builds link neither the object nor the wraps). In such a
+ * build a second line always follows the first:
  *
  *     alloccount: rcgmp live L
  *
  * L, the heap integers alive at exit, may be negative (a double free).
  * The program's constants stay alive, whatever the size: alloc-check.sh's
- * `live` bound compares L between two sizes.
+ * `live` bound compares L between two sizes, and requires the line.
  *
  * Limits: when the environment sets ALLOCCOUNT_MAX_ALLOCS (allocations and
  * reallocations together) or ALLOCCOUNT_MAX_BYTES (bytes requested), a run
@@ -61,8 +62,9 @@ char *getenv(const char *name);
 void _exit(int status);
 
 static _Atomic unsigned long long n_alloc, n_realloc, n_bytes;
-static _Atomic long long rcgmp_live;
-static _Atomic int rcgmp_used;
+/* The count of alloccount_rcgmp.c, whose object only lean2rr's builds link;
+ * weak, so null in a native build. */
+extern _Atomic long long alloccount_rcgmp_live __attribute__((weak));
 /* 0: no limit. Set by the constructor below, before `main`; allocations
  * made before it runs are counted but not checked. */
 static unsigned long long max_allocs, max_bytes;
@@ -95,9 +97,9 @@ static void put_counts(const char *prefix) {
 
 __attribute__((destructor)) static void alloccount_report(void) {
   put_counts("alloccount: allocs ");
-  if (atomic_load(&rcgmp_used)) {
+  if (&alloccount_rcgmp_live) {
     char buf[64], *p = buf;
-    long long live = atomic_load(&rcgmp_live);
+    long long live = atomic_load(&alloccount_rcgmp_live);
     p = put_str(p, "alloccount: rcgmp live ");
     if (live < 0) *p++ = '-';
     p = put_num(p, live < 0 ? 0ULL - (unsigned long long)live : (unsigned long long)live);
@@ -195,20 +197,4 @@ void *__real_aligned_alloc(size_t, size_t);
 void *__wrap_aligned_alloc(size_t a, size_t s) {
   count(&n_alloc, s);
   return __real_aligned_alloc(a, s);
-}
-
-/* Reussir's integer runtime (lean2rr's builds only, see the top): one heap
- * integer made or freed. The real hooks are weak here: a native build,
- * which does not wrap them, links none and never calls these. */
-void *__real_rcgmp_allocate(size_t, size_t) __attribute__((weak));
-void *__wrap_rcgmp_allocate(size_t s, size_t a) {
-  atomic_store_explicit(&rcgmp_used, 1, memory_order_relaxed);
-  atomic_fetch_add_explicit(&rcgmp_live, 1, memory_order_relaxed);
-  return __real_rcgmp_allocate(s, a);
-}
-
-void __real_rcgmp_dealloc(void *, size_t, size_t) __attribute__((weak));
-void __wrap_rcgmp_dealloc(void *p, size_t s, size_t a) {
-  atomic_fetch_sub_explicit(&rcgmp_live, 1, memory_order_relaxed);
-  __real_rcgmp_dealloc(p, s, a);
 }

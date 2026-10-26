@@ -1,7 +1,7 @@
 /-! Runtime test: `Int` values at the edges of a box's immediates, through
 boxes (a `List`, an `Option`, a pair, a polymorphic function) and back, then
 used. Lean boxes an `Int` in the `int32` range as the scalar of its 32 bits
-and any other as an object. Under `--int-backend rcgmp` lean2rr also boxes
+and any other as an object. lean2rr also boxes
 an `Int` in [2^32, 2^62) or [-2^62, -2^31) as an immediate (natively an
 object, whose word no program can depend on), and the others as a cell:
 2^31 - 1, 2^31, 2^32 - 1, 2^32, 2^62 - 1, 2^62 and the negative edges sit on

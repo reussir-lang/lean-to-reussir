@@ -1,7 +1,7 @@
 From a5fb6e94abb9db27e09a564832fa7cf8dfdc0b52 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 23:24:20 -0400
-Subject: [PATCH 23/24] l2r-local: entry 23-o: the glue defers boxes with a
+Subject: [PATCH 23/25] l2r-local: entry 23-o: the glue defers boxes with a
  wide header through defer_wide
 
 The lowering of `reussir.rc.defer` calls __reussir_drop_defer_wide (23-n)

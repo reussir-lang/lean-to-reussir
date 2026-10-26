@@ -1,12 +1,12 @@
-/-! Runtime test: `Nat` and `Int` at the edges of the immediates of both of
-lean2rr's representations: Lean's (a `Nat` below 2^63, an `Int` in the
-`int32` range) and Reussir's built-in integers under `--int-backend rcgmp`
-(rcgmp's immediates: [-2^61, 2^61)). Each edge value is built three ways:
-as a literal (under rcgmp a value outside the immediates is a read-only
-object of the program's data), computed at run time, and read back from a
-box (a `List`, an `Option`, an `Array` of boxes, a polymorphic function):
-every operation and conversion, equality and order of all pairs (a literal
-against a computed value of the same number), and the round trips. -/
+/-! Runtime test: `Nat` and `Int` at the edges of the immediates: those of
+Reussir's built-in integers (rcgmp's immediates: [-2^61, 2^61)) and a box's
+(Lean's: a `Nat` below 2^63, an `Int` in the `int32` range; also an `Int` in
+[2^32, 2^62) or [-2^62, -2^31)). Each edge value is built three ways: as a
+literal (a value outside rcgmp's immediates is a read-only object of the
+program's data), computed at run time, and read back from a box (a `List`,
+an `Option`, an `Array` of boxes, a polymorphic function): every operation
+and conversion, equality and order of all pairs (a literal against a
+computed value of the same number), and the round trips. -/
 
 def p (e k : Nat) : Nat := 2 ^ (e + k % 1)
 

@@ -1,12 +1,12 @@
 /-! Runtime test: string positions, indices and sizes at the edges of the
-integer representations: below and at 2^60, 2^61 (rcgmp's immediates end
-there), 2^62, 2^63 and 2^64. `next` and `prev` past the end give the
-position plus or minus one, so their result can be any size; `get`,
-`get?`, `extract`, `atEnd`, `isValid` and array reads treat a position or
-index from 2^63 like one from 2^64 (out of range). Under
-`--int-backend rcgmp` the prelude makes a size or a small position a `Nat`
-through a mask to 61 bits and truncates indices to `i64`
-(runtime/prelude.rr, `l2r_nat_size`). -/
+immediates and the index words: below and at 2^60, 2^61 (rcgmp's
+immediates end there), 2^62, 2^63 and 2^64. `next` and `prev` past the end
+give the position plus or minus one, so their result can be any size;
+`get`, `get?`, `extract`, `atEnd`, `isValid` and array reads treat a
+position or index from 2^63 like one from 2^64 (out of range). The
+prelude makes a size or a small position a `Nat` through a mask to 61
+bits and truncates indices to `i64` (runtime/prelude.rr,
+`l2r_nat_size`). -/
 
 @[noinline] def pos (n : Nat) : String.Pos.Raw := ⟨n⟩
 @[noinline] def idx (n : Nat) : Nat := n

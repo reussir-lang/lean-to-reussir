@@ -1,0 +1,2 @@
+[utf8-size-add] lean2rr: utf8-size-add: 11 addition(s) of Char.utf8Size rewritten to l2r_nat_add_utf8_size
+! is not Lean's Char.utf8Size rule

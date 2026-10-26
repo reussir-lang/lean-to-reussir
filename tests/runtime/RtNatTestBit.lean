@@ -1,10 +1,10 @@
 /-! Runtime test: `Nat.testBit` on small and big values, at indices below,
 at and past the value's bit length, up to an index of 2^64 and more (no
 number has such a bit). lean2rr may compute it in place (`l2r_nat_test_bit`:
-under `--int-backend rcgmp` rcgmp's `testbiti`, where Lean's definition
-builds `m >>> i`); the answers are Lean's. `Nat.testBit` also runs as a
-function value (`m.testBit` and `Nat.testBit` passed to functions that are
-not inlined), which calls its instance's own code (under rcgmp one call of
+rcgmp's `testbiti`, where Lean's definition builds `m >>> i`); the answers
+are Lean's. `Nat.testBit` also runs as a function value (`m.testBit` and
+`Nat.testBit` passed to functions that are not inlined), which calls its
+instance's own code (one call of
 `l2r_nat_test_bit`). -/
 
 def vals (k : Nat) : List Nat :=

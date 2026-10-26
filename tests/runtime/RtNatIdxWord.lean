@@ -5,10 +5,10 @@ every array here holds boxes), at small indices and at 2^61, 2^62, 2^63,
 default), `a[i]?`, of `Nat`, `UInt8`, `UInt32`, `Bool` (read at a type
 without a copy of the box: `boxWordRead?`), `Option Nat` and `List UInt8`
 elements, `ByteArray` `get`/`get!`, and `String.Pos.Raw` `get`, `get'`,
-`next'` and `atEnd`. Under `--int-backend rcgmp` lean2rr computes the
-index word first (`l2r_nat_index`) and calls the prelude's `_w` reads
-(`lean_array_fget_as_w`, `lean_array_get_as_w` for the reads at a type);
-under leanrt the reads take the `Nat`. -/
+`next'` and `atEnd`. lean2rr computes the index word first
+(`l2r_nat_index`: the value below 2^63, `u64::MAX` from there) and calls
+the prelude's `_w` reads (`lean_array_fget_as_w`, `lean_array_get_as_w`
+for the reads at a type; tests/runtime/int-backend-check.sh checks it). -/
 
 @[noinline] def idx (n : Nat) : Nat := n
 

@@ -403,10 +403,10 @@ def build_lean_runtime(out):
 # drain for a host (23-m; 23-l, the runs of cells, comes between them).
 # leanrt would also fail to compile without them.
 # 21-a (entry 21, inc/dec cancellation of integer members of [value]
-# records) is an optimization of code with rcgmp integers, and 23-p (one
+# records) is an optimization of code with rcgmp integers, 23-p (one
 # release function's pending records as cells, fewer instructions than
-# links) an optimization of the drops: nothing needs them, so they are not
-# checked.
+# links) an optimization of the drops, and 20-f a newer mlir-rcgmp pin
+# (quotient-only division): nothing needs them, so they are not checked.
 REQUIRED_REUSSIR_PATCHES = [
     ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
     ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
@@ -538,6 +538,28 @@ def gmp_archive():
     return gmp
 
 
+# Reussir's integer runtime (rcgmp), the archive that rrc links when its
+# rcgmp feature is on (RCGMP_RUNTIME_ARCHIVE, Reussir's driver/link.rs).
+RCGMP_RUNTIME = "libRCGMPRuntime.a"
+
+
+def rcgmp_runtime_link(libdirs, tmp):
+    """Reussir's integer runtime as rrc finds it (in the first of the
+    --polyffi-libdir directories `libdirs` that has it), under a name of
+    its own, `libl2r_rcgmp.a` (a symbolic link in the build's temporary
+    directory `tmp`), for a --link-lib before GMP's (main): rrc names the
+    archive itself, and rustc refuses a library named twice on its command
+    line."""
+    for d in libdirs:
+        archive = Path(d) / RCGMP_RUNTIME
+        if archive.is_file():
+            link = Path(tmp) / "libl2r_rcgmp.a"
+            link.symlink_to(archive)
+            return link
+    sys.exit(f"l2r: no {RCGMP_RUNTIME} (Reussir's integer runtime) in "
+             + ", ".join(str(d) for d in libdirs))
+
+
 def module_and_path(arg, lean_path):
     """The module to translate and the LEAN_PATH entries to add: `arg` is a
     module name (passed on as it is: lean2rr reads non-identifier
@@ -624,18 +646,36 @@ def main():
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
+        libdirs = [rt, deps, Path(target_libdir), rlib.parent]
         # rrc runs in the temporary directory: it leaves its polymorphic-FFI
         # scratch files (reussir_rust_module_*) in the current directory.
         rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),
                 "--emit", args.emit, "-O", args.opt,
-                "--polyffi-rust-path", str(rustc_wrapper(rlib, lr)),
-                "--polyffi-libdir", str(rt), "--polyffi-libdir", str(deps),
-                "--polyffi-libdir", target_libdir, "--polyffi-libdir", str(rlib.parent),
-                # In dependency order (GNU ld reads each archive once):
-                # leanrt, then lean-runtime, which leanrt calls, and its
-                # dependencies, then GMP.
-                "--link-lib", str(rlib)]
+                "--polyffi-rust-path", str(rustc_wrapper(rlib, lr))]
+               + [a for d in libdirs for a in ("--polyffi-libdir", str(d))]
+               # In dependency order: GNU ld reads each archive once, where
+               # it stands, and takes from it only the members that define
+               # a symbol still undefined there. leanrt, then lean-runtime,
+               # which leanrt calls, and its dependencies, then Reussir's
+               # integer runtime, which the program and leanrt call, then
+               # GMP, which that runtime calls. rrc links the integer
+               # runtime itself, but after every --link-lib, followed by
+               # `-l dylib=gmp` (`-Bdynamic -lgmp`, as needed): with GMP's
+               # archive first, nothing took a member from it, the
+               # runtime's GMP symbols stayed undefined until `-lgmp`, and
+               # the first -L directory with a libgmp decided. That was
+               # the toolchain's lib/, which has no libgmp.so, so GMP was
+               # static by accident; with L2R_GMP=/usr/lib/<triple>/libgmp.a
+               # (a directory that has libgmp.so too) the executable needed
+               # libgmp.so.10. Passed here before GMP, the integer runtime
+               # brings in its members, libgmp.a defines every GMP symbol
+               # they use, and `-lgmp` and rrc's own copy of the runtime
+               # add nothing: GMP is static whatever directories hold a
+               # libgmp.so (tests/runtime/run.sh checks that an executable
+               # needs no libgmp).
+               + ["--link-lib", str(rlib)]
                + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
+               + ["--link-lib", str(rcgmp_runtime_link(libdirs, tmp))]
                + ["--link-lib", str(gmp_archive())]
                # Reussir's in-place variant reuse skips stores of fields that
                # the packed record layout moves (RcCreateFusion copy

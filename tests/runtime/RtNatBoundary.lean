@@ -1,9 +1,9 @@
-/-! Runtime test: `Nat` and `Int` at the boundaries of lean2rr's one-word
-representation (Lean's: a `Nat` is a small value below 2^63, an `Int` in
-the `int32` range; other values are big numbers), for every arithmetic,
-bitwise, comparison and conversion extern on both sides of 2^62, 2^63 and
-2^64, and for the fast paths' own limits (products of factors around
-2^31 and 2^32, exponents, shift amounts). Values are built at runtime. -/
+/-! Runtime test: `Nat` and `Int` at the boundaries of native Lean's
+one-word encoding (a `Nat` below 2^63 and an `Int` in the `int32` range are
+scalars, other values big numbers), for every arithmetic, bitwise,
+comparison and conversion extern on both sides of 2^62, 2^63 and 2^64, and
+for native's fast paths' limits (products of factors around 2^31 and 2^32,
+exponents, shift amounts). Values are built at runtime. -/
 
 def p62 (k : Nat) : Nat := 2 ^ (62 + k % 1)
 def p63 (k : Nat) : Nat := 2 ^ (63 + k % 1)

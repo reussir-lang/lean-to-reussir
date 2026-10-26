@@ -11,7 +11,7 @@ patched (07-a), not yet applied in `./reussir`; lean2rr's generated code
 does not use the feature yet (the probe of the one-word `Box`, track E of
 the dependent-type work, does).
 
-**Upstream (2026-10-24):** Not upstream at 0378b744. 07-a stays in the series on 0378b744 (it applies unchanged), on ea240b19 and 00906e38 (2026-10-25: upstream's two new commits change rrc's relocation default, #758, and the commit of mlir-rcgmp that the build fetches, #804, not this code), and on `l2r-base10` (Phase 2: after 10-a, without the drop patches; commit `6620a1d4`; only line offsets change). The base before 7954a367 (`l2r-base2`) had it as old 38-a.
+**Upstream (2026-10-24):** Not upstream at 0378b744. 07-a stays in the series on 0378b744 (it applies unchanged), on ea240b19 and 00906e38 (2026-10-25: upstream's two new commits change rrc's relocation default, #758, and the commit of mlir-rcgmp that the build fetches, #804, not this code), and on `l2r-base11` (Phase 2: after 10-a, without the drop patches; commit `6620a1d4`; only line offsets change). The base before 7954a367 (`l2r-base2`) had it as old 38-a.
 
 lean2rr's one-word `Box` (`leanrt::any::LAny`, runtime/prelude.rr section
 "The one-word box") is a `tagged` opaque type. An odd word is an

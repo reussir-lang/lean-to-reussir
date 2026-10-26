@@ -1,12 +1,12 @@
 /-! Runtime test: join points that `inline-anchors` leaves to rrc's inliner
 (Emit/CopyAnchors; tests/runtime/inline-anchors-check.sh checks the .rr).
 A function whose inlined copies would put much code into one function is
-kept out of rrc's inliner (RtJpWide under `--int-backend rcgmp`: three
+kept out of rrc's inliner (RtJpWide: three
 join points of about 160 operations, each called from about 266 arms of
 one `match`; RtCopyAnchors); these are not:
 - `tiny`: a 300-arm `match` on a number (any other number returns early),
-  every arm going on to one small join point (23 operations under
-  `--int-backend rcgmp`), which is outlined (its copies would be over
+  every arm going on to one small join point (23 operations), which is
+  outlined (its copies would be over
   `jp-small`'s bound) and called from every arm: its copies are over the
   budget (299 × 23), but it is too small to keep out;
 - `few`: a 4-arm `match` whose arms go on to a larger join point (chained

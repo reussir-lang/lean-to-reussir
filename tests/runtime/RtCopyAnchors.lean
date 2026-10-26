@@ -1,8 +1,8 @@
 /-! Runtime test: functions that `inline-anchors` keeps out of rrc's inliner
 for their copies (Emit/CopyAnchors; tests/runtime/inline-anchors-check.sh
-checks the .rr under both representations of `Nat` and `Int`). Each case is
-a 64-arm `match` on an enumeration, one function under both
-representations:
+checks the .rr: the functions kept out, their sizes and calls). Each
+case is a 64-arm `match` on an enumeration, whose arms all stay in one
+function:
 - `sum3`: the arms call three mid-size functions (`p0`, `p1`, `p2`, about
   21 calls each). The copies of each one alone add less than the budget
   (4000), all three together more: the two that add the most are kept out,

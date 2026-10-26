@@ -1,9 +1,9 @@
 /-! Runtime test: a `Nat` literal of 20000 decimal digits, as a constant read
-in a loop and as a literal in the code of a function. Under
-`--int-backend leanrt` lean2rr parses a literal of 2^63 or more from its
-decimal text (`l2r_nat_of_decimal_lstr`) where it is evaluated; under
-`rcgmp` the literal is Reussir's own (a read-only object of the program's
-data: no parse, no allocation). Lean extracts a literal of 2^63 or more in
+in a loop and as a literal in the code of a function. lean2rr emits the
+literal as Reussir's own literal of the built-in `Nat` (rcgmp makes it a
+read-only object of the program's data: no parse and no allocation at run
+time; lean2rr's `natLiteral`, docs/implementation/representations/nat-int.md,
+"Literals"). Lean extracts a literal of 2^63 or more in
 a function's code as a closed term (Lean's `extractClosed`), so both forms
 are constants of the program. The digits of each literal are one token
 on one line (a prefix of the decimal digits of a power of 7). -/

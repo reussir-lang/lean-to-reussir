@@ -9,8 +9,9 @@ element being updated stays unshared (`Array.modifyMUnsafe`,
 
 ### A placeholder is the zero of its type
 
-- **What:** `zeroValue t` is a generated function `l2r_zero_N`: `0`,
-  `0.0`, `false`, `l2r_nat_small(0)`, the empty string or array, a
+- **What:** `zeroValue t` is a generated function `l2r_zero_N`: `0` (also
+  for `Nat` and `Int`, a literal of Reussir's integers), `0.0`, `false`,
+  the empty string or array, a
   constructor without fields, else the first constructor whose fields
   have zeros, a `done` cell holding a zero (a `pending` cell with the `z`
   function value, never forced, when the value has none), a new reference

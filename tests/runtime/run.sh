@@ -3,7 +3,8 @@
 # through lean2rr + Reussir (scripts/l2r.py), run both, and compare stdout,
 # stderr and the exit code exactly. The lean2rr executable must also have no
 # text relocations (DT_TEXTREL), as native Lean's has none (Reussir issue 5,
-# fixed upstream in ea240b19; the number is retired).
+# fixed upstream in ea240b19; the number is retired), and must not need a
+# shared GMP (DT_NEEDED libgmp): GMP is linked statically, as natively.
 #
 #   tests/runtime/run.sh [NAME...]       (default: every Rt*.lean)
 #
@@ -239,6 +240,12 @@ for t in "${TESTS[@]}"; do
     # into a PIE).
     if readelf -d "$d/l2r" 2>/dev/null | grep -q TEXTREL; then
       status=fail; why="$why the executable has text relocations (readelf -d $d/l2r);"
+    fi
+    # Like native Lean's, the executable has GMP linked in statically
+    # (scripts/l2r.py passes Reussir's integer runtime before libgmp.a, so
+    # rrc's `-lgmp` finds nothing left to resolve): no NEEDED libgmp.
+    if readelf -d "$d/l2r" 2>/dev/null | grep NEEDED | grep -q libgmp; then
+      status=fail; why="$why the executable needs a shared GMP (readelf -d $d/l2r: NEEDED libgmp);"
     fi
   fi
   if [ -f "$HERE/$t.xfail" ] && ! head -1 "$HERE/$t.xfail" | grep -q '^alloc-check:'; then

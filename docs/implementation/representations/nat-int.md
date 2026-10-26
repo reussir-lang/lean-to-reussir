@@ -170,6 +170,18 @@ accepted and does nothing, `--int-backend leanrt` and
     builds its interface once per Reussir checkout (`core_interface`) and
     compiles the program in package mode (`--package-name prog --extern
     core=...`).
+  - GMP is linked statically, as natively, by its place on the link line:
+    `scripts/l2r.py` passes Reussir's integer runtime
+    (`libRCGMPRuntime.a`, which calls GMP) with `--link-lib`, under a
+    name of its own (`libl2r_rcgmp.a`, `rcgmp_runtime_link`: rustc refuses
+    a library named twice), before the toolchain's `libgmp.a` (or
+    `L2R_GMP`). rrc links that runtime itself, but after every
+    `--link-lib` and followed by `-lgmp`: with GMP's archive first, GNU ld
+    took nothing from it, and `-lgmp` resolved the runtime's GMP symbols
+    in the first `-L` directory with a libgmp, from a `libgmp.so` where
+    there was one (with `L2R_GMP=/usr/lib/aarch64-linux-gnu/libgmp.a` the
+    executable needed `libgmp.so.10`; review of D8). `tests/runtime/run.sh`
+    fails an executable that needs a `libgmp`.
   - Differences from native Lean (allowed by the functional equivalence
     contract; review R1):
     - `Nat.add`/`mul` and the `Int` operations do not test lean-runtime's
@@ -218,8 +230,9 @@ accepted and does nothing, `--int-backend leanrt` and
 - **Where:** `runtime/prelude.rr` (the Nat and Int sections);
   `runtime/leanrt/src/rcgmp.rs`, `any.rs` (`of_mpz`, `mpz_of`,
   `release_kind`, `generic_mpz_box`); `scripts/l2r.py` (`INT_BACKEND`,
-  which refuses `leanrt`, `core_interface`, `check_rcgmp`);
-  `tests/runtime/leanrt-unit.sh`.
+  which refuses `leanrt`, `core_interface`, `check_rcgmp`,
+  `rcgmp_runtime_link`); `tests/runtime/leanrt-unit.sh`, `run.sh` (the
+  `libgmp` test).
 - **Remove only if:** never while lean2rr builds on Reussir (its own
   interface for big integers).
 
@@ -398,6 +411,55 @@ accepted and does nothing, `--int-backend leanrt` and
     `paynothing-check.sh` for `Unionfind` and `RtLazyFields` were
     refreshed with the rebinding: their functions' shapes changed, their
     counts and allocations did not.
+
+    One use keeps the variable (`loopCarriedAdds`, `CodeCtx.loopAdds`): a
+    loop-carried increment, `let z := Nat.add y l` (or `Nat.add l y`) with
+    `l` bound to a `Nat` literal, `y` the declaration's own parameter at a
+    position `k` and `z` the argument at position `k` of a self tail call
+    (`let r := f args; return r`, also a state machine's re-entry), reads
+    `y`'s name from before its first rebinding (`CodeCtx.indexOrig`):
+
+    ```
+    let ix749 : u64 = l2r_nat_index(a747);
+    let x750 : u32 = lean_array_fget_w<u32>(a745, ix749);
+    let ib751 : Nat = l2r_nat_of_index(ix749);
+    ...
+    let x765 : Nat = lean_nat_add(a747, x764);
+    let x766 : Tuple742 = qpartition_loop(a743, a744, a745, a746, x765);
+    ```
+
+    Every other use keeps the rebinding, and so does an increment that is
+    not loop-carried: passed at another position, to a call that is not a
+    tail call, or of an index that is not a parameter. In a loop the next
+    iteration's index is the increment, so the increment is on the loop's
+    critical path: on the tagged parameter it is one add and an overflow
+    branch (`adds x, x, #4`), on the rebinding four instructions more
+    (`asr`, `lsl`, `and`, `add`, recomputing the tagged value from the
+    word), one cycle against about four per iteration. X07's partition loop
+    is that chain (a read, a compare, the increment): 17.91 to 16.23 ms of
+    kernel time (-9.4%; median of 15 interleaved runs of the bench-flag
+    builds pinned to one core; leanrt 16.08 in the analysis), while its
+    instructions rise from 216.3 to 234.9 million (+8.6%; cachegrind, the
+    SVE-free builds). Elsewhere in the bench set: lean-regex Z03d 5.057 to
+    4.922 s (-2.7%), Z03l 1.708 to 1.643 s (-3.8%), Z03b 1.004 to 0.997 s
+    (-0.7%), X12 -0.4%, E05 -0.4%, Z01c 6.925 to 6.937 s (+0.2%, within
+    its noise; the same without its four increments in state machines;
+    instructions +0.03%). The
+    parameter stays live across the access, so the increment keeps its tag
+    test and its count's increment, which never runs (after the access the
+    index is an immediate): instructions rise, the time falls. Applied to
+    every increment of a rebound index (not only the loop-carried ones),
+    Z01c ran 4.3% longer (hand-edited `.rr` of the wall-time analysis,
+    2026-10-26); without the rebinding at all, X07 took 19.9 ms. The names
+    from before a rebinding are not used in an outlined join point's body
+    or a local function (`indexOrig` is empty there): they may not be
+    captured. A join point's parameter is never loop-carried in LCNF (a
+    jump occurs only in the join point's continuation, not in its body).
+    `tests/runtime/int-backend-check.sh` checks the shape on `RtNatIdxLoop`
+    (every loop-carried increment of its loops reads the parameter, and
+    `crossed` and `nonTail`, whose increments are not loop-carried, read
+    the rebinding) and allows the loop-carried increments in
+    `RtNatIdxRebind`'s check.
 - **Why:** upstream Reussir (without local patch R2) renders a built-in
   integer at a polyffi type argument as the raw handle and releases it after the call (its `rcgmp_handle`
   comes from the substituted parameter type): `l2r_once_put<Nat>` stored a
@@ -417,8 +479,8 @@ accepted and does nothing, `--int-backend leanrt` and
   `Lower/ExternCall.lean` (`bindReadIndex`, `wordReadSym?`,
   `wordUpdateSym?`, `boundedIndexSyms`, `boundedWordAccesses`);
   `Lower/Code.lean` (`indexWordsWanted`, `evalsBoundedAccess`, the
-  let-run's rebinding; `LowerCtx.hoistIndexWords`,
-  `LowerState.indexWords`);
+  let-run's rebinding, `loopCarriedAdds`; `LowerCtx.hoistIndexWords`,
+  `LowerState.indexWords`, `CodeCtx.loopAdds`, `CodeCtx.indexOrig`);
   `ArrayKinds.lean` (`ptrKind?`);
   `CompactArrays.lean`, `Opt/SplitMapLoops.lean`; `CellKinds.lean`,
   `TypedCells.lean`, `Lower/Externs.lean`
@@ -723,20 +785,27 @@ accepted and does nothing, `--int-backend leanrt` and
   defines) and prints the heap integers made less those freed at exit
   (`alloccount: rcgmp live L`). `tests/runtime/alloc-check.sh`'s optional
   bound `live OFFSET` lets that count change by at most `OFFSET` between a
-  test's two sizes: `RtNatStress` (`live 0`: every big number a round
-  makes is freed exactly once) and `RtNatConst` (`live 0`; its allocation
-  bound, FACTOR 0, also catches a big constant made at every use).
+  test's two sizes, and fails a lean2rr run without the line:
+  `RtNatStress` (`live 0`, 0 at both sizes: every big number a round
+  makes is freed exactly once) and `RtNatConst` (`live 0`, 2 at both
+  sizes, its two computed constants; its allocation bound, FACTOR 0, also
+  catches a big constant made at every use).
 - **Why:** Reference counts of heap integers cross the prelude, leanrt's
   boxes and Reussir's glue; a leak or a double free changes the count
   with the size, exactly, where the allocation counts and the peak memory
   do not show one small number per round (until D8,
   `nat-alloc-check.sh` read leanrt's own counters, which rcgmp's integers
   do not pass through). Shown to fail: a box of a big number whose cell
-  is never released (`release_kind`) gives `RtNatStress` 1000 -> 4000.
-- **Where:** `tests/runtime/alloccount/alloccount.c` (`__wrap_rcgmp_allocate`,
-  `__wrap_rcgmp_dealloc`; weak `__real_` functions, so native builds,
-  which do not wrap them, link the counter unchanged),
-  `alloccount.sh` (`ALLOCCOUNT_RCGMP_SYMS`, `alloccount_live`),
+  is never released (`release_kind`) gives `RtNatStress` 1000 -> 4000,
+  and a build without the wraps fails it for the missing line.
+- **Where:** `tests/runtime/alloccount/alloccount_rcgmp.c`
+  (`__wrap_rcgmp_allocate`, `__wrap_rcgmp_dealloc`, strong `__real_`
+  declarations, so a link without the hooks fails instead of calling
+  null; the hooks' object is always loaded, because rustc's symbols.o
+  references `__reussir_allocate`, defined beside them), linked only
+  into lean2rr's builds; `alloccount.c` (the line, through a weak
+  reference to the count, null in native builds); `alloccount.sh`
+  (`ALLOCCOUNT_RCGMP_SYMS`, `AC_RRC`, `alloccount_live`),
   `tests/runtime/alloc-check.sh`, `RtNatStress.alloc`, `RtNatConst.alloc`.
 - **Remove only if:** never (test infrastructure; not in programs).
 

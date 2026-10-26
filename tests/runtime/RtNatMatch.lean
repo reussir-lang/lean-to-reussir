@@ -1,9 +1,9 @@
-/-! Runtime test: case splits on `Nat`, which under `--int-backend rcgmp`
-are Reussir `match`es on the built-in integer (optimization `int-match`,
+/-! Runtime test: case splits on `Nat`, which lean2rr lowers to Reussir
+`match`es on the built-in integer (optimization `int-match`,
 Lower/IntMatch): `0` and `n+1` (the `Nat::Succ` arm's binder is the
 scrutinee minus one), nested splits of the field fused into one match
 (`0`, `1`, `n+2`; `0`, `1`, `2`, `n+3`), chains of literal tests (`0`, `1`,
-`5`, `_`; literals from 2^61 on, which are no immediates there) followed by
+`5`, `_`; literals from 2^61 on, which are not rcgmp immediates) followed by
 a default or by `n+1`, a literal tested before `0` and `n+1`, the
 scrutinee named in each kind of arm (a literal arm, the `n+1` arm, which
 then matches a copy, a default), used after the split, a test whose
@@ -12,7 +12,7 @@ and two scrutinees (Ackermann). Inputs are immediates, the edges of
 rcgmp's immediates (2^61 - 1, 2^61, 2^61 + 1), and heap values (2^62,
 2^63, 2^64, 10^30); some are computed at run time from the number of
 arguments, so no split is decided at compile time. Every line must equal
-native Lean's, under both representations. -/
+native Lean's. -/
 
 def sumTo : Nat → Nat
   | 0 => 0

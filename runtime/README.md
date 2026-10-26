@@ -78,10 +78,19 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
    - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`
      and `lean_runtime`),
    - `--link-lib libleanrt.rlib --link-lib liblean_runtime.rlib` (then
-     lean-runtime's dependencies, dependents first) `--link-lib libgmp.a`,
-     in this order: GNU ld reads each archive once, so a library comes after
-     the ones that call it (GMP from the Lean toolchain,
-     `$(lean --print-prefix)/lib/libgmp.a`, or `L2R_GMP`),
+     lean-runtime's dependencies, dependents first) `--link-lib
+     libl2r_rcgmp.a --link-lib libgmp.a`, in this order: GNU ld reads each
+     archive once, where it stands, so a library comes after the ones that
+     call it. `libl2r_rcgmp.a` is a link to Reussir's integer runtime
+     (`libRCGMPRuntime.a`, which the program and leanrt call and which
+     calls GMP), under a name of its own (rustc refuses a library named
+     twice): rrc links that runtime itself, but only after every
+     `--link-lib`, followed by `-lgmp`, and with GMP's archive before it
+     its GMP symbols would stay undefined until `-lgmp`, which takes a
+     `libgmp.so` where the first directory with a libgmp has one. So GMP
+     (from the Lean toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or
+     `L2R_GMP`) is static by its place on the line, as natively;
+     `tests/runtime/run.sh` checks that an executable needs no `libgmp`,
    - and the environment variable `REUSSIR_FFI_CACHE_DIR`
      (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
      empty turns it off): rrc compiles each texture of the program text

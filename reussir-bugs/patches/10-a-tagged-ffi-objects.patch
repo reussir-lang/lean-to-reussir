@@ -1,7 +1,7 @@
 From 6272aed46a70ae8edd44cdad7f6a1a736c403bfa Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 01/24] l2r-local: tagged FFI objects: an odd handle is an
+Subject: [PATCH 01/25] l2r-local: tagged FFI objects: an odd handle is an
  immediate, not counted
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may

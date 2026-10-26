@@ -25,7 +25,7 @@ waits, as in Lean's to-do list.
 memory: the patches are optimizations, and 23-k to 23-m the features a
 host runtime needs to share the stack. **Status:** patched (23-a to
 23-p), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base10`, commits `82b3985a` to `0bea9c7d`). `scripts/l2r.py`
+`l2r-base11`, commits `82b3985a` to `0bea9c7d`). `scripts/l2r.py`
 requires the patches: it stops with an error when the Reussir checkout
 lacks 23-f (the switch of rrc's pipeline to worklist drops), 23-k (the
 end work), 23-m (steps, depth and drain), 23-n (`defer_wide`) or 23-o

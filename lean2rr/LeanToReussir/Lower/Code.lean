@@ -222,7 +222,79 @@ small constant to it gives one: `i + 1` has no tag test and no overflow
 path, a later access at it no tag test, and a copy of it no count. The
 `Nat` itself would keep the access's big path, which rejoins after the
 access (a `Nat` in [2^61, 2^63) is a heap value whose word is valid), so
-every later use tested its tag again. -/
+every later use tested its tag again.
+
+One exception (`loopCarriedAdds`, `CodeCtx.loopAdds`): a loop-carried
+increment, `let z := Nat.add y l` with `l` a literal, `y` the
+declaration's parameter at position `k` and `z` the argument at position
+`k` of a self tail call, reads `y` itself (the name it had before the
+rebinding, `CodeCtx.indexOrig`):
+
+```
+let x765 : Nat = lean_nat_add(a747, x764);
+let x766 : Tuple742 = qpartition_loop(a743, a744, a745, a746, x765);
+```
+
+The next iteration's index then depends on this one's through one add
+on the tagged value (`adds x, x, #4` and the overflow branch), where the
+rebinding made it four instructions longer (`asr`, `lsl`, `and`, `add`):
+X07's partition loop, whose step is that chain, ran 10% longer. Every
+other use keeps the rebinding; an increment used elsewhere too still
+reads `y`. Applied to every increment of a rebound index, Z01c ran 4%
+longer. A self tail call that re-enters a state machine counts; the body
+of an outlined join point or of a local function reads no name from
+before a rebinding (`indexOrig` is empty there: the name may not be
+captured). (A join point's parameter is never loop-carried in LCNF: a
+jump to a join point occurs only in its continuation, not in its body.) -/
+
+/-- The loop-carried increments of declaration `self` (parameters
+`params`, code `body`): each `let z := Nat.add y l` or `Nat.add l y`, `l`
+bound to a `Nat` literal, `y` the parameter at a position `k` where a self
+tail call (`let r := self args; return r`) passes `z`, mapped to `y`
+(`CodeCtx.loopAdds`). Binders are unique, so one pass over the code
+collects them. -/
+partial def loopCarriedAdds (keys : NameMap InstKey) (self : Name) (params : Array (Param .pure))
+    (body : Code .pure) : Std.HashMap FVarId FVarId := Id.run do
+  let pos : Std.HashMap FVarId Nat := params.zipIdx.foldl (fun m (p, i) => m.insert p.fvarId i) {}
+  let declOf (f : Name) : Name := ((keys.find? f).map (·.decl)).getD f
+  -- The literals, the increments of a parameter (`z`, `y`, `l`) and the
+  -- arguments of the self tail calls (position, variable).
+  let rec go (c : Code .pure) (acc : FVarIdSet × Array (FVarId × FVarId × FVarId) × Std.HashSet (Nat × FVarId)) :
+      FVarIdSet × Array (FVarId × FVarId × FVarId) × Std.HashSet (Nat × FVarId) :=
+    match c with
+    | .let d k =>
+      let (lits, adds, tails) := acc
+      let lits := match d.value with
+        | .lit (.nat _) => lits.insert d.fvarId
+        | _ => lits
+      let adds := match d.value with
+        | .const f _ #[.fvar a, .fvar b] _ =>
+          if declOf f != ``Nat.add then adds
+          else if pos.contains a then adds.push (d.fvarId, a, b)
+          else if pos.contains b then adds.push (d.fvarId, b, a)
+          else adds
+        | _ => adds
+      let tails := match d.value, k with
+        | .const g _ args _, .return r =>
+          if g == self && r == d.fvarId then
+            args.zipIdx.foldl (fun t (a, i) => match a with
+              | .fvar x => t.insert (i, x)
+              | _ => t) tails
+          else tails
+        | _, _ => tails
+      go k (lits, adds, tails)
+    -- A join point's `return` returns from the declaration; a local
+    -- function's code is not the declaration's (a call there is no tail
+    -- call of it), and it reads no name from before a rebinding.
+    | .jp d k => go k (go d.value acc)
+    | .fun _ k => go k acc
+    | .cases cs => cs.alts.foldl (fun acc alt => go alt.getCode acc) acc
+    | _ => acc
+  let (lits, adds, tails) := go body ({}, #[], {})
+  let mut out : Std.HashMap FVarId FVarId := {}
+  for (z, y, l) in adds do
+    if lits.contains l && tails.contains (pos.getD y 0, z) then out := out.insert z y
+  return out
 
 /-- Whether `e` evaluates, whenever it completes, a call of a
 `boundedWordAccesses` access with the word `k` among its arguments: the
@@ -275,6 +347,9 @@ mutual
       let outer := ctx.vars
       let mut runVars : Std.HashMap FVarId (String × RR.Ty) := {}
       let mut runCalls := ctx.letCalls
+      -- The run's rebound indices (`rebindIndex`), with the name each had
+      -- before its first rebinding (`CodeCtx.indexOrig`).
+      let mut runOrig : Std.HashMap FVarId String := {}
       let mut c := c
       let mut lets : Array (String × Option RR.Ty × RR.Expr) := #[]
       -- `int-match`: a chain of tests of a `Nat` against literals, one
@@ -298,6 +373,13 @@ mutual
           match runVars[x]?, outer[x]? with
           | some v, _ | none, some v => m.insert x v
           | none, none => m
+        -- `rebindIndex`'s exception: a loop-carried increment of a rebound
+        -- parameter reads the parameter itself (`loopCarriedAdds`).
+        let small := match base.loopAdds[d.fvarId]? with
+          | some y => match runOrig[y]? <|> base.indexOrig[y]? with
+            | some o => small.insert y (o, RR.Ty.named "Nat")
+            | none => small
+          | none => small
         let ctx := { base with vars := small }
         -- J4: a tail call that enters a state machine (`tailCallEntry`).
         if let .const f _ args _ := d.value then
@@ -333,7 +415,9 @@ mutual
           if ys.isEmpty then continue
           let b ← fresh "ib"
           lets := lets.push (b, some (RR.Ty.named "Nat"), .call "l2r_nat_of_index" #[] #[.var w])
-          for y in ys do runVars := runVars.insert y (b, RR.Ty.named "Nat")
+          for y in ys do
+            runVars := runVars.insert y (b, RR.Ty.named "Nat")
+            runOrig := runOrig.insert y ((runOrig[y]? <|> base.indexOrig[y]?).getD n)
         if ctx.intInfo.litLet d then litNames := litNames.insert x
         runVars := runVars.insert d.fvarId (x, t)
         if let some v ← closedLetValue d.value e then
@@ -342,7 +426,8 @@ mutual
           if !args.isEmpty then runCalls := runCalls.insert d.fvarId (f, args.size)
         c := k
       let vars := runVars.fold (init := outer) fun m k v => m.insert k v
-      let ctx' := { base with vars, letCalls := runCalls }
+      let indexOrig := runOrig.fold (init := base.indexOrig) fun m k v => m.insert k v
+      let ctx' := { base with vars, letCalls := runCalls, indexOrig }
       match chain with
       | some (x, nt, arms) =>
         let m ← lowerIntMatch ctx' outlined retTy x nt arms
@@ -415,7 +500,9 @@ mutual
         -- J3: outline the body into a function over its free variables.
         let pnames ← params.mapM fun _ => fresh "p"
         let vars := (params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) (unitVars ctx.vars)
-        let bodyCtx := { ctx with vars }
+        -- A function of its own: the names before a rebinding
+        -- (`indexOrig`) are not captured.
+        let bodyCtx := { ctx with vars, indexOrig := {} }
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
         -- Captured in the order of their first use in the body, not by
@@ -499,7 +586,7 @@ mutual
         t := c
       if layers.isEmpty then
         throwError "lean2rr: local function {d.binderName}: every domain of its type {d.type} is phantom (internal error: its last domain stays, `keptErasedHead`)"
-      let bodyCtx := { ctx with vars }
+      let bodyCtx := { ctx with vars, indexOrig := {} }
       let body ← lowerCode bodyCtx outlined t d.value
       let mut lam := RR.Expr.block { body with lets := pre ++ body.lets }
       for (n, lt) in layers.reverse do
@@ -736,7 +823,8 @@ def lowerDeclCode (d : Decl .pure) (su : DeclSetup) (sm? : Option StateMachine)
   let lc ← read
   let ctx : CodeCtx := { vars := su.vars, sm := sm?, loop := su.loop, used := codeUses su.body {},
                          boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycles,
-                         intInfo := if lc.intMatch then intMatchInfo lc.decls su.body else {} }
+                         intInfo := if lc.intMatch then intMatchInfo lc.decls su.body else {},
+                         loopAdds := loopCarriedAdds lc.keys d.name d.params su.body }
   -- The body of a declaration without parameters runs once: a constant
   -- boxed there is boxed in line (`boxOf`), not given a once-cell.
   modify fun s => { s with inConstBody := d.params.isEmpty }

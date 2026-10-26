@@ -2,7 +2,7 @@
 edges of the box's immediates: a `Nat` below 2^63 and an `Int` in the
 `int32` range, in [2^32, 2^62) or in [-2^62, -2^31) are immediates; a `Nat`
 from 2^63, an `Int` in [2^31, 2^32) and one of 2^62 or more in magnitude
-are cells. Under `--int-backend rcgmp` a box of a value outside the
+are cells. A box of a value outside the
 immediates is a new leanrt cell, so `boxed-consts` boxes such a constant
 once, in a once-cell; one whose box is an immediate is boxed in line
 (review of step D: `k5 : Nat := 5` had a once-cell). Checked by

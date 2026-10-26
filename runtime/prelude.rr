@@ -15,7 +15,7 @@
 // call small `#[ffi(import)]` textures, which call into the `leanrt` Rust
 // crate (runtime/leanrt). Every call consumes its arguments. Lean's runtime
 // rules (hashes, string positions, float and fixed-width integer rules,
-// libm, the `Nat`/`Int` rules over leanrt's GMP numbers, the array edge
+// libm, the lifted limits of `Nat.pow` and the shifts, the array edge
 // rules, panics and the text of numbers) are the shared crate
 // lean-runtime's (`sem::...`, `lean_runtime::semantics`), which lean2rr
 // shares with another Lean translator: the prelude and leanrt only convert
@@ -483,7 +483,9 @@ fn l2r_word_index_ok(w : u64, n : u64) -> bool { w < n }
 // the index word of `trunci_overflow`'s pair.
 fn l2r_index_sat(v : u64, wide : bool) -> u64 { if wide || (v >> 63) != 0 { 18446744073709551615 } else { v } }
 
-// A value below 2^63 (lean2rr's small literals), and any word.
+// The `Nat` of a value below 2^63 (the prelude's small constants and the
+// conversions of narrow words; leanrt's unit test reads the
+// `lean_version_get_*` ones), and of any word.
 fn l2r_nat_small(x : u64) -> Nat { x as Nat }
 fn l2r_nat_of_u64(x : u64) -> Nat { x as Nat }
 
@@ -576,6 +578,20 @@ fn lean_nat_shiftr(a : Nat, b : Nat) -> Nat {
 fn l2r_nat_truncate_bits(a : Nat, b : Nat) -> Nat {
     let (w, wide) : (u64, bool) = core::intrinsic::bigint::trunci_overflow(b);
     if wide { a } else { core::intrinsic::bigint::floormod2expi(a, w) }
+}
+
+// `p + c.utf8Size` (lean2rr rewrites `Nat.add p (Char.utf8Size c)` to
+// this, optimization `utf8-size-add`, only where the program's
+// `Char.utf8Size` is Lean's rule: 1 up to 127, 2 up to 2047, 3 up to
+// 65535, else 4). An ASCII character adds 1 in a branch of its own: the
+// chain of tests, inlined, becomes selects on the character, and a loop's
+// next position (`String.map`: the size of the new character) would wait
+// for them on every character (L17).
+fn l2r_nat_add_utf8_size(p : Nat, c : u32) -> Nat {
+    if c <= 127 { p + 1 } else {
+        let n : Nat = if c <= 2047 { 2 } else { if c <= 65535 { 3 } else { 4 } };
+        p + n
+    }
 }
 
 // `Nat.log2` (`log2 0 = 0`).
@@ -1337,8 +1353,9 @@ fn powf(x : f32, y : f32) -> f32 [{ leanrt::float::libm_call::powf(x, y) }];
 // Positions are `Nat` byte offsets. A big position (2^63 or more) is never
 // valid; the functions below reproduce what Lean's C code does with
 // non-scalar positions (exactly the big `Nat`s here). Sizes, lengths and
-// valid positions are below 2^63 (memory), so they are made with
-// `l2r_nat_small`.
+// valid positions are below 2^48 (memory), so they are made with
+// `l2r_nat_size`, whose mask to 61 bits tells LLVM that the value is an
+// immediate.
 
 #[ffi(import)]
 fn lean_mk_string(s : str) -> LStr [{ leanrt::string::from_bytes((*s).as_bytes()) }];

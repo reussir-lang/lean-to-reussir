@@ -1,7 +1,7 @@
 From 0e8c4cb044c9a2b9917a0d5e50fe1d32d4a526e6 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:35:45 -0400
-Subject: [PATCH 12/24] l2r-local: entry 23-d: worklist drops behind an option
+Subject: [PATCH 12/25] l2r-local: entry 23-d: worklist drops behind an option
  (worklist-drops)
 
 Third step of the in-place worklist: the acquire/drop expansion can

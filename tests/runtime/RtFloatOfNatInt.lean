@@ -6,7 +6,7 @@ by a bit far below the halfway point), the largest finite double and the
 overflow edge to an infinity (`(2^54 - 1) * 2^970`, halfway between the
 largest finite double and 2^1024, goes up), far past it, and the negatives
 of all of them. Each conversion runs as a direct call and through a function
-value. lean2rr computes them under `--int-backend rcgmp` with `sitofp`
+value. lean2rr computes them with `sitofp`
 (`prelude-int-ops`: `l2r_float_of_nat`, `l2r_float_of_int`), natively
 Lean's `Float.ofScientific`; the bits must agree. -/
 

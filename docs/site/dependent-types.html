@@ -159,7 +159,9 @@ values inside the word.</p>
 of them occur below: <code>Sigma</code> is 21, <code>Prod</code> is 22.</p>
 <p>To put a value into a box, the code calls <code>l2r_any_of&lt;T&gt;(x, num)</code>. To take
 a value out, it calls <code>l2r_any_as&lt;T&gt;(b, num)</code>, or it splits the word
-itself. Each read checks the word:</p>
+itself. A <code>Nat</code> and an <code>Int</code> have functions of their own
+(<code>l2r_any_of_nat(x)</code>, <code>l2r_any_as_nat(b)</code>, and the same for <code>Int</code>): they
+keep a small value an immediate. Each read checks the word:</p>
 <ul>
 <li>a pointer with the expected number gives the object;</li>
 <li><code>box(0)</code> gives the <em>zero</em> of the type: <code>0</code>, <code>""</code>, an empty array, or a
@@ -335,7 +337,7 @@ fn Column_push(c : Column, i : Nat) -&gt; Column {
     let data : RVec&lt;LAny&gt; = c.0;
     match ty {
         Ty::c_nat =&gt; {
-            let data2 : RVec&lt;LAny&gt; = lean_array_push&lt;LAny&gt;(data, l2r_any_of&lt;Nat&gt;(i, 1));
+            let data2 : RVec&lt;LAny&gt; = lean_array_push&lt;LAny&gt;(data, l2r_any_of_nat(i));
             Column{data2, Ty::c_nat{}}
         },
         Ty::c_str =&gt; {
@@ -409,8 +411,8 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
 <p>lean2rr generates this code:</p>
 <pre><code class="language-rust">fn pickT(b : bool) -&gt; LAny {
     if b {
-        let n : Nat = l2r_nat_small(42);
-        l2r_any_of&lt;Nat&gt;(n, 1)
+        let n : Nat = 42;                          // a literal of the built-in Nat
+        l2r_any_of_nat(n)
     } else {
         let s : LStr = l2r_str_lit_cached(28);   // the constant &quot;hello&quot;, made once
         l2r_any_of&lt;LStr&gt;(s, 3)
@@ -420,8 +422,8 @@ def describe (x.1 : Bool) (x.2 : lcAny) : String :=
 fn describe(b : bool, v : LAny) -&gt; LStr {
     if b {
         let prefix : LStr = l2r_str_lit_cached(29);  // the constant &quot;nat &quot;
-        let one : Nat = l2r_nat_small(1);
-        let m : Nat = lean_nat_add(l2r_any_as&lt;Nat&gt;(v, 1), one);
+        let one : Nat = 1;
+        let m : Nat = lean_nat_add(l2r_any_as_nat(v), one);
         let digits : LStr = l2r_nat_repr(m);
         lean_string_append(prefix, digits)
     } else {
@@ -437,7 +439,7 @@ fn describe(b : bool, v : LAny) -&gt; LStr {
 <li><code>describe</code> takes the value as a box (<code>v</code>). The <code>true</code> branch takes a
   <code>Nat</code> out of the box and adds 1. The <code>false</code> branch takes a <code>String</code> out
   of the box and appends it.</li>
-<li><code>l2r_any_as&lt;Nat&gt;(v, 1)</code> gives the <code>Nat</code> of a small word or of a pointer
+<li><code>l2r_any_as_nat(v)</code> gives the <code>Nat</code> of a small word or of a pointer
   with the number 1. For <code>box(0)</code>, it gives 0, as in a native build:
   <code>box(0)</code> is reached only with <code>unsafeCast</code>. For any other word, it
   panics.</li>
@@ -493,7 +495,7 @@ enum List { c_nil, c_cons(LAny, List) }      // every List
 
 fn entries(n : Nat) -&gt; List {
     let t1 : Ty = Ty::c_nat{};
-    let p1 : Sigma = Sigma{l2r_any_imm(Ty_index(t1)), l2r_any_of&lt;Nat&gt;(n, 1)};      // ⟨.nat, n⟩
+    let p1 : Sigma = Sigma{l2r_any_imm(Ty_index(t1)), l2r_any_of_nat(n)};          // ⟨.nat, n⟩
     let t2 : Ty = Ty::c_str{};
     let s : LStr = l2r_nat_repr(n);
     let p2 : Sigma = Sigma{l2r_any_imm(Ty_index(t2)), l2r_any_of&lt;LStr&gt;(s, 3)};     // ⟨.str, toString n⟩
@@ -575,8 +577,8 @@ let _x.32 : String := Pkg.show _x.31;
 }
 
 let f : Fn_Nat_Str = Fn_Nat_Str::reprFast{};
-let five : Nat = l2r_nat_small(5);
-let p : Pkg = Pkg{l2r_any_of&lt;Nat&gt;(five, 1), Fn_Box_Str::wrap_Nat{f}};
+let five : Nat = 5;
+let p : Pkg = Pkg{l2r_any_of_nat(five), Fn_Box_Str::wrap_Nat{f}};
 let s : LStr = Pkg_show(p);
 </code></pre>
 <ul>
@@ -594,7 +596,7 @@ let s : LStr = Pkg_show(p);
         Fn_Box_Str::z =&gt; { zero_String() },
         Fn_Box_Str::raw(c) =&gt; { c(x) },
         Fn_Box_Str::wrap_Prod(g) =&gt; { apply_Fn_Prod_Str(g, unbox_Prod(x)) },
-        Fn_Box_Str::wrap_Nat(g) =&gt; { apply_Fn_Nat_Str(g, l2r_any_as&lt;Nat&gt;(x, 1)) }
+        Fn_Box_Str::wrap_Nat(g) =&gt; { apply_Fn_Nat_Str(g, l2r_any_as_nat(x)) }
     }
 }
 
@@ -658,20 +660,23 @@ one copy of <code>nest</code> for these calls. In that copy, <code>x</code> is a
 
 fn nest_Box(inst : Fn_Box_Str, n : Nat, x : LAny) -&gt; LStr {
     let instPair : Fn_Prod_Str = Fn_Prod_Str::toStringPair{inst, inst};
-    let zero : Nat = l2r_nat_small(0);
-    let isZero : bool = lean_nat_dec_eq(n, zero);
-    if isZero {
-        apply_Fn_Box_Str(inst, x)
-    } else {
-        let one : Nat = l2r_nat_small(1);
-        let n1 : Nat = lean_nat_sub(n, one);
-        let pair : Prod = Prod{x, x};
-        nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of&lt;Prod&gt;(pair, 22))
+    match n {
+        0 =&gt; {
+            apply_Fn_Box_Str(inst, x)
+        },
+        Nat::Succ(n1) =&gt; {                    // n1 is n - 1
+            let pair : Prod = Prod{x, x};
+            nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of&lt;Prod&gt;(pair, 22))
+        }
     }
 }
 </code></pre>
 <ul>
 <li><code>instPair</code> is <code>_f.4</code>: the dictionary for pairs.</li>
+<li>The test <code>Nat.decEq x.2 zero</code>, the <code>cases</code> on its result and
+  <code>Nat.sub x.2 one</code> become one <code>match</code> on the built-in <code>Nat</code> (pass
+  <code>int-match</code>): the arm <code>0</code>, and the arm <code>Nat::Succ(n1)</code>, where <code>n1</code> is
+  <code>n - 1</code>.</li>
 <li>At count 0, the copy applies <code>inst</code> to <code>x</code>.</li>
 <li>Else it builds the pair <code>(x, x)</code>, puts the pair into a box (the number of
   <code>Prod</code> is 22), and calls itself. <code>instPair</code> takes a <code>Prod</code>, and the copy
@@ -707,16 +712,15 @@ fn toStringPair(fa : Fn_Box_Str, fb : Fn_Box_Str, p : Prod) -&gt; LStr {
 at <code>Nat</code> for this call. It makes the first pair, then calls the copy at
 the box:</p>
 <pre><code class="language-rust">fn nest_Nat(n : Nat, x : Nat) -&gt; LStr {
-    let zero : Nat = l2r_nat_small(0);
-    let isZero : bool = lean_nat_dec_eq(n, zero);
-    if isZero {
-        l2r_nat_repr(x)
-    } else {
-        let instPair : Fn_Prod_Str = Fn_Prod_Str::toStringPairNat{};
-        let one : Nat = l2r_nat_small(1);
-        let n1 : Nat = lean_nat_sub(n, one);
-        let pair : Prod = Prod{l2r_any_of&lt;Nat&gt;(x, 1), l2r_any_of&lt;Nat&gt;(x, 1)};
-        nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of&lt;Prod&gt;(pair, 22))
+    match n {
+        0 =&gt; {
+            l2r_nat_repr(x)
+        },
+        Nat::Succ(n1) =&gt; {
+            let instPair : Fn_Prod_Str = Fn_Prod_Str::toStringPairNat{};
+            let pair : Prod = Prod{l2r_any_of_nat(x), l2r_any_of_nat(x)};
+            nest_Box(Fn_Box_Str::wrap_Prod{instPair}, n1, l2r_any_of&lt;Prod&gt;(pair, 22))
+        }
     }
 }
 </code></pre>
@@ -767,7 +771,7 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs =&gt; xs.length * 2⟩]
 <p>lean2rr generates this code:</p>
 <pre><code class="language-rust">fn ops_lam(xs : List) -&gt; Nat {
     let len : Nat = List_length(xs);
-    let two : Nat = l2r_nat_small(2);
+    let two : Nat = 2;
     lean_nat_mul(len, two)
 }
 </code></pre>
@@ -778,7 +782,7 @@ def ops : List Op := [⟨List.length⟩, ⟨fun xs =&gt; xs.length * 2⟩]
 <li>The function counts the cells and multiplies by 2:</li>
 </ul>
 <pre><code class="language-rust">fn List_length(xs : List) -&gt; Nat {
-    let zero : Nat = l2r_nat_small(0);
+    let zero : Nat = 0;
     List_length_aux(xs, zero)
 }
 
@@ -786,7 +790,7 @@ fn List_length_aux(xs : List, acc : Nat) -&gt; Nat {
     match xs {
         List::c_nil =&gt; { acc },
         List::c_cons(h, t) =&gt; {
-            let one : Nat = l2r_nat_small(1);
+            let one : Nat = 1;
             let acc1 : Nat = lean_nat_add(acc, one);
             List_length_aux(t, acc1)
         }
@@ -914,28 +918,27 @@ let _x.47 : Nat := leftDepth _x.46;
 </code></pre>
 <p>The functions:</p>
 <pre><code class="language-rust">fn leaf7_init() -&gt; Tree {                 // the constant .leaf 7
-    let seven : Nat = l2r_nat_small(7);
-    Tree::c_leaf{l2r_any_of&lt;Nat&gt;(seven, 1)}
+    let seven : Nat = 7;
+    Tree::c_leaf{l2r_any_of_nat(seven)}
 }
 
 fn build(n : Nat) -&gt; Tree {
-    let zero : Nat = l2r_nat_small(0);
-    let isZero : bool = lean_nat_dec_eq(n, zero);
-    if isZero {
-        leaf7()                           // reads the constant from its once-cell
-    } else {
-        let one : Nat = l2r_nat_small(1);
-        let n1 : Nat = lean_nat_sub(n, one);
-        let t : Tree = build(n1);
-        Tree::c_node{t, t}                // both children are the same t
+    match n {
+        0 =&gt; {
+            leaf7()                       // reads the constant from its once-cell
+        },
+        Nat::Succ(n1) =&gt; {                // n1 is n - 1
+            let t : Tree = build(n1);
+            Tree::c_node{t, t}            // both children are the same t
+        }
     }
 }
 
 fn leftDepth_go(t : Tree) -&gt; Nat {
     match t {
-        Tree::c_leaf(x) =&gt; { l2r_nat_small(0) },
+        Tree::c_leaf(x) =&gt; { let zero : Nat = 0; zero },
         Tree::c_node(l, r) =&gt; {
-            let one : Nat = l2r_nat_small(1);
+            let one : Nat = 1;
             let d : Nat = leftDepth_go(l);
             lean_nat_add(one, d)
         }
@@ -951,7 +954,8 @@ let t : Tree = build(n);
 let depth : Nat = leftDepth(t);
 </code></pre>
 <ul>
-<li><code>build</code> and <code>leftDepth</code> follow the LCNF line by line.</li>
+<li><code>leftDepth</code> follows the LCNF line by line. In <code>build</code>, the test of <code>n</code>
+  against 0 and <code>n - 1</code> become one <code>match</code> on the <code>Nat</code>, as in <code>nest</code>.</li>
 <li>The leaf's field has the parameter's type, so it is a box. <code>build</code> puts
   7 into it: the word of the small <code>Nat</code> 7.</li>
 <li><code>main</code> passes the tree to <code>leftDepth</code> as it is. No code copies the tree.

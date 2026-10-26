@@ -28,8 +28,9 @@ counts no number literal as an allocation). The rules ask here:
 A new representation of `Nat`/`Int` changes these definitions, the
 prelude's Nat and Int sections, leanrt, and the lowering's uses of
 Reussir's integers (the box functions, `natIntBoxFns?` in LowerBase)
-(docs/implementation/representations/nat-int.md, "The encoding is known in
-one place").
+(docs/implementation/representations/nat-int.md: "Reussir's built-in
+integers (rcgmp)" for the prelude and leanrt, "The lowering" for the cost
+model and the boxes).
 -/
 
 namespace LeanToReussir

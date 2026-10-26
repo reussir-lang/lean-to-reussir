@@ -4,7 +4,7 @@ value twice, as shared boxes), a big `Int` twice in a list made by a
 function that is not inlined (`listI`; a list's head is a box, where an
 `Option Int` is a flat value and Lean's compiler removes an option taken
 apart at once), takes the `Int`s out and uses them, maps the `Nat` list
-(unboxed, computed, boxed again), sums and drops it all. Under `--int-backend rcgmp` a big value's box is a leanrt
+(unboxed, computed, boxed again), sums and drops it all. A big value's box is a leanrt
 cell that takes the owned rcgmp handle (`l2r_any_of_big`): a box
 that kept one reference too many would keep every value alive, so the
 peak memory, flat natively, would grow with the count

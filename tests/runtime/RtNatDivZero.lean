@@ -1,6 +1,6 @@
 /-! Runtime test: every division of `Nat` and `Int` by 0, 1 and -1 (and by
-a big divisor), on immediate and heap operands of both of lean2rr's
-representations (`--int-backend leanrt` and `rcgmp`): Lean defines
+a big divisor), on immediate and heap operands of Reussir's built-in
+integers (rcgmp's immediates are [-2^61, 2^61)): Lean defines
 `x / 0 = 0` and `x % 0 = x` for every flavor (`Nat.div`, `Nat.mod`,
 `Nat.divExact`, `Int.div`/`Int.mod` (T-rounding), `Int.ediv`/`Int.emod`,
 `Int.fdiv`/`Int.fmod`, `Int.bdiv`/`Int.bmod`), where Reussir's own `/`

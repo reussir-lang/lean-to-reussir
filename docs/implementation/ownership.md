@@ -192,7 +192,7 @@ runtime.
     the promise's resolution with `none`
     ([tasks/dependents.md](tasks/dependents.md#no-context-is-ever-suspended-inside-a-free)).
   - Reussir frees records itself, at a bounded stack depth, through that
-    stack (Reussir base l2r-base10 and local patches 23-a to 23-p,
+    stack (Reussir base l2r-base11 and local patches 23-a to 23-p,
     [Reussir issue 23](../../reussir-bugs/23-worklist-drops.md)). A record
     whose last managed member is its one recursive member (a list) is
     freed in a loop. A record type whose drop could recurse otherwise
@@ -688,14 +688,15 @@ runtime.
   use that keeps it alive until then), where Reussir would release it at
   the start of the branch. The failing branch
   of a read that a proof keeps in bounds releases nothing and ends the
-  program: a big index is
-  unreachable code, a small one `index_bug` (`l2r_index_fail`,
+  program: an index word from 2^63 (a big `Nat`) is
+  unreachable code, another `index_bug` (`l2r_index_fail_w`,
   `l2r_array_index_bug`). String reads decide their release before their
   rule runs (`leanrt::string::read_owned`); `get_fast`/`next_fast` take
-  the position's word, and a big one is unreachable code inside the
-  texture (`l2r_string_get_fast_word`, `leanrt::index_word`); the
-  `Pos.Raw` reads turn a big position into `u64::MAX` without a call
-  (`l2r_pos_of_word`) and release it after the read.
+  the position's word, and one from 2^60 is unreachable code inside the
+  texture (`l2r_string_get_fast_k`, `l2r_string_next_fast_k`,
+  `leanrt::unreachable_code`); the `Pos.Raw` reads turn a big position
+  into `u64::MAX` without a call (`l2r_index_sat`) and release it after
+  the read (`l2r_consume`).
 - **Why:** LLVM removes the increment and the decrement together only when
   no call and no other store come between them on any path (Reussir's
   `rc.inc` lets it assume the old count was at least 1; so do the
@@ -747,12 +748,12 @@ runtime.
   take the array (`updateHashesMerged`) are the cost of owned parameters,
   not of reads.
 - **Where:** `runtime/prelude.rr`: `l2r_array_give`, `l2r_view_size`,
-  `l2r_view_take`, `l2r_view_end`, `l2r_array_get`, `l2r_array_get_word`,
-  `l2r_index_fail`, `l2r_array_index_bug`, `lean_array_get`,
+  `l2r_view_take`, `l2r_view_end`, `l2r_array_get`, `lean_array_fget_w`,
+  `l2r_index_fail_w`, `l2r_array_index_bug`, `lean_array_get`,
   `lean_byte_array_get`, `lean_float_array_get`, the string reads;
   `runtime/leanrt/src/array.rs`: `give`, `view_size`, `view_take`,
   `view_end`; `string.rs`:
-  `read_owned`; `lib.rs`: `index_word`; tests `RtArrayReadViews`,
+  `read_owned`; `lib.rs`: `unreachable_code`; tests `RtArrayReadViews`,
   `RtArrayGetDefault`, `RtReadsDeep`, leanrt's unit tests `views`; plan §10
   ("Reads take their container owned").
 - **Remove only if:** Reussir gets borrowed FFI parameters (a feature

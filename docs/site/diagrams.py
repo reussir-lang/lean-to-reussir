@@ -604,7 +604,7 @@ def runsh():
     s.path("M 650 50 C 680 50 680 110 710 110")
     s.path("M 650 200 C 680 200 680 140 710 140")
     s.box(715, 85, 215, 80, ["compare byte for byte:", "stdout, stderr, exit code;",
-                             "and no text relocations", "in the lean2rr build"], "b-test")
+                             "lean2rr build: no text", "relocations, no shared GMP"], "b-test")
     s.text(715, 195, "PASS, FAIL, or with NAME.xfail:", "ts")
     s.text(715, 211, "XFAIL (still fails), XPASS (remove .xfail)", "ts")
     return s.render()

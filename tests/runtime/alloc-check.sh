@@ -28,7 +28,8 @@
 #   counts the integers made less those freed): a big number that is never
 #   released, or released twice, makes the count grow, or shrink, with the
 #   size, while the program's constants stay alive at both (natively a big
-#   number is GMP's, not counted apart).
+#   number is GMP's, not counted apart); a lean2rr run without the line fails
+#   such a check (the counter's rcgmp hooks were not linked).
 # Native's counts are the largest of ALLOC_CHECK_NATIVE_RUNS runs at each
 # size (default 3; the first run's output is the one compared). Native Lean
 # starts libuv's event-loop thread while its runtime initializes, and that
@@ -190,7 +191,7 @@ for t in "${TESTS[@]}"; do
           dnb=$((nb2 - nb1)); dlb=$((lb2 - lb1)); allowedb=$(($(factor_times "$factor" $((dnb > 0 ? dnb : 0))) + 64 * offset))
           nr=$(tail -1 "$d/$k.large.native.rss"); lr=$(tail -1 "$d/$k.large.l2r.rss")
           lv1=$(alloccount_live "$d/$k.small.l2r.err"); lv2=$(alloccount_live "$d/$k.large.l2r.err")
-          echo "  $t [$small -> $large]: allocations native +$dn, lean2rr +$dl (allowed +$allowed); bytes native +$dnb, lean2rr +$dlb (allowed +$allowedb); peak KB native $nr, lean2rr $lr; heap integers alive at exit $lv1 -> $lv2"
+          echo "  $t [$small -> $large]: allocations native +$dn, lean2rr +$dl (allowed +$allowed); bytes native +$dnb, lean2rr +$dlb (allowed +$allowedb); peak KB native $nr, lean2rr $lr; heap integers alive at exit ${lv1:-?} -> ${lv2:-?}"
           if [ "$dl" -gt "$allowed" ]; then
             res="$res allocations grow faster than native's ([$small -> $large]: +$dl, native +$dn, allowed $factor x +$dn + $offset);"
           fi
@@ -204,9 +205,13 @@ for t in "${TESTS[@]}"; do
             fi
           fi
           if [ -n "$live" ]; then
-            dlv=$((lv2 - lv1))
-            if [ "${dlv#-}" -gt "$live" ]; then
-              res="$res heap integers alive at exit change with the size ([$small -> $large]: $lv1 -> $lv2, allowed a change of $live);"
+            if [ -z "$lv1" ] || [ -z "$lv2" ]; then
+              res="$res no 'alloccount: rcgmp live' line in a lean2rr run (the counter's rcgmp hooks were not linked), so the live bound measured nothing;"
+            else
+              dlv=$((lv2 - lv1))
+              if [ "${dlv#-}" -gt "$live" ]; then
+                res="$res heap integers alive at exit change with the size ([$small -> $large]: $lv1 -> $lv2, allowed a change of $live);"
+              fi
             fi
           fi
         fi

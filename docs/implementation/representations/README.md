@@ -27,7 +27,7 @@ is in [`runtime/README.md`](../../../runtime/README.md).
   without observable releases only, a set's release of a replaced record
   by its own drop, the costs.
 - [strings.md](strings.md): the counted string, its equality, the string literal table
-  and its `[` escape.
+  and its `[` escape, a position plus a character (`utf8-size-add`).
 - [box-and-uniform.md](box-and-uniform.md): the uniform `Box` type and its
   variants; the one-word box `LAny`, which every `Box` is.
 - [placeholders.md](placeholders.md): Lean's `box(0)` as the zero of a

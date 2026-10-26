@@ -1,7 +1,7 @@
 From 9c10b983382bffd59c6546ba0528744109f3afff Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 07:38:16 -0400
-Subject: [PATCH 08/24] l2r-local: entry 21: cancel rcgmp retains of [value]
+Subject: [PATCH 08/25] l2r-local: entry 21: cancel rcgmp retains of [value]
  record members against the record's drop
 
 A by-value record (or tuple) taken apart retains each member it extracts

@@ -16,16 +16,21 @@ builds apply to Reussir.
   which builds and runs them ([running the repros](#running-the-repros)).
 
 **Base.** lean2rr's Reussir is upstream Reussir `00906e38` (`main` on
-2026-10-25) plus the 24 patches of the series: 10-a, 07-a, entry 20's
-five, 21-a and entry 23's sixteen. The checkout at `./reussir` is not
-part of this repository; its branch `l2r-base10` (head `0bea9c7d`) is
-that stack (the series gives the same tree, `707daa79`), and
+2026-10-25) plus the 25 patches of the series: 10-a, 07-a, entry 20's
+first five, 21-a, entry 23's sixteen and entry 20's 20-f (the
+mlir-rcgmp pin). The checkout at `./reussir` is not part of this
+repository; its branch `l2r-base11` (head `a39e59b0`) is that stack (the
+series gives the same tree, `eb79e76e`), and
 `scripts/l2r.py` stops with an error on a Reussir without the patches it requires
 ([applying the patches](#applying-the-patches)). Since `0378b744`, the
 base needs GMP and newer build tools
 ([building Reussir](#building-reussir)).
 
-`l2r-base10` is Phase 2's base (2026-10-26). Reussir frees Direct and
+`l2r-base11` is `l2r-base10` (head `0bea9c7d`, tree `707daa79`) plus
+20-f, which moves the commit of mlir-rcgmp that the build fetches to a
+faster upstream one until upstream Reussir moves its own pin
+([history](#history-the-mlir-rcgmp-pin-2026-10-26)). `l2r-base10` is
+Phase 2's base (2026-10-26). Reussir frees Direct and
 TailLoop records with upstream's glue and the other recursive records
 through the per-thread drop stack of entry 23 (worklist drops), its
 pending records linked through their own headers on a change of release
@@ -101,12 +106,12 @@ only in part).
   entry. In the text, a patch is named by NN-x: 20-b is the second patch of
   issue 20.
 - **Patch file contents** are `git format-patch` output of the commits of
-  `l2r-base10`, against `00906e38`, as one series (each subject has its
-  patch count, `[PATCH NN/24]`). A file's subject line is the subject of
+  `l2r-base11`, against `00906e38`, as one series (each subject has its
+  patch count, `[PATCH NN/25]`). A file's subject line is the subject of
   its commit: "issue 38" (an old number) means entry 7; 10-a's subject
   has no number; the subjects of 20-a to 20-e name step D's patches R1,
-  R2, R2b, R2c and R3 (entry 20); those of 21-a and 23-a to 23-p name
-  their entries. The parked 19-a is its file from `l2r-base7`'s series
+  R2, R2b, R2c and R3 (entry 20), and 20-f's says "rcgmp pin"; those of
+  21-a and 23-a to 23-p name their entries. The parked 19-a is its file from `l2r-base7`'s series
   (`[PATCH 3/8]`). The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
   new ones.
@@ -188,18 +193,18 @@ changes only the commit of mlir-rcgmp that the build fetches
 | [2](02-native-drop-order.md) | missing feature (partly fixed upstream) | drop glue does not free in native Lean's order: upstream frees first field first; with entry 23, a Worklist record's other members at its visit and its dead children last first | yes: the release order of resources when user code drops a record; accepted by the owner | leanrt keeps its pending releases on entry 23's stack, which gives native order inside every drain | none since Phase 2 (02-a to 02-e left the series) | the stack depth is fixed (#677 to #679, another design, first field first); the order is not |
 | [7](07-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address | yes: the one-word `Box` needs it | none | [07-a](patches/07-a-tagged-top-bits.patch) | not fixed |
 | [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the box `LAny` needs it (and until D8 the one-word `Nat` and `Int`) | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed (lean2rr's `Nat` and `Int` are upstream's built-in integers, #776, since D8; the box still needs tagged handles) |
-| [20](20-rcgmp-integration.md) | missing feature (one patch also fixes a bug) | Reussir's built-in `Nat` and `Int` (rcgmp) lack what lean2rr's `Nat` and `Int` on rcgmp need: intrinsics for Lean's division modes and the power-of-two remainder, an owned handle at polyffi type arguments (without it a leak and uses after free, a bug), retain and release glue that inlines into textures, a query for sharing, and a parse of big literals that is not cubic | yes: lean2rr's `Nat` and `Int` are Reussir's built-in integers (step D; the only representation since D8) | none | [20-a](patches/20-a-bigint-lean-division.patch), [20-b](patches/20-b-mpz-polyffi-handle.patch), [20-c](patches/20-c-mpz-inline-glue.patch), [20-d](patches/20-d-mpz-is-shared.patch), [20-e](patches/20-e-hex-bigint-literals.patch) | not upstream; Reussir's maintainer takes them from here; prepared as pull request candidates, not opened |
+| [20](20-rcgmp-integration.md) | missing feature (one patch also fixes a bug) | Reussir's built-in `Nat` and `Int` (rcgmp) lack what lean2rr's `Nat` and `Int` on rcgmp need: intrinsics for Lean's division modes and the power-of-two remainder, an owned handle at polyffi type arguments (without it a leak and uses after free, a bug), retain and release glue that inlines into textures, a query for sharing, and a parse of big literals that is not cubic | yes: lean2rr's `Nat` and `Int` are Reussir's built-in integers (step D; the only representation since D8) | none | [20-a](patches/20-a-bigint-lean-division.patch), [20-b](patches/20-b-mpz-polyffi-handle.patch), [20-c](patches/20-c-mpz-inline-glue.patch), [20-d](patches/20-d-mpz-is-shared.patch), [20-e](patches/20-e-hex-bigint-literals.patch), [20-f](patches/20-f-rcgmp-pin-cc73b218.patch) (the mlir-rcgmp pin) | not upstream; Reussir's maintainer takes them from here; prepared as pull request candidates, not opened; 20-f goes when upstream moves its pin |
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44; checked) |
 
 **Counts.** 20 entries (numbers 1 to 24; numbers 5, 9, 11 and 22 are
 retired): 6 bugs, 3 costs, 6 missed optimizations, 4 missing features, 1
-dependency issue. 5 entries have patches in the series, 24 patch files
-in all (one each for 7, 10 and 21, five for entry 20, sixteen for entry
+dependency issue. 5 entries have patches in the series, 25 patch files
+in all (one each for 7, 10 and 21, six for entry 20, sixteen for entry
 23): 6 features (07-a, 10-a, 20-a, 20-d, 23-k, 23-m), 2 patches that
 also fix a bug (20-b, a feature that lean2rr needs; 23-e, an
-optimization that fixes entry 24), 14 optimizations (20-c, 20-e, 21-a,
-23-a, 23-b, 23-d, 23-f, 23-h, 23-i, 23-j, 23-l, 23-n, 23-o, 23-p), a
-refactor (23-c) and a patch of tests (23-g). 5 parked patches lie
+optimization that fixes entry 24), 15 optimizations (20-c, 20-e, 20-f,
+21-a, 23-a, 23-b, 23-d, 23-f, 23-h, 23-i, 23-j, 23-l, 23-n, 23-o, 23-p),
+a refactor (23-c) and a patch of tests (23-g). 5 parked patches lie
 outside the series (01-a, 06-a, 06-b, 16-a, 19-a).
 
 Status words used in the entries' summaries:
@@ -217,7 +222,7 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base10 00906e38
+git -C reussir checkout -b l2r-base11 00906e38
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
@@ -225,14 +230,15 @@ cmake --build reussir/build --target rrc reussir-rt
 ```
 
 Checked on 2026-10-26 (`git am` in a throwaway worktree): the series on
-`00906e38` gives tree `707daa79`, the tree of `./reussir`'s
-`l2r-base10` (`0bea9c7d`); without 23-n to 23-p it gave
+`00906e38` gives tree `eb79e76e`, the tree of `./reussir`'s
+`l2r-base11` (`a39e59b0`); without 20-f it gave `l2r-base10`'s tree,
+`707daa79` (`0bea9c7d`); without 23-n to 23-p too it gave
 `l2r-base9-shared`'s tree, `8b8dd1cb` (`6111586c`, 2026-10-25), and
 without 23-k to 23-m too `l2r-base9`'s, `8c53abcf` (`fc9c1d20`). Phase
 2's first base, `l2r-base7` (upstream `00906e38` plus 10-a, 07-a, 19-a
 and entry 20's five; head `bfe3d32d`, tree `eeab2856`), never became
-lean2rr's published base; `l2r-base10` is it without 19-a, with 21-a and
-entry 23's patches. Before Phase 2, the
+lean2rr's published base; `l2r-base11` is it without 19-a, with 21-a,
+entry 23's patches and 20-f. Before Phase 2, the
 series of 14 gave tree `10b34f74` (`l2r-base8`, head `8e9a6293`), and
 before 21-a the series of 13 tree `b3b19387` (`l2r-stepd`,
 `e3b96e03`). Before step D's patches, the series of 8 patches gave
@@ -261,6 +267,8 @@ Order and dependencies:
   on the one before, and 23-o 23-b's lowering (`DropStackLowering.cpp`)
   to call 23-n's `defer_wide`. 23-a to 23-j also apply to `00906e38` alone (`git
   am`, 2026-10-25).
+- 20-f comes last. It changes only `cmake/RCGMP.cmake` (mlir-rcgmp's
+  `GIT_TAG`), and applies to `00906e38` alone too.
 - The series is the order in which the patches were made, not entry
   order.
 
@@ -277,9 +285,10 @@ declares the box `LAny` `tagged`). lean2rr's `Nat` and `Int` are Reussir's
 built-in integers (step D, on dev since `1e57ed53`; the only
 representation since D8, 2026-10-26), so every build needs 20-a and 20-b
 (`check_rcgmp` checks for them) and uses 20-c to 20-e and 21-a; until
-D8, `--int-backend leanrt` needed none of them. 21-a and
-23-p are optimizations: nothing requires them, and `scripts/l2r.py`
-does not check for them. The driver also passes `--relocation-mode pic`, the workaround
+D8, `--int-backend leanrt` needed none of them. 21-a, 23-p and 20-f
+are optimizations: nothing requires them, and `scripts/l2r.py` does not
+check for them (without 20-f, code dominated by big quotients runs
+slower: L11 40.10G instructions instead of 33.50G). The driver also passes `--relocation-mode pic`, the workaround
 for entry 5 (retired): since `ea240b19` this is rrc's default for
 executables, so the flag is redundant but harmless; it stays for older
 bases.
@@ -312,9 +321,10 @@ it). The build then needs these, in addition to LLVM, MLIR and Clang 23:
   Ubuntu 24.04, install `libstdc++-14-dev`.
 - The rcgmp sources: at the first configuration, CMake fetches
   mlir-rcgmp from GitHub into the build directory's `_deps`, at the
-  commit that `cmake/RCGMP.cmake` pins (`GIT_TAG`; `ca288d5e` since
-  `00906e38`, `c2a68d81` before). An offline build needs them there
-  first.
+  commit that `cmake/RCGMP.cmake` pins (`GIT_TAG`; `cc73b218` with
+  20-f, `ca288d5e` since `00906e38`, `c2a68d81` before). An offline
+  build needs them there first (or `FETCHCONTENT_SOURCE_DIR_RCGMP` set
+  to a checkout of that commit).
 
 After a change of the C++ headers (for example after you install
 `libstdc++-14-dev`), delete the build directory and configure again. The
@@ -334,8 +344,8 @@ why it is parked and describes the patch.
 |---|---|---|---|---|---|
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
-| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `00906e38`, `l2r-base5`, `l2r-stepd`, the series of 14, `l2r-base9`, `l2r-base9-shared` and `l2r-base10` |
-| [19-a](patches/parked/19-a-retcon-direct-arms.patch) | [19](19-retcon-direct-arms.md) | bug fix | 2026-10-25 | lean2rr does not reach the bug since 23-f (rrc makes no retcon destructors) | applies to `00906e38`, `l2r-base9`, `l2r-base9-shared` and `l2r-base10` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `00906e38`, `l2r-base5`, `l2r-stepd`, the series of 14, `l2r-base9`, `l2r-base9-shared`, `l2r-base10` and `l2r-base11` |
+| [19-a](patches/parked/19-a-retcon-direct-arms.patch) | [19](19-retcon-direct-arms.md) | bug fix | 2026-10-25 | lean2rr does not reach the bug since 23-f (rrc makes no retcon destructors) | applies to `00906e38`, `l2r-base9`, `l2r-base9-shared`, `l2r-base10` and `l2r-base11` |
 
 The parked files 01-a, 06-a and 06-b are against the stacks they were
 made on (`ef922049` plus earlier patches of the old series); 16-a is
@@ -343,8 +353,8 @@ against `7954a367`, 19-a against `l2r-base7` (`00906e38` plus 10-a and
 07-a). The column *On 00906e38* was checked on 2026-10-25 (`git apply
 --check`; on `0378b744` on 2026-10-24 and on `ea240b19` on 2026-10-25,
 with the same results; with the series of 13 patches, the series of 14
-and `l2r-base9-shared` on 2026-10-25 and `l2r-base10` on 2026-10-26, the
-same results). The parked 11-a was
+and `l2r-base9-shared` on 2026-10-25 and `l2r-base10` and `l2r-base11`
+on 2026-10-26, the same results). The parked 11-a was
 deleted with entry 11 in Phase 2 (it needed 02-c and 09-a). To park a
 patch of the series, move its file to `patches/parked/`, delete its line
 from `patches/series`, rebuild the Reussir stack from the series, and
@@ -470,6 +480,9 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   reviewable and actionable change per pull request; the other local
   patches stay in the series. Entry 20's patches and 21-a are prepared
   as pull request candidates, not opened.
+- A local move of a dependency's pin (20-f, mlir-rcgmp) stands in for
+  upstream's own: it is dropped when upstream Reussir moves its pin to
+  that commit or a later one, as it did for mlir-rcgmp #48 in #804.
 - Patches are local: lean2rr's work does not push them. The "Upstream
   note" at the end of a patched entry is text for an upstream report.
   Reussir's maintainer asked that Reussir-side changes for lean2rr be
@@ -569,6 +582,26 @@ the runtime side made for leanrt and which change only reussir-rt's
 `drop_stack.rs` and its tests (reviewed, 2026-10-25). `l2r-base10` adds
 23-n to 23-p (2026-10-26): the same 21 commits, then three; checks in
 [issue 23](23-worklist-drops.md#tests).
+
+## History: the mlir-rcgmp pin (2026-10-26)
+
+Upstream mlir-rcgmp's main gained #49 (vectorized heap paths of AND, OR
+and XOR) and #50 (division without a remainder when only the quotient is
+wanted), after the commit that upstream Reussir pins (`ca288d5e`, #804).
+`l2r-base11` adds 20-f to entry 20, which moves the pin to `cc73b218`
+(only `cmake/RCGMP.cmake`); head `a39e59b0`, tree `eb79e76e`; before,
+`l2r-base10` (`0bea9c7d`, tree `707daa79`). lean2rr's L11 (bignum) runs
+33.50G instructions instead of 40.10G (-16%), the count of lean2rr's
+earlier leanrt representation. The runtime side built the 24 patches
+before it unchanged and ran lean2rr's 28 `Nat` and `Int` runtime tests
+and their alloc-checks: all pass. The other 24 patch files changed only
+in their patch counts; the parked patches apply as before. 20-f is a
+note under entry 20, not an entry of its own: it is no Reussir problem
+(the old pin is correct, only slower) and no error in the library, which
+is what entry 15's kind (a dependency issue) records, but a version
+choice for the integers that entry 20 integrates, whose patches are what
+lean2rr needs from Reussir's rcgmp side; every patch belongs to one
+entry. It is dropped when upstream moves its pin.
 
 ## History: linked pending records (2026-10-26)
 

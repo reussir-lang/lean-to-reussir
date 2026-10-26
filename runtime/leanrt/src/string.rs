@@ -135,8 +135,8 @@ unsafe fn data(o: *mut Obj) -> *mut u8 {
 /// others): `f` on the bytes. The release is decided before `f` runs: a
 /// shared string is decremented first (another reference keeps the block
 /// alive; one thread runs Lean code), so the rule's out-of-line paths (the
-/// decoding of a character that is not ASCII; the panic of a big position
-/// in `l2r_string_get_fast_word`) come after the decrement, and LLVM
+/// decoding of a character that is not ASCII; the panic of a position from
+/// 2^60 in `l2r_string_get_fast_k`) come after the decrement, and LLVM
 /// removes the caller's increment and this decrement on every path. The
 /// last reference runs `f`, then frees the block, as `Drop`.
 #[inline(always)]

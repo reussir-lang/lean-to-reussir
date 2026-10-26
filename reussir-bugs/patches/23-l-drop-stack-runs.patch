@@ -1,7 +1,7 @@
 From f67d389f495da7ae85d0b20f3d5ab527bcaa6560 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 22:59:21 -0400
-Subject: [PATCH 20/24] l2r-local: entry 23-l: drop stack: runs of drops with
+Subject: [PATCH 20/25] l2r-local: entry 23-l: drop stack: runs of drops with
  one release function
 
 Drops deferred one after the other with one release function form one

@@ -12,7 +12,7 @@ under every option.
 
 **Kind:** bug. **Status:** fixed by 23-e
 ([issue 23](23-worklist-drops.md)), applied in `./reussir`'s series since
-2026-10-25 (branch `l2r-base10`, commit `0fef47d1`). lean2rr does not
+2026-10-25 (branch `l2r-base11`, commit `0fef47d1`). lean2rr does not
 reach the bug: rrc's command line has no TPDE level (`-O` is `none`,
 `default`, `aggressive` or `size`), and lean2rr does not use the JIT.
 

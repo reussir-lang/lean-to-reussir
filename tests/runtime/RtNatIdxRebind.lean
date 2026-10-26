@@ -1,7 +1,7 @@
 /-! Runtime test: the index of an access that a proof keeps in range, used
 again after the access: `a[i]` with a proof (`fget`), `ByteArray.get`,
 `a.set i x h` (`fset`), `ByteArray.set`, `a.swap i j` (`fswap`), also
-through `Vector` and `Array.qsort`. Under `--int-backend rcgmp` lean2rr
+through `Vector` and `Array.qsort`. lean2rr
 uses the access's index word as a `Nat` (`l2r_nat_of_index`) in place of
 the index after the access (`rebindIndex`, Lower/Code). Pinned: loops up
 to the size of arrays of 0, 1, 2, 7 and 1000 elements (after the last

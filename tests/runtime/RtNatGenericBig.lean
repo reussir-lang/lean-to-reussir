@@ -1,12 +1,12 @@
 /-! Runtime test: big `Nat`s
 (above 2^61, rcgmp's immediate range, and above 2^63) in a
 closed term (`big`, a once-cell constant) and in a typed `Array Nat` (built
-by `push`, read by `get!`), read again after other allocations. Under
-`--int-backend rcgmp` both cross generic prelude textures at `T = Nat`
-(`l2r_once_put/get`, `l2r_array_push`, `l2r_view_take`), where Reussir
-renders a built-in integer as the raw handle: without lean2rr's guard (no
-`Nat` type arguments until Reussir renders an owning handle) the counts
-were wrong and the sums silently different (review R1-01 of step D).
+by `push`, read by `get!`), read again after other allocations. Both
+cross generic prelude textures at `T = Nat` (`l2r_once_put/get`,
+`l2r_array_push`, `l2r_view_take`), where Reussir renders a built-in
+integer as its owned handle (local patch R2); with the raw handle and no
+guard in lean2rr, the counts were wrong and the sums silently different
+(review R1-01 of step D).
 -/
 def big : Nat := 2^70
 

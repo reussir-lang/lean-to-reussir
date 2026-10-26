@@ -1,7 +1,7 @@
 /-! Runtime test: `Int` literal matches when Lean extracts no closed term
 (`compiler.extract_closed false`), so a negative literal is computed in
 place (`Int.neg (Int.ofNat 6)`) and CSE lets an arm return the literal it
-was tested against. Under `--int-backend rcgmp` (optimization `int-match`,
+was tested against. With optimization `int-match` (on by default,
 Lower/IntMatch) the tests are one `match`; an arm that keeps such a
 literal must keep the `let`s it reads too (review of 762c2ac6: the arm kept
 `Int.neg b` but dropped `b := Int.ofNat a` and `a := 6`, and lean2rr
@@ -9,7 +9,7 @@ stopped with "unbound variable (internal error)"). Shapes: arms returning
 their literal (`f`), the default and later arms reading literals of earlier
 tests (`g`), literal tests then the `Int` split with nested fields (`h`);
 small values of both signs and ±2^70, computed at run time. Every line
-must equal native Lean's, under both representations. -/
+must equal native Lean's. -/
 
 set_option compiler.extract_closed false
 

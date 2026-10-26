@@ -32,7 +32,7 @@
 # …` (the other anchors, `anchoredFns`, are not in them), and the join
 # points' `#[transform_anchor]`s from the .rr.
 # The check fails when a program has none of the join points it looks at
-# (it would check nothing). Self-check: RtJpWide under rcgmp with
+# (it would check nothing). Self-check: RtJpWide with
 # `L2R_NO_INLINE_ANCHORS` (no anchors at all) must fail the check of its
 # .rr.
 #   tests/runtime/inline-anchors-check.sh
@@ -106,31 +106,31 @@ wide() {
   fi
   return 0
 }
-# cases FILE.rr BACKEND: RtCopyAnchors' expectations.
+# cases FILE.rr: RtCopyAnchors' expectations.
 cases() {
-  local f=$1 be=$2 list
+  local f=$1 list
   list=$(anchors "$f")
   local ps; ps=$(awk '$1 ~ /^l_p[012]___l2r_0_$/' <<< "$list")
-  [ "$(grep -c . <<< "$ps")" -eq 2 ] || fail "$be: $(grep -c . <<< "$ps") of p0, p1, p2 anchored, expected 2"
+  [ "$(grep -c . <<< "$ps")" -eq 2 ] || fail "$(grep -c . <<< "$ps") of p0, p1, p2 anchored, expected 2"
   # Each alone under the budget in sum3: anchored for the sum.
   awk 'NF && ($5 != "l_sum3___l2r_0_" || ($4 - 1) * $2 > 4000) { print "  " $0 }' <<< "$ps" | grep . \
-    && fail "$be: a p anchored other than for the sum of sum3's copies"
+    && fail "a p anchored other than for the sum of sum3's copies"
   awk '$1 == "l_wrap___l2r_0_" && $3 <= 32 && $2 > 32' <<< "$list" | grep -q . \
-    || fail "$be: wrap (own size at most 32, more with big inlined) is not anchored for viaWrap's calls"
-  grep -q '^l_big___l2r_0_ ' <<< "$list" && fail "$be: big (one call) is anchored"
-  grep -q '^l_build___l2r_0_ ' <<< "$list" || fail "$be: build (which calls itself) is not anchored"
-  calls "$f" build build 1 || fail "$be: build does not call itself in the .rr (the test checks nothing)"
+    || fail "wrap (own size at most 32, more with big inlined) is not anchored for viaWrap's calls"
+  grep -q '^l_big___l2r_0_ ' <<< "$list" && fail "big (one call) is anchored"
+  grep -q '^l_build___l2r_0_ ' <<< "$list" || fail "build (which calls itself) is not anchored"
+  calls "$f" build build 1 || fail "build does not call itself in the .rr (the test checks nothing)"
   # mid: anchored with its size over the limit (shown capped at 256) once
   # loop is counted, its own size under it; loop (which calls itself) not.
   awk '$1 == "l_mid___l2r_0_" && $2 == 256 && $3 <= 256' <<< "$list" | grep -q . \
-    || fail "$be: mid (own size under 256, over it with loop) is not anchored for viaMid's calls"
-  grep -q '^l_loop___l2r_0_ ' <<< "$list" && fail "$be: loop is anchored"
-  { calls "$f" loop loop 1 && calls "$f" mid loop 1; } || fail "$be: mid does not call loop, or loop does not call itself (the test checks nothing)"
+    || fail "mid (own size under 256, over it with loop) is not anchored for viaMid's calls"
+  grep -q '^l_loop___l2r_0_ ' <<< "$list" && fail "loop is anchored"
+  { calls "$f" loop loop 1 && calls "$f" mid loop 1; } || fail "mid does not call loop, or loop does not call itself (the test checks nothing)"
   # fc: anchored for fb's calls, in the cycle fa -> fb -> fc -> fa.
   awk '$1 == "l_fc___l2r_0_" && $5 == "l_fb___l2r_0_"' <<< "$list" | grep -q . \
-    || fail "$be: fc is not anchored for the calls of fb, in their cycle"
+    || fail "fc is not anchored for the calls of fb, in their cycle"
   { calls "$f" fa fb 1 && calls "$f" fb fc 60 && calls "$f" fc fa 1; } \
-    || fail "$be: no cycle fa -> fb -> fc -> fa with fb calling fc from its arms (the test checks nothing)"
+    || fail "no cycle fa -> fb -> fc -> fa with fb calling fc from its arms (the test checks nothing)"
   return 0
 }
 # calls FILE.rr G H N: the function of Lean definition G calls H's at least N times.
@@ -145,26 +145,27 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
   (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1 \
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
   before=$fails
-  for be in rcgmp; do
-    R=$OUT/$be.rr
-    if ! translate "$R"; then fail "$be did not translate (see $R.log)"; continue; fi
+  R=$OUT/$P.rr
+  if ! translate "$R"; then
+    fail "did not translate (see $R.log)"
+  else
     want=0
     case $P in
       RtJpWide)
         wide "$R" anchored; want=3 ;;
       RtJpAnchors)
         list=$(jps "$R")
-        awk '$4 >= 250' <<< "$list" | grep -q . || fail "$be: no join point with 250 or more calls (tiny's)"
-        awk '$4 >= 2 && $4 <= 6 && $3 > 40' <<< "$list" | grep -q . || fail "$be: no join point of more than 40 lines with 2 to 6 calls (few's)"
-        awk '$2 == 1 { print "  anchored: " $0 }' <<< "$list" | grep . && fail "$be: a join point is anchored"
+        awk '$4 >= 250' <<< "$list" | grep -q . || fail "no join point with 250 or more calls (tiny's)"
+        awk '$4 >= 2 && $4 <= 6 && $3 > 40' <<< "$list" | grep -q . || fail "no join point of more than 40 lines with 2 to 6 calls (few's)"
+        awk '$2 == 1 { print "  anchored: " $0 }' <<< "$list" | grep . && fail "a join point is anchored"
         anchors "$R" small | awk '$1 ~ /^jp_/ && $4 >= 250 && ($4 - 1) * $2 > 4000' | grep -q . \
-          || fail "$be: tiny's join point is not listed as small and over the budget (the exemption is not exercised)" ;;
+          || fail "tiny's join point is not listed as small and over the budget (the exemption is not exercised)" ;;
       RtCopyAnchors)
-        cases "$R" $be; want=6 ;;
+        cases "$R"; want=6 ;;
     esac
     n=$(count "$R")
-    [ "$n" = $want ] || fail "$be: the rule anchored '$n' function(s), expected $want (see $R.log)"
-  done
+    [ "$n" = $want ] || fail "the rule anchored '$n' function(s), expected $want (see $R.log)"
+  fi
   if [ $P = RtJpWide ]; then
     # Self-check: without anchors the check of the .rr must fail.
     R=$OUT/noanchors.rr

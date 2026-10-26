@@ -166,6 +166,18 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   and how many times its code names each variable (`intMatchInfo`), for
   the matches on `Nat` and `Int` (Lower/IntMatch). -/
   intInfo : IntMatchInfo := {}
+  /-- The loop-carried increments of the declaration being lowered
+  (`loopCarriedAdds`): each `let z := Nat.add y l` (`l` a literal) whose
+  `y` is the declaration's parameter at the position where a self tail
+  call passes `z`, with `y`. Such an increment reads the parameter itself,
+  not the rebinding after a proved access (`rebindIndex`'s exception). -/
+  loopAdds : Std.HashMap FVarId FVarId := {}
+  /-- The `Nat` variables that `rebindIndex` bound again after a proved
+  access (to `l2r_nat_of_index` of the access's word), with the Reussir
+  name each had before its first rebinding, which is in scope wherever the
+  rebinding is. Empty in an outlined join point's body and in a local
+  function, where that name is not captured. -/
+  indexOrig : Std.HashMap FVarId String := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

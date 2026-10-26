@@ -40,14 +40,19 @@ Paths are relative to the repository root.
   `__real_` one; both builds link it with `-Wl,--wrap=…`
   (`alloccount.sh`: `AC_LEANC` for `leanc`, `AC_RRC` for rrc through
   `L2R_RRC_FLAGS`). A destructor prints `alloccount: allocs A reallocs R
-  bytes B` to stderr at exit. In lean2rr's builds `AC_RRC` also wraps
-  rcgmp's allocation hooks (`rcgmp_allocate`, `rcgmp_dealloc`, one heap
-  integer each; their `__real_` functions are weak, so a native build,
-  which does not wrap them, links the counter unchanged), and when a heap
-  integer was made a second line follows: `alloccount: rcgmp live L`, the
-  integers made less those freed (`alloccount_live`; stripped with the
-  first line from the stderr compared with native). The file includes
-  only the compiler's own headers and declares `write` itself: Lean's
+  bytes B` to stderr at exit. In lean2rr's builds `AC_RRC` also links
+  `alloccount_rcgmp.o` and wraps rcgmp's allocation hooks
+  (`rcgmp_allocate`, `rcgmp_dealloc`, one heap integer each) with it, and
+  a second line always follows: `alloccount: rcgmp live L`, the integers
+  made less those freed (`alloccount_live`, empty when the line is
+  missing; both lines are stripped from the stderr compared with native).
+  The object's `__real_` declarations are strong, so a link without the
+  hooks fails instead of calling null; the hooks' object is always
+  loaded, because rustc's symbols.o references `__reussir_allocate`,
+  which reussir-rt defines beside them (this object comes after the rlib
+  on the link line and loads nothing itself); native builds link neither the object nor its wraps, and alloccount.c
+  reads its count through a weak reference. The files include only the
+  compiler's own headers and alloccount.c declares `write` itself: Lean's
   `leanc` has no C library headers.
 - **Why:** the conversion counter (`L2R_COUNT_CONVERSIONS`) exists only in
   lean2rr's build and distorted it (blowup audit BA-00: it broke the
@@ -98,7 +103,8 @@ Paths are relative to the repository root.
   between the two runs (the counter's `alloccount: rcgmp live L` line, of
   rcgmp's allocation hooks, which lean2rr's builds also wrap: a leak or a
   double free of big numbers changes it with the size; RtNatStress and
-  RtNatConst, `live 0`;
+  RtNatConst, `live 0`; a lean2rr run without the line fails the check,
+  so the bound never passes without measuring;
   [representations/nat-int.md](representations/nat-int.md#heap-integers-alive-at-exit-are-counted-in-tests)).
 - **Why:** the two runtimes allocate very differently at startup (native
   Lean about 11000 allocations before `main`, lean2rr about 100), and in

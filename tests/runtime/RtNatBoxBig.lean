@@ -1,10 +1,10 @@
 /-! Runtime test: `Nat` and `Int` values in boxes (the elements of `List`
 and `Option`, the fields of a pair), from small values to values far past
 the box's immediates (`Nat` 2^63 and up, `Int` from 2^62 in magnitude, and
-10^30), built, read back, summed and printed. Under `--int-backend rcgmp`
-a big value's box is a leanrt cell that takes the owned rcgmp handle
-(`l2r_any_of_big`); tests/runtime/int-backend-check.sh checks that the
-translation boxes through it. -/
+10^30), built, read back, summed and printed. A big value's box is a
+leanrt cell that takes the owned rcgmp handle (`l2r_any_of_big`);
+tests/runtime/int-backend-check.sh checks that the translation boxes
+through it. -/
 
 @[noinline] def nats (k : Nat) : List Nat :=
   [0, 1, k, 2^31, 2^62, 2^63 - 1, 2^63 + k, 2^64 + 5 * k, 10^30 + k]

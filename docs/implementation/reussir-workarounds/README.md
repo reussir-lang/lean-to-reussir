@@ -40,11 +40,13 @@ table below.
 ## Summary
 
 lean2rr's builds use upstream Reussir `00906e38` (2026-10-25) plus the
-24 patches of the series: `./reussir`'s branch `l2r-base10` (head
-`0bea9c7d`): 10-a (tagged opaque handles,
+25 patches of the series: `./reussir`'s branch `l2r-base11` (head
+`a39e59b0`): 10-a (tagged opaque handles,
 [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a, 20-a
 to 20-e (the interface for `Nat` and `Int` on rcgmp,
-[issue 20](../../../reussir-bugs/20-rcgmp-integration.md), for step D),
+[issue 20](../../../reussir-bugs/20-rcgmp-integration.md), for step D;
+with 20-f, the build fetches mlir-rcgmp `cc73b218` instead of upstream's
+pin `ca288d5e`),
 21-a (inc/dec cancellation of integer members of `[value]` records,
 [issue 21](../../../reussir-bugs/21-value-record-member-retains.md)) and
 23-a to 23-p (worklist drops,
@@ -115,7 +117,7 @@ either way.
 | [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | every generated tuple (a join point's, J2; a `flatten-structs` result) has its fields in decreasing alignment, as records have (`memberOrder`, `field-order`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [18](../../../reussir-bugs/18-tail-padding-return.md) | missed optimization | the tuple of a `flatten-structs` result keeps a `bool`, `u8`, `u16` or `u32` in a `u64` member and has no member for a unit value, so it has no tail padding (`tupleMemberTy`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [19](../../../reussir-bugs/19-retcon-direct-arms.md) | bug (rrc's memory, reussir#759) | none needed: with 23-f rrc makes no retcon destructors (on `l2r-base7`, which had no 23-f, rrc ran out of memory on `RtSyncSelect` without 19-a) | none (19-a parked) | n/a |
-| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a to 20-e | n/a: every build needs 20-a and 20-b (`check_rcgmp`); until D8, `--int-backend leanrt` needed none |
+| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a to 20-e, and 20-f (the mlir-rcgmp pin) | n/a: every build needs 20-a and 20-b (`check_rcgmp`); until D8, `--int-backend leanrt` needed none; 20-f is not required |
 | [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: the pairs stay without the patch | 21-a | n/a: an optimization; nothing requires it |
 | [23](../../../reussir-bugs/23-worklist-drops.md) | cost (memory and run time of frees) | none: lean2rr's builds use the patches (`RtDeepTreeFree`, `RtClosureChainFree` and their alloc-check bounds show the cost without them), and leanrt's pending stack is built on 23-a's stack | 23-a to 23-p | n/a: `scripts/l2r.py` requires 23-f, 23-k, 23-m, 23-n and 23-o |
 

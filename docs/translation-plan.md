@@ -746,8 +746,10 @@ The lowering emits Reussir's literal of any size (a value outside the
 immediates is a read-only object of the program's data), boxes and
 unboxes through the prelude's non-generic
 `l2r_any_of_nat`/`l2r_any_as_nat` (a box keeps Lean's immediates: a `Nat`
-below 2^63, an `Int` in the `int32` range; a bigger value is a cell that
-holds the heap integer), and passes them at the type arguments of the
+below 2^63, an `Int` in the `int32` range; it also holds an `Int` in
+[2^32, 2^62) or [-2^62, -2^31) as a wider immediate, `2v + 1`
+(`l2r_int_box_wide`); any other value is a cell that holds the heap
+integer), and passes them at the type arguments of the
 runtime's generic FFI functions as owned handles (Reussir's local patch
 R2): a once-cell, a polymorphic extern's value, a typed array or cell
 holds the handle itself. So `Nat` and `Int` are ordinary counted handles
@@ -2178,10 +2180,11 @@ startup step at its place, read or not.
 
 A constant whose code only builds unboxed values from small literals and
 constructors (`Int.ofNat 0`, an enumeration value) is recomputed at every
-use instead of cached. Every `Nat` or `Int` it builds must be small (a
-`Nat` below 2^63, an `Int` in `int32`; `def K : Int := 3000000000` is a
-big number, which is cached: recomputed it would be allocated at every
-use, RV8N-01). It cannot panic, trace or allocate, so this is
+use instead of cached. Every `Nat` or `Int` it builds must cost no
+allocation: a literal of any size (a read-only object of the program's
+data) or a computed value in rcgmp's immediates, [-2^61, 2^61) (under
+leanrt's one-word representation, until D8, a big value was allocated at
+every use, RV8N-01). It cannot panic, trace or allocate, so this is
 unobservable, and it is cheaper than a once-cell read (optional pass
 `cheap-consts`). A constant boxed where boxing allocates (a `Float`, a
 `UInt64` from 2^63) is boxed once, its box kept in a once-cell, as Lean's

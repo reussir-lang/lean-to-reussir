@@ -61,10 +61,10 @@ Paths are relative to the repository root.
   `frExp`, `scaleB`, classification and conversions, and the fixed-width
   rules with logic (`gen_scalars.py` makes those textures; single
   operations stay inline Reussir). The glue only converts: a big `Nat`
-  position becomes `u64::MAX` (`l2r_pos_of_nat`), except for `next` and
-  `prev`, which take a position below 2^63 (a big one stays the caller's
-  `Nat` arithmetic, as in C), and `next`'s 2^63 becomes a big `Nat`
-  (`l2r_nat_of_u64`); `get?`/`get!` give `0x110000` for `none`; a big
+  position becomes `u64::MAX` (`l2r_index_sat`, of rcgmp's truncation to
+  `i64`), except for `next` and `prev`, which compute a position from 2^60,
+  past the end of every string, on the `Nat` (`p + 1`, `p - 1`) and give
+  one below as a `Nat` through `l2r_nat_size`; `get?`/`get!` give `0x110000` for `none`; a big
   `Int` for `scaleB` is `i64::MIN`/`MAX` by its sign (`l2r_int_sat_i64`);
   `leanrt::string::extract`/`extract_fast` make the string of
   lean-runtime's byte range (the string itself when the range is all of
@@ -82,8 +82,8 @@ Paths are relative to the repository root.
   Reussir code (no call through the FFI boundary: `ffi-inline-check.sh`);
   lean-runtime's cold paths (`get_core_cold`, `next_step_cold`,
   `frexp_i32`'s subnormal case, `scaleb_big`) are calls, as designed.
-- **Where:** `runtime/prelude.rr`: the `sem::` textures, `l2r_pos_of_nat`,
-  `l2r_int_sat_i64`, `lean_string_utf8_next`; `runtime/gen_scalars.py`;
+- **Where:** `runtime/prelude.rr`: the `sem::` textures, `l2r_index_sat`,
+  `l2r_nat_size`, `l2r_int_sat_i64`, `lean_string_utf8_next`; `runtime/gen_scalars.py`;
   `runtime/leanrt/src/string.rs`: `extract`, `extract_fast`, `of_range`,
   `utf8_count`; `runtime/leanrt/src/float.rs`: `to_string`, `StackText`.
 - **Remove only if:** lean2rr's representations change (the conversions

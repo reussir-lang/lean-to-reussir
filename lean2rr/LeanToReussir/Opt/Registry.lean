@@ -8,6 +8,7 @@ import LeanToReussir.Opt.CheapConsts
 import LeanToReussir.Opt.PreludeRepr
 import LeanToReussir.Opt.PreludeIntOps
 import LeanToReussir.Opt.ModPow2
+import LeanToReussir.Opt.Utf8SizeAdd
 import LeanToReussir.Opt.JpSink
 import LeanToReussir.Opt.JpSmall
 import LeanToReussir.Opt.LazyFields
@@ -101,7 +102,8 @@ def optimizations : Array OptPass := #[
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
   ⟨"prelude-int-ops", true, "Nat.testBit, Float.ofNat (Nat.toFloat) and Float.ofInt (Int.toFloat) computed by the runtime's rcgmp versions (l2r_nat_test_bit: the bit read in place, where Lean's definition makes m >>> i; l2r_float_of_nat/_int: sitofp, the same bits as Lean's Float.ofScientific in linear rather than quadratic time): their calls and their instances' own code (for function values)", PreludeIntOps.install⟩,
   ⟨"int-match", true, "a case split on a Nat or Int (Lean's Nat.casesOn and Int.casesOn, n+1 and negSucc patterns) is a Reussir match on the built-in integer, nested splits of its field one match (0, 1, n+2), and a chain of tests of one Nat or Int against literals one match with an arm per literal, instead of Lean's tests (Nat.decEq, Nat.sub, Int.decLt, Int.natAbs, Int.decEq)", IntMatch.install⟩,
-  ⟨"mod-pow2", true, "x % 2^w (Nat.mod x (Nat.pow 2 w), x % (1 <<< w), x modulo a literal 2^k with k >= 63; every BitVec.ofNat) computed as the low w bits of x by the runtime (l2r_nat_truncate_bits), without making 2^w; the power's let goes when nothing else uses it (the same value for every x and w)", ModPow2.install⟩,
+  ⟨"mod-pow2", true, "x % 2^w (Nat.mod x (Nat.pow 2 w), x % (1 <<< w), x modulo a literal 2^k with k >= 61; every BitVec.ofNat) computed as the low w bits of x by the runtime (l2r_nat_truncate_bits), without making 2^w; the power's let goes when nothing else uses it (the same value for every x and w)", ModPow2.install⟩,
+  ⟨"utf8-size-add", true, "p + c.utf8Size (a String.Pos.Raw plus a Char: String.map's step, Pos.pastSet) computed by the prelude's l2r_nat_add_utf8_size, which adds 1 for an ASCII character in a branch of its own, so a loop's next position does not wait for Char.utf8Size's chain of selects; only for the instances of Char.utf8Size whose code is Lean's rule (checked); the size's let goes when nothing else uses it", Utf8SizeAdd.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (own body at most 40 nodes, a copy expanding to at most 480 with the join points inlined into it, the copies beyond the first adding at most 2000, 4000 for a loop's continuation) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
   ⟨"state-machines", true, "a loop's state machine (J4) entered and re-entered without allocation: every variant nullary, the parameters and join points' values passed in parameter slots (placeholders in the slots a jump does not fill)", StateMachines.install⟩,

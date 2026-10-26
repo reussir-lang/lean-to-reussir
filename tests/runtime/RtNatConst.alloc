@@ -2,5 +2,6 @@
 # allocates nothing per iteration (natively one 16-byte block per iteration), so the bound is no growth (FACTOR 0). A
 # `Nat` or `Int` constant recomputed at every use (PB and PI, computed by a loop, with no once-cell: a fault injected
 # in the lowering) makes 2 allocations per iteration, +600001 at these sizes against the allowed +2000. The literal
-# constants are static under Reussir's integers, recomputed or not. Heap integers alive at exit: 0 at both sizes.
+# constants are static under Reussir's integers, recomputed or not. Heap integers alive at exit: 2 at both sizes (PB and
+# PI in their once-cells).
 100000 | 400000 | 0 2000 | live 0

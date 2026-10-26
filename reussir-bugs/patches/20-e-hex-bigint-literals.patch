@@ -1,7 +1,7 @@
 From 28fdf5053df1389f7e6951df31a474d191c968e5 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:37:26 -0400
-Subject: [PATCH 07/24] l2r-local: step D (R3): big integer constants and match
+Subject: [PATCH 07/25] l2r-local: step D (R3): big integer constants and match
  keys reach MLIR in hex (LLVM's decimal parse is cubic)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

@@ -123,7 +123,7 @@ pub fn is_shared<T: 'static>(a: &T) -> bool {
 /// `l2r_dbg_trace_if_shared_rec`, which lean2rr calls at a record type):
 /// whether `w`, the record's handle word (polyffi passes a record as one
 /// pointer word), is a box that another reference also holds. It reads
-/// only what Reussir states for foreign code (Reussir l2r-base10, upstream
+/// only what Reussir states for foreign code (Reussir l2r-base11, upstream
 /// 00906e38):
 /// - a nullary constructor of a type with a nullary variant may be an
 ///   immediate, a scalar natively and so never shared

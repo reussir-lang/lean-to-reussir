@@ -4,16 +4,20 @@
 upstream #770 to #803) do not have all that lean2rr needs to put Lean's
 `Nat` and `Int` on them. Five patches, 20-a to 20-e, add it. One of them,
 20-b, also fixes erroneous behaviour (a bug) in the same code; 20-c and
-20-e are optimizations. Each patch is described below with its tests.
+20-e are optimizations. A sixth, 20-f, moves the commit of mlir-rcgmp
+that Reussir's build fetches to a faster upstream one, until upstream
+Reussir moves its own pin. Each patch is described below with its tests.
 
 ## Summary
 
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
 rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a to
 20-e), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base10`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
+`l2r-base11`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
 `28fdf505`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`, `cb24040e`,
-`729ea9fb`, `e3b96e03`, the same code); not upstream.
+`729ea9fb`, `e3b96e03`, the same code); not upstream. 20-f (commit
+`a39e59b0`, since 2026-10-26) is a local stand-in for upstream's pin of
+mlir-rcgmp, dropped when upstream moves it.
 
 **Upstream (2026-10-25):** Not upstream at 00906e38. Reussir's
 maintainer asked that the Reussir-side changes for lean2rr be made first
@@ -24,19 +28,21 @@ upstream as pull requests of at most 300 changed lines each), its
 patches are prepared as pull request candidates, not opened. (20-a's
 `nonnegative` part drops if upstream sets the attribute itself.)
 
-| Patch | Step D name | `l2r-base10` commit | Kind | What it adds |
+| Patch | Step D name | `l2r-base11` commit | Kind | What it adds |
 |---|---|---|---|---|
 | [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `eece8062` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
 | [20-b](patches/20-b-mpz-polyffi-handle.patch) | R2 | `036ed9f6` | bug fix and feature | `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz` |
 | [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `5e9a39e9` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
 | [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `e69cde10` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
 | [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `28fdf505` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
+| [20-f](patches/20-f-rcgmp-pin-cc73b218.patch) | - | `a39e59b0` | optimization (dependency pin) | the build fetches mlir-rcgmp `cc73b218` (upstream #49 and #50) instead of `ca288d5e` |
 
 Step D's notes and the patches' subject lines use the names R1 to R3.
 The patches apply in this order, after 10-a and 07-a (until Phase 2,
 after the 8 of the drop series, 10-a and 07-a), with no change of code;
 20-c and 20-d change 20-b's `Mpz`. 21-a and entry 23's patches come
-after them.
+after them, and 20-f last (it changes only `cmake/RCGMP.cmake` and also
+applies to `00906e38` alone).
 
 ## Context
 
@@ -342,6 +348,37 @@ computed at run time); the reussir-codegen unit test;
 (a read-only object in the program's data, no parse at run time), so a
 program with a long literal reaches this path.
 
+## 20-f: the mlir-rcgmp pin moves to cc73b218
+
+Patch file [`patches/20-f-rcgmp-pin-cc73b218.patch`](patches/20-f-rcgmp-pin-cc73b218.patch)
+(commit `a39e59b0`, its subject "rcgmp pin": it names no entry). Not a
+Reussir problem: Reussir's build fetches mlir-rcgmp, the dialect and C
+runtime of its built-in integers, at the commit that `cmake/RCGMP.cmake`
+pins (`GIT_TAG`), and upstream moves that pin from time to time (#804
+moved it to `ca288d5e`, for mlir-rcgmp #48). 20-f moves it to
+`cc73b218`, mlir-rcgmp's main with #49 (vectorized heap paths of AND, OR
+and XOR) and #50 (division without a remainder when only the quotient is
+wanted). Only mlir-rcgmp's `runtime/Bitwise.cppm` and
+`runtime/Divide.cppm` change between the two commits, with their tests:
+no dialect, conversion or C API file, so every rcgmp operation lowers as
+before.
+
+**Effect.** lean2rr's L11 (bignum, dominated by quotients): 40.10G
+instructions with `ca288d5e`, 33.50G with `cc73b218` (-16%), the count
+that lean2rr's earlier leanrt representation of `Nat` reached: GMP's
+`mpn_tdiv_qr` no longer computes the divide-and-conquer remainder when
+only the quotient is used.
+
+**Tests** (the runtime side, 2026-10-26, on a build configured with
+`FETCHCONTENT_SOURCE_DIR_RCGMP` at a `cc73b218` checkout, which is the
+same build): the 24 patches before it build unchanged, lean2rr's 28
+`Nat` and `Int` runtime tests and their alloc-checks pass.
+
+**Status.** A local stand-in until upstream Reussir moves its pin to
+`cc73b218` or later (as it did for #48 in #804); 20-f is dropped then.
+The pull-request work may propose the move upstream if the maintainer
+does not make it first.
+
 ## Review
 
 Each patch was reviewed adversarially (code review and targeted repros,
@@ -367,4 +404,6 @@ type arguments and generic positions (an owned `Mpz`), not at positions
 declared `Nat` or `Int` (#795's borrowed raw handle stays). 20-c and 20-d
 add compiler-emitted glue with fixed names, hidden and `weak_odr`; they
 need 20-b. 20-e changes only the text that codegen gives to MLIR's
-parser, not the attributes.
+parser, not the attributes. 20-f is upstream's own kind of change (a new
+`GIT_TAG` for mlir-rcgmp, as in #804): a pin move that upstream makes
+itself.

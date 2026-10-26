@@ -1041,9 +1041,10 @@ def boxPointer? (t : RR.Ty) : LowerM (Option (Nat × RR.Ty × Bool)) := do
 (1) or an `Int`'s (2): boxing, unboxing a box, and unboxing a box's word
 that owns its reference (`l2r_any_of_nat`, `l2r_any_as_nat`,
 `l2r_any_raw_take_nat`; `_int`). They keep Lean's boxes: a `Nat` below
-2^63 and an `Int` in the `int32` range are immediates, tested in Reussir
-code, and a bigger value is a leanrt cell of kind `n` holding the rcgmp
-reference. The generic `l2r_any_of<T>`/`l2r_any_as<T>` would receive the
+2^63 and an `Int` in the `int32` range are Lean's immediates, and an `Int`
+in [2^32, 2^62) or [-2^62, -2^31) is a wider immediate (`2v + 1`, the
+prelude's `l2r_int_box_wide`), all tested in Reussir code; any other value
+is a leanrt cell of kind `n` holding the rcgmp reference. The generic `l2r_any_of<T>`/`l2r_any_as<T>` would receive the
 handle at `T := Nat` and could not tell a small value (leanrt's
 `generic_mpz_box`). A big value's cell takes the owned handle (the
 prelude's `l2r_any_of_big<Nat>`: no retain and no release around the
