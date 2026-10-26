@@ -105,3 +105,44 @@ pub fn sharedmutex_try_read(h: &LHandle) -> bool {
 pub fn sharedmutex_unlock_read(h: &LHandle) {
     get::<SharedMutex>(h).unlock_read()
 }
+
+/// The operations of the prelude's textures, taking the handles by value,
+/// out of line: a texture that borrowed its handle (`mutex_lock(&h)`) left,
+/// inlined into a Lean loop, a stack slot whose address escapes to a call,
+/// and LLVM then kept the loop's self tail call as a real call (a loop over
+/// `Mutex.atomically` overflowed the stack; the rule of fs.rs's `owned`).
+pub mod owned {
+    use super::*;
+
+    /// Operation `op` on `h` (the prelude's `l2r_sync_op` numbering), then
+    /// `h` released; the result of a `try`, else `true`.
+    #[inline(never)]
+    pub fn op(op: u64, h: LHandle) -> bool {
+        let r = match op {
+            0 => { mutex_lock(&h); true }
+            1 => mutex_try_lock(&h),
+            2 => { mutex_unlock(&h); true }
+            3 => { condvar_notify_one(&h); true }
+            4 => { condvar_notify_all(&h); true }
+            5 => { recmutex_lock(&h); true }
+            6 => recmutex_try_lock(&h),
+            7 => { recmutex_unlock(&h); true }
+            8 => { sharedmutex_write(&h); true }
+            9 => sharedmutex_try_write(&h),
+            10 => { sharedmutex_unlock_write(&h); true }
+            11 => { sharedmutex_read(&h); true }
+            12 => sharedmutex_try_read(&h),
+            _ => { sharedmutex_unlock_read(&h); true }
+        };
+        crate::rc_release(h);
+        r
+    }
+
+    /// `Condvar.wait c m`; both handles released afterwards.
+    #[inline(never)]
+    pub fn condvar_wait(c: LHandle, m: LHandle) {
+        super::condvar_wait(&c, &m);
+        crate::rc_release(c);
+        crate::rc_release(m);
+    }
+}

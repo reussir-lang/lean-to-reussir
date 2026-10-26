@@ -34,7 +34,9 @@ mono code that still has exact types.
 | rrc | `prog.rr` with the prelude | an executable | Reussir |
 
 `lean2rr --emit STAGE` stops after a stage and prints its output:
-`base`, `inst`, `mono`, `externs`, `retyped` or `rr`.
+`base`, `inst`, `mono`, `externs`, `retyped` or `rr`. With the
+environment variable `L2R_TIMINGS`, lean2rr writes one line for each step
+to stderr: the time of the step and the memory of the process.
 
 ## Loading
 

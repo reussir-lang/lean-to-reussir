@@ -127,7 +127,9 @@ mono code that still has exact types.</p>
 </tbody>
 </table>
 <p><code>lean2rr --emit STAGE</code> stops after a stage and prints its output:
-<code>base</code>, <code>inst</code>, <code>mono</code>, <code>externs</code>, <code>retyped</code> or <code>rr</code>.</p>
+<code>base</code>, <code>inst</code>, <code>mono</code>, <code>externs</code>, <code>retyped</code> or <code>rr</code>. With the
+environment variable <code>L2R_TIMINGS</code>, lean2rr writes one line for each step
+to stderr: the time of the step and the memory of the process.</p>
 <h2 id="loading">Loading</h2>
 <ul>
 <li>lean2rr imports the program's modules and Lean's library at the

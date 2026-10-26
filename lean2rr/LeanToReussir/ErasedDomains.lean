@@ -176,6 +176,16 @@ def hasFnTy (e : Expr) : Bool := (e.find? (·.isForall)).isSome
 def mkFnTy (ps : Array Expr) (r : Expr) : Expr :=
   ps.foldr (fun p b => .forallE `x p b .default) r
 
+/-- `layoutFieldTypes`' answers, by constructor, for the whole run: rule 4's
+flow analysis asks for the fields of both sides of every link it makes
+(in a program that casts, of every boxed inductive with every unboxed
+one), the `compact-arrays` check and the lowering's constructor types ask
+too. A constructor's type and the environment's inductives do not change
+meanwhile (the environment only grows), and one lean2rr process translates
+one program (`Main.lean`: `run`), so the table never mixes two
+environments. -/
+initialize layoutFieldCache : IO.Ref (Std.HashMap Name (Array Expr)) ← IO.mkRef {}
+
 /-- The mono types of the fields of constructor `ctor`, as the layout has
 them (rule 1, `nominalType`: one layout per inductive, its fields computed
 once with every parameter `lcAny`, so a field of a parameter's type is a
@@ -183,9 +193,11 @@ once with every parameter `lcAny`, so a field of a parameter's type is a
 constructor's type at `lcAny` parameters, each field through
 `toMonoTypeKeep`. They do not depend on the instance (`inst`, kept for the
 callers): a value of a field read at a typed binder is an edge from the
-uniform field type, one stored there an edge to it. -/
+uniform field type, one stored there an edge to it. Memoized by
+constructor (`layoutFieldCache`). -/
 def layoutFieldTypes (ctor : Name) (inst : Expr) : CoreM (Array Expr) := do
   let _ := inst
+  if let some out := (← layoutFieldCache.get)[ctor]? then return out
   let some (.ctorInfo ci) := (← getEnv).find? ctor | return #[]
   let ctorTy ← getOtherDeclBaseType ctor []
   let mut ty ← instantiateForall ctorTy (Array.replicate ci.numParams anyExpr)
@@ -196,6 +208,7 @@ def layoutFieldTypes (ctor : Name) (inst : Expr) : CoreM (Array Expr) := do
       out := out.push (← toMonoTypeKeep d)
       ty := b.instantiate1 anyExpr
     | _ => break
+  layoutFieldCache.modify (·.insert ctor out)
   return out
 
 /-- What the lowering needs to decide erased domains: the skeletons after
@@ -232,6 +245,8 @@ structure FlowState where
   eMarks : Std.HashSet Skel := {}
   /-- `mayHoldFn`'s answers. -/
   holdsFn : Std.HashMap Expr Bool := {}
+  /-- `layoutFieldKeys`' answers, by constructor. -/
+  fieldKeys : Std.HashMap Name (Array Expr) := {}
   /-- Whether the program can read a value as another type than its own
   (`programCasts`): a `Box` can then be unboxed at another inductive. -/
   casts : Bool := true
@@ -299,6 +314,15 @@ def FlowM.unbox (y : Expr) : FlowM Unit := do
   unless (← get).unboxedSet.contains y do
     modify fun s => { s with unboxed := s.unboxed.push y, unboxedSet := s.unboxedSet.insert y }
 
+/-- The fields of constructor `ctor` as `layoutFieldTypes` gives them,
+normalized (`keyTy`), as `flowLink` normalizes them; computed once per
+constructor (`FlowState.fieldKeys`). -/
+def layoutFieldKeys (ctor : Name) : FlowM (Array Expr) := do
+  if let some fs := (← get).fieldKeys[ctor]? then return fs
+  let fs := (← layoutFieldTypes ctor anyExpr).map keyTy
+  modify fun s => { s with fieldKeys := s.fieldKeys.insert ctor fs }
+  return fs
+
 mutual
 /-- Values of mono type `x` become values of mono type `y` (see the section
 comment): an edge between function types, their domains the other way
@@ -308,9 +332,11 @@ the value field by field, whichever way a field uses an argument); for
 two inductives (a cast), the fields of their constructors at the same
 position, both ways; a `Box` where one side may be `Box`, or where the two
 cannot be compared. -/
-partial def flowLink (x y : Expr) : FlowM Unit := do
-  let x := keyTy x
-  let y := keyTy y
+partial def flowLink (x y : Expr) : FlowM Unit :=
+  flowLinkK (keyTy x) (keyTy y)
+
+/-- `flowLink` of types already normalized (`keyTy`). -/
+partial def flowLinkK (x y : Expr) : FlowM Unit := do
   if x == y then return
   unless (← mayHoldFn x) || (← mayHoldFn y) do return
   if (← get).linked.contains (x, y) then return
@@ -361,17 +387,17 @@ partial def flowLinkFields (x y : Expr) (same : Bool) : FlowM Unit := do
   let env ← getEnv
   let (some ix, some iy) := (inductiveOf env x, inductiveOf env y) | return
   for (cx, cy) in ix.ctors.zip iy.ctors do
-    let fx ← layoutFieldTypes cx x
-    let fy ← layoutFieldTypes cy y
+    let fx ← layoutFieldKeys cx
+    let fy ← layoutFieldKeys cy
     if same then
       for (a, b) in fx.zip fy do
-        flowLink a b
-        flowLink b a
+        flowLinkK a b
+        flowLinkK b a
     else
       for a in fx do
         for b in fy do
-          flowLink a b
-          flowLink b a
+          flowLinkK a b
+          flowLinkK b a
 end
 
 /-- Whether a value boxed at `b` can be unboxed at `u` (Lower's
@@ -388,25 +414,60 @@ def boxCompat (env : Environment) (casts : Bool) (b u : Expr) : Bool :=
         (casts && (inductiveOf env b).isSome && (inductiveOf env u).isSome)
     | _, _ => false
 
+/-- What `boxCompat` reads of a type: a function type's skeleton, or the
+head constant of an application with its number of arguments and whether
+`inductiveOf` finds an inductive for it (`other`: neither). -/
+inductive BoxShape where
+  | fn (k : Skel)
+  | app (head : Name) (nargs : Nat) (ind : Bool)
+  | other
+  deriving Inhabited
+
+/-- `boxCompat`'s view of type `t` (`BoxShape`). -/
+def boxShape (env : Environment) (t : Expr) : BoxShape :=
+  match t with
+  | .forallE .. => .fn (skelOf env t)
+  | _ =>
+    match t.getAppFn with
+    | .const m _ => .app m t.getAppNumArgs (inductiveOf env t).isSome
+    | _ => .other
+
+/-- `boxCompat` from the two types' shapes (`boxShape`). -/
+def boxShapeCompat (casts : Bool) : BoxShape → BoxShape → Bool
+  | .fn a, .fn b => a.unify b
+  | .fn _, _ | _, .fn _ => false
+  | .app m na ia, .app n nb ib => (sameInductive m n && na == nb) || (casts && ia && ib)
+  | _, _ => false
+
 /-- Link every boxed type with every type a `Box` is unboxed at that it can
-be (`boxCompat`), until no link adds a boxed or unboxed type. -/
+be (`boxCompat`), until no link adds a boxed or unboxed type. Each type's
+shape (`boxShape`) and normalized form (`keyTy`, which `flowLink` applies
+first) are computed once, not once per pair. -/
 def flowThroughBoxes : FlowM Unit := do
   let env ← getEnv
   let mut doneB := 0
   let mut doneU := 0
+  let mut bInfo : Array (BoxShape × Expr) := #[]
+  let mut uInfo : Array (BoxShape × Expr) := #[]
   repeat
     let s ← get
     let nb := s.boxed.size
     let nu := s.unboxed.size
     if doneB == nb && doneU == nu then break
+    for i in [bInfo.size:nb] do
+      let b := s.boxed[i]!
+      bInfo := bInfo.push (boxShape env b, keyTy b)
+    for j in [uInfo.size:nu] do
+      let u := s.unboxed[j]!
+      uInfo := uInfo.push (boxShape env u, keyTy u)
     -- New boxed types with every unboxed one, and old boxed ones with the
     -- new unboxed ones.
     for i in [:nb] do
-      let b := s.boxed[i]!
+      let (bs, bk) := bInfo[i]!
       for j in [:nu] do
         if i < doneB && j < doneU then continue
-        let u := s.unboxed[j]!
-        if boxCompat env s.casts b u then flowLink b u
+        let (us, uk) := uInfo[j]!
+        if boxShapeCompat s.casts bs us then flowLinkK bk uk
     doneB := nb
     doneU := nu
 

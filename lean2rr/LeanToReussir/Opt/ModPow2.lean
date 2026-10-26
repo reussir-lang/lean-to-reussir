@@ -206,7 +206,7 @@ def truncDecl : CoreM (Decl .pure) := do
   if let some info := env.find? truncName then
     unless getExternNameFor env `c truncName == some truncSym && info.type == ty do
       let src := match env.getModuleIdxFor? truncName with
-        | some idx => s!" (declared in module {env.header.moduleNames[idx]!})"
+        | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: mod-pow2: {truncName}{src} is not the extern {truncSym} : Nat → Nat → Nat \
         that the pass adds; the L2R* namespaces are lean2rr's (internal error)"

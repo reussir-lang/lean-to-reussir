@@ -1,4 +1,5 @@
 import LeanToReussir.CompileRecord
+import LeanToReussir.Timings
 
 /-!
 # Loading a compiled program
@@ -165,6 +166,7 @@ def loadEnvironment (modules : Array Name) : IO Environment := do
     let found ← findOLean m
     if let some diff ← moduleDiff found (modToFilePath dir m "olean") then
       throw <| IO.userError s!"module {m} ({found}) is named like a module of {what}{diff}: {reservedNames}"
+  timingMark "load environment: import" s!"{env.header.modules.size} modules"
   unsafe loadExtensionStates env
 
 /-- Run a `CoreM` action against `env` without a heartbeat limit and,

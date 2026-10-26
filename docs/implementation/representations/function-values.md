@@ -139,9 +139,11 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   parameter matching an erased domain everywhere) kept every erased domain
   of most programs.
 - **Where:** `ErasedDomains.lean`: `Skel`, `skelOf`, `Skel.unify`,
-  `keptErasedHead`, `flowAnalysis` (`flowCode`, `flowLink`,
+  `keptErasedHead`, `flowAnalysis` (`flowCode`, `flowLink`, `flowLinkK`,
   `flowLinkFields`, `flowFieldUses`, `mayHoldFn`, `flowThroughBoxes`,
-  `reachedMarks`, `layoutFieldTypes`, `keyTy`);
+  `boxShape`, `reachedMarks`, `layoutFieldTypes`, `layoutFieldKeys`,
+  `keyTy`; the memo tables:
+  [../translator.md](../translator.md#questions-about-types-are-answered-once-per-run));
   `LowerBase.lean`: `lowerType`, `LowerCtx.erased`,
   `LowerState.keptErasedOf` (the decisions, cached), `FnTarget` (`keep`,
   `ty`), `FnVariant`; `RR.lean`: `Ty.phantom`, `Ty.rt`, `fnTypeName`;

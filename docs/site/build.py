@@ -292,6 +292,9 @@ def gen_testsets():
          "the entry point of a state machine whose variants are all nullary is an integer (a <code>u8</code>, a <code>u32</code> above 256 variants), and LLVM threads the loops of RtSmDecode and RtSmNestedJp; a variant that keeps a field makes the entry point a <code>[value]</code> enum; a jump passes on the slots that its arm does not bind, and puts no live value in a slot that its target does not bind"],
         ["Inlined wait points", "<code>tests/runtime/wait-inline-check.sh</code>", "1 runtime test",
          "in the executable, the reference points and a thunk's store and wake are inline in the loops, their thread-local loads direct"],
+        ["Texture borrows", "<code>tests/runtime/texture-escape-check.sh</code>", "every texture of the prelude",
+         "no texture gives the address of one of its own variables, or a closure that uses them, to a function of leanrt "
+         "that can stay out of line (the address keeps a stack slot, and a loop that calls the texture keeps its tail call)"],
         ["Refused externs", "<code>tests/runtime/allow-missing-check.sh</code>", "1 program",
          "with <code>L2R_ALLOW_MISSING_EXTERNS=1</code>, a refused extern of the program warns, the build fails, "
          "and the code calls no runtime function of its symbol"],

@@ -947,6 +947,58 @@ pub fn promise_is_resolved(cell: usize) -> bool {
     query(cell) == 2
 }
 
+/// The promise operations of the prelude's textures, taking their
+/// arguments by value, out of line. A texture that borrowed a local of its
+/// own (`promise_cell(&p)`, a closure over its locals for `resolve_with`)
+/// left, once inlined into a Lean loop, a stack slot whose address escapes
+/// to a call; LLVM then kept the loop's self tail call as a real call, and
+/// a loop that could resolve a promise grew the stack at every iteration
+/// until it overflowed (the rule of fs.rs's `owned`). Here the borrow is in
+/// these functions' own frames.
+pub mod owned {
+    use super::*;
+
+    /// The cell of promise `p`'s task with a new reference (`Rc`'s count
+    /// through an `Rc<()>` view: the offset does not depend on the payload,
+    /// as `is_shared` reads it); `p` is released.
+    #[inline(never)]
+    pub fn promise_cell(p: LPromise) -> usize {
+        let a = super::promise_cell(&p);
+        let rc = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<()>>(a) });
+        std::mem::forget((*rc).clone());
+        crate::rc_release(p);
+        a
+    }
+
+    /// `IO.Promise.isResolved`; `p` is released afterwards.
+    #[inline(never)]
+    pub fn promise_is_resolved(p: LPromise) -> bool {
+        let r = super::promise_is_resolved(super::promise_cell(&p));
+        drop(p);
+        r
+    }
+
+    /// Resolve the promise of cell `c` with `v` (`resolve_with`), unless it
+    /// was resolved already; `c` is consumed, a value it held is released.
+    #[inline(never)]
+    pub fn resolve_with<T>(c: crate::drop::Cell<T>, v: T) {
+        let mut c = c;
+        let a: usize = unsafe { std::mem::transmute_copy(&c) };
+        let mut v = Some(v);
+        let mut old = None;
+        super::resolve_with(a, &mut || {
+            if let Some(v) = v.take() {
+                old = Some(unsafe { std::mem::replace(c.data_mut(), v) });
+            }
+        });
+        drop(c);
+        drop(v);
+        if let Some(old) = old {
+            crate::drop::release(old);
+        }
+    }
+}
+
 /// Unit tests run on several threads at once: the ones that reach the task
 /// glue's state (a cell's last reference asks it) take this lock.
 #[cfg(test)]

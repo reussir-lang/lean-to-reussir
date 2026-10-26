@@ -211,7 +211,7 @@ def Ctx.source? (cx : Ctx) (n : Name) : Option Name :=
 lean2rr's shim). -/
 def isToolchainDeclIn (env : Environment) (s : Name) : Bool :=
   match env.getModuleIdxFor? s with
-  | some i => isToolchainModule env.header.moduleNames[i.toNat]!
+  | some i => isToolchainModule (moduleNameAt env i.toNat)
   | none => false
 
 /-- Whether a recursion through instance `n` ends, as Lean's library

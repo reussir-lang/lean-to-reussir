@@ -269,6 +269,18 @@ def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
   modify fun s => { s with borrowInfo := some r }
   return r
 
+/-- The answers of `mayHoldResource`, by mono type (after
+`consumeMData.headBeta`), for the rest of the process: Opt/UnreadFields and
+Opt/Flatten ask it before Stage 4, the lowering of borrowed arguments
+(`borrowKeeps`, `boxedTarget`) at every call of a declaration with a
+borrowed parameter. An answer depends only on the type and on the
+inductives of the environment, which only grows meanwhile: Opt/Flatten adds
+its tuples, Opt/ModPow2, Opt/PreludeIntOps and Opt/Utf8SizeAdd add their
+externs, and none of these changes an inductive that exists. One lean2rr
+process translates one program (`Main.lean`: `run`), so the table never
+mixes two environments. -/
+initialize resourceTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
+
 /-- Whether a value of mono type `e` may hold a resource with an
 observable release (see `resourceExterns`): a handle (`IO.FS.Handle`, whose
 mono type is `lcAny`), so also any value of unknown type (`lcAny`), or a
@@ -277,39 +289,67 @@ arguments (a reference is `lcAny` in mono code) (`IO.Process.Child` holds its pi
 `List Nat` holds none). Decided on mono types, not Reussir types: a field
 of a parameter's type is a `Box` in every instantiation (one type per
 inductive), which would make every container look like a handle's.
-Closures, thunks and tasks are not looked into. Types already being
-examined count as not holding one (the least fixed point). -/
-partial def mayHoldResource (e : Expr) (seen : Array Expr := #[]) : LowerM Bool := do
-  let e := e.consumeMData.headBeta
-  if seen.contains e then return false
-  let seen := seen.push e
-  if e.isForall || e.isSort then return false
-  let .const n _ := e.getAppFn | return true
-  if n == ``lcAny || n == ``IO.FS.Handle then return true
-  let args := e.getAppArgs
-  if n == ``Array then
-    return ← match args[0]? with
-      | some a => mayHoldResource a seen
-      | none => pure true
-  if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
-  let env ← getEnv
-  let some ival := (match env.find? (n ++ `_impl), env.find? n with
-      | some (.inductInfo iv), _ => some iv
-      | _, some (.inductInfo iv) => some iv
-      | _, _ => none) | return true
-  if ival.type.getForallBody.isProp then return false
-  let params := (List.range ival.numParams).toArray.map fun i => (args[i]?.getD anyExpr).consumeMData
-  for c in ival.ctors do
-    let mut ty ← instantiateForall (← getOtherDeclBaseType c []) params
-    repeat
-      match ty.headBeta with
-      | .forallE _ d b _ =>
-        let m ← toMonoTypeKeep d
-        if !(m.isErased || m == mkConst ``lcVoid) then
-          if ← mayHoldResource m seen then return true
-        ty := b.instantiate1 anyExpr
-      | _ => break
-  return false
+Closures, thunks and tasks are not looked into. So: whether a type that
+holds a resource is reachable from `e` through array elements and
+constructor fields.
+
+A plain reachability with one visited set per question (linear in the
+types it reaches), memoized (`resourceTypeCache`) as rule 4's `mayHoldFn`:
+a `true` holds for every type on the path that found it, a `false` for
+every type the search visited. (Until 2026-10-26 the lowering searched
+along every simple path, cutting a cycle on the path only, without a table:
+a program that imports `Cslib.Init` spent 52 s of the 76 s it lowered
+declarations there; then the searches kept a `false` only where the search
+below met no type above it on the path, still exponential in the size of a
+dense mutual block: RtResDenseMutual's eight members.) -/
+partial def mayHoldResource (e : Expr) : CoreM Bool := do
+  let visited ← IO.mkRef ({} : Std.HashSet Expr)
+  let found ← go e visited
+  unless found do
+    let vs ← visited.get
+    resourceTypeCache.modify fun c => vs.fold (fun c t => c.insert t false) c
+  return found
+where
+  /-- Whether a type that holds a resource is reachable from `e` through
+  types not visited yet; `true` is kept for `e`. -/
+  go (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
+    let e := e.consumeMData.headBeta
+    if let some r := (← resourceTypeCache.get)[e]? then return r
+    if (← visited.get).contains e then return false
+    visited.modify (·.insert e)
+    let r ← search e visited
+    if r then resourceTypeCache.modify (·.insert e true)
+    return r
+  /-- The rules for `e`, its array element and its constructors' fields
+  through `go`. -/
+  search (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
+    if e.isForall || e.isSort then return false
+    let .const n _ := e.getAppFn | return true
+    if n == ``lcAny || n == ``IO.FS.Handle then return true
+    let args := e.getAppArgs
+    if n == ``Array then
+      return ← match args[0]? with
+        | some a => go a visited
+        | none => pure true
+    if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
+    let env ← getEnv
+    let some ival := (match env.find? (n ++ `_impl), env.find? n with
+        | some (.inductInfo iv), _ => some iv
+        | _, some (.inductInfo iv) => some iv
+        | _, _ => none) | return true
+    if ival.type.getForallBody.isProp then return false
+    let params := (List.range ival.numParams).toArray.map fun i => (args[i]?.getD anyExpr).consumeMData
+    for c in ival.ctors do
+      let mut ty ← instantiateForall (← getOtherDeclBaseType c []) params
+      repeat
+        match ty.headBeta with
+        | .forallE _ d b _ =>
+          let m ← toMonoTypeKeep d
+          if !(m.isErased || m == mkConst ``lcVoid) then
+            if ← go m visited then return true
+          ty := b.instantiate1 anyExpr
+        | _ => break
+    return false
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the

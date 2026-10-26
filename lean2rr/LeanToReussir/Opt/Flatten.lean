@@ -83,7 +83,7 @@ may hold one, every declaration whose borrow flags decide the flag of such
 a parameter (`flagSources`), and every join point parameter that may hold
 one (`resourceExcluded`): lean2rr emulates native release times by Lean's
 borrow inference on that code. Which binders may hold one, the whole-program flow analysis
-`ResourceFlow` decides (by type, `holdsResource`, in a program that casts).
+`ResourceFlow` decides (by type, `mayHoldResource`, in a program that casts).
 
 Only pure steps move: a constructor application not built, a projection
 read from a known field, a value rebuilt, a match on a tag instead of on a
@@ -212,56 +212,11 @@ def mentionsFn (t : Expr) : Bool :=
   (t.find? (·.isForall)).isSome
 
 /-- Memo tables of the type questions (`indInfo?`, `placeholderOk`), keyed
-by mono type. The environment only grows by the pass's tuples meanwhile. -/
+by mono type. The environment only grows by the pass's tuples meanwhile.
+(Whether a type may hold a resource is Lower/Borrow's `mayHoldResource`,
+memoized there.) -/
 initialize indInfoCache : IO.Ref (Std.HashMap Expr (Option (InductiveVal × Ctors × Array (Array Expr)))) ← IO.mkRef {}
 initialize placeholderCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
-initialize resourceCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
-
-/-- Whether a value of mono type `e` may hold a resource whose release is
-observable: Lower/Borrow's `mayHoldResource` (the same rules: a handle,
-`lcAny`, or an inductive or array with such a field or element at its type
-arguments; types being examined count as not holding one), memoized here
-(a `true` wherever it was found, a `false` at the top only), as the pass
-asks it of every declaration's types. Only in a program that casts
-(`Resources.types`); otherwise `ResourceFlow` follows the values. -/
-partial def holdsResource (e : Expr) (seen : Array Expr := #[]) : CoreM Bool := do
-  let e := e.consumeMData.headBeta
-  if let some r := (← resourceCache.get)[e]? then
-    if r || seen.isEmpty then return r
-  let r ← go e seen
-  if r || seen.isEmpty then resourceCache.modify (·.insert e r)
-  return r
-where
-  go (e : Expr) (seen : Array Expr) : CoreM Bool := do
-    if seen.contains e then return false
-    let seen := seen.push e
-    if e.isForall || e.isSort then return false
-    let .const n _ := e.getAppFn | return true
-    if n == ``lcAny || n == ``IO.FS.Handle then return true
-    let args := e.getAppArgs
-    if n == ``Array then
-      return ← match args[0]? with
-        | some a => holdsResource a seen
-        | none => pure true
-    if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
-    let env ← getEnv
-    let some ival := (match env.find? (n ++ `_impl), env.find? n with
-        | some (.inductInfo iv), _ => some iv
-        | _, some (.inductInfo iv) => some iv
-        | _, _ => none) | return true
-    if ival.type.getForallBody.isProp then return false
-    let params := (List.range ival.numParams).toArray.map fun i => (args[i]?.getD anyExpr).consumeMData
-    for c in ival.ctors do
-      let mut ty ← instantiateForall (← getOtherDeclBaseType c []) params
-      repeat
-        match ty.headBeta with
-        | .forallE _ d b _ =>
-          let m ← toMonoTypeKeep d
-          if !(m.isErased || m == mkConst ``lcVoid) then
-            if ← holdsResource m seen then return true
-          ty := b.instantiate1 anyExpr
-        | _ => break
-    return false
 
 /-- The inductive `ty` is, when the pass may spread it: one or two
 constructors, not recursive (nor nested or mutual), no indices, not a
@@ -1821,7 +1776,7 @@ inductive Resources where
   | absent
   /-- `ResourceFlow`'s answer. -/
   | flow (info : ResourceFlow.Info)
-  /-- By type (`holdsResource`): the program can read a value as another
+  /-- By type (`mayHoldResource`): the program can read a value as another
   type (`programCasts`), which the flow analysis cannot follow. -/
   | types
 
@@ -1831,7 +1786,7 @@ def Resources.holds (r : Resources) (decl : Name) (x : FVarId) (t : Expr) : Core
   match r with
   | .absent => pure false
   | .flow info => pure (info.holds decl x)
-  | .types => holdsResource t
+  | .types => mayHoldResource t
 
 /-- The variables of declaration `d`'s code connected with `start` by the
 edges along which Lean's borrow inference (`InferBorrow`) passes ownership,
@@ -1965,7 +1920,7 @@ parameter or a result that may hold such a resource: their code, and so
 their inferred borrows, stay Lean's. Which binders may hold one, the
 whole-program flow analysis decides (`ResourceFlow`: a record whose
 `lcAny` fields only ever get regex data is no resource holder); in a
-program that casts, the type (`holdsResource`: every `lcAny` may be a
+program that casts, the type (`mayHoldResource`: every `lcAny` may be a
 handle). -/
 def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Resources × NameSet) := do
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : NameMap (Decl .pure))
@@ -2011,7 +1966,7 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
     let mut byType := 0
     for d in decls do
       unless d.value matches .code _ do continue
-      if (← d.params.anyM (holdsResource ·.type)) || (← holdsResource (splitArrows d.type d.params.size).2) then
+      if (← d.params.anyM (mayHoldResource ·.type)) || (← mayHoldResource (splitArrows d.type d.params.size).2) then
         byType := byType + 1
     IO.eprintln s!"flatten: resources: {out.size} declarations left alone (by type: {byType})"
   return (r, out)

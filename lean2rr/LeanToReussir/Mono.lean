@@ -297,7 +297,7 @@ def exportMap : MonoM (Std.HashMap String Name) := do
   if let some m := (← get).exports then return m
   let env ← getEnv
   let mut m : Std.HashMap String Name := {}
-  for i in [:env.header.moduleNames.size] do
+  for i in [:env.header.modules.size] do
     for (decl, sym) in exportAttr.ext.getModuleEntries env i do
       m := m.insert (sym.toString (escape := false)) decl
   modify fun s => { s with exports := some m }
@@ -497,8 +497,8 @@ def toolchainExternSyms : MonoM (Std.HashMap String (Array Name)) := do
   if let some s := (← get).toolchainExterns then return s
   let env ← getEnv
   let mut s : Std.HashMap String (Array Name) := {}
-  for i in [:env.header.moduleNames.size] do
-    unless isToolchainModule env.header.moduleNames[i]! do continue
+  for i in [:env.header.modules.size] do
+    unless isToolchainModule (moduleNameAt env i) do continue
     for (n, _) in externAttr.ext.getModuleEntries env i do
       if let some sym := getExternNameFor env `c n then s := s.insert sym ((s.getD sym #[]).push n)
   modify fun st => { st with toolchainExterns := some s }
@@ -553,7 +553,7 @@ the shim directory), so the name decides it. -/
 def isToolchainDecl (n : Name) : CoreM Bool := do
   let env ← getEnv
   match env.getModuleIdxFor? n with
-  | some i => return isToolchainModule env.header.moduleNames[i.toNat]!
+  | some i => return isToolchainModule (moduleNameAt env i.toNat)
   | none => return false
 
 /-- `e` without metadata, such as the borrow marks `@&`. -/
@@ -772,7 +772,7 @@ def libraryDeclAdvice (g : Name) (what : String) : CoreM String := do
   let env ← getEnv
   if isPrivateName g then
     let m := match env.getModuleIdxFor? g with
-      | some i => toString env.header.moduleNames[i.toNat]!
+      | some i => toString (moduleNameAt env i.toNat)
       | none => "?"
     return s!"{what} {(privateToUserName? g).getD g}, a private declaration of module {m} of \
       Lean's library, which a program can call only from a `module` file that imports it with \

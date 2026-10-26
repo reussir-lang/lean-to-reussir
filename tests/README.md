@@ -328,6 +328,14 @@ review RS6-03). It then checks itself on four mutations, each of which
 must fail: a `bl`, a `cbnz` and a `blr` to a fast path added to the
 disassembly, and a TLS descriptor relocation added to readelf's output
 (RS6-06; an indirect tail branch `br` is tracked as `blr` is).
+`tests/runtime/texture-escape-check.sh` reads the prelude and leanrt's sources
+(no build) and fails when a texture lends one of its own locals (`&x`, `&mut
+x`, a closure that is not `move`, or a method of leanrt's on `&self`) to a
+leanrt function that is not `#[inline(always)]`: inlined into a Lean loop,
+such a texture leaves a stack slot whose address escapes, and LLVM keeps the
+loop's self tail call (RtLoopTailPromise, RtLoopTailSync, RtLoopTailIO; the
+promise, lock, timer and socket textures before the hunt after D8; on that
+prelude it reports 65 of 142 calls).
 `tests/runtime/const-read-check.sh` builds `RtConstReads` (constants of
 every kind of once-cell read in loops: a table computed at startup, a
 literal table, closed terms, a toolchain constant, a small scalar,
@@ -445,7 +453,8 @@ results, so each runs at two sizes.
   layout for each datatype (rule 1 of the design site's page "Dependent
   types") removes it.
 - `tests/runtime/determinism-check.sh [PROGRAM...]` translates a few
-  programs (`lean2rr --emit rr`, no Reussir build) twice and requires
+  programs (`lean2rr --emit rr`, no Reussir build) twice, the second
+  time with the stage timings on (`L2R_TIMINGS`), and requires
   byte-identical `.rr` files; then it adds an unrelated definition (a
   structure of two numbers and a recursive function over it, with a new
   entry point `l2rDetRoot` that runs `main` and then prints the
@@ -759,6 +768,7 @@ it draws on, with their copyright notices (Apache 2.0):
 | HR-03 (the same hunt; switch step 14): `Std.Sync`'s try functions right after such a close took a lock that a task takes first natively (the task then waited for good) | RtHandOffTryLock |
 | HSK-01 (hunt of stack sizes; switch step 16, lean-runtime's fixes-16): nested waits under deep recursion overflowed, as the single-thread scheduler ran each awaited task on its waiter's stack, where natively each runs on a worker thread of its own with a whole stack (`LEAN_STACK_SIZE_KB=16384`) | RtNestedWaitDeepStacks |
 | HSK-03 (the same hunt): a deep recursion in a timer's `sync` dependent overflowed the event loop's context, which followed `LEAN_STACK_SIZE_KB`; natively libuv's loop thread always has 1 GiB | RtLoopDeepSyncDependent |
+| H3 (leanrt hunt after D8): a `for` loop that resolved or tested a promise (`IO.Promise.resolve`, `isResolved`), took a `Std` lock or notified a condition variable, or waited on a timer (`Timer.next`, `reset`) took a stack frame per step and overflowed a 1 MiB stack (2*10^7 steps: 1 GB), where native Lean runs in 8 MB: the prelude's textures lent a local (`&p`, `&h`, `&t`) to leanrt functions that are not inlined, and LLVM kept the loop's self tail call; the textures now call by-value `owned` wrappers | RtLoopTailPromise, RtLoopTailSync, RtLoopTailIO (and `texture-escape-check.sh`) |
 | HCO-01 (lean-runtime-side hunt of the cooperative IO layer; switch step 14): a pipe handle's last reference went inside its own primitive with the pipe full, and the close's wait for its writer (the drain-end hook) let a task's IO overwrite the primitive's recorded outcome: a `putStr` failed with the task's error, and a failed `truncate` succeeded | RtHandOffLastError |
 | RS15-01 (review of switch step 15): a dedicated task's value, which the program dropped, was freed after the task's stream context had closed, so a promise's `sync` dependent that its free released printed to the process's stdout instead of the task's | RtDedicatedValueStreams |
 | HTG-01 (hunt of the task glue): a dedicated task whose last reference went while it ran was ended in lean-runtime inside its job (`end_running_task`) before the job's reference to the cell went, so its finish woke an `IO.waitAny` that natively waits for the next finish (natively the task is deleted and freed without a notification) | RtDroppedDedicatedNotify |

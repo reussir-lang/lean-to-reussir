@@ -133,7 +133,7 @@ def externDecl (o : Op) : CoreM (Decl .pure) := do
   if let some info := env.find? o.name then
     unless getExternNameFor env `c o.name == some o.sym && info.type == ty do
       let src := match env.getModuleIdxFor? o.name with
-        | some idx => s!" (declared in module {env.header.moduleNames[idx]!})"
+        | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: prelude-int-ops: {o.name}{src} is not the extern {o.sym} : {ty} \
         that the pass adds; the L2R* namespaces are lean2rr's (internal error)"

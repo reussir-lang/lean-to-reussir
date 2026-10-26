@@ -90,7 +90,7 @@ static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// the task manager runs (`Task.spawn`, `Task.map`, `Task.bind`,
 /// `IO.asTask`) is multi-threaded, so never exclusive (a documented
 /// difference).
-#[inline]
+#[inline(always)]
 pub fn is_shared<T: 'static>(a: &T) -> bool {
     let name = std::any::type_name::<T>();
     if name == "leanrt::any::LAny" {

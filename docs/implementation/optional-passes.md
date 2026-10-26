@@ -151,7 +151,7 @@ built-in integers
   as a function value may return one, so may every function value's and
   extern's result (`rFnRet`: `IO.asTask`, `Thunk.get` call function
   values); only values whose type may hold one count (`mayHoldRes`:
-  `mayHoldCode`, or Flatten's `holdsResource`). Both checks start as a
+  `mayHoldCode`, or Lower/Borrow's `mayHoldResource`). Both checks start as a
   new attempt when the kept code creates tasks or makes resources, and
   again while the kept code of the last attempt (which only grows) shows
   a new kind: at most three attempts (re-review N1, N2). Address and sharing tests read no field: the object stays the
@@ -607,7 +607,7 @@ built-in integers
   (`mayCarry`: `lcAny`, a handle, a function type, a thunk, a task, an
   array or an inductive with such an element or field; not `List Nat`,
   not `EST.Out ε σ Unit`, whose state field is `Void σ`). In a program
-  that can cast (`programCasts`), the type rule stays (`holdsResource`:
+  that can cast (`programCasts`), the type rule stays (`mayHoldResource`:
   every `lcAny` may be a handle). Example: lean-regex's driver reads its
   input with `IO.FS.readFile`. The handle goes to `Handle.read` and to
   `readBinToEndInto.loop` only, so only that class holds a resource, and
@@ -675,9 +675,10 @@ built-in integers
   `explode`, `materialize` (`Env.mats`, `VVal.key`), `callWorker`, `run` (workers, wrappers,
   peeled wrappers). `LowerBase.lean`: `flatTupleName`, `lowerType` (the
   tuple types, `tupleType`); `Lower/Values.lean`: `lowerLetValue` (tuple
-  constructor and projections, through `tupleLayout?`); `Opt/Flatten.lean`'s `holdsResource` (the type rule, for
-  a program that can cast) follows
-  `Lower/Borrow.lean`'s `mayHoldResource` (memoized); hook `PassConfig.monoPassesCore`
+  constructor and projections, through `tupleLayout?`); the type rule, for
+  a program that can cast, is
+  `Lower/Borrow.lean`'s `mayHoldResource` (memoized for the run, shared with
+  `unread-fields` and the lowering: [translator.md](translator.md#questions-about-types-are-answered-once-per-run)); hook `PassConfig.monoPassesCore`
   (run by `Main.lean` after `monoPasses`; `--emit opt` prints the result).
   Tests `RtFlattenLoops`, `RtFlattenResults`, `RtFlattenSums`,
   `RtFlattenAlloc` (with `RtFlattenAlloc.alloc`), `RtFlattenShared` (with

@@ -42,7 +42,13 @@ files, `runtime/` and `scripts/` from the repository root.
   atomics (a wrapper around rustc), hot paths are `#[inline(always)]`,
   cold paths `#[cold]` `extern "C"` (no landing pads), `make_mut` copies by
   value, and handle operations and the monotonic clock are out of line,
-  taking their arguments by value.
+  taking their arguments by value: the `owned` modules of leanrt's `fs`,
+  `task` (promises), `sync` (locks, condition variables), `net` (timers,
+  signals, sockets, operations) and `proc` (spawn, output), which take
+  their arguments (handles, arrays, a promise's cell and value), release
+  them and are `#[inline(never)]`. No texture lends one of its own locals
+  (`&x`, `&mut x`, a closure that borrows them) to a leanrt function that
+  is not `#[inline(always)]` (`tests/runtime/texture-escape-check.sh`).
 - **Why:** A function with a stack slot whose address escapes (a `str`
   argument, a float or 4+ argument FFI call through the packed-argument
   path, a borrowed `&LHandle`, a `timespec` buffer) never has its self tail
@@ -50,13 +56,19 @@ files, `runtime/` and `scripts/` from the repository root.
   `monoNanosNow` grew the stack until it overflowed (adv2 N2, 20e54f5);
   loops that print floats overflowed with the plain rustc; an inlined
   `&mut` to a caller's local cost the caller its tail calls (arr benchmark
-  0.32 s → 0.03 s, c3cca07). Textures inline only when compiled for the
-  same CPU and features as Reussir's code.
+  0.32 s → 0.03 s, c3cca07); a `for` loop that resolved or tested a
+  promise, took a lock or waited on a timer overflowed a 1 MiB stack
+  (`leanrt::task::promise_cell(&p)`, `sync::mutex_lock(&h)`,
+  `net::timer_next(&t, ..)` in their textures; tests RtLoopTailPromise,
+  RtLoopTailSync, RtLoopTailIO; leanrt hunt after D8). Textures inline
+  only when compiled for the same CPU and features as Reussir's code.
 - **Where:** `scripts/l2r.py`: `NATIVE_FLAGS`, `rustc_wrapper`,
   `build_leanrt`; `LowerBase.lean`: `strLit`, `strLitTable`;
   `Lower/Values.lean`: `natLiteral`; `runtime/leanrt/src/array.rs`
-  (`drop_last`, `copy_shared`, `make_mut`), `fs.rs`, `io.rs`;
-  `runtime/README.md` ("Building and linking").
+  (`drop_last`, `copy_shared`, `make_mut`), `fs.rs`, `io.rs`, the
+  `owned` modules of `fs.rs`, `task.rs`, `sync.rs`, `net.rs`, `proc.rs`;
+  `runtime/README.md` ("Building and linking");
+  `tests/runtime/texture-escape-check.sh`.
 - **Remove only if:** Reussir guarantees tail calls, or passes these
   arguments without an escaping slot.
 

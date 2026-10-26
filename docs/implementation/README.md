@@ -71,7 +71,10 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
     Lean's runtime library: the binding of their C symbol, their Lean
     definitions, refusals), the C FFI (parked).
 11. [translator.md](translator.md): lean2rr itself: loading the program,
-    its stack and limits, its switches.
+    its stack and limits, its switches (stage timings: `L2R_TIMINGS`),
+    and how it avoids repeated work in its own run (indexes of emitted
+    items, tables of the answers about types, reachability with a visited
+    set where types are recursive).
 12. [testing.md](testing.md): the test tooling that checks costs and the
     translation itself: the representation of `Nat` and `Int` the checks
     build with, the allocation counter, its limits and

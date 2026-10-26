@@ -1159,8 +1159,8 @@ C symbol it is (`Mono.redirectTarget`), an `IO.Error` builder the runtime
 calls (`ioErrorBuilderSyms`, `@[export]`s of `Init`). -/
 def librarySymbols (env : Environment) : Std.HashSet String := Id.run do
   let mut s : Std.HashSet String := {}
-  for i in [:env.header.moduleNames.size] do
-    unless isToolchainModule env.header.moduleNames[i]! do continue
+  for i in [:env.header.modules.size] do
+    unless isToolchainModule (moduleNameAt env i) do continue
     for (n, _) in externAttr.ext.getModuleEntries env i do
       if let some sym := getExternNameFor env `c n then s := s.insert sym
     for (_, sym) in exportAttr.ext.getModuleEntries env i do
@@ -1171,7 +1171,7 @@ def librarySymbols (env : Environment) : Std.HashSet String := Id.run do
 module. -/
 def exportsBySymbol (env : Environment) : Std.HashMap String (Array Name) := Id.run do
   let mut m : Std.HashMap String (Array Name) := {}
-  for i in [:env.header.moduleNames.size] do
+  for i in [:env.header.modules.size] do
     for (d, sym) in exportAttr.ext.getModuleEntries env i do
       let k := sym.toString (escape := false)
       m := m.insert k ((m.getD k #[]).push d)
@@ -1319,8 +1319,8 @@ axiom whose evaluation reaches its `f`, in any module (tests
 def nativeExempt (env : Environment) (library : Name → Bool) (csimps : Array CSimp.Entry) :
     NameSet := Id.run do
   let mut axioms : Array (Name × Expr) := #[]
-  for i in [:env.header.moduleNames.size] do
-    if isToolchainModule env.header.moduleNames[i]! then continue
+  for i in [:env.header.modules.size] do
+    if isToolchainModule (moduleNameAt env i) then continue
     let some data := env.header.moduleData[i]? | continue
     for ci in data.constants do
       if let some e := nativeEvalStatement? ci then axioms := axioms.push (ci.name, e)
@@ -1426,7 +1426,7 @@ Lean's library casts only where lean2rr's representations agree: an
 def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (Decl .pure)) :
     Option Name := Id.run do
   let library (n : Name) : Bool := match env.getModuleIdxFor? n with
-    | some i => (env.header.moduleNames[i.toNat]?.map isToolchainModule).getD false
+    | some i => (env.header.modules[i.toNat]?.map (isToolchainModule ·.module)).getD false
     | none => false
   let csimps := programCsimps env
   -- Built on first use (most programs have no axiom of native evaluation).

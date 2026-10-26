@@ -6,6 +6,7 @@ import LeanToReussir.MonoRetype
 import LeanToReussir.CompactArrays
 import LeanToReussir.TypedCells
 import LeanToReussir.PreludePrune
+import LeanToReussir.Timings
 
 /-!
 # Program assembly
@@ -566,6 +567,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
                           convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields,
                           refKindsOn, intMatch := cfg.intMatch }
+  timingMark "lowering: program analyses" s!"{ctx.decls.size} declarations"
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.
@@ -584,6 +586,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       | none => lowerDecl cfg.lower d
     let entry ← lowerEntry mainInst errStr startup
     modify fun s => { s with fns := s.fns.push entry }
+    timingMark "lowering: declarations" s!"{← getPart (·.fns.size)} functions"
     -- `conv-liveness`: the prelude's names are roots too (the raw items'
     -- are found by `liveFollow`).
     if cfg.convLiveness then liveRootText prelude
@@ -596,6 +599,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
           finishUnboxFns
           unless ← finishFnValues do break
     finish
+    timingMark "lowering: helpers" s!"{← getPart (·.fns.size)} functions"
     -- What the functions generated next depend on: whether the program has
     -- stream cells, and whether it registers tasks with the runtime.
     let lateKey : LowerM (Option Nat × Option RR.Ty × Bool) := do
@@ -638,6 +642,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       unless (← finishFnValues) || (← finishPersistFns) do break
     return (← fnTypeItems, ← anchoredFns)
   let ((fnItems, anchored), st) ← (act.run ctx).run {}
+  timingMark "lowering: late functions" s!"{st.fns.size} functions"
   if (← IO.getEnv "L2R_DEBUG").isSome then
     -- By skeleton (the types of one skeleton can differ in their flow).
     let env ← getEnv
@@ -668,7 +673,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     let env ← getEnv
     let moduleOf (d : Name) : String :=
       match env.getModuleIdxFor? d with
-      | some i => toString env.header.moduleNames[i.toNat]!
+      | some i => toString (moduleNameAt env i.toNat)
       | none => "?"
     let mut parts := #[]
     unless refused.isEmpty do
@@ -692,7 +697,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
           "; not of Lean's library: lean2rr internal error, it should run its Lean definition"
         pure s!"  {sym}  (extern of {d}, module {moduleOf d}{note})"
       let ofLean := missing.any fun (_, d) =>
-        (env.getModuleIdxFor? d).any fun i => (env.header.moduleNames[i.toNat]!).getRoot == `Lean
+        (env.getModuleIdxFor? d).any fun i => (moduleNameAt env i.toNat).getRoot == `Lean
       parts := parts.push (s!"{missing.size} extern(s) of Lean's library that the program reaches \
         are not implemented by lean2rr's runtime:\n{"\n".intercalate lines.toList}" ++
         (if ofLean then "\n(the `Lean` package's C++ functions are not in lean2rr's runtime yet)" else ""))
@@ -707,6 +712,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       pure (items, st)
     else pure (fnItems, st)
   let (boxItem, st) ← (boxTypeItems.run ctx).run st
+  timingMark "lowering: live functions, types" s!"{st.fns.size} functions"
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
 
 end LeanToReussir

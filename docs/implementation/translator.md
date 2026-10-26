@@ -125,6 +125,12 @@ relative to `lean2rr/` unless they start with `scripts/`.
   refused extern of the program is called as `l2r_refused_<declaration>`,
   checked by `tests/runtime/allow-missing-check.sh`;
   [externs-ffi/program-externs.md](externs-ffi/program-externs.md#refusals-are-reported-at-translation-with-the-reason)),
+  `L2R_TIMINGS` prints one line per step of the pipeline on stderr
+  (loading, Stages 1 to 3, the passes over mono code, the parts of the
+  lowering, the passes over the generated functions, rendering, writing):
+  the wall time of the step, the time since the start, the resident memory
+  now and at most (`VmRSS`, `VmHWM`), and a count of what the step made;
+  the output does not change (`LeanToReussir/Timings.lean`: `timingMark`),
   `L2R_DEBUG` prints whether the
   program can cast and why, each declaration Stage 1 could not
   recompile from source, with the error, what the optimization
@@ -141,8 +147,10 @@ relative to `lean2rr/` unless they start with `scripts/`.
   [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
 - **Why:** Debugging aids; the switches keep the repros meaningful while
   the workarounds stay on by default.
-- **Where:** `Main.lean`: `pipeline`, `parseArgs`, `usage`;
+- **Where:** `Main.lean`: `pipeline`, `run`, `parseArgs`, `usage`;
   `emitBase`, `dumpDecls`; `LeanToReussir/Dump.lean`;
+  `LeanToReussir/Timings.lean`; `LeanToReussir/Env.lean`:
+  `loadEnvironment` (the step between importing and the extension states);
   `LeanToReussir/Stats.lean`, `Specialize.lean`, `Retype.lean`;
   `LeanToReussir/Emit/Program.lean`: `lowerProgram`, `externReport`;
   `LeanToReussir/Mono.lean`: `recompile`; `scripts/l2r.py`.
@@ -202,3 +210,74 @@ relative to `lean2rr/` unless they start with `scripts/`.
   (`boxCastConv`) is gone: no cast that `boxCastable` accepts registers a
   helper and then fails (review of rule 1, simplicity finding 1).
 - **Remove only if:** never.
+
+### Questions about types are answered once per run
+
+- **What:** The questions that the passes ask about a mono type or a
+  constructor again and again keep their answers for the whole run:
+  - whether a type may hold a resource with an observable release
+    (`mayHoldResource`, `resourceTypeCache`): one function and one table
+    for `unread-fields`, `flatten-structs` (the type rule of a program that
+    can cast) and the lowering of borrowed arguments (`borrowKeeps`,
+    `boxedTarget`). It is a reachability through array elements and
+    constructor fields with one visited set per question, as rule 4's
+    `mayHoldFn`: each type is looked at once per question, a `true` is
+    kept for the types on the path that found it, a `false` for every type
+    the question visited;
+  - the field types of a constructor's layout (`layoutFieldTypes`,
+    `layoutFieldCache`), and, in rule 4's flow analysis, the same fields
+    normalized (`layoutFieldKeys`);
+  - in rule 4's links through `Box` (`flowThroughBoxes`), what `boxCompat`
+    reads of each boxed and unboxed type (`boxShape`: a function type's
+    skeleton, or the head, the number of arguments and whether it is an
+    inductive) and the type's normalized form, once per type and not once
+    per pair; `flowLinkK` is `flowLink` on normalized types;
+  - the name of a module by index (`moduleNameAt`), read from the header's
+    module list: Lean's `EnvironmentHeader.moduleNames` builds the array
+    of all module names at each call, and lean2rr indexed it once per
+    constant (`programCasts`' walk, `isToolchainDecl`) and once per module
+    in loops over the modules.
+- **Why:** Translation time (2026-10-26, `L2R_TIMINGS`; single runs, so
+  indicative). A program that imports `Cslib.Init` and prints one line
+  (translation only; it reaches externs of the `Lean` package that the
+  runtime does not have) took 170 s and 4.87 GB: 52 s of the 76 s it
+  spent lowering declarations went to the resource question (then a
+  search along every simple path, a cycle cut on the path only, and no
+  table), 8 s of `flatten-structs`' 10 s to its copy, whose table kept a
+  `false` only at the top, and 25 s to rule 4's links through `Box` (the field types
+  computed again for every link, each pair's types normalized and compared
+  again). Now 84 s and 4.43 GB: the set of links held its own normalized
+  copies of the two types of every link, which made the peak. The
+  path searches were exponential in the size of a dense mutual block
+  (eight inductives, each with a constructor per member: about 20 times
+  longer per member, 41 s at seven, minutes at eight; a first table that
+  kept a `false` only where the search below met no type above it on the
+  path halved that); the reachability takes well under a second at nine
+  (test `RtResDenseMutual`, eight members). The
+  module names: lean-zip's compressor (bench Z01c) spent about 1.9 s in
+  each of the three walks of `programCasts` (`unread-fields`,
+  `flatten-structs`' resource flow, the lowering), nearly all of it
+  building those arrays: 7.5 s, now 3.2 s; the Cedar benchmark (Z06t)
+  11.3 s, now 8.8 s. The answers depend only on the type or constructor
+  and on the environment, which only grows meanwhile (`flatten-structs`'
+  tuples, the externs that `mod-pow2`, `prelude-int-ops` and
+  `utf8-size-add` add), and one lean2rr process translates one program,
+  so the output is byte-identical: all 714 programs of the runtime tests
+  and the classic corpus that translate, and the programs above.
+- **Where:** `Lower/Borrow.lean`: `resourceTypeCache`, `mayHoldResource`
+  (test `RtResDenseMutual`);
+  `Opt/Flatten.lean`: `Resources.holds`, `resourceExcluded`;
+  `Opt/UnreadFields.lean`: `mayHoldRes`; `ErasedDomains.lean`:
+  `layoutFieldCache`, `layoutFieldTypes`, `layoutFieldKeys`,
+  `FlowState.fieldKeys`, `flowLink`, `flowLinkK`, `flowLinkFields`,
+  `BoxShape`, `boxShape`, `boxShapeCompat`, `flowThroughBoxes`;
+  `CompileRecord.lean`: `moduleNameAt` (used by `Mono.lean`,
+  `Lower/Conv.lean`, `Emit/Startup.lean`, `Emit/Program.lean` and the
+  optional passes).
+- **Remove only if:** never. A new rule in one of these questions must
+  keep the answer a function of the type (or constructor) and the
+  environment, or leave its table. A question about types that can be
+  recursive is answered by a reachability with a visited set (or by
+  strongly connected components), never by a search along every path:
+  that is exponential in a dense mutual block (`RtErasedDenseMutual` for
+  `mayHoldFn`, `RtResDenseMutual` for `mayHoldResource`).

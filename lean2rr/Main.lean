@@ -105,6 +105,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let (leanInit, items) ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root leanInit items)
     { preludeFns := ← preludeFnDeclsM prelude }
+  timingMark "stage 1 (monomorphize)" s!"{st.decls.size} instances, {st.externs.size} extern instances"
   -- The startup steps, with instance names; the registry's pass that
   -- leaves out the steps of unread constants without effects, with what
   -- only they reach (`Opt/UnreadConsts`).
@@ -114,6 +115,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let (startup, st) ← match cfg.startupPrune with
     | some pass => pass st mainInst errStr startup
     | none => pure (startup, st)
+  timingMark "startup steps" s!"{startup.size} steps, {st.decls.size} instances"
   -- The externs of the program that run their Lean definition (natively
   -- their C code runs): a note of the build, on lean2rr's stderr (the
   -- program's output is not affected).
@@ -141,6 +143,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let insts := retypeErasedData st.decls
   -- Stage 2: Lean's own mono pipeline, with the registry's edits.
   let decls ← runStage2 cfg.stage2 insts st.externs st.keys opts.check
+  timingMark "stage 2 (Lean's mono passes)" s!"{decls.size} declarations"
   -- Again on Stage 2's output: a join point Lean's mono passes made.
   let decls := retypeErasedData decls
   if stage == "externs" then return ← externReport decls st.keys
@@ -170,21 +173,25 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
       | .init _ i => !isUsedInit s || kept.contains i || !before.contains i
       | _ => true)
   let roots := entryCallees mainInst errStr startup
+  timingMark "prune passes" s!"{decls.size} declarations, {roots.size} roots"
   let table ← programRelevance decls
   -- (With `compact-arrays`, the typed `map` loops, which can add extern
   -- instances and their keys.)
   let (decls, keys) ← retypeMono cfg.stage2 cfg.stage3 table decls st.keys roots
+  timingMark "stage 3 (relevance, retype)" s!"{decls.size} declarations"
   if stage == "retyped" then return dumpDecls header decls
   -- The registry's passes over mono LCNF (`Opt/FloatLits`), then those
   -- that need the environment (`Opt/Flatten`).
   let decls := cfg.monoPasses.foldl (fun ds pass => pass keys ds) decls
   let decls ← cfg.monoPassesCore.foldlM (fun ds pass => pass keys ds) decls
+  timingMark "mono passes" s!"{decls.size} declarations"
   if stage == "opt" then return dumpDecls header decls
   -- Stage 4: lowering, with the registry's lowering hooks.
   let prog ← lowerProgram cfg prelude mainInst errStr startup roots decls keys
     (st.externRoutes.foldl (init := {}) fun m f r => match r with
       | .refused why => m.insert f why
       | _ => m)
+  timingMark "stage 4 (lowering)" s!"{prog.fns.size} functions"
   -- `Outline` (core; first, so that the passes after it see bounded
   -- functions), the registry's passes over the generated functions, and
   -- the program text. `L2R_NO_OUTLINE` and
@@ -195,7 +202,9 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let noAnchors := (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if noAnchors then { prog with anchored := {} } else prog
+  timingMark "outline" s!"{prog.fns.size} functions"
   let prog := prog.runRRPasses cfg
+  timingMark "passes over the generated functions" s!"{prog.fns.size} functions"
   -- `inline-anchors`, last, on the final functions and calls: the
   -- functions whose inlined copies would make one function too large
   -- (Emit/CopyAnchors).
@@ -209,10 +218,15 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
       unless d.small.isEmpty do
         IO.eprintln s!"lean2rr: inline-anchors: {d.small.size} small function(s) left to rrc's inliner over the budget{fmt d.small}"
     pure prog
-  return prog.render cfg.prunePrelude
+  timingMark "inline-anchors" s!"{prog.anchored.size} anchored"
+  let text := prog.render cfg.prunePrelude
+  timingMark "render" s!"{text.utf8ByteSize} bytes"
+  return text
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
+  timingMark "start"
   let env ← loadEnvironment #[module]
+  timingMark "load environment: extension states"
   let text ← runCoreM env do
     let mut text := ""
     -- What `main` reaches, for `--emit base` and `--stats` only.
@@ -226,6 +240,7 @@ def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
   match opts.output with
   | some path => IO.FS.writeFile path text
   | none => IO.print text
+  timingMark "write"
   return 0
 
 /-- The stack size of the threads Lean's runtime creates from now on

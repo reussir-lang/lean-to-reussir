@@ -480,12 +480,12 @@ Only values whose type may hold one count (`mayHoldRes`). -/
 /-- Whether a value of mono type `t` may hold a resource, also through a
 closure: a function type, `lcAny`, a type variable, a task, thunk,
 reference or promise (`mayHoldCode`), a handle, or an inductive with such
-a field (`holdsResource`). -/
+a field (`mayHoldResource`). -/
 def mayHoldRes (t : Expr) : M Bool := do
   let t := t.consumeMData.headBeta
   if t.isForall then return true
   if ← mayHoldCode t then return true
-  Flatten.holdsResource t
+  mayHoldResource t
 
 def setREscape : M Unit := do
   unless (← get).facts.rEscape do
@@ -853,7 +853,7 @@ def run (keys : NameMap InstKey) (roots : Array Name) (inits : Array (Name × Na
       {if resources then s!", resources: kept where they may be held ({if st.facts.rEscape then "escaped" else "followed"})" else ""}"
   if explain then
     for n in st.facts.externs do
-      let isLean := (env.getModuleIdxFor? n).any fun i => (env.header.moduleNames[i.toNat]!).getRoot == `Lean
+      let isLean := (env.getModuleIdxFor? n).any fun i => (moduleNameAt env i.toNat).getRoot == `Lean
       if isLean && (getExternNameFor env `c ((keys.find? n).map (·.decl) |>.getD n)).isSome then
         IO.eprintln s!"lean2rr: unread-fields: {n} is kept by:\n  {"\n  ".intercalate (chain st.facts.why n)}"
   return out

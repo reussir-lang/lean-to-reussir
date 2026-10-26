@@ -645,3 +645,144 @@ pub fn ifaces() -> LHandle {
     }
     o
 }
+
+/// The operations of the prelude's textures, taking the handles and arrays
+/// by value, out of line: a texture that borrowed its handle (`op(&o)`,
+/// `timer_next(&t, ..)`, `tcp_recv(&s, ..)`) left, inlined into a Lean loop,
+/// a stack slot whose address escapes to a call, and LLVM then kept the
+/// loop's self tail call as a real call (a loop over `Timer.next` and
+/// `Timer.reset` overflowed the stack; the socket and signal textures had
+/// the same shape; the rule of fs.rs's `owned`). Each releases what it is
+/// given, as the textures did.
+pub mod owned {
+    use super::*;
+    use crate::array::{as_slice, bytes_of_vec, release};
+    use crate::rc_release;
+    use crate::string::LStr;
+
+    #[inline(never)]
+    pub fn op_canceled(o: LHandle) -> bool { let r = op(&o).canceled; rc_release(o); r }
+    #[inline(never)]
+    pub fn op_code(o: LHandle) -> u32 { let r = op(&o).code as u32; rc_release(o); r }
+    #[inline(never)]
+    pub fn op_bytes(o: LHandle) -> RVec<u8> { let b = std::mem::take(&mut op(&o).bytes); rc_release(o); bytes_of_vec(b) }
+    #[inline(never)]
+    pub fn op_addr(o: LHandle) -> RVec<u8> { let b = op(&o).addr.clone(); rc_release(o); bytes_of_vec(b) }
+    /// An operation's string `i`, decoded as Lean's `lean_mk_string` does
+    /// (each invalid UTF-8 sequence becomes U+FFFD).
+    #[inline(never)]
+    pub fn op_str(o: LHandle, i: u32) -> LStr {
+        let x = op(&o);
+        let s = crate::string::from_bytes_lossy(<[Vec<u8>]>::get(&x.strs, i as usize).map(|v| v.as_slice()).unwrap_or(b""));
+        rc_release(o);
+        s
+    }
+    #[inline(never)]
+    pub fn op_str_count(o: LHandle) -> u32 { let r = op(&o).strs.len() as u32; rc_release(o); r }
+    #[inline(never)]
+    pub fn op_has_handle(o: LHandle) -> bool { let r = op(&o).handle.is_some(); rc_release(o); r }
+    #[inline(never)]
+    pub fn op_handle(o: LHandle) -> LHandle {
+        let h = op(&o).handle.take().expect("leanrt: operation without a handle");
+        rc_release(o);
+        h
+    }
+    #[inline(never)]
+    pub fn op_fresh(o: LHandle) -> bool { let r = op(&o).fresh; rc_release(o); r }
+    #[inline(never)]
+    pub fn op_promise(o: LHandle) -> LPromise {
+        let p = op(&o).promise.clone().expect("leanrt: operation without a promise");
+        rc_release(o);
+        p
+    }
+    #[inline(never)]
+    pub fn err_kind(o: LHandle, which: u8) -> u32 { let r = super::err_kind(&o, which); rc_release(o); r }
+    #[inline(never)]
+    pub fn err_errno(o: LHandle, which: u8) -> u32 { let r = super::err_errno(&o, which); rc_release(o); r }
+    /// An operation's error's file name (`details` false) or details.
+    #[inline(never)]
+    pub fn err_text(o: LHandle, which: u8, details: bool) -> LStr {
+        let t = err_texts(&o, which);
+        let s = crate::string::from_bytes(if details { &t.1 } else { &t.0 });
+        rc_release(o);
+        s
+    }
+
+    #[inline(never)]
+    pub fn timer_next(t: LHandle, p: LPromise, r: LPromise) -> LHandle { let o = super::timer_next(&t, p, r); rc_release(t); o }
+    #[inline(never)]
+    pub fn timer_ctl(t: LHandle, which: u8) { super::timer_ctl(&t, which); rc_release(t) }
+    #[inline(never)]
+    pub fn signal_next(s: LHandle, p: LPromise, r: LPromise) -> LHandle { let o = super::signal_next(&s, p, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn signal_ctl(s: LHandle, which: u8) -> LHandle { let o = super::signal_ctl(&s, which); rc_release(s); o }
+
+    #[inline(never)]
+    pub fn tcp_bind(s: LHandle, a: RVec<u8>) -> LHandle { let o = super::tcp_bind(&s, as_slice(&a)); release(a); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_listen(s: LHandle, backlog: u32) -> LHandle { let o = super::tcp_listen(&s, backlog); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_connect(s: LHandle, a: RVec<u8>, r: LPromise) -> LHandle {
+        let o = super::tcp_connect(&s, as_slice(&a), r);
+        release(a);
+        rc_release(s);
+        o
+    }
+    #[inline(never)]
+    pub fn tcp_send(s: LHandle, d: RVec<crate::any::LAny>, r: LPromise) -> LHandle { let o = super::tcp_send(&s, d, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_recv(s: LHandle, size: u64, r: LPromise) -> LHandle { let o = super::tcp_recv(&s, size, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_wait_readable(s: LHandle, r: LPromise) -> LHandle { let o = super::tcp_wait_readable(&s, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_cancel_recv(s: LHandle) { super::tcp_cancel_recv(&s); rc_release(s) }
+    #[inline(never)]
+    pub fn tcp_accept(s: LHandle, r: LPromise) -> LHandle { let o = super::tcp_accept(&s, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_try_accept(s: LHandle) -> LHandle { let o = super::tcp_try_accept(&s); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_cancel_accept(s: LHandle) { super::tcp_cancel_accept(&s); rc_release(s) }
+    #[inline(never)]
+    pub fn tcp_shutdown(s: LHandle, r: LPromise) -> LHandle { let o = super::tcp_shutdown(&s, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn sock_name(s: LHandle, peer: bool, is_udp: bool) -> LHandle { let o = super::sock_name(&s, peer, is_udp); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_nodelay(s: LHandle) -> LHandle { let o = super::tcp_nodelay(&s); rc_release(s); o }
+    #[inline(never)]
+    pub fn tcp_keepalive(s: LHandle, enable: i32, delay: u32) -> LHandle { let o = super::tcp_keepalive(&s, enable, delay); rc_release(s); o }
+
+    #[inline(never)]
+    pub fn udp_bind(s: LHandle, a: RVec<u8>) -> LHandle { let o = super::udp_bind(&s, as_slice(&a)); release(a); rc_release(s); o }
+    #[inline(never)]
+    pub fn udp_connect(s: LHandle, a: RVec<u8>) -> LHandle { let o = super::udp_connect(&s, as_slice(&a)); release(a); rc_release(s); o }
+    #[inline(never)]
+    pub fn udp_send(s: LHandle, d: RVec<crate::any::LAny>, a: RVec<u8>, r: LPromise) -> LHandle {
+        let o = super::udp_send(&s, d, as_slice(&a), r);
+        release(a);
+        rc_release(s);
+        o
+    }
+    #[inline(never)]
+    pub fn udp_recv(s: LHandle, size: u64, r: LPromise) -> LHandle { let o = super::udp_recv(&s, size, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn udp_wait_readable(s: LHandle, r: LPromise) -> LHandle { let o = super::udp_wait_readable(&s, r); rc_release(s); o }
+    #[inline(never)]
+    pub fn udp_cancel_recv(s: LHandle) { super::udp_cancel_recv(&s); rc_release(s) }
+    #[inline(never)]
+    pub fn udp_option(s: LHandle, which: u8, v: u32) -> LHandle { let o = super::udp_option(&s, which, v); rc_release(s); o }
+    #[inline(never)]
+    pub fn udp_membership(s: LHandle, m: RVec<u8>, i: RVec<u8>, membership: u8) -> LHandle {
+        let o = super::udp_membership(&s, as_slice(&m), as_slice(&i), membership);
+        release(m);
+        release(i);
+        rc_release(s);
+        o
+    }
+    #[inline(never)]
+    pub fn udp_multicast_interface(s: LHandle, i: RVec<u8>) -> LHandle {
+        let o = super::udp_multicast_interface(&s, as_slice(&i));
+        release(i);
+        rc_release(s);
+        o
+    }
+}

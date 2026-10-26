@@ -167,9 +167,11 @@ fn l2r_any_as_f64(a : LAny) -> f64 [{ leanrt::any::as_f64(a) }];
 // pointer: lean2rr boxes a type with nullary variants through its generated
 // `l2r_box_T`, which makes a nullary variant the immediate of its index;
 // leanrt does not decode Reussir's immediates), an opaque type of
-// this prelude (`LStr`, `RVec`, `LCell`, `LHandle`, `LPromise`), a `Nat` or `Int` (their
-// own words). leanrt's own kinds keep their fixed numbers whatever `num`
-// says: `Nat`, `Int`, `LStr`, `RVec<LAny>`, the arrays of scalars
+// this prelude (`LStr`, `RVec`, `LCell`, `LHandle`, `LPromise`). A `Nat` or
+// `Int` is boxed by `l2r_any_of_nat`/`l2r_any_of_int` (below), never here:
+// at these types this texture ends the program (leanrt::any's
+// `generic_mpz_box`). leanrt's own kinds keep their fixed numbers whatever
+// `num` says: `LStr`, `RVec<LAny>`, the arrays of scalars
 // `RVec<u8>`, `RVec<f64>`, `RVec<u16>`, `RVec<u32>`, `RVec<u64>`,
 // `RVec<f32>` (7 to 12: `ByteArray`, `FloatArray`, lean2rr's compact
 // arrays), and `LRef<LAny>`, the same Rust type as `RVec<LAny>` (number 6,
@@ -192,8 +194,9 @@ fn l2r_any_of_ptr<T>(x : T, num : u64) -> LAny [{ {
 } }];
 // The payload of a box at payload `num`. Lean's `box(0)` (word 1) read at
 // one of leanrt's kinds is its zero (`0`, `0.0`, `""`, `#[]`), as the `b0`
-// arm of the old enum `L2RBox` gave; a `Nat` or `Int` also decodes its own
-// immediates. Anything else is `l2r_unreachable` (a panic, never a wrong
+// arm of the old enum `L2RBox` gave (a `Nat` or `Int` is unboxed by
+// `l2r_any_as_nat`/`l2r_any_as_int`, never here: at these types this texture
+// ends the program). Anything else is `l2r_unreachable` (a panic, never a wrong
 // read), with one exception, the safety net of the compact arrays: an
 // array of scalars (7 to 12) unboxed at `RVec<LAny>` is converted to an
 // array of boxes (`leanrt::any`, `boxes_of_compact`; never expected,
@@ -2337,11 +2340,10 @@ fn l2r_promise_new<S>(c : LCell<S>) -> LPromise [{
 #[ffi(import)]
 fn l2r_promise_cell<S>(p : LPromise) -> LCell<S> [{
     {
-        let a = leanrt::task::promise_cell(&p);
-        let c: Rc<[:S:]> = unsafe { ::std::mem::transmute_copy(&a) };
-        let r = c.clone();
-        ::std::mem::forget(c);
-        leanrt::rc_release(p);
+        // Out of line, by value (`task::owned`): a borrowed local here, inlined
+        // into a Lean loop, would keep the loop's self tail call a real call.
+        let a = leanrt::task::owned::promise_cell(p);
+        let r: Rc<[:S:]> = unsafe { ::std::mem::transmute_copy(&a) };
         leanrt::drop::Cell::from_inner(r)
     }
 }];
@@ -2360,23 +2362,7 @@ fn l2r_promise_release(p : LPromise) -> u64 [{ { drop(p); 0 } }];
 // was resolved already. `c` is consumed (released here). Returns 0.
 #[ffi(import)]
 fn l2r_promise_resolve_with<T>(c : LCell<T>, v : T) -> u64 [{
-    {
-        let mut c = c;
-        let a: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let mut v = Some(v);
-        let mut old = None;
-        leanrt::task::resolve_with(a, &mut || {
-            if let Some(v) = v.take() {
-                old = Some(unsafe { ::std::mem::replace(c.data_mut(), v) });
-            }
-        });
-        drop(c);
-        drop(v);
-        if let Some(old) = old {
-            leanrt::drop::release(old);
-        }
-        0
-    }
+    { leanrt::task::owned::resolve_with(c, v); 0 }
 }];
 
 // `Option.getOrBlock!` on `none`: Lean's forced panic message, then block
@@ -2796,32 +2782,11 @@ fn l2r_sync_new(kind : u64) -> LHandle [{
 
 // Operation `op` on `h` (see the functions below); the result of a `try`.
 #[ffi(import)]
-fn l2r_sync_op(op : u64, h : LHandle) -> bool [{
-    {
-        let r = match op {
-            0 => { leanrt::sync::mutex_lock(&h); true }
-            1 => leanrt::sync::mutex_try_lock(&h),
-            2 => { leanrt::sync::mutex_unlock(&h); true }
-            3 => { leanrt::sync::condvar_notify_one(&h); true }
-            4 => { leanrt::sync::condvar_notify_all(&h); true }
-            5 => { leanrt::sync::recmutex_lock(&h); true }
-            6 => leanrt::sync::recmutex_try_lock(&h),
-            7 => { leanrt::sync::recmutex_unlock(&h); true }
-            8 => { leanrt::sync::sharedmutex_write(&h); true }
-            9 => leanrt::sync::sharedmutex_try_write(&h),
-            10 => { leanrt::sync::sharedmutex_unlock_write(&h); true }
-            11 => { leanrt::sync::sharedmutex_read(&h); true }
-            12 => leanrt::sync::sharedmutex_try_read(&h),
-            _ => { leanrt::sync::sharedmutex_unlock_read(&h); true }
-        };
-        leanrt::rc_release(h);
-        r
-    }
-}];
+fn l2r_sync_op(op : u64, h : LHandle) -> bool [{ leanrt::sync::owned::op(op, h) }];
 
 #[ffi(import)]
 fn l2r_condvar_wait_h(c : LHandle, m : LHandle) -> u64 [{
-    { leanrt::sync::condvar_wait(&c, &m); leanrt::rc_release(c); leanrt::rc_release(m); 0 }
+    { leanrt::sync::owned::condvar_wait(c, m); 0 }
 }];
 
 fn l2r_sync_unit(op : u64, h : LHandle) -> L2RUnit {
@@ -2866,58 +2831,39 @@ fn l2r_unit_of(x : u64) -> L2RUnit { L2RUnit::u{} }
 
 // Operations: their outcome (`leanrt::net::OpSt`).
 #[ffi(import)]
-fn l2r_shim_op_canceled(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).canceled; leanrt::rc_release(o); r } }];
+fn l2r_shim_op_canceled(o : LHandle) -> bool [{ leanrt::net::owned::op_canceled(o) }];
 #[ffi(import)]
-fn l2r_shim_op_code(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).code as u32; leanrt::rc_release(o); r } }];
+fn l2r_shim_op_code(o : LHandle) -> u32 [{ leanrt::net::owned::op_code(o) }];
 #[ffi(import)]
-fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{
-    { let b = ::std::mem::take(&mut leanrt::net::op(&o).bytes); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
-}];
+fn l2r_shim_op_bytes(o : LHandle) -> RVec<u8> [{ leanrt::net::owned::op_bytes(o) }];
 #[ffi(import)]
-fn l2r_shim_op_addr(o : LHandle) -> RVec<u8> [{
-    { let b = leanrt::net::op(&o).addr.clone(); leanrt::rc_release(o); leanrt::array::bytes_of_vec(b) }
-}];
+fn l2r_shim_op_addr(o : LHandle) -> RVec<u8> [{ leanrt::net::owned::op_addr(o) }];
 // An operation's string `i`, decoded as Lean's `lean_mk_string` does (each
 // invalid UTF-8 sequence becomes U+FFFD).
 #[ffi(import)]
-fn l2r_shim_op_str(o : LHandle, i : u32) -> LStr [{
-    {
-        let x = leanrt::net::op(&o);
-        let s = leanrt::string::from_bytes_lossy(x.strs.get(i as usize).map(|v| v.as_slice()).unwrap_or(b""));
-        leanrt::rc_release(o);
-        s
-    }
-}];
+fn l2r_shim_op_str(o : LHandle, i : u32) -> LStr [{ leanrt::net::owned::op_str(o, i) }];
 #[ffi(import)]
-fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ { let r = leanrt::net::op(&o).strs.len() as u32; leanrt::rc_release(o); r } }];
+fn l2r_shim_op_str_count(o : LHandle) -> u32 [{ leanrt::net::owned::op_str_count(o) }];
 #[ffi(import)]
-fn l2r_shim_op_has_handle(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).handle.is_some(); leanrt::rc_release(o); r } }];
+fn l2r_shim_op_has_handle(o : LHandle) -> bool [{ leanrt::net::owned::op_has_handle(o) }];
 #[ffi(import)]
-fn l2r_shim_op_handle(o : LHandle) -> LHandle [{
-    { let h = leanrt::net::op(&o).handle.take().expect("leanrt: operation without a handle"); leanrt::rc_release(o); h }
-}];
+fn l2r_shim_op_handle(o : LHandle) -> LHandle [{ leanrt::net::owned::op_handle(o) }];
 // An operation's error, its start's (`which` 0) or its completion's (1):
 // the builder (`u32::MAX`: none), its code, file name and details.
 #[ffi(import)]
-fn l2r_shim_op_err_kind(o : LHandle, which : u8) -> u32 [{ { let r = leanrt::net::err_kind(&o, which); leanrt::rc_release(o); r } }];
+fn l2r_shim_op_err_kind(o : LHandle, which : u8) -> u32 [{ leanrt::net::owned::err_kind(o, which) }];
 #[ffi(import)]
-fn l2r_shim_op_err_code(o : LHandle, which : u8) -> u32 [{ { let r = leanrt::net::err_errno(&o, which); leanrt::rc_release(o); r } }];
+fn l2r_shim_op_err_code(o : LHandle, which : u8) -> u32 [{ leanrt::net::owned::err_errno(o, which) }];
 #[ffi(import)]
-fn l2r_shim_op_err_file(o : LHandle, which : u8) -> LStr [{
-    { let s = leanrt::string::from_bytes(&leanrt::net::err_texts(&o, which).0); leanrt::rc_release(o); s }
-}];
+fn l2r_shim_op_err_file(o : LHandle, which : u8) -> LStr [{ leanrt::net::owned::err_text(o, which, false) }];
 #[ffi(import)]
-fn l2r_shim_op_err_details(o : LHandle, which : u8) -> LStr [{
-    { let s = leanrt::string::from_bytes(&leanrt::net::err_texts(&o, which).1); leanrt::rc_release(o); s }
-}];
+fn l2r_shim_op_err_details(o : LHandle, which : u8) -> LStr [{ leanrt::net::owned::err_text(o, which, true) }];
 // `Timer.next`/`Signal.next`: whether the loop took the promise passed, or
 // the loop's own (a new reference).
 #[ffi(import)]
-fn l2r_shim_op_fresh(o : LHandle) -> bool [{ { let r = leanrt::net::op(&o).fresh; leanrt::rc_release(o); r } }];
+fn l2r_shim_op_fresh(o : LHandle) -> bool [{ leanrt::net::owned::op_fresh(o) }];
 #[ffi(import)]
-fn l2r_shim_op_promise(o : LHandle) -> LPromise [{
-    { let p = leanrt::net::op(&o).promise.clone().expect("leanrt: operation without a promise"); leanrt::rc_release(o); p }
-}];
+fn l2r_shim_op_promise(o : LHandle) -> LPromise [{ leanrt::net::owned::op_promise(o) }];
 
 // Addresses (pure externs of the shim).
 #[ffi(import)]
@@ -2934,9 +2880,7 @@ fn l2r_shim_ifaces() -> LHandle [{ leanrt::net::ifaces() }];
 // `IO.Promise.isResolved`, which borrows the promise: released after the
 // question (a last reference resolves it with `none`).
 #[ffi(import)]
-fn l2r_shim_promise_is_resolved(p : LPromise) -> bool [{
-    { let r = leanrt::task::promise_is_resolved(leanrt::task::promise_cell(&p)); drop(p); r }
-}];
+fn l2r_shim_promise_is_resolved(p : LPromise) -> bool [{ leanrt::task::owned::promise_is_resolved(p) }];
 
 // The loop (lean-runtime's `sched::uv`: each lets the loop catch up first).
 #[ffi(import)]
@@ -2951,97 +2895,75 @@ fn l2r_uv_event_loop_alive() -> bool [{ leanrt::net::loop_alive() }];
 #[ffi(import)]
 fn l2r_shim_timer_new(timeout : u64, repeating : bool) -> LHandle [{ leanrt::net::timer_new(timeout, repeating) }];
 #[ffi(import)]
-fn l2r_shim_timer_next(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::timer_next(&t, p, r); leanrt::rc_release(t); o } }];
+fn l2r_shim_timer_next(t : LHandle, p : LPromise, r : LPromise) -> LHandle [{ leanrt::net::owned::timer_next(t, p, r) }];
 #[ffi(import)]
-fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{ { leanrt::net::timer_ctl(&t, which); leanrt::rc_release(t); 0 } }];
+fn l2r_shim_timer_ctl_h(t : LHandle, which : u8) -> u64 [{ { leanrt::net::owned::timer_ctl(t, which); 0 } }];
 fn l2r_shim_timer_ctl(t : LHandle, which : u8) -> L2RUnit { l2r_unit_of(l2r_shim_timer_ctl_h(t, which)) }
 #[ffi(import)]
 fn l2r_shim_signal_new(signum : u32, repeating : bool) -> LHandle [{ leanrt::net::signal_new(signum as i32, repeating) }];
 #[ffi(import)]
-fn l2r_shim_signal_next(s : LHandle, p : LPromise, r : LPromise) -> LHandle [{ { let o = leanrt::net::signal_next(&s, p, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_signal_next(s : LHandle, p : LPromise, r : LPromise) -> LHandle [{ leanrt::net::owned::signal_next(s, p, r) }];
 #[ffi(import)]
-fn l2r_shim_signal_ctl(s : LHandle, which : u8) -> LHandle [{ { let o = leanrt::net::signal_ctl(&s, which); leanrt::rc_release(s); o } }];
+fn l2r_shim_signal_ctl(s : LHandle, which : u8) -> LHandle [{ leanrt::net::owned::signal_ctl(s, which) }];
 
 // TCP sockets.
 #[ffi(import)]
 fn l2r_shim_tcp_new() -> LHandle [{ leanrt::net::tcp_new() }];
 #[ffi(import)]
-fn l2r_shim_tcp_bind(s : LHandle, a : RVec<u8>) -> LHandle [{
-    { let o = leanrt::net::tcp_bind(&s, leanrt::array::as_slice(&a)); leanrt::array::release(a); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_tcp_bind(s : LHandle, a : RVec<u8>) -> LHandle [{ leanrt::net::owned::tcp_bind(s, a) }];
 #[ffi(import)]
-fn l2r_shim_tcp_listen(s : LHandle, backlog : u32) -> LHandle [{ { let o = leanrt::net::tcp_listen(&s, backlog); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_listen(s : LHandle, backlog : u32) -> LHandle [{ leanrt::net::owned::tcp_listen(s, backlog) }];
 #[ffi(import)]
-fn l2r_shim_tcp_connect(s : LHandle, a : RVec<u8>, r : LPromise) -> LHandle [{
-    { let o = leanrt::net::tcp_connect(&s, leanrt::array::as_slice(&a), r); leanrt::array::release(a); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_tcp_connect(s : LHandle, a : RVec<u8>, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_connect(s, a, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_send(s : LHandle, d : RVec<LAny>, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_send(&s, d, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_send(s : LHandle, d : RVec<LAny>, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_send(s, d, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_recv(&s, size, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_recv(s, size, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_wait_readable(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_wait_readable(&s, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_wait_readable(s : LHandle, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_wait_readable(s, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::owned::tcp_cancel_recv(s); 0 } }];
 fn l2r_shim_tcp_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_recv_h(s)) }
 #[ffi(import)]
-fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_accept(&s, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_accept(s : LHandle, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_accept(s, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_try_accept(&s); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_try_accept(s : LHandle) -> LHandle [{ leanrt::net::owned::tcp_try_accept(s) }];
 #[ffi(import)]
-fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::tcp_cancel_accept(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_tcp_cancel_accept_h(s : LHandle) -> u64 [{ { leanrt::net::owned::tcp_cancel_accept(s); 0 } }];
 fn l2r_shim_tcp_cancel_accept(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_tcp_cancel_accept_h(s)) }
 #[ffi(import)]
-fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::tcp_shutdown(&s, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_shutdown(s : LHandle, r : LPromise) -> LHandle [{ leanrt::net::owned::tcp_shutdown(s, r) }];
 #[ffi(import)]
-fn l2r_shim_tcp_name(s : LHandle, peer : bool) -> LHandle [{ { let o = leanrt::net::sock_name(&s, peer, false); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_name(s : LHandle, peer : bool) -> LHandle [{ leanrt::net::owned::sock_name(s, peer, false) }];
 #[ffi(import)]
-fn l2r_shim_tcp_nodelay(s : LHandle) -> LHandle [{ { let o = leanrt::net::tcp_nodelay(&s); leanrt::rc_release(s); o } }];
+fn l2r_shim_tcp_nodelay(s : LHandle) -> LHandle [{ leanrt::net::owned::tcp_nodelay(s) }];
 #[ffi(import)]
-fn l2r_shim_tcp_keepalive(s : LHandle, enable : u32, delay : u32) -> LHandle [{
-    { let o = leanrt::net::tcp_keepalive(&s, enable as i32, delay); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_tcp_keepalive(s : LHandle, enable : u32, delay : u32) -> LHandle [{ leanrt::net::owned::tcp_keepalive(s, enable as i32, delay) }];
 
 // UDP sockets.
 #[ffi(import)]
 fn l2r_shim_udp_new() -> LHandle [{ leanrt::net::udp_new() }];
 #[ffi(import)]
-fn l2r_shim_udp_bind(s : LHandle, a : RVec<u8>) -> LHandle [{
-    { let o = leanrt::net::udp_bind(&s, leanrt::array::as_slice(&a)); leanrt::array::release(a); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_udp_bind(s : LHandle, a : RVec<u8>) -> LHandle [{ leanrt::net::owned::udp_bind(s, a) }];
 #[ffi(import)]
-fn l2r_shim_udp_connect(s : LHandle, a : RVec<u8>) -> LHandle [{
-    { let o = leanrt::net::udp_connect(&s, leanrt::array::as_slice(&a)); leanrt::array::release(a); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_udp_connect(s : LHandle, a : RVec<u8>) -> LHandle [{ leanrt::net::owned::udp_connect(s, a) }];
 #[ffi(import)]
-fn l2r_shim_udp_send(s : LHandle, d : RVec<LAny>, a : RVec<u8>, r : LPromise) -> LHandle [{
-    { let o = leanrt::net::udp_send(&s, d, leanrt::array::as_slice(&a), r); leanrt::array::release(a); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_udp_send(s : LHandle, d : RVec<LAny>, a : RVec<u8>, r : LPromise) -> LHandle [{ leanrt::net::owned::udp_send(s, d, a, r) }];
 #[ffi(import)]
-fn l2r_shim_udp_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{ { let o = leanrt::net::udp_recv(&s, size, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_udp_recv(s : LHandle, size : u64, r : LPromise) -> LHandle [{ leanrt::net::owned::udp_recv(s, size, r) }];
 #[ffi(import)]
-fn l2r_shim_udp_wait_readable(s : LHandle, r : LPromise) -> LHandle [{ { let o = leanrt::net::udp_wait_readable(&s, r); leanrt::rc_release(s); o } }];
+fn l2r_shim_udp_wait_readable(s : LHandle, r : LPromise) -> LHandle [{ leanrt::net::owned::udp_wait_readable(s, r) }];
 #[ffi(import)]
-fn l2r_shim_udp_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::udp_cancel_recv(&s); leanrt::rc_release(s); 0 } }];
+fn l2r_shim_udp_cancel_recv_h(s : LHandle) -> u64 [{ { leanrt::net::owned::udp_cancel_recv(s); 0 } }];
 fn l2r_shim_udp_cancel_recv(s : LHandle) -> L2RUnit { l2r_unit_of(l2r_shim_udp_cancel_recv_h(s)) }
 #[ffi(import)]
-fn l2r_shim_udp_name(s : LHandle, peer : bool) -> LHandle [{ { let o = leanrt::net::sock_name(&s, peer, true); leanrt::rc_release(s); o } }];
+fn l2r_shim_udp_name(s : LHandle, peer : bool) -> LHandle [{ leanrt::net::owned::sock_name(s, peer, true) }];
 #[ffi(import)]
-fn l2r_shim_udp_option(s : LHandle, which : u8, v : u32) -> LHandle [{ { let o = leanrt::net::udp_option(&s, which, v); leanrt::rc_release(s); o } }];
+fn l2r_shim_udp_option(s : LHandle, which : u8, v : u32) -> LHandle [{ leanrt::net::owned::udp_option(s, which, v) }];
 #[ffi(import)]
-fn l2r_shim_udp_membership(s : LHandle, m : RVec<u8>, i : RVec<u8>, membership : u8) -> LHandle [{
-    {
-        let o = leanrt::net::udp_membership(&s, leanrt::array::as_slice(&m), leanrt::array::as_slice(&i), membership);
-        leanrt::array::release(m);
-        leanrt::array::release(i);
-        leanrt::rc_release(s);
-        o
-    }
-}];
+fn l2r_shim_udp_membership(s : LHandle, m : RVec<u8>, i : RVec<u8>, membership : u8) -> LHandle [{ leanrt::net::owned::udp_membership(s, m, i, membership) }];
 #[ffi(import)]
-fn l2r_shim_udp_multicast_interface(s : LHandle, i : RVec<u8>) -> LHandle [{
-    { let o = leanrt::net::udp_multicast_interface(&s, leanrt::array::as_slice(&i)); leanrt::array::release(i); leanrt::rc_release(s); o }
-}];
+fn l2r_shim_udp_multicast_interface(s : LHandle, i : RVec<u8>) -> LHandle [{ leanrt::net::owned::udp_multicast_interface(s, i) }];
 
 // Name resolution.
 #[ffi(import)]
@@ -3170,7 +3092,7 @@ fn l2r_shared_rc_text(msg : LStr) -> LStr [{
     {
         let line = lean_runtime::io::debug::shared_rc_line(msg.utf8());
         leanrt::rc_release(msg);
-        leanrt::string::from_bytes(&line)
+        leanrt::string::from_bytes(line.as_slice())
     }
 }];
 
@@ -3464,7 +3386,7 @@ fn l2r_fs_read_dir(p : LStr) -> RVec<LStr> [{
 // (dir, file, symlink, other).
 #[ffi(import)]
 fn l2r_fs_metadata(p : LStr, follow : bool) -> RVec<u64> [{
-    { let v = leanrt::fs::metadata(p.utf8(), follow); leanrt::rc_release(p); leanrt::array::from_slice(&v[..]) }
+    leanrt::fs::owned::metadata(p, follow)
 }];
 // `Handle.isTty` is `BaseIO` (it cannot fail): a payload primitive named
 // after the extern symbol.
@@ -3505,16 +3427,7 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 // it was spawned with `setsid` for `wait`/`tryWait`/`kill`/`pid`.
 #[ffi(import)]
 fn l2r_proc_spawn(cmd : LStr, args : RVec<LAny>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{
-    {
-        let pid = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid, |a| leanrt::proc::spawn(a, modes));
-        leanrt::rc_release(cmd);
-        leanrt::rc_release(cwd);
-        leanrt::array::release(args);
-        leanrt::array::release(env_names);
-        leanrt::array::release(env_values);
-        leanrt::array::release(env_set);
-        pid
-    }
+    leanrt::proc::owned::spawn(cmd, args, cwd, has_cwd, env_names, env_values, env_set, modes, inherit_env, setsid)
 }];
 #[ffi(import)]
 fn l2r_proc_end(i : u64) -> LHandle [{ leanrt::proc::take_end(i) }];
@@ -3533,18 +3446,7 @@ fn l2r_proc_try_wait(pid : u32) -> u64 [{ leanrt::proc::try_wait(pid) }];
 // `l2r_proc_output_str(1)` and `(2)`, valid UTF-8.
 #[ffi(import)]
 fn l2r_proc_output(cmd : LStr, args : RVec<LAny>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, inherit_env : bool, setsid : bool, input : LStr, has_input : bool) -> u32 [{
-    {
-        let code = leanrt::proc::with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid,
-            |a| leanrt::proc::output(a, if has_input { Some(input.utf8()) } else { None }));
-        leanrt::rc_release(cmd);
-        leanrt::rc_release(cwd);
-        leanrt::rc_release(input);
-        leanrt::array::release(args);
-        leanrt::array::release(env_names);
-        leanrt::array::release(env_values);
-        leanrt::array::release(env_set);
-        code
-    }
+    leanrt::proc::owned::output(cmd, args, cwd, has_cwd, env_names, env_values, env_set, inherit_env, setsid, input, has_input)
 }];
 #[ffi(import)]
 fn l2r_proc_output_str(which : u64) -> LStr [{ leanrt::proc::take_output(which) }];

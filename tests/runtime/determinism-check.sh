@@ -2,7 +2,9 @@
 # lean2rr's translation is deterministic and local: for each program below
 # (runtime tests and classic programs, translation only: `lean2rr --emit
 # rr`, no Reussir build):
-# - two translations of the program give byte-identical .rr files;
+# - two translations of the program give byte-identical .rr files (the
+#   second with L2R_TIMINGS set: the stage timings lean2rr then prints on
+#   stderr must not change the output);
 # - with one unrelated definition added (a structure of two numbers, a
 #   recursive function over it that uses only `Nat` arithmetic, so that it
 #   shares no instance or specialization with the program, and a new entry
@@ -127,7 +129,7 @@ EOF
       || { echo "FAIL $p: lean failed on the $( [ $v = a ] && echo program || echo variant) (see $d/$v/lean.log)"; status=1; ok=""; }
   done
   [ -n "$ok" ] || continue
-  if ! translate "$d/a" "$p" l2rDetRoot "$d/a/one.rr" || ! translate "$d/a" "$p" l2rDetRoot "$d/a/two.rr"; then
+  if ! translate "$d/a" "$p" l2rDetRoot "$d/a/one.rr" || ! L2R_TIMINGS=1 translate "$d/a" "$p" l2rDetRoot "$d/a/two.rr"; then
     echo "FAIL $p: lean2rr failed (see $d/a/one.rr.log, $d/a/two.rr.log)"; status=1; continue
   fi
   if ! cmp -s "$d/a/one.rr" "$d/a/two.rr"; then

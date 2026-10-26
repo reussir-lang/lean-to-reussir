@@ -1,0 +1,3 @@
+for p in timer udp metadata process; do
+  LEAN_STACK_SIZE_KB=1024 $BIN $p 200000 3 2>&1; echo "$p: exit $?"
+done

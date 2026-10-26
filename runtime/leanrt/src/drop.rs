@@ -3,12 +3,11 @@
 //!
 //! Native Lean frees an object iteratively (`lean_dec_ref_cold`): the
 //! children whose count drops to zero go onto a stack of objects to free,
-//! popped last first. leanrt does the same with its own stack of pending
-//! work per thread (`crate::pending`), which the outermost free empties.
-//! Reussir's drop glue frees records by itself, with a bounded stack
-//! (tail loops, and the per-thread stack of pending drops, reussir-rt's
-//! `drop_stack`, which this module shares through `crate::pending`), and
-//! releases a
+//! popped last first. leanrt does the same on the per-thread stack of
+//! pending drops that it shares with Reussir's drop glue (reussir-rt's
+//! `drop_stack`, through `crate::pending`), which the outermost free
+//! empties. The glue frees records by itself, with a bounded stack (tail
+//! loops and that shared stack), and releases a
 //! container field through the container's Rust `Drop` (the opaque type's
 //! drop hook), which releases the elements, records again: a tree whose
 //! children are in arrays, a chain of thunks.

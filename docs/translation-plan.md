@@ -3163,11 +3163,16 @@ Each item says what differs and when.
   hours). Then the native program stops at startup, or starts late, and
   lean2rr's program runs at once. Natively such a program does nothing
   useful; a constant that is read is evaluated at its place as before.
-- *Running out of memory*: lean2rr ends every failed allocation, including
-  a big number's limbs (one block allocated by leanrt since the one-block
-  layout; only `pow`, `gcd` and decimal conversion go through GMP's own
-  allocator), with `INTERNAL PANIC: out of memory` and exit status 1 after
-  flushing standard output. Natively the end depends on the site: a Lean
+- *Running out of memory*: in lean2rr the end depends on the site: a
+  string or array of leanrt's ends with `INTERNAL PANIC: out of memory`
+  and exit status 1 after flushing standard output; a record of Reussir's
+  and a big number's heap integer go through reussir-rt's allocation
+  function (`Panic: allocation failed`, then `abort`, 134), a thunk or task
+  cell (`Rc::new`) through Rust's allocator (`memory allocation of N bytes
+  failed`, then `abort`, 134), and GMP's scratch through GMP's own
+  allocator (`GNU MP: Cannot allocate memory (size=N)`, 134;
+  `docs/implementation/representations/nat-int.md`).
+  Natively the end depends on the site too: a Lean
   object gives the same `INTERNAL PANIC: out of memory`, exit 1; GMP's
   limbs give `GNU MP: Cannot allocate memory (size=N)` and an abort (status
   134, buffered standard output lost); `IO.FS.Stream.getLine` gives a C++

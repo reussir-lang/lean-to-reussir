@@ -215,8 +215,10 @@ accepted and does nothing, `--int-backend leanrt` and
     - `dbgTraceIfShared` (a debug message) follows rcgmp's immediates, not
       Lean's: a `Nat` in [2^61, 2^63) is a heap value here and can be
       reported shared (a literal such as 2^61 always is: an immortal object),
-      where natively it is a scalar; an `Int` with |x| in [2^31, 2^61) is an
-      immediate here and never reported, where natively it is an object.
+      where natively it is a scalar; so can a computed value equal to a big
+      literal (`2^70 + k` at `k = 0`, natively a new object); an `Int` with
+      |x| in [2^31, 2^61) is an immediate here and never reported, where
+      natively it is an object.
     - A boxed `Int` in [2^32, 2^62) or [-2^62, -2^31) is an immediate
       (`2v + 1`, `l2r_int_box_wide`; natively an object, its word an
       address): an `int32` value keeps Lean's scalar, and a box word read

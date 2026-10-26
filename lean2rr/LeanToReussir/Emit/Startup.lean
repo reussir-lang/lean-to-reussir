@@ -447,8 +447,8 @@ def startupModules (env : Environment) (root : Name) (toolchain := false) : Arra
     let runtimeOnly := (env.header.moduleData[mainIdx.toNat]?.map (·.isModule)).getD false
     ((importPostOrder env (followMeta := !runtimeOnly) toolchain mainIdx.toNat ({}, #[])).2, runtimeOnly)
   | none =>
-    ((Array.range env.header.moduleNames.size).filter fun i =>
-      toolchain || !isToolchainModule env.header.moduleNames[i]!, false)
+    ((Array.range env.header.modules.size).filter fun i =>
+      toolchain || !isToolchainModule (moduleNameAt env i), false)
 
 /-- The startup item of declaration `n` if it is an `initialize` declaration
 (`initialize do …`: its function; `initialize c : T ← act`: `c`, with the
@@ -485,7 +485,7 @@ def libraryModuleItems (idx : Nat) (runtimeOnly : Bool) : CoreM (Array StartupIt
 for `main`'s module): a module of it is among `modules`, the modules whose
 initializers run (`startupModules` with the toolchain's). -/
 def usesLeanPackage (env : Environment) (modules : Array Nat) : Bool :=
-  modules.any fun i => (`Lean).isPrefixOf env.header.moduleNames[i]!
+  modules.any fun i => (`Lean).isPrefixOf (moduleNameAt env i)
 
 /-- The modules that `lean_initialize()` initializes, in order, and the set
 of them: in a program that uses the `Lean` package (`usesLeanPackage`),
@@ -526,10 +526,10 @@ def startupItems (root : Name) : CoreM (Array StartupItem × Array StartupItem) 
     if usesLeanPackage env walk then leanInitModules env else ({}, #[])
   let mut leanInit := #[]
   for idx in leanModules do
-    if isLibraryModule env.header.moduleNames[idx]! then
+    if isLibraryModule (moduleNameAt env idx) then
       leanInit := leanInit ++ (← libraryModuleItems idx (runtimeOnly := false))
   let order := walk.filter (!initialized.contains ·)
-  let modules := order.filter fun i => !isToolchainModule env.header.moduleNames[i]!
+  let modules := order.filter fun i => !isToolchainModule (moduleNameAt env i)
   let wanted : Std.HashSet Nat := modules.foldl (·.insert ·) {}
   let mut byModule : Std.HashMap Nat (Array (StartupItem × Name)) := {}
   for (n, _) in env.constants.map₁.toList do
@@ -553,7 +553,7 @@ def startupItems (root : Name) : CoreM (Array StartupItem × Array StartupItem) 
   -- `initialize` action, and nearly every constant that calls a function.
   let mut out := #[]
   for idx in order do
-    let m := env.header.moduleNames[idx]!
+    let m := moduleNameAt env idx
     if isLibraryModule m then
       out := out ++ (← libraryModuleItems idx runtimeOnly)
       continue

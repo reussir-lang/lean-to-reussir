@@ -419,6 +419,17 @@ pub mod owned {
     pub fn lock(h: LHandle, exclusive: bool) { super::lock(&h, exclusive); rc_release(h); }
     #[inline(never)]
     pub fn try_lock(h: LHandle, exclusive: bool) -> bool { let r = super::try_lock(&h, exclusive); rc_release(h); r }
+    /// `System.FilePath.metadata`/`symlinkMetadata`: the words of
+    /// `metadata` as an array; the path is released. Out of line, so that
+    /// the words' buffer is a slot of this frame, not of the Lean function
+    /// that calls the texture.
+    #[inline(never)]
+    pub fn metadata(p: LStr, follow: bool) -> RVec<u64> {
+        use crate::string::Utf8;
+        let v = super::metadata(p.utf8(), follow);
+        rc_release(p);
+        array::from_slice(&v[..])
+    }
     #[inline(never)]
     pub fn unlock(h: LHandle) { super::unlock(&h); rc_release(h); }
 }

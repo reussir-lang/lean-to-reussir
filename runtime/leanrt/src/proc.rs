@@ -176,3 +176,73 @@ pub fn with_args<R>(
         .collect();
     f(&SpawnArgs { cmd: cmd.utf8(), args: &argv, cwd: if has_cwd { Some(cwd.utf8()) } else { None }, env: &env, inherit_env, setsid })
 }
+
+/// `l2r_proc_spawn` and `l2r_proc_output` taking their arguments by value,
+/// out of line: a texture that borrowed them (`with_args(&cmd, &args, ..)`,
+/// which hands a `SpawnArgs` built on the stack to the spawn) lent its
+/// locals to a function that may stay out of line; inlined into a Lean
+/// loop, such a texture leaves a stack slot whose address escapes, and LLVM
+/// then keeps the loop's self tail call as a real call (the rule of fs.rs's
+/// `owned`; no loop was seen to overflow here, the borrow is moved into
+/// these frames so that none depends on LLVM's inlining). Each releases its
+/// arguments, as the textures did.
+pub mod owned {
+    use super::*;
+    use crate::array::{release, RVec};
+    use crate::rc_release;
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn spawn(
+        cmd: LStr,
+        args: RVec<crate::any::LAny>,
+        cwd: LStr,
+        has_cwd: bool,
+        env_names: RVec<LStr>,
+        env_values: RVec<LStr>,
+        env_set: RVec<bool>,
+        modes: u32,
+        inherit_env: bool,
+        setsid: bool,
+    ) -> u32 {
+        let pid = with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid, |a| {
+            super::spawn(a, modes)
+        });
+        rc_release(cmd);
+        rc_release(cwd);
+        release(args);
+        release(env_names);
+        release(env_values);
+        release(env_set);
+        pid
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    pub fn output(
+        cmd: LStr,
+        args: RVec<crate::any::LAny>,
+        cwd: LStr,
+        has_cwd: bool,
+        env_names: RVec<LStr>,
+        env_values: RVec<LStr>,
+        env_set: RVec<bool>,
+        inherit_env: bool,
+        setsid: bool,
+        input: LStr,
+        has_input: bool,
+    ) -> u32 {
+        use crate::string::Utf8;
+        let code = with_args(&cmd, &args, &cwd, has_cwd, &env_names, &env_values, &env_set, inherit_env, setsid, |a| {
+            super::output(a, if has_input { Some(input.utf8()) } else { None })
+        });
+        rc_release(cmd);
+        rc_release(cwd);
+        rc_release(input);
+        release(args);
+        release(env_names);
+        release(env_values);
+        release(env_set);
+        code
+    }
+}

@@ -18,6 +18,16 @@ its `.ir` file).
 namespace LeanToReussir
 open Lean Compiler LCNF
 
+/-- The name of module `idx` of `env` (by `ModuleIdx`), as
+`env.header.moduleNames[idx]!`, without building that array:
+`EnvironmentHeader.moduleNames` maps the header's whole module list at
+every call, so each lookup made an array of the names of all imported
+modules. (A program that uses lean-zip spent about 1.9 s in each of the
+three walks of `programCasts`, nearly all of it in those arrays.) An index
+out of range is an internal error, reported as `moduleNames[idx]!` did. -/
+def moduleNameAt (env : Environment) (idx : Nat) : Name :=
+  env.header.modules[idx]!.module
+
 /-- Whether a module belongs to the Lean toolchain (its constants are
 evaluated lazily; see translation plan §5.12). -/
 def isToolchainModule (m : Name) : Bool :=
@@ -133,7 +143,7 @@ def closedRecord (idx : Nat) : CoreM ClosedRecord := do
   let mut decls := IR.declMapExt.getModuleEntries env idx
   for d in decls do known := known.insert d.name
   unless decls.any (· matches .fdecl ..) do
-    let mod := env.header.moduleNames[idx]!
+    let mod := moduleNameAt env idx
     decls ← (try moduleIRDecls mod catch _ => pure #[])
   let mut readers : Std.HashSet Name := {}
   let mut bodies := false
@@ -158,8 +168,8 @@ targets that are declarations of the program as roots of its walk;
 (`Opt.UnreadConsts.axiomTaints`) walks the theorems and the targets. -/
 def programCsimps (env : Environment) : Array CSimp.Entry := Id.run do
   let mut out : Array CSimp.Entry := #[]
-  for i in [:env.header.moduleNames.size] do
-    if isToolchainModule env.header.moduleNames[i]! then continue
+  for i in [:env.header.modules.size] do
+    if isToolchainModule (moduleNameAt env i) then continue
     let some data := env.header.moduleData[i]? | continue
     for ci in data.constants do
       if let some (_, .const f _, .const g _) := ci.type.eq? then

@@ -64,7 +64,9 @@ runtime.
   `RtBorrowTailNone`, `RtBorrowTailNoneH`).
 - **Where:** `Lower/Borrow.lean`: `resourceExterns`,
   `programMakesResources`, `inferBorrowedParams`, `borrowedVars`,
-  `borrowInfo`, `mayHoldResource`, `borrowKeeps`, `releaseAfter`,
+  `borrowInfo`, `mayHoldResource` (memoized for the run, `resourceTypeCache`:
+  [translator.md](translator.md#questions-about-types-are-answered-once-per-run)),
+  `borrowKeeps`, `releaseAfter`,
   `boxedTarget`; `Lower/Values.lean`: `lowerConstApp`;
   `runtime/prelude.rr`: `l2r_release_after`; plan
   [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
@@ -272,7 +274,7 @@ runtime.
   `free_cell`, and the wrappers `active`, `defer`, `run`, `release`;
   `runtime/leanrt/src/task.rs`: `drained`; `scripts/l2r.py`:
   `check_reussir_patches` requires the local patches of the current base
-  (`REQUIRED_REUSSIR_PATCHES`: 23-f, 23-k, 23-m and 07-a), so it refuses the
+  (`REQUIRED_REUSSIR_PATCHES`: 23-f, 23-k, 23-m, 23-n, 23-o and 07-a), so it refuses the
   checkout of an older base (l2r-base8 and the bases before it push
   onto the old shared stack; l2r-base7, a trial base of the port, freed
   with upstream's destructor executor). Reussir: `lib/IR/RecordDrop.cpp` (`classifyRecordDrop`),

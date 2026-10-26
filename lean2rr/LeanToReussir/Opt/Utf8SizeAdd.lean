@@ -154,7 +154,7 @@ def addDecl' : CoreM (Decl .pure) := do
   if let some info := env.find? addName then
     unless getExternNameFor env `c addName == some addSym && info.type == ty do
       let src := match env.getModuleIdxFor? addName with
-        | some idx => s!" (declared in module {env.header.moduleNames[idx]!})"
+        | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: utf8-size-add: {addName}{src} is not the extern {addSym} : Nat → Char → Nat \
         that the pass adds; the L2R* namespaces are lean2rr's (internal error)"
