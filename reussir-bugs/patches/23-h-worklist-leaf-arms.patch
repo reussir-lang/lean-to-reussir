@@ -1,7 +1,7 @@
 From c7f8015fc111116e97915e46bdfc4799452f6058 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 17:04:23 -0400
-Subject: [PATCH 16/21] l2r-local: entry 23-h: worklist entry: leaf arms
+Subject: [PATCH 16/24] l2r-local: entry 23-h: worklist entry: leaf arms
  released in place
 
 An optimization of the worklist entry (23-d): every drop of a Worklist

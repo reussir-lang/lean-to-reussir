@@ -1,7 +1,7 @@
 From 5e9a39e915b262da003e1d200c8554c36713bd65 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 00:13:21 -0400
-Subject: [PATCH 05/21] l2r-local: step D (R2b): Mpz clones and drops through
+Subject: [PATCH 05/24] l2r-local: step D (R2b): Mpz clones and drops through
  compiler-emitted rcgmp glue that inlines into textures
 
 R2's `reussir_rt::rcgmp::Mpz` retains and releases through the rcgmp

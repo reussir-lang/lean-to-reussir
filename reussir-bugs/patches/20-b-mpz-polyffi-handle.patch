@@ -1,7 +1,7 @@
 From 036ed9f6368963d4ed0e7a660494ceb3df24af07 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 24 Oct 2026 23:43:29 -0400
-Subject: [PATCH 04/21] l2r-local: step D (R2): Nat and Int at polyffi type
+Subject: [PATCH 04/24] l2r-local: step D (R2): Nat and Int at polyffi type
  arguments are an owned handle, reussir_rt::rcgmp::Mpz
 
 #795 lets `Nat` and `Int` cross `#[ffi(import)]` as the raw rcgmp handle,

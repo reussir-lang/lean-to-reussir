@@ -15,18 +15,23 @@ with a per-thread stack of pending drops instead, the way Lean's
 23-k to 23-m let lean2rr's runtime share that stack (end work after the
 outermost drain, runs of cells, steps), so that one drain frees records
 and runtime objects in one order and no Lean code runs inside a drain.
+Patches 23-n to 23-p keep a pending record linked through its own header
+when the release function changes, so that it costs no memory while it
+waits, as in Lean's to-do list.
 
 ## Summary
 
 **Kind:** cost (memory and run time), with a fix that bounds the
 memory: the patches are optimizations, and 23-k to 23-m the features a
 host runtime needs to share the stack. **Status:** patched (23-a to
-23-m), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base9-shared`, commits `82b3985a` to `6111586c`). `scripts/l2r.py`
+23-p), applied in `./reussir`'s series since 2026-10-25 (branch
+`l2r-base10`, commits `82b3985a` to `0bea9c7d`). `scripts/l2r.py`
 requires the patches: it stops with an error when the Reussir checkout
 lacks 23-f (the switch of rrc's pipeline to worklist drops), 23-k (the
-end work) or 23-m (steps, depth and drain; `REQUIRED_REUSSIR_PATCHES`),
-and leanrt's pending stack does not compile without 23-k to 23-m.
+end work), 23-m (steps, depth and drain), 23-n (`defer_wide`) or 23-o
+(the glue's use of it; `REQUIRED_REUSSIR_PATCHES`), and leanrt's pending
+stack does not compile without 23-k to 23-m. 23-p, an optimization of
+instructions, is not checked.
 
 **Upstream (2026-10-25):** Open at 00906e38, by design: upstream's drops
 of Worklist types are retcon coroutines (#678, #679), with a bounded
@@ -95,8 +100,9 @@ compositions: about 85, 622 and 88 bytes per level (CoroSplit gives
 each arm's spilled child its own frame slot, so the frame grows with the
 number of arms). `run.sh` prints `REPRODUCES`. With 23-a to 23-j
 (`l2r-base9`): 2052 KiB for each tree and nothing for the others
-(allocator noise); with 23-k to 23-m too (`l2r-base9-shared`): nothing
-for any of the four. `run.sh` prints `FIXED` on both.
+(allocator noise); with 23-k to 23-m too (`l2r-base9-shared`), and
+with 23-a to 23-p (`l2r-base10`): nothing for any of the four. `run.sh`
+prints `FIXED` on all three.
 
 Through lean2rr (Phase 2's lean2rr, 10^6 levels, peak RSS):
 
@@ -116,11 +122,14 @@ version of 23-k to 23-m (`l2r-base9-shared-v1`, `fbc2bba2`): trees 37.3
 MB, the closure chain 68 MB, compositions 66 MB, under both integer
 representations, and both tests pass their alloc-check bounds (lean2rr's
 phase2-dev branch, commit `92512534`). A shape that
-alternates two types costs more: AltTree (mutual types A and B with two
-recursive fields each, 10^6 levels, each level deferring a small child
-of the other type) peaks at 88.7 MB on `l2r-base9-shared`, native Lean
-at 55.2 MB; about 25 MB of the difference is the pending vector (runs of
-one cell, 24 bytes each; [open items](#open-items)).
+alternates two types cost more there: `RtAltTreeFree` (mutual types A
+and B with two recursive fields each, 10^6 levels, each level deferring a
+small child of the other type) peaked at 88.7 MB on `l2r-base9-shared`,
+native Lean at 55.1 MB; about 25 MB of the difference was the pending
+vector (runs of one cell, 24 bytes each). With 23-n to 23-p
+(`l2r-base10`, 2026-10-26): 45.7 MB, its allocations and bytes as
+native's, under both integer representations
+([linked records](#linked-pending-records-23-n-23-o-23-p)).
 
 ## Cause
 
@@ -137,7 +146,7 @@ child in general.
 
 ## Patch
 
-Thirteen patch files, 23-a to 23-m, each at most 300 changed lines with
+Sixteen patch files, 23-a to 23-p, each at most 300 changed lines with
 its tests. TailLoop and Direct records are unchanged; TPDE mode (which only
 the JIT front ends select) keeps plain recursive drops, as before.
 
@@ -156,6 +165,9 @@ the JIT front ends select) keeps plain recursive drops, as before.
 | [23-k](patches/23-k-drop-stack-end-work.patch) | `34df7ac4` | feature (for a host; fixes a regression with leanrt) | end work: one function that the outermost drain calls once it has ended (`set_end_work`, `want_end_work`) |
 | [23-l](patches/23-l-drop-stack-runs.patch) | `f67d389f` | optimization (runtime) | runs of drops with one release function: 8 bytes per pending cell in a run instead of a 16-byte entry |
 | [23-m](patches/23-m-drop-stack-steps.patch) | `6111586c` | feature (for a host) | steps (`defer_step`, `run_step`), `depth()` and `drain()`, so that a host frees its own objects on the same stack |
+| [23-n](patches/23-n-drop-stack-linked-runs.patch) | `8792ae76` | optimization (memory) | `defer_wide` (C: `__reussir_drop_defer_wide`): a box with a wide header waits linked through its header, in a linked run of the stack |
+| [23-o](patches/23-o-defer-wide-headers.patch) | `a5fb6e94` | optimization (memory) | the glue defers boxes with a wide header (variants, compound records aligned to 8) through `defer_wide` |
+| [23-p](patches/23-p-same-release-cells.patch) | `0bea9c7d` | optimization (instructions) | in a linked run, a box after one of the same release function joins the run's cells; only a change of function links; a cache of the release table |
 
 ### The runtime stack (23-a)
 
@@ -280,8 +292,9 @@ Made by the runtime side for leanrt, whose own stack of pending releases
   joined to a run takes 8 bytes (4 on wasm32) instead of a 16-byte
   entry (8); a run of one cell below the top takes a 24-byte entry (12
   on wasm32), so drops that alternate release functions (the dead
-  children of two record types in turn) take half as much again while
-  they wait. The order is the same, last deferred first. Runs form only
+  children of two record types in turn) took half as much again while
+  they waited, until 23-n linked the glue's records. The order is the
+  same, last deferred first. Runs form only
   between equal function pointers: a function reified twice may get two
   addresses, which costs entries, never order.
 - **Steps, depth and drain (23-m).** A step (`defer_step`, `run_step`)
@@ -309,6 +322,82 @@ With 23-k to 23-m, leanrt's pending stack is this stack, its end work is
 the stack's end function, and no Lean code runs inside any drain; both
 tests pass (lean2rr's phase2-dev branch, commits `fbd9f1c2` and
 `d502cd7d`, 2026-10-25).
+
+### Linked pending records (23-n, 23-o, 23-p)
+
+With the shared stack, a pending record of the glue cost 8 bytes in a
+run of cells, and a 24-byte entry when its release function differed
+from the previous one's: a chain whose levels each leave a record of
+another type pending (`RtAltTreeFree`) took 24 bytes per level while it
+waited, 88.7 MB at 10^6 levels against native Lean's 55.1 MB. Lean's
+to-do list is linked through the freed objects; the earlier local stack
+(02-b) linked its records through their headers too (45.7 MB there).
+
+- **Linked runs (23-n).** `defer_wide` (C: `__reussir_drop_defer_wide`)
+  takes a box whose first 8 bytes are header: its 32-bit count, then a
+  32-bit word whose upper 16 bits are 0 (a variant's tag, below 2^16) or
+  padding. Such boxes form a linked run, one entry of the stack like a
+  run of cells, so host cells, runs and steps interleave last deferred
+  first as before, and `depth()` counts it once. A box links to the box
+  deferred before it through its count and those 16 bits (48 bits): a
+  40-bit signed offset in 8-byte units and, in the high 8 bits, 1 plus
+  the index of the previous box's release function in a per-thread table
+  of 255 functions, emptied with the stack (02-b's encoding). A pop
+  reads the link and writes count 1 and the upper bits 0 back before the
+  box's release runs; the release reads neither the count nor the bits
+  above the tag. The box is the caller's alone until its release (its
+  count was observed to be 1, or reached 0 for an atomic box). A box
+  that cannot link starts a new run: one with a nonzero top byte (under
+  top-byte tagging an immediate's dummy box, which the glue never
+  defers), one farther than 2^42 bytes or not a multiple of 8 bytes
+  away, or a new function with the table full. The previous box's
+  provenance is exposed and the pop rebuilds the pointer from its
+  address (Miri's default mode accepts that; `-Zmiri-strict-provenance`
+  rejects it, as expected). The table is a zero-initialized thread-local
+  of its own (a new thread's TLS image does not grow), and a run's linked
+  flag below the top is the top bit of its count (an entry stays 12
+  bytes on 32-bit targets). The stack still never writes a host's cell.
+- **The glue (23-o).** The lowering of `reussir.rc.defer` calls
+  `__reussir_drop_defer_wide` for a fused variant box with at most 2^16
+  arms (the count, then the i32 tag) and for a compound record box whose
+  payload starts at offset 8 or later (the box is `{i32, payload}`, not
+  packed, so the payload starts at its alignment); other boxes keep
+  `__reussir_drop_defer`. Every Worklist variant qualifies, and every
+  Worklist compound record on 64-bit targets (its box members are 8-byte
+  pointers); on i686 and wasm32 a compound record without 8-byte members
+  does not.
+- **One function's records as cells (23-p).** Linking every pending box
+  cost instructions where the glue defers one child per freed cell (a
+  balanced tree +6.5 instructions per freed cell, a rose tree +5.8). So
+  a box deferred after a box of the same release function joins the
+  linked run's cells (8 bytes while it waits; for a value of one type
+  usually as many as its height), with the upper 16 bits of its header's
+  second word set to 0, and only a change of function links (those bits
+  are then never 0, so a pop tells a link from a cell). The table lookup
+  on a change goes through a 16-slot cache of (function, index) pairs.
+
+**Measured** (2026-10-26; base9-shared = `6111586c`, 23-n = linking every
+box, 23-p = the series' head):
+
+| Instructions per freed cell (plain Reussir microbenchmark) | base9-shared | 23-n | 23-p |
+|---|---|---|---|
+| left-deep, right-deep binary trees | 41.83, 42.33 | 41.83, 42.33 | 41.83, 42.33 |
+| balanced binary tree (depth 20) | 57.08 | 63.58 | 59.08 |
+| 64-arm enum chain; compositions left, right | 41.77; 45.33, 47.33 | the same | the same |
+| rose tree (depth 12) | 52.77 | 58.54 | 54.55 |
+| alternating pending nodes (two mutual types) | 66.07 | 74.60 | 74.60 |
+
+lean2rr (the leanrt backend, instructions): L06 (binary trees) 6011.06M
+on base9-shared, 6011.06M with 23-p; X02 (deriv 8) 128.6M and 129.7M;
+E07 (rose tree) 362.4M and 365.6M; the same outputs. Peak RSS at 10^6
+levels (alloc-check, both integer representations for the first two):
+`RtAltTreeFree` 45.7 MB (native 55.1; base9-shared 88.7);
+`RtDeepTreeFree` 37.3 to 37.5 MB (native 38.7); `RtClosureChainFree`
+68.2 to 68.4 MB in its closure modes (native 102.2), compositions 66.2
+MB (native 85.8; linking every box, 23-n alone, 45.9 MB: one function's
+pending records are cells again), `list` 109.2 MB (native 163.7).
+`RtDepPolyRec`'s rrc: 127.5 s and 3.62 GB on base9-shared, 130.8 s and
+3.71 GB with 23-n and 23-o (one run each, on a busy machine).
 
 ## Order of releases
 
@@ -390,6 +479,20 @@ In the patches (Reussir's lit tests, unit tests and Rust tests):
   outermost drain and outside a drain; the entries and cells of three
   runs and their order; a step that yields to its deferrals, a step done
   with work above it, a step deferred inside a drain, an empty drain.
+- `drop_stack/tests.rs` (23-n, 23-p): alternating releases in one linked
+  entry with no cells, headers restored before each release, boxes that
+  cannot link starting runs, the table emptied after the drain; a random
+  program of drops, steps and nested runs whose events are identical
+  whether its boxes go through `defer_wide` or `defer` (boxes with
+  garbage in the upper half of their second word, as padding has; the
+  wide run must use cells too).
+- `conversion/drop_stack_ops.mlir` (23-o): a compound record aligned to
+  8 and a variant through the wide entry, one aligned to 4 through the
+  plain one. `frontend/worklist_drop_depth.rr` gains a chain of two
+  mutually recursive types whose levels each leave a small node of the
+  other type pending, 10^6 levels: the peak grew by 45060 KiB with 23-a
+  to 23-m; it must grow by less than 16 MiB. The ASan run frees it at
+  10^5 levels.
 
 Results on `l2r-base9` (`fc9c1d20`, 2026-10-25, a build with the tests
 and the ASan runtime): Reussir's lit tests 776 passed, 125 unsupported,
@@ -409,6 +512,13 @@ on the first version of 23-k to 23-m (`fbc2bba2`) the runtime side
 reported leanrt's unit tests 101 of 101 (leanrt build) and 104 of 104
 (rcgmp build), and the trace digests of its 400 random order scenarios
 equal to those of leanrt's own stack before (phase2-dev `d502cd7d`).
+On `l2r-base10` (`0bea9c7d`, 2026-10-26): reussir-rt's tests 73 of 73,
+`drop_stack` 13 of 13 under Miri (stacked and tree borrows), the
+drop-related lit tests 26 of 26 (one unsupported) with the ASan run of
+`worklist_drop_depth`, `reussir-ut` 82 of 82; with 23-n and 23-o, the
+whole lit suite 776 passed, 125 unsupported and the 2 failures for want
+of the `not` tool; lean2rr's 31 release-order and deep-free tests and
+leanrt's unit tests 101 of 101 and 104 of 104.
 
 ## Measurements
 
@@ -463,6 +573,23 @@ walk per query) and nothing else. Two mutations of the release order
 (swapping the tail call and the deferral; moving an inline member) make
 `runtime/drop_member_order.mlir` fail.
 
+23-k to 23-m were made by the runtime side and reviewed adversarially
+(2026-10-25); the review's fixes are in the patches (a step is
+`extern "C"`, so a panicking step aborts; the nesting of end work and the
+entry costs of runs documented). 23-n and 23-o were reviewed
+adversarially (2026-10-26, notes in `lifodrop-review/rt/link/`): no bug.
+Every box that 23-o routes to `defer_wide` has the header it claims on
+every target (i686 narrow, wasm32 right, big-endian safe); the headers
+are back before each release; the order holds with host cells, steps,
+runs, nested runs and end work in a model check with real boxes (3000
+seeds x 3 natively, 40 x 3 under Miri with both borrow models); the
+40-bit offset links at +-2^42 and starts a run beyond. Its cleanups
+(the table zero-initialized, the linked flag in the count's top bit, two
+comments) are in 23-n. The runtime side found the order digests of its
+400 scenarios unchanged. 23-p's re-review follows; the review's model
+check, with a joined box allowed (count untouched, upper bits 0), passes
+against it (3000 x 3 natively, 40 x 3 under Miri).
+
 ## Open items
 
 - **A chain through a `[value]` variant** (`S { o: [value] Opt(S), v }`):
@@ -489,19 +616,22 @@ walk per query) and nothing else. Two mutations of the release order
   on `l2r-base7` with a list's tail drop). 23-i avoids `musttail` on
   wasm; TailDrop is unchanged. A bug of upstream that lean2rr does
   not reach (no wasm target).
-- **Link Reussir's own deferred records through their headers.** A
-  deferred record of Reussir's glue costs 8 to 24 bytes on the pending
-  stack while it waits (AltTree above: about 25 MB at 10^6 levels);
-  native Lean links its to-do list through the freed objects' headers
-  and takes no memory. Reussir's own deferred records could be linked
-  the same way, with the vector kept for a host's cells. Not written.
+- **One function's pending records are cells.** Since 23-p a record
+  deferred after one of the same release function takes 8 bytes in a
+  run of cells (fewer instructions than a link); for a value of one type
+  usually as many as its height, but a chain of one type that leaves a
+  record pending per level takes 8 bytes per level (the compositions of
+  `RtClosureChainFree`: 66.2 MB, 45.9 MB with every record linked;
+  native 85.8 MB).
 - **Delete the retcon lowering.** No driver reaches it after 23-f: the
   retcon expansion in `AcquireDropExpansion.cpp`, the LLVM passes
   (`reussir-retcon-drop`), `dtor_executor.rs` and their tests. More than
   300 changed lines per component; not written.
 
 The stack shared with leanrt, an open item of the first version, is
-23-k to 23-m ([above](#the-shared-stack-23-k-23-l-23-m)).
+23-k to 23-m ([above](#the-shared-stack-23-k-23-l-23-m)), and the links
+of the glue's own pending records through their headers 23-n to 23-p
+([above](#linked-pending-records-23-n-23-o-23-p)).
 
 ## Upstream note
 

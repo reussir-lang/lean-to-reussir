@@ -1,7 +1,7 @@
 From 563c1b958927792b5fb513371ec2c9d2767295a1 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:48:42 -0400
-Subject: [PATCH 15/21] l2r-local: entry 23-g: tests: deep worklist drops, and
+Subject: [PATCH 15/24] l2r-local: entry 23-g: tests: deep worklist drops, and
  the release order
 
 Sixth step: tests of what the switch to worklist drops (23-a..23-f)

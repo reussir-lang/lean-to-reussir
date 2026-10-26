@@ -11,7 +11,7 @@ patched (10-a), applied in `./reussir` (`l2r-local` commit `a75ed2cf`).
 lean2rr's prelude declares `Nat` and `Int` `tagged`; rrc rejects the
 attribute without the patch.
 
-**Upstream (2026-10-24):** Not upstream at 0378b744: an opaque FFI handle must still be a pointer to a counted box. Upstream 0378b744 has built-in `Nat` and `Int` (#776 `af25863e`, with #770 to #803): rcgmp integers, where a small value is an immediate and a large one a counted heap object. They are another way to a one-word `Nat` and `Int`; lean2rr does not use them yet, so its prelude still needs 10-a. 10-a stays in the series on 0378b744, ea240b19 and 00906e38 (2026-10-25; it applies unchanged), and on `l2r-base9-shared` (Phase 2: the first patch of the series, commit `6272aed4`; only line offsets change; its rebase onto 7954a367 had two conflicts: upstream added the `placement` and `launch` fields to records).
+**Upstream (2026-10-24):** Not upstream at 0378b744: an opaque FFI handle must still be a pointer to a counted box. Upstream 0378b744 has built-in `Nat` and `Int` (#776 `af25863e`, with #770 to #803): rcgmp integers, where a small value is an immediate and a large one a counted heap object. They are another way to a one-word `Nat` and `Int`; lean2rr does not use them yet, so its prelude still needs 10-a. 10-a stays in the series on 0378b744, ea240b19 and 00906e38 (2026-10-25; it applies unchanged), and on `l2r-base10` (Phase 2: the first patch of the series, commit `6272aed4`; only line offsets change; its rebase onto 7954a367 had two conflicts: upstream added the `placement` and `launch` fields to records).
 
 Until 2026-10-06 this patch had no entry: it was one of the two "local
 additions" (file `local-additions.md`, now entries

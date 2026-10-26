@@ -11,7 +11,7 @@ upstream #770 to #803) do not have all that lean2rr needs to put Lean's
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
 rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a to
 20-e), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base9-shared`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
+`l2r-base10`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
 `28fdf505`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`, `cb24040e`,
 `729ea9fb`, `e3b96e03`, the same code); not upstream.
 
@@ -24,7 +24,7 @@ upstream as pull requests of at most 300 changed lines each), its
 patches are prepared as pull request candidates, not opened. (20-a's
 `nonnegative` part drops if upstream sets the attribute itself.)
 
-| Patch | Step D name | `l2r-base9-shared` commit | Kind | What it adds |
+| Patch | Step D name | `l2r-base10` commit | Kind | What it adds |
 |---|---|---|---|---|
 | [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `eece8062` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
 | [20-b](patches/20-b-mpz-polyffi-handle.patch) | R2 | `036ed9f6` | bug fix and feature | `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz` |

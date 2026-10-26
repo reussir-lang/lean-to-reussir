@@ -12,7 +12,7 @@ accepted.
 ## Summary
 
 **Kind:** missing feature, partly fixed upstream. **Status:** not
-patched since 2026-10-25 (Phase 2, base `l2r-base9-shared`): patches
+patched since 2026-10-25 (Phase 2, base `l2r-base10`): patches
 02-a to 02-e left the series. lean2rr uses upstream's drops for Direct
 and TailLoop records and entry 23's worklist drops for the other
 recursive records ([issue 23](23-worklist-drops.md)), and lean2rr's

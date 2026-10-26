@@ -1,0 +1,292 @@
+From a5fb6e94abb9db27e09a564832fa7cf8dfdc0b52 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 23:24:20 -0400
+Subject: [PATCH 23/24] l2r-local: entry 23-o: the glue defers boxes with a
+ wide header through defer_wide
+
+The lowering of `reussir.rc.defer` calls __reussir_drop_defer_wide (23-n)
+for a box whose first 8 bytes are header with 16 spare bits, so that the
+stack links the pending boxes through their headers instead of keeping an
+entry or a cell each:
+- a fused variant box: the 32-bit count, then the i32 tag; the tag is
+  below 2^16 when the variant has at most 2^16 arms;
+- a compound record box whose payload starts at offset 8 or later: the
+  count, then padding (the box is `{i32, payload}`, not packed, so the
+  payload starts at its alignment; a packed record's is 1).
+Other boxes (a compound record aligned to 4 or less, as on 32-bit
+targets without 8-byte members) keep __reussir_drop_defer. The release
+functions read neither the count nor the bits above the tag, and the
+runtime writes both back before a release runs.
+
+Every Worklist variant qualifies, and on 64-bit targets every Worklist
+compound record (its box members are 8-byte pointers). lean2rr's
+RtAltTreeFree, whose levels each leave a node of the other type pending,
+took 24 bytes per pending node (runs of one, the release functions
+alternating); now none.
+
+Tests: conversion/drop_stack_ops.mlir (a compound record aligned to 8 and
+a variant through the wide entry, one aligned to 4 through the plain
+one); frontend/worklist_drop_depth.rr gains a chain of two mutually
+recursive types whose levels each leave a small node of the other type
+pending, 10^6 levels on a 256 KiB stack: peak RSS must grow by less than
+16 MiB (it grew by 45060 KiB with 23-a to 23-m only), and the ASan run
+of sanitizer/e2e/worklist_drop_depth.rr frees it at 10^5 levels;
+codegen/retcon_drop_targets.rr, executable_pic_default_retcon.rr and
+frontend/retcon_drop.rr expect the wide entry for their recursive enums.
+---
+ .../BasicOpsLowering/DropStackLowering.cpp    | 33 ++++++++++++++++++-
+ .../codegen/executable_pic_default_retcon.rr  |  2 +-
+ .../codegen/retcon_drop_targets.rr            |  6 ++--
+ .../conversion/drop_stack_ops.mlir            | 33 +++++++++++++++++--
+ tests/integration/frontend/retcon_drop.rr     |  2 +-
+ .../frontend/worklist_drop_depth.c            |  7 ++++
+ .../frontend/worklist_drop_depth.rr           | 22 ++++++++++---
+ 7 files changed, 93 insertions(+), 12 deletions(-)
+
+diff --git a/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp b/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
+index 0a91ced2..20ef4840 100644
+--- a/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
+@@ -13,12 +13,15 @@
+ // `__reussir_drop_defer(box, release)` and `__reussir_drop_run(ref, walk)`,
+ // the function operand passed by address. The runtime calls it back with
+ // the C ABI `void(ptr)`, which is the lowered type of every such callee.
++// A box whose first 8 bytes are header with 16 spare bits goes to
++// `__reussir_drop_defer_wide`, which may link it through them.
+ //
+ //===----------------------------------------------------------------------===//
+ 
+ #include "Reussir/Conversion/BasicOpsLowering.h"
+ #include "Reussir/IR/ReussirOps.h"
+ #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
++#include <mlir/Interfaces/DataLayoutInterfaces.h>
+ 
+ namespace reussir {
+ namespace {
+@@ -40,6 +43,29 @@ LLVM::LLVMFuncOp dropStackFunction(Operation *op, StringRef name) {
+   return function;
+ }
+ 
++// Whether a box of `type` starts with 8 bytes of header whose upper 16 bits
++// are zero or unused: a fused variant box (the 32-bit count, then the i32
++// tag, below 2^16) or a compound record box whose payload starts at offset
++// 8 or later (the count, then padding). The runtime then may keep its link
++// to the box deferred before it there, and writes count 1 and the upper
++// bits 0 back before the release, which reads neither.
++bool hasWideHeader(RcType type, const LLVMTypeConverter &converter,
++                   Operation *op) {
++  auto record = llvm::dyn_cast<RecordType>(type.getElementType());
++  if (!record || type.getCapability() != Capability::shared)
++    return false;
++  RcBoxType box = type.getInnerBoxType();
++  if (box.isHeaderFused())
++    return record.getMembers().size() <= (1u << 16);
++  if (box.getHeaderTypes().size() != 1)
++    return false;
++  // The box is `{i32, payload}`, not packed: the payload starts at its
++  // alignment (a packed record's is 1).
++  Type payload = converter.convertType(record);
++  return payload &&
++         DataLayout::closest(op).getTypeABIAlignment(payload) >= 8;
++}
++
+ template <typename Op>
+ struct DropStackCallPattern : ConvertOpToLLVMPattern<Op> {
+   StringRef runtime;
+@@ -49,7 +75,12 @@ struct DropStackCallPattern : ConvertOpToLLVMPattern<Op> {
+   LogicalResult
+   matchAndRewrite(Op op, typename Op::Adaptor adaptor,
+                   ConversionPatternRewriter &rewriter) const override {
+-    auto callee = dropStackFunction(op, runtime);
++    StringRef name = runtime;
++    if constexpr (std::is_same_v<Op, ReussirRcDeferOp>)
++      if (hasWideHeader(op.getBox().getType(), *this->getTypeConverter(),
++                        op))
++        name = "__reussir_drop_defer_wide";
++    auto callee = dropStackFunction(op, name);
+     auto ptr = LLVM::LLVMPointerType::get(op.getContext());
+     auto [symbol, object] = [&] {
+       if constexpr (std::is_same_v<Op, ReussirRcDeferOp>)
+diff --git a/tests/integration/codegen/executable_pic_default_retcon.rr b/tests/integration/codegen/executable_pic_default_retcon.rr
+index 61b5cf4e..8fa1fec6 100644
+--- a/tests/integration/codegen/executable_pic_default_retcon.rr
++++ b/tests/integration/codegen/executable_pic_default_retcon.rr
+@@ -18,7 +18,7 @@
+ // RUN: %rrc %s -o %t.so --emit dynlib -O none %rrc_linker
+ // RUN: %llvm-readobj --dynamic-table %t.so | %FileCheck %s
+ 
+-// IR: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @{{.*}}.worklist.release)
++// IR: call void @__reussir_drop_defer_wide(ptr %{{.*}}, ptr @{{.*}}.worklist.release)
+ 
+ // CHECK: DynamicSection [
+ // CHECK-NOT: TEXTREL
+diff --git a/tests/integration/codegen/retcon_drop_targets.rr b/tests/integration/codegen/retcon_drop_targets.rr
+index 5781cee0..3ea57973 100644
+--- a/tests/integration/codegen/retcon_drop_targets.rr
++++ b/tests/integration/codegen/retcon_drop_targets.rr
+@@ -24,12 +24,12 @@ extern "C" trampoline "consume" = consume;
+ // Worklist drops: the walk defers each dead Tree box; the release continues
+ // with the last child by a musttail call (on wasm it calls the walk).
+ // CHECK-DAG: declare void @__reussir_drop_run(ptr, ptr)
+-// CHECK-DAG: declare void @__reussir_drop_defer(ptr, ptr)
++// CHECK-DAG: declare void @__reussir_drop_defer_wide(ptr, ptr)
+ // CHECK: define linkonce_odr void @[[TREE:.*TreeE]].worklist.release(ptr {{.*}})
+-// TAIL: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
++// TAIL: call void @__reussir_drop_defer_wide(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
+ // TAIL: musttail call void @[[TREE]].worklist.release(ptr
+ // NOTAIL: call void @[[TREE]].worklist.walk(ptr
+ // CHECK: define linkonce_odr void @[[TREE]].worklist.walk(ptr {{.*}})
+-// CHECK: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
++// CHECK: call void @__reussir_drop_defer_wide(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
+ // CHECK: define linkonce_odr void @[[TREE]].worklist(ptr {{.*}})
+ // CHECK: call void @__reussir_drop_run(ptr %{{.*}}, ptr @[[TREE]].worklist.walk)
+diff --git a/tests/integration/conversion/drop_stack_ops.mlir b/tests/integration/conversion/drop_stack_ops.mlir
+index c39e4b45..c5a7c48a 100644
+--- a/tests/integration/conversion/drop_stack_ops.mlir
++++ b/tests/integration/conversion/drop_stack_ops.mlir
+@@ -2,27 +2,56 @@
+ // RUN: %reussir-opt %s --reussir-convert-to-llvm --verify-each | %FileCheck %s
+ 
+ // `rc.defer` and `drop.run` become calls of the runtime's drop stack, the
+-// callee passed by address (the runtime calls it back as `void(ptr)`).
++// callee passed by address (the runtime calls it back as `void(ptr)`). A
++// box with 8 bytes of header whose upper 16 bits are free (a compound
++// record whose payload starts at offset 8, a fused variant) is deferred
++// through `__reussir_drop_defer_wide`, which may link it through them; a
++// compound record whose payload starts at offset 4 through
++// `__reussir_drop_defer`.
+ 
+ !node_ = !reussir.record<compound "DeferNode" incomplete>
+ !node = !reussir.record<compound "DeferNode" {i64, !node_}>
++!small = !reussir.record<compound "DeferSmall" {i32, i32}>
++!tree_ = !reussir.record<variant "DeferTree" incomplete>
++!leaf = !reussir.record<compound "DeferLeaf" [value] {}>
++!fork = !reussir.record<compound "DeferFork" [value] {!tree_, !tree_}>
++!tree = !reussir.record<variant "DeferTree" {!leaf, !fork}>
+ 
+ module attributes {llvm.data_layout = "e-p:64:64-i64:64-n8:16:32:64-S128"} {
+   // CHECK-DAG: llvm.func @__reussir_drop_defer(!llvm.ptr, !llvm.ptr) attributes {passthrough = ["nounwind"]}
++  // CHECK-DAG: llvm.func @__reussir_drop_defer_wide(!llvm.ptr, !llvm.ptr) attributes {passthrough = ["nounwind"]}
+   // CHECK-DAG: llvm.func @__reussir_drop_run(!llvm.ptr, !llvm.ptr) attributes {passthrough = ["nounwind"]}
+   func.func private @node_release(!reussir.rc<!node>)
+   func.func private @node_walk(!reussir.ref<!node>)
++  func.func private @small_release(!reussir.rc<!small>)
++  func.func private @tree_release(!reussir.rc<!tree>)
+ 
+   // ROUNDTRIP-LABEL: func.func @defer
+   // ROUNDTRIP: reussir.rc.defer @node_release(%{{.*}} : !reussir.rc<
+   // CHECK-LABEL: llvm.func @defer
+   // CHECK: %[[FN:.*]] = llvm.mlir.addressof @node_release : !llvm.ptr
+-  // CHECK: llvm.call @__reussir_drop_defer(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
++  // CHECK: llvm.call @__reussir_drop_defer_wide(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
+   func.func @defer(%box: !reussir.rc<!node>) {
+     reussir.rc.defer @node_release(%box : !reussir.rc<!node>)
+     return
+   }
+ 
++  // CHECK-LABEL: llvm.func @defer_narrow
++  // CHECK: %[[FN:.*]] = llvm.mlir.addressof @small_release : !llvm.ptr
++  // CHECK: llvm.call @__reussir_drop_defer(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
++  func.func @defer_narrow(%box: !reussir.rc<!small>) {
++    reussir.rc.defer @small_release(%box : !reussir.rc<!small>)
++    return
++  }
++
++  // CHECK-LABEL: llvm.func @defer_variant
++  // CHECK: %[[FN:.*]] = llvm.mlir.addressof @tree_release : !llvm.ptr
++  // CHECK: llvm.call @__reussir_drop_defer_wide(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
++  func.func @defer_variant(%box: !reussir.rc<!tree>) {
++    reussir.rc.defer @tree_release(%box : !reussir.rc<!tree>)
++    return
++  }
++
+   // ROUNDTRIP-LABEL: func.func @run
+   // ROUNDTRIP: reussir.drop.run @node_walk(%{{.*}} : !reussir.ref<
+   // CHECK-LABEL: llvm.func @run
+diff --git a/tests/integration/frontend/retcon_drop.rr b/tests/integration/frontend/retcon_drop.rr
+index 8713b5a3..236949c5 100644
+--- a/tests/integration/frontend/retcon_drop.rr
++++ b/tests/integration/frontend/retcon_drop.rr
+@@ -1,6 +1,6 @@
+ // RUN: %rrc %s -Oaggressive -t llvm-ir -o %t.ll
+ // RUN: %FileCheck %s --check-prefix=FREE < %t.ll
+-// FREE: call void @__reussir_drop_defer(ptr %{{.*}}, ptr {{(nonnull )?}}@{{.*}}TreeE.worklist.release)
++// FREE: call void @__reussir_drop_defer_wide(ptr %{{.*}}, ptr {{(nonnull )?}}@{{.*}}TreeE.worklist.release)
+ // RUN: %rrc %s -o %t.o --relocation-mode pic -Onone
+ // RUN: %cc %t.o %S/retcon_drop.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
+ // RUN: %t.exe
+diff --git a/tests/integration/frontend/worklist_drop_depth.c b/tests/integration/frontend/worklist_drop_depth.c
+index 9ddc8f56..6067a1ba 100644
+--- a/tests/integration/frontend/worklist_drop_depth.c
++++ b/tests/integration/frontend/worklist_drop_depth.c
+@@ -17,6 +17,9 @@ extern uint64_t wl_chain_consume(void *);
+ extern void *wl_id(void);
+ extern void *wl_comp(void *, void *);
+ extern uint64_t wl_fn_consume(void *);
++extern void *wl_alt_leaf(void);
++extern void *wl_alt_pair(void *, uint64_t);
++extern uint64_t wl_alt_consume(void *);
+ 
+ static int check_rss;
+ 
+@@ -66,5 +69,9 @@ int main(int argc, char **argv) {
+   for (uint64_t i = 0; i < depth; ++i)
+     fn = i % 2 ? wl_comp(fn, wl_id()) : wl_comp(wl_id(), fn);
+   drop("compositions", wl_fn_consume, fn);
++  void *alt = wl_alt_leaf();
++  for (uint64_t i = 0; i < depth / 2; ++i)
++    alt = wl_alt_pair(alt, i);
++  drop("alternating pending nodes", wl_alt_consume, alt);
+   return 0;
+ }
+diff --git a/tests/integration/frontend/worklist_drop_depth.rr b/tests/integration/frontend/worklist_drop_depth.rr
+index 76043232..e54bc6d3 100644
+--- a/tests/integration/frontend/worklist_drop_depth.rr
++++ b/tests/integration/frontend/worklist_drop_depth.rr
+@@ -3,10 +3,14 @@
+ // outermost drop pops the dead boxes, last first. The driver frees, on a
+ // 256 KiB stack, one-sided trees of two recursive fields (left- and
+ // right-deep), a chain of a 64-arm enum whose recursive member comes first
+-// (as in a closure enum that captures a closure, then a value), and
+-// compositions of two recursive fields, each 10^6 levels deep, and checks
+-// that peak RSS grows by less than 16 MiB during each drop (one-sided
+-// retcon frames took 85 bytes per level, the enum chain 622).
++// (as in a closure enum that captures a closure, then a value),
++// compositions of two recursive fields, and a chain of two mutually
++// recursive types whose levels each leave a small node of the other type
++// pending (the pending releases alternate: linked through the boxes'
++// headers, 23-n and 23-o, they take no memory; as runs of one, 24 bytes
++// each), each 10^6 levels deep, and checks that peak RSS grows by less than
++// 16 MiB during each drop (one-sided retcon frames took 85 bytes per level,
++// the enum chain 622).
+ // sanitizer/e2e/worklist_drop_depth.rr runs the same frees (10^5 levels)
+ // under ASan.
+ 
+@@ -21,6 +25,8 @@ pub struct Box { value: u64 }
+ pub enum Tree { Leaf, Node(Tree, Box, Tree) }
+ pub enum Chain { End, K0(Chain, Box), K1(Chain, Box), K2(Chain, Box), K3(Chain, Box), K4(Chain, Box), K5(Chain, Box), K6(Chain, Box), K7(Chain, Box), K8(Chain, Box), K9(Chain, Box), K10(Chain, Box), K11(Chain, Box), K12(Chain, Box), K13(Chain, Box), K14(Chain, Box), K15(Chain, Box), K16(Chain, Box), K17(Chain, Box), K18(Chain, Box), K19(Chain, Box), K20(Chain, Box), K21(Chain, Box), K22(Chain, Box), K23(Chain, Box), K24(Chain, Box), K25(Chain, Box), K26(Chain, Box), K27(Chain, Box), K28(Chain, Box), K29(Chain, Box), K30(Chain, Box), K31(Chain, Box), K32(Chain, Box), K33(Chain, Box), K34(Chain, Box), K35(Chain, Box), K36(Chain, Box), K37(Chain, Box), K38(Chain, Box), K39(Chain, Box), K40(Chain, Box), K41(Chain, Box), K42(Chain, Box), K43(Chain, Box), K44(Chain, Box), K45(Chain, Box), K46(Chain, Box), K47(Chain, Box), K48(Chain, Box), K49(Chain, Box), K50(Chain, Box), K51(Chain, Box), K52(Chain, Box), K53(Chain, Box), K54(Chain, Box), K55(Chain, Box), K56(Chain, Box), K57(Chain, Box), K58(Chain, Box), K59(Chain, Box), K60(Chain, Box), K61(Chain, Box), K62(Chain, Box), K63(Chain, Box) }
+ pub enum Fn { Id, Comp(Fn, Fn) }
++pub enum AltA { LeafA, SmallA(Box), NodeA(AltB, AltB) }
++pub enum AltB { LeafB, SmallB(Box), NodeB(AltA, AltA) }
+ 
+ pub fn leaf() -> Tree { Tree::Leaf }
+ pub fn left(t: Tree, v: u64) -> Tree { Tree::Node{t, Box{value: v}, Tree::Leaf} }
+@@ -33,6 +39,11 @@ pub fn chain_consume(c: Chain) -> u64 { match c { Chain::End => 0, _ => 1 } }
+ pub fn id() -> Fn { Fn::Id }
+ pub fn comp(f: Fn, g: Fn) -> Fn { Fn::Comp{f, g} }
+ pub fn fn_consume(f: Fn) -> u64 { match f { Fn::Id => 0, _ => 1 } }
++pub fn alt_leaf() -> AltA { AltA::LeafA }
++pub fn alt_pair(rest: AltA, k: u64) -> AltA {
++    AltA::NodeA{AltB::SmallB{Box{value: k}}, AltB::NodeB{AltA::SmallA{Box{value: k + 1}}, rest}}
++}
++pub fn alt_consume(a: AltA) -> u64 { match a { AltA::LeafA => 0, _ => 1 } }
+ 
+ extern "C" trampoline "wl_leaf" = leaf;
+ extern "C" trampoline "wl_left" = left;
+@@ -45,3 +56,6 @@ extern "C" trampoline "wl_chain_consume" = chain_consume;
+ extern "C" trampoline "wl_id" = id;
+ extern "C" trampoline "wl_comp" = comp;
+ extern "C" trampoline "wl_fn_consume" = fn_consume;
++extern "C" trampoline "wl_alt_leaf" = alt_leaf;
++extern "C" trampoline "wl_alt_pair" = alt_pair;
++extern "C" trampoline "wl_alt_consume" = alt_consume;

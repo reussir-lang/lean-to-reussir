@@ -191,10 +191,11 @@ files, `runtime/` and `scripts/` from the repository root.
   ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md)).
 - **Where:** [../ownership.md](../ownership.md#runtime-objects-free-through-leanrts-pending-stack-in-leans-order);
   `runtime/leanrt/src/pending.rs`; `scripts/l2r.py`:
-  `check_reussir_patches` (it requires 23-f, 23-k and 23-m, so it
-  refuses the checkout of a base before Phase 2, whose glue still pushes
-  onto the old shared stack, and `l2r-base9`, which lacks the shared
-  stack).
+  `check_reussir_patches` (it requires 23-f, 23-k, 23-m, 23-n and 23-o,
+  so it refuses the checkout of a base before Phase 2, whose glue still
+  pushes onto the old shared stack, `l2r-base9`, which lacks the shared
+  stack, and `l2r-base9-shared`, whose pending records take a stack entry
+  each instead of a link through their headers).
 - **Remove only if:** the stack itself: never (a bounded stack through
   runtime objects). The field order at the top of a free that user code
   starts goes only if such a drop runs inside a drain of the shared

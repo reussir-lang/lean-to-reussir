@@ -16,22 +16,25 @@ builds apply to Reussir.
   which builds and runs them ([running the repros](#running-the-repros)).
 
 **Base.** lean2rr's Reussir is upstream Reussir `00906e38` (`main` on
-2026-10-25) plus the 21 patches of the series: 10-a, 07-a, entry 20's
-five, 21-a and entry 23's thirteen. The checkout at `./reussir` is not
-part of this repository; its branch `l2r-base9-shared` (head `6111586c`)
-is that stack (the series gives the same tree, `8b8dd1cb`), and
-`scripts/l2r.py`
-stops with an error on a Reussir without the patches it requires
+2026-10-25) plus the 24 patches of the series: 10-a, 07-a, entry 20's
+five, 21-a and entry 23's sixteen. The checkout at `./reussir` is not
+part of this repository; its branch `l2r-base10` (head `0bea9c7d`) is
+that stack (the series gives the same tree, `707daa79`), and
+`scripts/l2r.py` stops with an error on a Reussir without the patches it requires
 ([applying the patches](#applying-the-patches)). Since `0378b744`, the
 base needs GMP and newer build tools
 ([building Reussir](#building-reussir)).
 
-`l2r-base9-shared` is Phase 2's base (2026-10-25). Reussir frees Direct
-and TailLoop records with upstream's glue and the other recursive
-records through the per-thread drop stack of entry 23 (worklist drops),
-and lean2rr's runtime keeps its pending releases on that same stack
-(23-k to 23-m). `./reussir`'s branch `l2r-base9` (head `fc9c1d20`, tree
-`8c53abcf`) is the same series without 23-k to 23-m. So the local
+`l2r-base10` is Phase 2's base (2026-10-26). Reussir frees Direct and
+TailLoop records with upstream's glue and the other recursive records
+through the per-thread drop stack of entry 23 (worklist drops), its
+pending records linked through their own headers on a change of release
+function (23-n to 23-p), and lean2rr's runtime keeps its pending
+releases on that same stack (23-k to 23-m). `./reussir`'s branch
+`l2r-base9-shared` (head `6111586c`, tree `8b8dd1cb`) is the same series
+without 23-n to 23-p, and `l2r-base9` (head `fc9c1d20`, tree
+`8c53abcf`) also without 23-k to 23-m
+([history](#history-linked-pending-records-2026-10-26)). So the local
 drop patches 02-a to 02-e and the drain-end hook 09-a left the series,
 entries 9 and 11 were deleted and their numbers retired, entry 19
 (upstream #759) is recorded with its patch parked, and entries 23 and
@@ -98,11 +101,11 @@ only in part).
   entry. In the text, a patch is named by NN-x: 20-b is the second patch of
   issue 20.
 - **Patch file contents** are `git format-patch` output of the commits of
-  `l2r-base9-shared`, against `00906e38`, as one series (each subject has
-  its patch count, `[PATCH NN/21]`). A file's subject line is the subject of
+  `l2r-base10`, against `00906e38`, as one series (each subject has its
+  patch count, `[PATCH NN/24]`). A file's subject line is the subject of
   its commit: "issue 38" (an old number) means entry 7; 10-a's subject
   has no number; the subjects of 20-a to 20-e name step D's patches R1,
-  R2, R2b, R2c and R3 (entry 20); those of 21-a and 23-a to 23-m name
+  R2, R2b, R2c and R3 (entry 20); those of 21-a and 23-a to 23-p name
   their entries. The parked 19-a is its file from `l2r-base7`'s series
   (`[PATCH 3/8]`). The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
@@ -175,7 +178,7 @@ changes only the commit of mlir-rcgmp that the build fetches
 | [24](24-locked-drop-token-leak.md) | bug (a leak, with TPDE's drop options) | with tail-recursive and retcon drops off, a lock-guarded cell's payload is released inside the critical section, and its box is never freed | no: rrc has no TPDE level | - | fixed by [23-e](patches/23-e-worklist-nullable-locked.patch) | open; not reported |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | still reproduces (checked) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | still reproduces (checked) |
-| [23](23-worklist-drops.md) | cost (memory and run time) | retcon destructors keep one coroutine frame per level of a value being freed: memory grows with the depth (85 to 622 bytes per level) | yes: peak memory of deep frees (`RtClosureChainFree` 652 MB on `l2r-base7`, native 102 MB) and instructions per freed cell | none | [23-a](patches/23-a-drop-stack-runtime.patch) to [23-m](patches/23-m-drop-stack-steps.patch) (thirteen; 23-k to 23-m share the stack with leanrt) | by design (retcon drops, #678, #679); not reported |
+| [23](23-worklist-drops.md) | cost (memory and run time) | retcon destructors keep one coroutine frame per level of a value being freed: memory grows with the depth (85 to 622 bytes per level) | yes: peak memory of deep frees (`RtClosureChainFree` 652 MB on `l2r-base7`, native 102 MB) and instructions per freed cell | none | [23-a](patches/23-a-drop-stack-runtime.patch) to [23-p](patches/23-p-same-release-cells.patch) (sixteen; 23-k to 23-m share the stack with leanrt, 23-n to 23-p link pending records through their headers) | by design (retcon drops, #678, #679); not reported |
 | [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | not rechecked; no change to token reuse up to `0378b744` |
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | still reproduces (checked) |
 | [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | found on 7954a367 with the series; unchanged at `0378b744`; not reported |
@@ -190,14 +193,14 @@ changes only the commit of mlir-rcgmp that the build fetches
 
 **Counts.** 20 entries (numbers 1 to 24; numbers 5, 9, 11 and 22 are
 retired): 6 bugs, 3 costs, 6 missed optimizations, 4 missing features, 1
-dependency issue. 5 entries have patches in the series, 21 patch files
-in all (one each for 7, 10 and 21, five for entry 20, thirteen for entry
+dependency issue. 5 entries have patches in the series, 24 patch files
+in all (one each for 7, 10 and 21, five for entry 20, sixteen for entry
 23): 6 features (07-a, 10-a, 20-a, 20-d, 23-k, 23-m), 2 patches that
 also fix a bug (20-b, a feature that lean2rr needs; 23-e, an
-optimization that fixes entry 24), 11 optimizations (20-c, 20-e, 21-a,
-23-a, 23-b, 23-d, 23-f, 23-h, 23-i, 23-j, 23-l), a refactor (23-c) and
-a patch of tests (23-g). 5 parked patches lie outside the series (01-a,
-06-a, 06-b, 16-a, 19-a).
+optimization that fixes entry 24), 14 optimizations (20-c, 20-e, 21-a,
+23-a, 23-b, 23-d, 23-f, 23-h, 23-i, 23-j, 23-l, 23-n, 23-o, 23-p), a
+refactor (23-c) and a patch of tests (23-g). 5 parked patches lie
+outside the series (01-a, 06-a, 06-b, 16-a, 19-a).
 
 Status words used in the entries' summaries:
 
@@ -214,20 +217,21 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base9-shared 00906e38
+git -C reussir checkout -b l2r-base10 00906e38
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
 
-Checked on 2026-10-25 (`git am` in a throwaway worktree): the series on
-`00906e38` gives tree `8b8dd1cb`, the tree of `./reussir`'s
-`l2r-base9-shared` (`6111586c`); without 23-k to 23-m it gave
-`l2r-base9`'s tree, `8c53abcf` (`fc9c1d20`). Phase 2's first base,
-`l2r-base7` (upstream `00906e38` plus 10-a, 07-a, 19-a and entry 20's
-five; head `bfe3d32d`, tree `eeab2856`), never became lean2rr's
-published base; `l2r-base9-shared` is it without 19-a, with 21-a and
+Checked on 2026-10-26 (`git am` in a throwaway worktree): the series on
+`00906e38` gives tree `707daa79`, the tree of `./reussir`'s
+`l2r-base10` (`0bea9c7d`); without 23-n to 23-p it gave
+`l2r-base9-shared`'s tree, `8b8dd1cb` (`6111586c`, 2026-10-25), and
+without 23-k to 23-m too `l2r-base9`'s, `8c53abcf` (`fc9c1d20`). Phase
+2's first base, `l2r-base7` (upstream `00906e38` plus 10-a, 07-a, 19-a
+and entry 20's five; head `bfe3d32d`, tree `eeab2856`), never became
+lean2rr's published base; `l2r-base10` is it without 19-a, with 21-a and
 entry 23's patches. Before Phase 2, the
 series of 14 gave tree `10b34f74` (`l2r-base8`, head `8e9a6293`), and
 before 21-a the series of 13 tree `b3b19387` (`l2r-stepd`,
@@ -250,29 +254,32 @@ Order and dependencies:
 - 21-a changes no file of another patch (inc/dec cancellation, the
   equivalence analysis, `RCGMPMembers.cpp` and `ReussirOps.h`); it
   applies to `00906e38` and to the series alike.
-- 23-a to 23-m come last, in that order: 23-b lowers to 23-a's runtime
+- 23-a to 23-p come last, in that order: 23-b lowers to 23-a's runtime
   functions, 23-d uses 23-b's ops and 23-c's helper, 23-e to 23-j change
-  23-d's glue (`WorklistDrop.cpp`), 23-f switches the pipelines, and
-  23-k to 23-m change only 23-a's runtime stack (`drop_stack.rs`), each
-  on the one before. 23-a to 23-j also apply to `00906e38` alone (`git
+  23-d's glue (`WorklistDrop.cpp`), 23-f switches the pipelines, 23-k to
+  23-n and 23-p change only 23-a's runtime stack (`drop_stack.rs`), each
+  on the one before, and 23-o 23-b's lowering (`DropStackLowering.cpp`)
+  to call 23-n's `defer_wide`. 23-a to 23-j also apply to `00906e38` alone (`git
   am`, 2026-10-25).
 - The series is the order in which the patches were made, not entry
   order.
 
 What lean2rr needs: `scripts/l2r.py` stops with an error when the
 Reussir checkout lacks 23-f (rrc's pipeline with worklist drops), 23-k
-(the end work), 23-m (steps, depth and drain) or 07-a
-(`REQUIRED_REUSSIR_PATCHES`), so plain upstream fails there, and so do
-the checkout of a base before Phase 2 (its glue pushed onto the old
-shared stack) and `l2r-base9`; leanrt's pending stack, built on entry
+(the end work), 23-m (steps, depth and drain), 23-n (`defer_wide`),
+23-o (the glue's use of it) or 07-a (`REQUIRED_REUSSIR_PATCHES`), so
+plain upstream fails there, and so do the checkout of a base before
+Phase 2 (its glue pushed onto the old shared stack), `l2r-base9` and
+`l2r-base9-shared` (`RtAltTreeFree`'s bounds are native's, which needs
+the links); leanrt's pending stack, built on entry
 23's, does not compile without 23-k to 23-m; its prelude needs 10-a (it
 declares `Nat` and `Int` `tagged`). lean2rr's `--int-backend rcgmp`
 (step D, on dev since `1e57ed53`) needs 20-a and 20-b (its `check_rcgmp`
 checks for them) and uses 20-c to 20-e and 21-a. rcgmp is lean2rr's
 default representation since 2026-10-25, so a default build needs them;
-`--int-backend leanrt` (`L2R_INT_BACKEND=leanrt`) does not. 21-a is an
-optimization: nothing requires it, and `scripts/l2r.py` does not check
-for it. The driver also passes `--relocation-mode pic`, the workaround
+`--int-backend leanrt` (`L2R_INT_BACKEND=leanrt`) does not. 21-a and
+23-p are optimizations: nothing requires them, and `scripts/l2r.py`
+does not check for them. The driver also passes `--relocation-mode pic`, the workaround
 for entry 5 (retired): since `ea240b19` this is rrc's default for
 executables, so the flag is redundant but harmless; it stays for older
 bases.
@@ -327,8 +334,8 @@ why it is parked and describes the patch.
 |---|---|---|---|---|---|
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | does not apply |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | do not apply |
-| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `00906e38`, `l2r-base5`, `l2r-stepd`, the series of 14, `l2r-base9` and `l2r-base9-shared` |
-| [19-a](patches/parked/19-a-retcon-direct-arms.patch) | [19](19-retcon-direct-arms.md) | bug fix | 2026-10-25 | lean2rr does not reach the bug since 23-f (rrc makes no retcon destructors) | applies to `00906e38`, `l2r-base9` and `l2r-base9-shared` |
+| [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | applies to `00906e38`, `l2r-base5`, `l2r-stepd`, the series of 14, `l2r-base9`, `l2r-base9-shared` and `l2r-base10` |
+| [19-a](patches/parked/19-a-retcon-direct-arms.patch) | [19](19-retcon-direct-arms.md) | bug fix | 2026-10-25 | lean2rr does not reach the bug since 23-f (rrc makes no retcon destructors) | applies to `00906e38`, `l2r-base9`, `l2r-base9-shared` and `l2r-base10` |
 
 The parked files 01-a, 06-a and 06-b are against the stacks they were
 made on (`ef922049` plus earlier patches of the old series); 16-a is
@@ -336,7 +343,8 @@ against `7954a367`, 19-a against `l2r-base7` (`00906e38` plus 10-a and
 07-a). The column *On 00906e38* was checked on 2026-10-25 (`git apply
 --check`; on `0378b744` on 2026-10-24 and on `ea240b19` on 2026-10-25,
 with the same results; with the series of 13 patches, the series of 14
-and `l2r-base9-shared` on 2026-10-25, the same results). The parked 11-a was
+and `l2r-base9-shared` on 2026-10-25 and `l2r-base10` on 2026-10-26, the
+same results). The parked 11-a was
 deleted with entry 11 in Phase 2 (it needed 02-c and 09-a). To park a
 patch of the series, move its file to `patches/parked/`, delete its line
 from `patches/series`, rebuild the Reussir stack from the series, and
@@ -417,8 +425,10 @@ three REPRODUCE (19: 1167 KB and 4599 KB, 3.93x; 23: 83972, 83972,
 (23-k to 23-m change only Reussir's runtime) issues 19 and 23 printed
 FIXED again (23: no growth for any of the four values); 24 was not run
 there (its build has no `reussir-opt`; the code it tests is the same).
-On Phase 2's first base `l2r-base7`, issue 19's repro printed FIXED
-with 19-a (322 KB and 457 KB, 1.41x).
+On `l2r-base10` (2026-10-26) issues 19, 23 and 24 printed FIXED (19:
+59 KB and 69 KB, 1.16x; 23: no growth for any of the four values; 24 on
+a build of the same commit with `reussir-opt`: one `token.free`). On Phase 2's first base `l2r-base7`, issue 19's repro printed
+FIXED with 19-a (322 KB and 457 KB, 1.41x).
 
 ## Policy
 
@@ -499,6 +509,8 @@ git history (commit `419a74d4`):
 | 21-a | independent review | `rccancel-review/` | sound; its three findings (test inputs, the crossed operations in the message with a negative test, the stop at `rcgmp.bridge.mpz.is_unique`) are in the patch |
 | 23-a to 23-j | two adversarial rounds (runtime, IR and pipeline; glue, member kinds, release order and tests), then an independent re-review | `lifodrop-review/rt/NOTES.md`, `lifodrop-review/gen/NOTES.txt`, `lifodrop-review/gen/v2/` | round one: two order bugs (the tail call taken although a later member pushed; an anonymous recursive arm taken for a leaf), the TPDE token leak (entry 24), a flex box accepted by `rc.defer`, a defer outside a drain that waited for a later drain, a buffer leaked after the thread-exit guard, and documentation and test gaps: all fixed in the patches; re-review: the type predicates exponential on generated inputs (fixed: one reachability walk per query), nothing else; the fixes were checked with targeted lit tests and ASan |
 | 23-k to 23-m | made and tested by the runtime side, then an adversarial review (2026-10-25) | `phase2/shared/` | its fixes are in the patches: a step is `extern "C"`, so a panicking step aborts instead of unwinding with the thread marked as draining; the nesting of end work requested inside the end function (one level per generation, as natively) and the entry costs of runs are documented; on the first version (`fbc2bba2`), leanrt's unit tests 101 of 101 (leanrt build) and 104 of 104 (rcgmp build) and the trace digests of 400 random order scenarios equal to those of leanrt's own stack |
+| 23-n, 23-o | an adversarial review (2026-10-26) | `lifodrop-review/rt/link/` | no bug: every box 23-o routes to `defer_wide` has the claimed header on every target (i686 narrow, wasm32 right, big-endian safe); headers back before each release; the order with host cells, steps, runs, nested runs and end work in a model check with real boxes (3000 seeds x 3 natively, 40 x 3 under Miri, both borrow models); the 40-bit offset right at +-2^42. Its cleanups (the table zero-initialized, the linked flag in the count's top bit, two comments) are in 23-n |
+| 23-p | short re-review pending; the review's model check, with a joined box allowed (count untouched, upper bits 0), passes (3000 x 3 natively, 40 x 3 under Miri) | `lifodrop/link/` | instructions per freed cell back near `l2r-base9-shared`'s (balanced tree 59.08 against 57.08, rose tree 54.55 against 52.77); `RtAltTreeFree` 45.7 MB kept |
 | 19-a (parked) | issue #759's measurements (prototype "a+m2", on 7954a367); `l2r-base7` checks | `r759/RESULTS.md`, `reussir-move/base7/` | not reviewed adversarially; the prototype passed Reussir's 66 lit tests that touch drops; on `l2r-base7` lit 767 passed, 2 failed for want of the `not` tool, 125 unsupported; `reussir-ut` 82 of 82 |
 
 The rebase onto `7954a367` (2026-10-19) is not reviewed yet: 10-a had two
@@ -554,7 +566,29 @@ Reussir's lit tests 776 passed, 125 unsupported, 2 failed
 compiles `RtSyncSelect` in 1.94 GB and `RtDepPolyRec` in 3.47 GB
 without 19-a (entry 19). `l2r-base9-shared` adds 23-k to 23-m, which
 the runtime side made for leanrt and which change only reussir-rt's
-`drop_stack.rs` and its tests (reviewed, 2026-10-25).
+`drop_stack.rs` and its tests (reviewed, 2026-10-25). `l2r-base10` adds
+23-n to 23-p (2026-10-26): the same 21 commits, then three; checks in
+[issue 23](23-worklist-drops.md#tests).
+
+## History: linked pending records (2026-10-26)
+
+The review of the shared stack (23-k to 23-m) measured a shape where
+its entries cost memory: a chain of two mutually recursive types whose
+levels each leave a record of the other type pending (lean2rr's
+`RtAltTreeFree`) took a 24-byte entry per level while it waited, 88.7 MB
+at 10^6 levels against native Lean's 55.1 MB and dev's 45.7 MB on
+`l2r-base8` (whose drop patches linked pending records through their
+headers). `l2r-base10` adds three patches to entry 23: 23-n (pending
+records of the glue linked through their own headers, `defer_wide`),
+23-o (the glue's use of it for boxes with a wide header) and 23-p (one
+release function's pending records as a run of cells, for fewer
+instructions; only a change of function links). Head `0bea9c7d`, tree
+`707daa79`; before, `l2r-base9-shared` (`6111586c`, tree `8b8dd1cb`).
+The other 21 patch files changed only in their patch counts.
+`RtAltTreeFree` now peaks at 45.7 MB (its bounds are native's, lean2rr's
+branch alt-tree-bounds), and `scripts/l2r.py` requires 23-n and 23-o.
+The parked patches apply as before (16-a and 19-a to `l2r-base10`; 01-a,
+06-a and 06-b do not).
 
 ## History: Phase 2, worklist drops instead of the local drop patches (2026-10-25)
 

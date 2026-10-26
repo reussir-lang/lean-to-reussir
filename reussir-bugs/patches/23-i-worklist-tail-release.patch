@@ -1,7 +1,7 @@
 From 77ccdcc004144ccba1dc88865be39ce0fdc08b0c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 17:12:43 -0400
-Subject: [PATCH 17/21] l2r-local: entry 23-i: worklist release: the last child
+Subject: [PATCH 17/24] l2r-local: entry 23-i: worklist release: the last child
  continues by a tail call
 
 An optimization of the release functions (23-d): in the worklist order,

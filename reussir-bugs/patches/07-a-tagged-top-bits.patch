@@ -1,7 +1,7 @@
 From 6620a1d42ac11e4b9e1565111ac4c6bb504976f9 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
-Subject: [PATCH 02/21] l2r-local: issue 38: tagged FFI objects: clear the top
+Subject: [PATCH 02/24] l2r-local: issue 38: tagged FFI objects: clear the top
  16 bits before the inline count access
 
 A `tagged` opaque handle (`#[ffi(rust = "path", tagged)]`, patch 0050) is

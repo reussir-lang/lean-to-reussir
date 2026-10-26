@@ -1,0 +1,435 @@
+From 0bea9c7d97cc59e7c0a75af2ea8ea27c81824891 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Mon, 26 Oct 2026 00:18:44 -0400
+Subject: [PATCH 24/24] l2r-local: entry 23-p: drop stack: one function's
+ pending boxes join a run of cells
+
+23-n links every pending box of the glue through its header, which costs
+instructions where the glue defers one child per freed cell: a balanced
+tree 57.08 -> 63.58 instructions per freed cell, a rose tree 52.77 ->
+58.54 (cachegrind, the plain Reussir microbenchmark); binary trees are a
+benchmark. A link takes a header read, decode and restore at the pop and
+an encode and two stores at the deferral, where a run of cells takes a
+push and a pop.
+
+Now a box deferred with defer_wide after a box of the same release
+function joins the linked run's cells, as a host's cell joins a run (8
+bytes while it waits; for a value of one type usually as many as its
+height), and the upper 16 bits of its header's second word are set to 0.
+Only a change of release links through the header, as before (40-bit
+offset; in the high 8 bits, 1 plus the index of the previous box's
+function, so they are never 0 in a link). A pop of a linked run's head
+reads those bits: 0, the cells' last one is the head now; else the link,
+restored. The order is the same: the run is one entry, its boxes popped
+last deferred first. Alternating releases (RtAltTreeFree) still take no
+memory per pending box.
+
+The table lookup on a change of release goes through a 16-slot cache of
+(function, index) pairs, direct-mapped by address, in the zero-initialized
+thread-local beside the table and cleared with it, so that many release
+functions do not scan the 255 entries at every link.
+
+Instructions per freed cell (base9-shared / 23-n / this patch): balanced
+tree 57.08 / 63.58 / 59.08, rose tree 52.77 / 58.54 / 54.55, alternating
+pending nodes 66.07 / 74.60 / 74.60; one-sided chains unchanged.
+lean2rr, peak RSS at 10^6 levels: RtAltTreeFree 45.7 MB (native 55.1),
+RtDeepTreeFree 37.3, RtClosureChainFree 68.2 (native 102.3) and its
+compositions 66.1 MB (native 85.9; with 23-n alone 45.9: one type's
+pending boxes are cells again). Also measured, not taken: a same-function
+link of one 32-bit store (offset in the count, upper bits 0) gave 61.08
+and 56.32.
+
+Tests: the differential test's boxes have garbage in the upper half of
+their second word for odd numbers (padding), the releases check count and
+tag, and the run with wide boxes must use cells; the releases are reified
+once (Miri gives every reification its own address).
+---
+ crates/reussir-rt/src/drop_stack.rs       | 176 ++++++++++++++--------
+ crates/reussir-rt/src/drop_stack/tests.rs |  30 ++--
+ 2 files changed, 129 insertions(+), 77 deletions(-)
+
+diff --git a/crates/reussir-rt/src/drop_stack.rs b/crates/reussir-rt/src/drop_stack.rs
+index 54a090db..a9aae8e2 100644
+--- a/crates/reussir-rt/src/drop_stack.rs
++++ b/crates/reussir-rt/src/drop_stack.rs
+@@ -25,14 +25,17 @@
+ //! Drop glue defers a box whose first 8 bytes are header (a 32-bit count,
+ //! then a 32-bit word that is padding or a tag below 2^16) with
+ //! [`defer_wide`]: such boxes form one linked run whatever their release
+-//! functions, threaded through their headers as Lean's to-do list is through
+-//! its objects, so a pending box costs no memory. A box's link takes its
+-//! count and the upper 16 bits of the next word: the offset to the box
+-//! deferred before it (40 bits, signed, in 8-byte units) and that box's
+-//! release function (8 bits: the same as this box's, or an index into a
+-//! per-thread table emptied with the stack); both go back (count 1, upper
+-//! bits 0) before the box's release runs. A box that cannot link starts a
+-//! new run: one with a nonzero top byte (under top-byte tagging, an
++//! functions. A box released by the same function as the box deferred
++//! before it joins the run's cells, as a host's cell does (8 bytes while it
++//! waits; for a value of one type, usually as many as its height), and the
++//! upper 16 bits of its header's second word are set to 0. A box released
++//! by another function links to that box through its header, as Lean's
++//! to-do list is threaded through its objects, so it costs no memory: its
++//! count and those 16 bits keep a 40-bit signed offset in 8-byte units and,
++//! in the high 8 bits, 1 plus the index of the previous box's function in a
++//! per-thread table emptied with the stack. So a pop tells a link (nonzero
++//! bits) from a cell. A link goes back (count 1, upper bits 0) before the
++//! box's release runs. A box that cannot link starts a new run: one with a nonzero top byte (under top-byte tagging, an
+ //! immediate's dummy box, which the glue never defers), one too far from
+ //! the previous box (or not a multiple of 8 bytes away), or a new function
+ //! with the table full. A pop rebuilds the linked box's pointer from its
+@@ -67,8 +70,8 @@ enum Work {
+     /// `n` deferred cells, the last deferred at `head`, to be released with
+     /// `release`; the run's other `n - 1` cells are in the cells vector,
+     /// below the cells of the runs above it (see [`State`]); in a linked
+-    /// run (`n` with [`LINKED`]) they are linked through their headers
+-    /// instead ([`defer_wide`]).
++    /// run (`n` with [`LINKED`]) a box released by another function than
++    /// the one before it links to it through its header ([`defer_wide`]).
+     Run { release: Release, head: *mut u8, n: u32 },
+     /// Incremental work: `step(p)` runs until it answers that it is done.
+     Step(usize, Step),
+@@ -77,10 +80,9 @@ enum Work {
+ /// Capacity each vector keeps after a drain.
+ const KEEP: usize = 64;
+ 
+-/// A link's release index meaning "the same function as this box's"; the
+-/// table holds the others.
+-const SAME: u32 = 0xff;
+-const TABLE: usize = SAME as usize;
++/// The release functions a table holds, and the slots of its cache.
++const TABLE: usize = 255;
++const CACHE: usize = 16;
+ /// A run's `n` in the stack vector: whether the run is linked.
+ const LINKED: u32 = 1 << 31;
+ /// The most cells a run holds.
+@@ -159,7 +161,8 @@ impl<T> Parts<T> {
+ /// each cell but its head one pointer in the cells vector (8 bytes while it
+ /// waits, as the boxed heads of a list that the glue frees whole); boxes
+ /// deferred with [`defer_wide`] one after the other form one linked run,
+-/// whatever their functions, their links in their headers. The top
++/// whatever their functions: a change of function links through the box's
++/// header. The top
+ /// run is kept in the state itself, so a deferral or a pop that stays in it
+ /// touches no vector but the cells'. Also whether the thread drains, whether
+ /// a release asked for the end work, and whether its exit guard ran (a later
+@@ -175,7 +178,7 @@ struct State {
+     release: Cell<Release>,
+     stack: Parts<Work>,
+     cells: Parts<*mut u8>,
+-    /// The entries of [`RELEASES`] in use.
++    /// The entries of [`TABLE_STATE`]'s table in use.
+     known: Cell<u8>,
+ }
+ 
+@@ -199,12 +202,27 @@ thread_local! {
+             known: Cell::new(0),
+         }
+     };
+-    /// The release functions that links name by index (zero-initialized,
++    /// The release functions that links name by index, and a cache of
++    /// (function, index) pairs, direct-mapped by address (zero-initialized,
+     /// so it adds nothing to the image a new thread copies).
+-    static RELEASES: [Cell<Option<Release>>; TABLE] = const { [const { Cell::new(None) }; TABLE] };
++    static TABLE_STATE: Table = const {
++        Table { releases: [const { Cell::new(None) }; TABLE], cache: [const { Cell::new((0, 0)) }; CACHE] }
++    };
+     static GUARD: Guard = const { Guard };
+ }
+ 
++struct Table {
++    releases: [Cell<Option<Release>>; TABLE],
++    cache: [Cell<(usize, u8)>; CACHE],
++}
++
++/// The upper half of a box header's second word (its bits 16 to 31,
++/// whatever the byte order).
++#[inline(always)]
++fn upper(cell: *mut u8) -> *mut u16 {
++    cell.wrapping_add(if cfg!(target_endian = "little") { 6 } else { 4 }).cast()
++}
++
+ /// Frees the buffers at thread exit (registered with the first buffer).
+ struct Guard;
+ 
+@@ -304,49 +322,64 @@ impl State {
+         true
+     }
+ 
+-    /// The index a link from a box released with `release` gives `prev`, the
+-    /// function of the box it links to; None with the table full.
++    /// The index of `prev` in the table, through the cache; None with the
++    /// table full.
+     #[inline(always)]
+-    fn index(&self, prev: Release, release: Release) -> Option<u32> {
+-        if prev as usize == release as usize {
+-            return Some(SAME);
+-        }
+-        let known = self.known.get() as usize;
+-        RELEASES.with(|releases| {
+-            let same = |r: &Cell<Option<Release>>| r.get().is_some_and(|r| r as usize == prev as usize);
+-            if let Some(i) = releases[..known].iter().rposition(same) {
+-                return Some(i as u32);
++    fn index(&self, prev: Release) -> Option<u32> {
++        let key = prev as usize;
++        TABLE_STATE.with(|t| {
++            let slot = &t.cache[(key >> 4) % CACHE];
++            if slot.get().0 == key {
++                return Some(slot.get().1 as u32);
+             }
+-            if known == TABLE {
+-                return None;
+-            }
+-            releases[known].set(Some(prev));
+-            self.known.set(known as u8 + 1);
+-            Some(known as u32)
++            let known = self.known.get() as usize;
++            let same = |r: &Cell<Option<Release>>| r.get().is_some_and(|r| r as usize == key);
++            let i = match t.releases[..known].iter().rposition(same) {
++                Some(i) => i,
++                None if known < TABLE => {
++                    t.releases[known].set(Some(prev));
++                    self.known.set(known as u8 + 1);
++                    known
++                }
++                None => return None,
++            };
++            slot.set((key, i as u8));
++            Some(i as u32)
+         })
+     }
+ 
+-    /// Defers a box with a wide header ([`defer_wide`]): links it to the
+-    /// linked run on top, or starts a linked run. Answers false, changing
+-    /// nothing, when the stack vector must grow first.
++    /// Defers a box with a wide header ([`defer_wide`]): adds it to the
++    /// linked run on top (a cell after a box of its function, else a link),
++    /// or starts a linked run. Answers false, changing nothing, when a
++    /// vector must grow first.
+     #[inline(always)]
+     unsafe fn try_defer_wide(&self, cell: *mut u8, release: Release) -> bool {
+-        let (n, head) = (self.n.get(), self.head.get());
++        let (n, head, prev) = (self.n.get(), self.head.get(), self.release.get());
+         // The offset to the head, in 8-byte units (modulo the address width,
+         // as the decoding adds it back).
+         let diff = (head as usize).wrapping_sub(cell as usize);
+         let units = (diff as isize >> 3) as i64;
+-        let fits = diff & 7 == 0 && units << (64 - OFFSET_BITS) >> (64 - OFFSET_BITS) == units;
+-        if n != 0 && n < MAX_RUN && self.linked.get() && cell as u64 >> 56 == 0 && fits {
+-            if let Some(index) = self.index(self.release.get(), release) {
+-                // The box is the caller's alone until its release: its count
+-                // and the upper half of the word after it are free.
+-                let words = cell as *mut u32;
+-                let units = units as u64 & ((1 << OFFSET_BITS) - 1);
+-                let high = (((units >> 32) as u32) << 16) | (index << 24);
++        if n != 0 && n < MAX_RUN && self.linked.get() && prev as usize == release as usize {
++            if !self.cells.try_push(head) {
++                return false;
++            }
++            unsafe { upper(cell).write(0) };
++            self.head.set(cell);
++            self.n.set(n + 1);
++            return true;
++        }
++        if n != 0 && n < MAX_RUN && self.linked.get() && cell as u64 >> 56 == 0 && diff & 7 == 0 {
++            // The box is the caller's alone until its release: its count and
++            // the upper half of the word after it are free.
++            let link = if units << (64 - OFFSET_BITS) >> (64 - OFFSET_BITS) == units {
++                self.index(prev).map(|i| ((units >> 32) as u16 & 0xff) | ((i as u16 + 1) << 8))
++            } else {
++                None
++            };
++            if let Some(high) = link {
+                 unsafe {
+-                    words.write(units as u32);
+-                    words.add(1).write(words.add(1).read() & 0xffff | high);
++                    (cell as *mut u32).write(units as u32);
++                    upper(cell).write(high);
+                 }
+                 head.expose_provenance();
+                 self.head.set(cell);
+@@ -358,27 +391,28 @@ impl State {
+         unsafe { self.try_start(cell, release, true) }
+     }
+ 
+-    /// Takes the head off the linked run on top (it has another box): the
+-    /// box it links to is the head now; its header is restored.
++    /// Takes the head off the linked run on top (it has another box): with
++    /// its upper bits 0 the cells' last one is the head now, else the box it
++    /// links to (its header restored).
+     #[inline(always)]
+-    unsafe fn unlink(&self, head: *mut u8, release: Release) {
+-        let words = head as *mut u32;
+-        let (low, high) = unsafe { (words.read(), words.add(1).read()) };
++    unsafe fn unlink(&self, head: *mut u8) {
++        let high = unsafe { upper(head).read() };
++        self.n.set(self.n.get() - 1);
++        if high == 0 {
++            self.head.set(unsafe { self.cells.pop_unchecked() });
++            return;
++        }
++        let low = unsafe { (head as *mut u32).read() };
+         unsafe {
+-            words.write(1);
+-            words.add(1).write(high & 0xffff);
++            (head as *mut u32).write(1);
++            upper(head).write(0);
+         }
+-        let units = ((((high >> 16) & 0xff) as u64) << 32 | low as u64) as i64;
++        let units = ((high as u64 & 0xff) << 32 | low as u64) as i64;
+         let units = units << (64 - OFFSET_BITS) >> (64 - OFFSET_BITS);
+         let prev = (head as usize).wrapping_add((units as usize).wrapping_mul(8));
+         self.head.set(core::ptr::with_exposed_provenance_mut(prev));
+-        let index = high >> 24;
+-        self.release.set(if index == SAME {
+-            release
+-        } else {
+-            RELEASES.with(|releases| releases[index as usize].get().unwrap_or(unnamed))
+-        });
+-        self.n.set(self.n.get() - 1);
++        let index = (high >> 8) as usize - 1;
++        self.release.set(TABLE_STATE.with(|t| t.releases[index].get().unwrap_or(unnamed)));
+     }
+ 
+     /// Pops and runs the pending drops, last deferred first, until none is
+@@ -391,7 +425,7 @@ impl State {
+                 if n == 1 {
+                     self.unspill();
+                 } else if self.linked.get() {
+-                    unsafe { self.unlink(head, release) };
++                    unsafe { self.unlink(head) };
+                 } else {
+                     self.head.set(unsafe { self.cells.pop_unchecked() });
+                     self.n.set(n - 1);
+@@ -424,7 +458,10 @@ impl State {
+             }
+         }
+         debug_assert_eq!(self.cells.len.get(), 0, "reussir-rt: pending cells left after a drain");
+-        self.known.set(0);
++        if self.known.get() != 0 {
++            self.known.set(0);
++            TABLE_STATE.with(|t| t.cache.iter().for_each(|slot| slot.set((0, 0))));
++        }
+         let exited = self.exited.get();
+         self.stack.trim(exited);
+         self.cells.trim(exited);
+@@ -530,7 +567,12 @@ pub unsafe fn defer_wide(cell: *mut u8, release: Release) {
+ #[inline(never)]
+ unsafe extern "C" fn defer_wide_slow(cell: *mut u8, release: Release) {
+     let state = state();
+-    state.stack.grow();
++    let n = state.n.get();
++    if n != 0 && n < MAX_RUN && state.linked.get() && state.release.get() as usize == release as usize {
++        state.cells.grow();
++    } else {
++        state.stack.grow();
++    }
+     let deferred = unsafe { state.try_defer_wide(cell, release) };
+     debug_assert!(deferred);
+ }
+diff --git a/crates/reussir-rt/src/drop_stack/tests.rs b/crates/reussir-rt/src/drop_stack/tests.rs
+index 71ec3c62..a6c79c5b 100644
+--- a/crates/reussir-rt/src/drop_stack/tests.rs
++++ b/crates/reussir-rt/src/drop_stack/tests.rs
+@@ -257,8 +257,9 @@ fn steps_inside_a_drain_and_an_empty_drain() {
+     assert!(!releasing() && depth() == 0);
+ }
+ 
+-// Linked runs: boxes with a wide header (count, then a tag below 2^16),
+-// deferred with `defer_wide`. A release checks that its header is back.
++// Linked runs: boxes with a wide header (count, then a tag below 2^16 or
++// padding: an odd box's upper 16 bits are garbage), deferred with
++// `defer_wide`. A release checks that its count and tag are back.
+ #[repr(C, align(8))]
+ struct Wide {
+     count: u32,
+@@ -266,11 +267,12 @@ struct Wide {
+     id: usize,
+ }
+ fn wide(id: usize) -> *mut u8 {
+-    Box::into_raw(Box::new(Wide { count: 1, tag: id as u32 % 7, id })).cast()
++    let garbage = if id % 2 == 1 { 0xabcd << 16 } else { 0 };
++    Box::into_raw(Box::new(Wide { count: 1, tag: id as u32 % 7 | garbage, id })).cast()
+ }
+ unsafe fn take(cell: *mut u8, kind: char) -> usize {
+     let b = unsafe { Box::from_raw(cell.cast::<Wide>()) };
+-    assert_eq!((b.count, b.tag), (1, b.id as u32 % 7));
++    assert_eq!((b.count, b.tag & 0xffff), (1, b.id as u32 % 7));
+     log(kind, b.id);
+     b.id
+ }
+@@ -279,6 +281,8 @@ unsafe fn take(cell: *mut u8, kind: char) -> usize {
+ // a step, or a nested run.
+ thread_local! {
+     static WIDE: Cell<bool> = const { Cell::new(true) };
++    // The most cells pending while a release ran.
++    static CELLS: Cell<usize> = const { Cell::new(0) };
+ }
+ fn kids(id: usize) -> usize {
+     if id > 2000 { 0 } else { (id.wrapping_mul(2654435761) >> 7) % 4 }
+@@ -286,7 +290,7 @@ fn kids(id: usize) -> usize {
+ unsafe fn plan(id: usize) {
+     for k in 0..kids(id) {
+         let c = id * 4 + k;
+-        let f: Release = if c % 3 == 0 { wb } else { wa };
++        let f = if c % 3 == 0 { WB } else { WA };
+         match (c >> 3) % 5 {
+             0 => unsafe { defer_step(c, wide_step) },
+             1 => unsafe { run(wide(c), f) },
+@@ -298,12 +302,16 @@ unsafe fn plan(id: usize) {
+ }
+ unsafe extern "C" fn wa(cell: *mut u8) {
+     let id = unsafe { take(cell, 'A') };
++    CELLS.with(|c| c.set(c.get().max(state().cells.len.get())));
+     unsafe { plan(id) };
+ }
+ unsafe extern "C" fn wb(cell: *mut u8) {
+     let id = unsafe { take(cell, 'B') };
+     unsafe { plan(id) };
+ }
++// Reified once each (Miri gives every reification its own address).
++static WA: Release = wa;
++static WB: Release = wb;
+ unsafe extern "C" fn wide_step(c: usize) -> bool {
+     log('s', c);
+     unsafe { plan(c + 1) };
+@@ -312,16 +320,18 @@ unsafe extern "C" fn wide_step(c: usize) -> bool {
+ 
+ #[test]
+ fn linked_runs_keep_the_order() {
+-    // The same drops, wide or not: the same events, and linked boxes take
+-    // no cells.
++    // The same drops, wide or not: the same events. Wide boxes deferred one
++    // after the other with one release join a run of cells; a change of
++    // release links through the header.
+     let mut logs = vec![];
+     for linked in [true, false] {
+         WIDE.with(|w| w.set(linked));
+         for root in 1..if cfg!(miri) { 10 } else { 60 } {
+-            unsafe { run(wide(root), if root % 2 == 0 { wb } else { wa }) };
++            unsafe { run(wide(root), if root % 2 == 0 { WB } else { WA }) };
+         }
+         logs.push(take_log());
+         assert!(!releasing() && pending() == 0 && trimmed());
++        assert!(CELLS.with(|c| c.replace(0)) > 0);
+     }
+     assert!(logs[0].len() > if cfg!(miri) { 20 } else { 300 });
+     assert_eq!(logs[0], logs[1]);
+@@ -345,7 +355,7 @@ unsafe extern "C" fn alternating(_: *mut u8) {
+     unsafe { defer_wide(off, off_release) };
+     log('d', s.depth());
+     // Fill the table (its entries in use stay).
+-    RELEASES.with(|t| t[s.known.get() as usize..].iter().for_each(|r| r.set(Some(unnamed))));
++    TABLE_STATE.with(|t| t.releases[s.known.get() as usize..].iter().for_each(|r| r.set(Some(unnamed))));
+     s.known.set(TABLE as u8);
+     // One reified function, so that 11 links to 10 (Miri gives each
+     // reification its own address).
+@@ -357,7 +367,7 @@ unsafe extern "C" fn alternating(_: *mut u8) {
+ unsafe extern "C" fn off_release(cell: *mut u8) {
+     // Never linked: its "header" (box 9's tag and number) is untouched.
+     let words = cell.cast::<u32>();
+-    assert_eq!(unsafe { (words.read(), words.add(1).read()) }, (2, 9));
++    assert_eq!(unsafe { (words.read(), words.add(1).read()) }, (2 | 0xabcd << 16, 9));
+     drop(unsafe { Box::from_raw(cell.sub(4).cast::<Wide>()) });
+     log('o', 9);
+ }

@@ -406,12 +406,20 @@ def build_lean_runtime(out):
 # drain for a host (23-m; 23-l, the runs of cells, comes between them).
 # leanrt would also fail to compile without them.
 # 21-a (entry 21, inc/dec cancellation of integer members of [value]
-# records) is an optimization of code with rcgmp integers: nothing needs it,
-# so it is not checked.
+# records) is an optimization of code with rcgmp integers, and 23-p (one
+# release function's pending records as cells, fewer instructions than
+# links) an optimization of the drops: nothing needs them, so they are not
+# checked.
 REQUIRED_REUSSIR_PATCHES = [
     ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
     ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
     ("23-m", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_step"),
+    # 23-n and 23-o: the glue's pending records wait linked through their
+    # own headers (defer_wide), not one stack entry each: without them a
+    # chain whose levels each leave a record of another type pending takes
+    # 24 bytes per level (RtAltTreeFree's bounds are native's).
+    ("23-n", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_wide"),
+    ("23-o", "lib/Conversion/BasicOpsLowering/DropStackLowering.cpp", "__reussir_drop_defer_wide"),
     # The one-word box `LAny` keeps its payload's type number in the top 16
     # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),

@@ -1,7 +1,7 @@
 From e69cde106e2649c4de0a6f2b7ab064fcb366c94b Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:30:35 -0400
-Subject: [PATCH 06/21] l2r-local: step D (R2c): Mpz::is_shared through
+Subject: [PATCH 06/24] l2r-local: step D (R2c): Mpz::is_shared through
  compiler-emitted glue from rcgmp.mpz.is_unique
 
 lean2rr's dbgTraceIfShared (Lean's `lean_dbg_trace_if_shared`, natively

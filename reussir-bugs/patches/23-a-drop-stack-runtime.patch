@@ -1,7 +1,7 @@
 From 82b3985a7cc8bd8b79c2f6f027490dd1f47408f0 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:24:40 -0400
-Subject: [PATCH 09/21] l2r-local: entry 23-a: rt: a per-thread stack of
+Subject: [PATCH 09/24] l2r-local: entry 23-a: rt: a per-thread stack of
  pending drops
 
 First step of replacing the retcon destructor executor for

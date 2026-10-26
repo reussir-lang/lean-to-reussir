@@ -3439,10 +3439,15 @@ Each item says what differs and when.
   a value deep through records, containers and boxes (a tree whose
   children are in arrays, a record → array → record chain, a chain of
   thunks, tasks or boxes) is freed at a bounded depth
-  (`RtArrayDeepSharedFree`, `RtBoxDeepChain`). Reussir's stack holds a pending child record while it frees such a
-  value as one 24-byte entry, or 8 bytes when it follows one with the same
-  release function (a run) (heap memory, cut back when the drain ends); natively the to-do list is
-  linked through the freed objects and takes no memory. Reussir's glue
+  (`RtArrayDeepSharedFree`, `RtBoxDeepChain`). Reussir keeps a pending child record as one 8-byte cell of a run when it
+  follows one with the same release function, and where the release
+  function changes links it through its own header (its count and the
+  upper bits of its tag word), so a record of another type than the one
+  before takes no memory while it waits (`RtAltTreeFree`: two types in
+  turn); natively the to-do list is linked through the freed objects and
+  takes no memory at all. The runtime's own pending cells take 8 bytes
+  each in a run, a 24-byte entry when a run starts (heap memory, cut back
+  when the drain ends). Reussir's glue
   and the runtime share that stack, so one drain frees both in one
   order. The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,

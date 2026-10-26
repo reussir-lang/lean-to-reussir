@@ -5,7 +5,7 @@ whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
 numbers). lean2rr's builds use a later base, upstream `00906e38` with
-the series (`./reussir` branch `l2r-base9-shared`, `6111586c`); the
+the series (`./reussir` branch `l2r-base10`, `0bea9c7d`); the
 workarounds stay until each is removed.
 Issues 1 (a missed optimization) and 2 (a missing feature), which
 are not bugs, are in [limitations.md](limitations.md). The open issue

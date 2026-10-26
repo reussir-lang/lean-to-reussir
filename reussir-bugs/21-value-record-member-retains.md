@@ -9,7 +9,7 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 ## Summary
 
 **Kind:** missed optimization. **Status:** patched (21-a), applied in
-`./reussir`'s series since 2026-10-25 (branch `l2r-base9-shared`, commit
+`./reussir`'s series since 2026-10-25 (branch `l2r-base10`, commit
 `9c10b983`; made as `8e9a6293`, `l2r-stepd` plus 21-a, the same code).
 No workaround in lean2rr. It shows only under
 `--int-backend rcgmp` (lean2rr's default since 2026-10-25): with the
@@ -124,7 +124,7 @@ and L17 compile to the same instructions with and without the patch
 
 Patch file
 [`patches/21-a-value-record-member-retains.patch`](patches/21-a-value-record-member-retains.patch)
-(commit `9c10b983` on `l2r-base9-shared`, `8e9a6293` on `l2r-base8`). Its
+(commit `9c10b983` on `l2r-base10`, `8e9a6293` on `l2r-base8`). Its
 rule: a counted word's retain cancels against the member release of a
 record's expanded drop under the rules that hold for an rc member.
 

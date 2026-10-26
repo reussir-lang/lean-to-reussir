@@ -5,17 +5,17 @@ two recursive fields each, so Reussir frees them through its stack of
 pending drops. The chain alternates `A.node small rest` and
 `B.node small rest`, where `small` is a node of the other type with its own
 number (not a shared constant): freeing the chain defers `small` at every
-level and goes on along `rest`, so `n` pairs leave `2 n` pending cells, each
-a run of one cell of the stack (the release functions alternate), one
-24-byte entry each. Natively the to-do list is linked through the freed
-objects and takes no memory. Built bottom-up in a loop; `consume` reads
-only the root, and its drop frees the chain. At 500000 pairs (10^6
-levels) the peak is about 88.5 MB, native's 55.1 MB, and 45.7 MB with
-Reussir's earlier drop patches, which linked the pending records through
-their own headers (RtAltTreeFree.alloc bounds today's peak, to notice
-changes). The follow-up: Reussir links its own deferred records through
-their headers, so that only the runtime's cells take entries. Argument:
-the number of pairs (default 1000). -/
+level and goes on along `rest`, so `n` pairs leave `2 n` pending records.
+A deferred record whose release function differs from the one deferred
+before it is linked through its own header (the link keeps its release
+function): here every one, the functions alternating, so the pending
+records take no stack memory, as natively, where the to-do list is linked
+through the freed objects. (A record with the same release function as the
+one before is one 8-byte cell of a run.) Built
+bottom-up in a loop; `consume` reads only the root, and its drop frees the
+chain. At 500000 pairs (10^6 levels) the peak is about 45.7 MB, native's
+55.1 MB (with a 24-byte entry of the stack per pending child, before the
+linking: 88.6 MB). Argument: the number of pairs (default 1000). -/
 mutual
 inductive A where
   | leaf : A

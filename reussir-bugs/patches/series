@@ -19,3 +19,6 @@
 23-k-drop-stack-end-work.patch
 23-l-drop-stack-runs.patch
 23-m-drop-stack-steps.patch
+23-n-drop-stack-linked-runs.patch
+23-o-defer-wide-headers.patch
+23-p-same-release-cells.patch
