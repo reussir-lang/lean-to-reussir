@@ -1,0 +1,6 @@
+# Big Nat and Int values boxed, taken apart and boxed again in a loop (review of the owned big-integer boxes,
+# rcgmp-r14: a box that kept one reference too many keeps every value alive). Eight boxes of big values per iteration
+# (three in the Nat list, three in the mapped list, two in the Int list). Natively the peak is flat (8.0 MB at 25000,
+# 8.2 MB at 100000; at 400000 native reaches the counter's allocation limit). A leaked reference per box, injected in
+# leanrt's box_owned: 43.7 MB at 100000 against the allowed 12.1 MB.
+25000 | 100000 | 1 2000 | rss 1 4000

@@ -4,7 +4,7 @@
 # `match` on the built-in integer. Translation only (`lean2rr --emit rr`,
 # no Reussir build), on tests/runtime/RtNatMatch and RtIntMatch, whose
 # outputs run.sh checks:
-# - with `--int-backend rcgmp --rcgmp-type-args`: `sumTo` is one match
+# - with `--int-backend rcgmp`: `sumTo` is one match
 #   with the arms `0` and `Nat::Succ(p)` and no `lean_nat_dec_eq`/
 #   `lean_nat_sub`; `fib` one match `0`, `1`, `Nat::Succ(Nat::Succ(p))`;
 #   `lits` one match with an arm per literal (also 2^64 and 10^30, which
@@ -55,7 +55,7 @@ for P in RtNatMatch RtIntMatch; do
   (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1 \
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
   before=$fails
-  if ! translate "$OUT/on.rr" --int-backend rcgmp --rcgmp-type-args; then
+  if ! translate "$OUT/on.rr" --int-backend rcgmp; then
     fail "--int-backend rcgmp did not translate (see $OUT/on.rr.log)"
   elif [ $P = RtNatMatch ]; then
     R=$OUT/on.rr
@@ -74,7 +74,7 @@ for P in RtNatMatch RtIntMatch; do
     has $R intLit "0 => " "1 => " "-1 => " "5 => " "-7 => " "_ => "
     lacks $R intLit lean_int_dec_eq
   fi
-  if ! translate "$OUT/off.rr" --int-backend rcgmp --rcgmp-type-args --disable-opt int-match; then
+  if ! translate "$OUT/off.rr" --int-backend rcgmp --disable-opt int-match; then
     fail "--disable-opt int-match did not translate (see $OUT/off.rr.log)"
   elif grep -nE 'Nat::Succ\(|Int::(OfNat|NegSucc)\(' "$OUT/off.rr" > "$OUT/off.hits"; then
     fail "--disable-opt int-match left a match on Nat or Int (see $OUT/off.hits)"

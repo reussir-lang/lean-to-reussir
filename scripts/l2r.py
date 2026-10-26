@@ -36,8 +36,6 @@ third_party/lean-runtime, whose checked-out commit must be the pinned one),
 L2R_LEAN_RUNTIME_FEATURES (comma-separated lean-runtime features to add, to
 try a branch), L2R_INT_BACKEND (`rcgmp` or `leanrt`: the representation of
 `Nat` and `Int`, lean2rr's `--int-backend`; unset or empty: `rcgmp`),
-L2R_RCGMP_TYPE_ARGS (`0`: under rcgmp, without lean2rr's
-`--rcgmp-type-args`, which is on by default there),
 L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
 `--nullary-variant-encoding arch-independent`), REUSSIR_FFI_CACHE_DIR
 (where rrc keeps the compiled textures; default
@@ -141,13 +139,15 @@ if INT_BACKEND not in ("leanrt", "rcgmp"):
     sys.exit(f"l2r: L2R_INT_BACKEND={INT_BACKEND}: expected rcgmp or leanrt")
 if INT_BACKEND == "rcgmp":
     LEANRT_FLAGS += ["--cfg", "leanrt_rcgmp"]
-# Under rcgmp, `Nat` and `Int` may be type arguments of the runtime's generic
-# textures (typed arrays and cells of them, once-cell constants, ...):
-# lean2rr's `--rcgmp-type-args`, since the Reussir that rcgmp needs renders
-# them there as an owned handle (local patch R2, `check_rcgmp`).
-# L2R_RCGMP_TYPE_ARGS=0 leaves the flag off: lean2rr then keeps them out
-# (its guard), for measurements.
-RCGMP_TYPE_ARGS = INT_BACKEND == "rcgmp" and os.environ.get("L2R_RCGMP_TYPE_ARGS", "1") != "0"
+# Under rcgmp, `Nat` and `Int` are type arguments of the runtime's generic
+# textures (typed arrays and cells of them, once-cell constants, the boxes
+# of big values): the Reussir that rcgmp needs renders them there as an
+# owned handle (local patch R2, which `check_rcgmp` requires). (Until
+# 2026-10-25, L2R_RCGMP_TYPE_ARGS=0 kept them out, for measurements; the
+# variable is ignored now, with a warning.)
+if os.environ.get("L2R_RCGMP_TYPE_ARGS") is not None:
+    sys.stderr.write("l2r: warning: L2R_RCGMP_TYPE_ARGS: guard mode was removed on 2026-10-25; "
+                     "the variable is ignored\n")
 
 # Extra rustc flags for the textures rrc compiles (L2R_TEXTURE_RUSTFLAGS,
 # split on spaces), added after NATIVE_FLAGS in the rustc wrapper rrc runs
@@ -623,7 +623,6 @@ def main():
         run([str(LEAN2RR), module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)]
             + ["--int-backend", INT_BACKEND]
-            + (["--rcgmp-type-args"] if RCGMP_TYPE_ARGS else [])
             + [a for n in disabled for a in ("--disable-opt", n)]
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()

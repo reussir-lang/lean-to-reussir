@@ -109,11 +109,11 @@ relative to `lean2rr/` unless they start with `scripts/`.
   passes. `--int-backend rcgmp|leanrt` chooses the representation of
   `Nat` and `Int` (default `rcgmp`, Reussir's built-in integers, since
   2026-10-25; until then `leanrt`, Lean's one-word encoding, which
-  `--int-backend leanrt` still selects), and `--rcgmp-type-args` says that
-  Reussir passes them as owned handles at type arguments of generic FFI
-  functions (Reussir's local patch R2; off unless given, so plain
-  `lean2rr` lowers rcgmp in its guard mode; scripts/l2r.py passes it under
-  rcgmp):
+  `--int-backend leanrt` still selects); under rcgmp Reussir passes them
+  as owned handles at type arguments of generic FFI functions (Reussir's
+  local patch R2, which scripts/l2r.py requires; `--rcgmp-type-args` is
+  accepted and ignored; until 2026-10-25 a lowering for measurements
+  that did not use R2 kept them out of type arguments):
   [representations/nat-int.md](representations/nat-int.md#--int-backend-rcgmp-the-lowering).
   Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
@@ -126,9 +126,6 @@ relative to `lean2rr/` unless they start with `scripts/`.
   refused extern of the program is called as `l2r_refused_<declaration>`,
   checked by `tests/runtime/allow-missing-check.sh`;
   [externs-ffi/program-externs.md](externs-ffi/program-externs.md#refusals-are-reported-at-translation-with-the-reason)),
-  `L2R_TEST_NAT_TYPE_ARGS` lowers `--int-backend rcgmp` as with
-  `--rcgmp-type-args` but keeps the check of its type arguments on (the
-  test `tests/runtime/int-backend-check.sh`),
   `L2R_DEBUG` prints whether the
   program can cast and why, each declaration Stage 1 could not
   recompile from source, with the error, what the optimization

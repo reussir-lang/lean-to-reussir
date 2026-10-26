@@ -36,15 +36,6 @@ unsafe extern "C" {
     fn rcgmp_mpz_from_word(magnitude: usize, negative: u32, atomic: u32) -> *mut c_void;
 }
 
-/// A new reference to the borrowed handle `p` (a texture's parameter).
-///
-/// # Safety
-/// `p` is a live handle.
-#[inline(always)]
-pub unsafe fn retained(p: *mut c_void) -> Mpz {
-    (*std::mem::ManuallyDrop::new(unsafe { Mpz::from_raw(p) })).clone()
-}
-
 /// The integer `-v` (`negative`) or `v`, an owned handle.
 #[inline]
 pub fn of_word(v: u64, negative: bool) -> Mpz {
@@ -52,13 +43,19 @@ pub fn of_word(v: u64, negative: bool) -> Mpz {
 }
 
 /// The box of a big `Nat` (`num` = `any::NUM_NAT`) or `Int` (`NUM_INT`),
-/// the borrowed handle `p` (a value the prelude did not box as an
-/// immediate: a `Nat` of 2^63 or more, an `Int` outside the `int32` range):
-/// a leanrt cell holding a new reference (`any::of_mpz`).
+/// a value the prelude did not box as an immediate (a `Nat` of 2^63 or
+/// more, an `Int` outside the box's immediate ranges): a leanrt cell that
+/// takes the owned handle `x` (`any::of_mpz`). The prelude's generic
+/// `l2r_any_of_big` at `Nat` or `Int`, where Reussir passes
+/// `reussir_rt::rcgmp::Mpz` (local patch R2), so there is no retain here
+/// and no release after the call. `T` is `Mpz`.
 #[cold]
 #[inline(never)]
-pub extern "C" fn box_big(p: *mut c_void, num: u64) -> LAny {
-    crate::any::of_mpz(unsafe { retained(p) }, num)
+pub fn box_owned<T>(x: T, num: u64) -> LAny {
+    const { assert!(std::mem::size_of::<T>() == std::mem::size_of::<Mpz>()) };
+    debug_assert!(std::any::type_name::<T>().ends_with("Mpz"), "leanrt: box_owned at {}", std::any::type_name::<T>());
+    let x = std::mem::ManuallyDrop::new(x);
+    crate::any::of_mpz(unsafe { std::mem::transmute_copy::<std::mem::ManuallyDrop<T>, Mpz>(&x) }, num)
 }
 
 /// The handle a big `Nat` or `Int` box of kind `num` holds, as a returned
@@ -166,8 +163,7 @@ mod tests {
     #[test]
     fn box_cell_shared_then_unique() {
         let p = of_text(TWO_100);
-        let a = box_big(p, NUM_NAT);
-        drop(unsafe { Mpz::from_raw(p) });
+        let a = box_owned(unsafe { Mpz::from_raw(p) }, NUM_NAT);
         assert_eq!(a.num(), NUM_NAT);
         let b = a.clone();
         assert!(!a.is_exclusive());
@@ -185,7 +181,7 @@ mod tests {
     #[test]
     fn box_cell_dropped() {
         let p = of_text(b"-340282366920938463463374607431768211456");
-        let a = box_big(p, crate::any::NUM_INT);
+        let a = box_owned((*std::mem::ManuallyDrop::new(unsafe { Mpz::from_raw(p) })).clone(), crate::any::NUM_INT);
         drop(a.clone());
         drop(a);
         assert_eq!(text(p), b"-340282366920938463463374607431768211456");

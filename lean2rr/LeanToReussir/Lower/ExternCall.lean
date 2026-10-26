@@ -219,6 +219,37 @@ def wordReadSym? : String → Option String
   | "lean_string_utf8_at_end" => some "lean_string_utf8_at_end_w"
   | _ => none
 
+/-- The prelude's twin at index words (`_w`) of an update at a `Nat` index
+that a proof keeps below the size (`a.set i x h`, `a.swap i j`,
+`ByteArray.set`), which `bindReadIndex` calls under `--int-backend rcgmp`
+as it calls the reads' twins: one word per `Nat` argument. -/
+def wordUpdateSym? : String → Option String
+  | "lean_array_fset" => some "lean_array_fset_w"
+  | "lean_byte_array_fset" => some "lean_byte_array_fset_w"
+  | "lean_array_fswap" => some "lean_array_fswap_w"
+  | _ => none
+
+/-- The accesses at a `Nat` index that a proof keeps below the size
+(`a[i]'h`, `ByteArray.get`, `a.set i x h`, `ByteArray.set`, `a.swap i j`)
+whose twins at index words (`boundedWordAccesses`) return only for words
+below the size: from 2^63 (`u64::MAX`) the twin is unreachable code, and
+another word at or above the size is the runtime's `index_bug`, both the
+end of the program. After such an access, its index is below the size, so
+far below 2^60, the mask's bound (sizes are bounded by the address space).
+Lower/Code's let-run then uses `l2r_nat_of_index` of
+the word in place of the index (`rebindIndex`). Not the `get!` reads (out
+of range they panic and go on) nor the string reads (a position past the
+end gives a value). -/
+def boundedIndexSyms : List String :=
+  ["lean_array_fget", "lean_array_fget_borrowed", "lean_byte_array_fget",
+   "lean_array_fset", "lean_byte_array_fset", "lean_array_fswap"]
+
+/-- The twins of `boundedIndexSyms` (`lean_array_fget_as_w` is
+`lean_array_fget_w` at a type, `boxWordRead?`). -/
+def boundedWordAccesses : List String :=
+  ["lean_array_fget_w", "lean_array_fget_as_w", "lean_byte_array_fget_w",
+   "lean_array_fset_w", "lean_byte_array_fset_w", "lean_array_fswap_w"]
+
 /-- The call `mk sym args` of the extern `sym`; for a read extern
 (`readExternSyms`), each argument that is a variable passed to a parameter
 of type `Nat` is bound by a `let` first: `let k = i; read(a, k)`. That is
@@ -249,20 +280,45 @@ of a big index (a call) sat between the caller's increment of the container
 and the read's decrement, and LLVM kept both (each read loaded, incremented
 and stored the count, and restored it). With the word, nothing but the read
 follows the container's increment, and the pair cancels. Under `leanrt`
-nothing changes. -/
+nothing changes.
+
+The updates at a proved index (`wordUpdateSym?`: `fset`, `fswap`) get their
+words the same way under rcgmp, one per `Nat` argument. A word of a variable
+that the let-run asks for (`LowerCtx.hoistIndexWords`: the index of a
+`boundedIndexSyms` access, used again after it) is not bound here but given
+to the let-run (`LowerState.indexWords`), which binds it before the `let`
+and, after it, uses the `Nat` of the word in place of the index
+(`rebindIndex`, Lower/Code). -/
 def bindReadIndex (sym : String) (mask : Array Bool) (atVar : Array Bool) (params : Array Expr)
     (args : Array RR.Expr) (mk : String → Array RR.Expr → RR.Expr) : LowerM RR.Expr := do
-  unless readExternSyms.contains sym do return mk sym args
+  let rcgmp := (← read).intBackend == .rcgmp
+  let upd := if rcgmp then wordUpdateSym? sym else none
+  unless readExternSyms.contains sym || upd.isSome do return mk sym args
   let isNat := (mask.zip params).zipIdx.filterMap fun ((m, p), i) =>
     if m then some (!(atVar[i]?.getD false) && p.consumeMData.isConstOf ``Nat) else none
   let natArgs := (List.range args.size).filter fun i => isNat[i]? == some true
-  if (← read).intBackend == .rcgmp then
-    if let (some wsym, [ni]) := (wordReadSym? sym, natArgs) then
+  if rcgmp then
+    let wsym? := match wordReadSym? sym, upd with
+      | some w, _ => if natArgs.length == 1 then some w else none
+      | none, some w => if natArgs.isEmpty then none else some w
+      | none, none => none
+    if let some wsym := wsym? then
       unless (← read).preludeFns.contains wsym do
-        throwError "lean2rr: the prelude has no {wsym}, the read {sym} at an index word (internal error)"
-      let k ← fresh "ix"
-      let args' := args.set! ni (.var k)
-      return .block ⟨#[(k, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[args[ni]!])], mk wsym args'⟩
+        throwError "lean2rr: the prelude has no {wsym}, the access {sym} at an index word (internal error)"
+      let hoist := (← read).hoistIndexWords
+      let mut lets := #[]
+      let mut args' := args
+      for ni in natArgs do
+        let k ← fresh "ix"
+        args' := args'.set! ni (.var k)
+        let a := args[ni]!
+        match a with
+        | .var n =>
+          if hoist.contains n then
+            modify fun s => { s with indexWords := s.indexWords.push (k, n) }
+          else lets := lets.push (k, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[a])
+        | _ => lets := lets.push (k, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[a])
+      return if lets.isEmpty then mk wsym args' else .block ⟨lets, mk wsym args'⟩
   let mut lets := #[]
   let mut args' := #[]
   for (a, i) in args.zipIdx do

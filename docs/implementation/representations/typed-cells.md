@@ -25,11 +25,9 @@ box's payload number) after the take.
   representation (`CellKinds.lean`: `cellKind?`):
   - `bool`, `u8`, `u16`, `u32`, `f32`: `Bool`, `UInt8`, `UInt16`,
     `UInt32` (and `Char`, whose mono type is `UInt32`), `Float32`;
-  - `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (`Nat` and `Int` none
-    under `--int-backend rcgmp` without `--rcgmp-type-args`: `cellKind?`'s
-    `natInt`; `l2r_rc_set_ref<T, R>` passes the old value to the texture
-    `l2r_release_value_then<T, R>`, where Reussir would give it a raw rcgmp
-    handle; [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
+  - `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (under `--int-backend
+    rcgmp` the cell holds Reussir's owned handle, local patch R2;
+    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
   - `I:<name>`: an inductive that the lowering makes a shared record or
     enum (`sharedInductive?`, the function typed arrays use: rule 1 gives
     `List Nat` and `List String` the one type `T_List`);

@@ -70,6 +70,7 @@
 //! constructor by index). leanrt never reads Reussir's representation of a
 //! nullary variant: a box of a Reussir type is always a pointer here.
 
+#[cfg(not(leanrt_rcgmp))]
 use crate::big::LBig;
 use crate::nat::{LInt, LNat};
 use crate::string::LStr;
@@ -892,7 +893,7 @@ fn copy_big<B>(a: &LAny, num: u64) -> B {
 
 /// Under `--int-backend rcgmp`, a big built-in `Nat` (`num` = `NUM_NAT`)
 /// or `Int` (`NUM_INT`) in a box: a cell holding the reference `x`
-/// (`rcgmp::box_big`). The prelude boxes every other value as Lean's
+/// (`rcgmp::box_owned`). The prelude boxes every other value as Lean's
 /// immediate (a `Nat` below 2^63, an `Int` in the `int32` range), tested
 /// in Reussir code; leanrt does not read the handle.
 #[cfg(leanrt_rcgmp)]

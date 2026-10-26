@@ -729,7 +729,7 @@ def refElemTy (typeArgs : Array Expr) : LowerM RR.Ty := do
   let some a := typeArgs[1]? | return RR.Ty.box
   let t ← toMonoTypeKeep a
   let cache ← IO.mkRef (← get).ptrKindCache
-  let k ← cellKind? cache (← read).compactKindsOn (← read).typedKindsOn (← read).natIntTypeArgs t
+  let k ← cellKind? cache (← read).compactKindsOn (← read).typedKindsOn t
   let c ← cache.get
   modify fun s => { s with ptrKindCache := c }
   let some k := k | return RR.Ty.box

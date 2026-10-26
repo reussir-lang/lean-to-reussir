@@ -27,7 +27,7 @@
 #   build prints, and count some conversions.
 #   tests/runtime/conv-count-check.sh [SMALL]   (default 300: RtConvProbeRollback's argument)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
-# L2R_LEAN_TOOLCHAIN, L2R_INT_BACKEND, L2R_RCGMP_TYPE_ARGS).
+# L2R_LEAN_TOOLCHAIN, L2R_INT_BACKEND).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -39,11 +39,9 @@ mkdir -p "$OUT"
 cd "$OUT"
 status=0
 # The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25),
-# under rcgmp with --rcgmp-type-args unless L2R_RCGMP_TYPE_ARGS=0.
+# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
 int_be=${L2R_INT_BACKEND:-rcgmp}
 int_flags=(--int-backend "$int_be")
-if [ "$int_be" = rcgmp ] && [ "${L2R_RCGMP_TYPE_ARGS:-1}" != 0 ]; then int_flags+=(--rcgmp-type-args); fi
 
 # The translation-only programs: no conversion function in their code.
 for t in RtUniformUpdates RtUniformUpdatesJp RtUniformUpdatesMixed RtUniformUpdatesNested \

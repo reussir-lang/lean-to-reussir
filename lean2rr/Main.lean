@@ -17,16 +17,13 @@ structure CliOptions where
   /-- The representation of `Nat` and `Int` (`--int-backend`; NatEncoding;
   the default is `rcgmp`, until 2026-10-25 it was `leanrt`). -/
   intBackend : IntBackend := .rcgmp
-  /-- Whether Reussir passes a `Nat` or `Int` as a type argument of a
-  generic FFI function as an owned handle (`--rcgmp-type-args`, Reussir's
-  local patch R2): only then may `rcgmp` instantiate one at them
-  (`LowerCtx.natIntTypeArgs`). -/
-  rcgmpTypeArgs : Bool := false
 
 def usage : String :=
   "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|opt|rr] [--prelude FILE]\n" ++
   "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
-  "               [--int-backend rcgmp|leanrt (default rcgmp)] [--rcgmp-type-args]\n" ++
+  "               [--int-backend rcgmp|leanrt (default rcgmp)]\n" ++
+  "               (--rcgmp-type-args is accepted and ignored: since 2026-10-25 rcgmp always passes Nat and Int\n" ++
+  "               at type arguments as owned handles, Reussir's local patch R2)\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
   "  may contain non-identifier characters (`rbtree-zipper`) or be written `«rbtree-zipper»`."
@@ -69,7 +66,9 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
     match IntBackend.ofString? b with
     | some ib => parseArgs rest { o with intBackend := ib }
     | none => .error s!"unknown --int-backend '{b}' (supported: leanrt, rcgmp)"
-  | "--rcgmp-type-args" :: rest, o => parseArgs rest { o with rcgmpTypeArgs := true }
+  -- Accepted and ignored (see `usage`); it chose the lowering of `Nat` and
+  -- `Int` at type arguments until 2026-10-25.
+  | "--rcgmp-type-args" :: rest, o => parseArgs rest o
   | "-o" :: f :: rest, o => parseArgs rest { o with output := some f }
   | a :: rest, o =>
     -- An option that takes an argument gets here only without one.
@@ -215,10 +214,6 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
       unless d.small.isEmpty do
         IO.eprintln s!"lean2rr: inline-anchors: {d.small.size} small function(s) left to rrc's inliner over the budget{fmt d.small}"
     pure prog
-  -- `--int-backend rcgmp` without `--rcgmp-type-args`: no `Nat` or `Int`
-  -- left at a type argument of the runtime's generic FFI functions
-  -- (Emit/IntBackendCheck).
-  if cfg.intBackend == .rcgmp && !cfg.rcgmpTypeArgs then intBackendCheck prog
   return prog.render cfg.prunePrelude
 
 def run (opts : CliOptions) (cfg : PassConfig) (module : Name) : IO UInt32 := do
@@ -260,7 +255,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok opts =>
     -- The registry's passes, minus `--disable-opt`, plus `--enable-opt`
     -- (the names are checked first, also for `--list-opts`).
-    let cfg ← match Opt.config opts.disabled opts.enabled opts.intBackend opts.rcgmpTypeArgs with
+    let cfg ← match Opt.config opts.disabled opts.enabled opts.intBackend with
       | .ok cfg => pure cfg
       | .error e =>
         IO.eprintln s!"lean2rr: {e}"

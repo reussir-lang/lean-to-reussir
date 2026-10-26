@@ -6,7 +6,7 @@
 # add Σ (calls in g - 1) x size; while that is over 4000, the callee that
 # adds the most is anchored. Translation only (`lean2rr --emit rr`, no Reussir build), under
 # both representations of `Nat` and `Int`:
-# - RtJpWide with `--int-backend rcgmp --rcgmp-type-args`: its 800-arm
+# - RtJpWide with `--int-backend rcgmp`: its 800-arm
 #   `match` is one function (`int-match`) whose arms call three outlined join
 #   points (J3) about 266 times each: those three `jp_` functions are
 #   `#[transform_anchor]`, and no other `jp_` is;
@@ -150,8 +150,8 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
   before=$fails
   for be in rcgmp leanrt; do
     # Each representation named (rcgmp is lean2rr's default since
-    # 2026-10-25), rcgmp in scripts/l2r.py's mode (--rcgmp-type-args).
-    flags=(--int-backend $be); [ $be = rcgmp ] && flags+=(--rcgmp-type-args)
+    # 2026-10-25).
+    flags=(--int-backend $be)
     R=$OUT/$be.rr
     if ! translate "$R" "${flags[@]}"; then fail "$be did not translate (see $R.log)"; continue; fi
     want=0
@@ -176,7 +176,7 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
   if [ $P = RtJpWide ]; then
     # Self-check: without anchors the check of the .rr must fail.
     R=$OUT/noanchors.rr
-    if ! L2R_NO_INLINE_ANCHORS=1 translate "$R" --int-backend rcgmp --rcgmp-type-args; then
+    if ! L2R_NO_INLINE_ANCHORS=1 translate "$R" --int-backend rcgmp; then
       fail "L2R_NO_INLINE_ANCHORS: did not translate (see $R.log)"
     else
       saved_status=$status saved_fails=$fails

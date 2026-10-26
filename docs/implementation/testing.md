@@ -16,18 +16,14 @@ Paths are relative to the repository root.
   since 2026-10-25 (before, `leanrt`). The scripts that call lean2rr
   directly (`determinism-check.sh`, `prelude-liveness-check.sh`,
   `conv-count-check.sh`, `paynothing-check.sh`, `any-probe.sh`) pass what
-  scripts/l2r.py passes (`int_flags`): `--int-backend`, and under rcgmp
-  `--rcgmp-type-args` unless `L2R_RCGMP_TYPE_ARGS=0`. The scripts that
+  scripts/l2r.py passes (`int_flags`): `--int-backend`. The scripts that
   test one representation, or both, name it: `nat-alloc-check.sh`
   always builds with `L2R_INT_BACKEND=leanrt`; `int-backend-check.sh`,
   `int-match-check.sh` and `inline-anchors-check.sh` give each
   translation its `--int-backend`; `leanrt-unit.sh` builds and runs the
   crate's tests for both representations unless `L2R_INT_BACKEND` names
   one.
-- **Why:** lean2rr's own `--rcgmp-type-args` is off unless given (its
-  guard mode needs no Reussir patch R2), so a direct call with only
-  `--int-backend rcgmp` checks another lowering than the builds use.
-  `nat-alloc-check.sh` counts leanrt's big numbers, which only the leanrt
+- **Why:** `nat-alloc-check.sh` counts leanrt's big numbers, which only the leanrt
   representation makes. `int-match-check.sh` and `inline-anchors-check.sh`
   translated their leanrt side without `--int-backend`: with the new
   default that side would have been rcgmp. The crate's unit tests run

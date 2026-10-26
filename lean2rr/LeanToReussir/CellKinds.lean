@@ -18,11 +18,8 @@ two element types of one kind that can be one type (`List Nat` and
 * `bool`, `u8`, `u16`, `u32`, `f32`: `Bool`, `UInt8`, `UInt16`, `UInt32`
   (and `Char`, whose mono type is `UInt32`), `Float32`, the scalars that a
   box holds as an immediate;
-* `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (`Nat` and `Int` only with
-  `natInt`: not under `--int-backend rcgmp` without `--rcgmp-type-args`,
-  where the references' glue would pass a raw rcgmp handle at a texture's
-  type argument, `l2r_rc_set_ref`'s `l2r_release_value_then<T, R>`;
-  `isFfiTypeArgTy`);
+* `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (under `--int-backend rcgmp`
+  a typed cell of `Nat` holds Reussir's owned handle, local patch R2);
 * `I:<name>`: an inductive the lowering makes a shared record or enum
   (`sharedInductive?`, as for typed arrays);
 * `A(<s>)`: an `Array Y`, where `s` is the storage of `Y` in the array as
@@ -44,10 +41,9 @@ open Lean Compiler LCNF
 
 /-- The cell kind of mono type `t` (see the module comment), given the
 storage kinds whose arrays are compact (`compactOn`) and the pointer kinds
-whose arrays are typed (`typedOn`); `Nat` and `Int` have one only with
-`natInt` (`LowerCtx.natIntTypeArgs`). `cache` is `ptrKind?`'s. -/
+whose arrays are typed (`typedOn`). `cache` is `ptrKind?`'s. -/
 partial def cellKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (compactOn : Array String)
-    (typedOn : Std.HashSet String) (natInt : Bool) (t : Expr) : CoreM (Option String) := do
+    (typedOn : Std.HashSet String) (t : Expr) : CoreM (Option String) := do
   let t := t.consumeMData.headBeta
   if t.isForall then return none
   let .const n _ := t.getAppFn | return none
@@ -58,8 +54,8 @@ partial def cellKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (compa
   | ``UInt32 => return some "u32"
   | ``Float32 => return some "f32"
   | ``UInt64 | ``USize | ``Float => return none
-  | ``Nat => return if natInt then some "Nat" else none
-  | ``Int => return if natInt then some "Int" else none
+  | ``Nat => return some "Nat"
+  | ``Int => return some "Int"
   | ``String => return some "LStr"
   | ``Array =>
     unless t.getAppNumArgs == 1 do return none
@@ -68,10 +64,10 @@ partial def cellKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (compa
     let s ← match ← scalarKind? cache e with
       | some k => pure (if compactOn.contains k then k else "box")
       | none =>
-        match ← ptrKind? cache e natInt with
+        match ← ptrKind? cache e with
         | some k =>
           if typedOn.contains k then
-            match ← cellKind? cache compactOn typedOn natInt e with
+            match ← cellKind? cache compactOn typedOn e with
             | some c => pure c
             | none => pure "box"
           else pure "box"

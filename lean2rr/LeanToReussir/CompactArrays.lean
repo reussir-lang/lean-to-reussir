@@ -96,15 +96,13 @@ structure CACtx where
   /-- Pointer kinds too (optimization `typed-arrays`), not only storage
   kinds. -/
   ptr : Bool
-  /-- Whether `Nat` and `Int` have pointer kinds (`ptrKind?`). -/
-  natInt : Bool
 
 abbrev CAM := ReaderT CACtx (StateRefT CAState CoreM)
 
 /-- The kind of array element type `t` (`elemKind?`); a pointer kind
 records `t` for the check of its releases. -/
 def CAM.kindOf (t : Expr) : CAM (Option String) := do
-  let r ← elemKind? (← read).cache t (← read).ptr (← read).natInt
+  let r ← elemKind? (← read).cache t (← read).ptr
   if let some k := r then
     if isPtrKind k then
       let t := keyTy t
@@ -312,7 +310,7 @@ compact array (a crossing, `compactArrayKinds`). With `ptr`
 (`typed-arrays`), also the pointer kinds each inductive's field is
 instantiated with (`Subarray String`: `LStr`), apart: such a field is a
 box when some pointer kind stays on (`compactArrayKinds`). -/
-partial def arrayFieldInductives (decls : Array (Decl .pure)) (ptr : Bool := false) (natInt : Bool := true) :
+partial def arrayFieldInductives (decls : Array (Decl .pure)) (ptr : Bool := false) :
     CoreM (NameSet × Std.HashMap Name (Array String)) := do
   let env ← getEnv
   let cache ← IO.mkRef ({} : Std.HashMap Name (Option String))
@@ -349,7 +347,7 @@ partial def arrayFieldInductives (decls : Array (Decl .pure)) (ptr : Bool := fal
               out.modify (·.insert iv.name)
               return
             if ptr then
-              if let some k ← ptrKind? cache e natInt then
+              if let some k ← ptrKind? cache e then
                 let ks := (← ptrOut.get).getD iv.name #[]
                 unless ks.contains k do ptrOut.modify (·.insert iv.name (ks.push k))
     | _ => pure ()
@@ -673,10 +671,9 @@ structure CAResult where
 /-- One run of the check (see `compactArrayKinds`). Without `ptr`, the
 storage kinds and the fields boxed for them. With `ptr`, the pointer kinds
 too, with `scalarBoxed` the fields that the first run boxed; `boxed` then
-holds only the fields boxed for a pointer kind that stays on. Without
-`natInt`, `Nat` and `Int` have no pointer kind (`ptrKind?`). -/
+holds only the fields boxed for a pointer kind that stays on. -/
 def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (inits : Array (Name × Name))
-    (roots : Array Name) (ptr : Bool) (scalarBoxed : NameSet := {}) (natInt : Bool := true) :
+    (roots : Array Name) (ptr : Bool) (scalarBoxed : NameSet := {}) :
     CoreM CAResult := do
   if let some n := casts then
     return { off := compactKinds.map fun k => (k, s!"the program can cast ({n})") }
@@ -698,7 +695,7 @@ def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (ini
   -- (The boxed fields from every declaration: the lowering lowers the
   -- unreachable ones too, and a boxed field there removes a crossing that
   -- would lower to a panic.)
-  let (boxedScalar0, ptrFields) ← arrayFieldInductives decls ptr natInt
+  let (boxedScalar0, ptrFields) ← arrayFieldInductives decls ptr
   -- (The second run takes the first run's boxed fields as they are.)
   let boxedScalar := if ptr then scalarBoxed else boxedScalar0
   -- A field instantiated with a pointer kind is a box during the check;
@@ -754,7 +751,7 @@ def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (ini
           CAM.turnOff (some k) s!"its elements ({t}) may hold a value of type {u}, whose release the program can observe"
           break
   let cache ← IO.mkRef {}
-  let ((), st) ← (act.run { cache, ptr, natInt }).run {}
+  let ((), st) ← (act.run { cache, ptr }).run {}
   let on := compactKinds.filter fun k => !st.off.contains k
   let seen := (st.ptrElems.toArray.map (·.1)).qsort (· < ·)
   let ptrOn := seen.filter fun k => !st.off.contains k
@@ -785,15 +782,12 @@ turn storage kinds off that stay on without typed arrays (lean-regex's
 kinds (`A(s)`, `A(box)`) off, so the outer arrays hold boxes where the
 first run assumed them; a field boxed for a pointer kind holds only
 arrays of pointer kinds or of boxes, which the first run's `Array lcAny`
-field held too. Without `natInt` (`--int-backend rcgmp` without
-`--rcgmp-type-args`, `LowerCtx.natIntTypeArgs`), `Nat` and `Int` have no
-pointer kind (`ptrKind?`): their arrays hold boxes, and an `Array (Array
-Nat)` is of kind `A(box)`. -/
+field held too. -/
 def compactArrayKinds (decls : Array (Decl .pure)) (casts : Option Name) (inits : Array (Name × Name))
-    (roots : Array Name) (ptr : Bool := false) (natInt : Bool := true) : CoreM CAResult := do
+    (roots : Array Name) (ptr : Bool := false) : CoreM CAResult := do
   let r ← compactArrayKindsRun decls casts inits roots false
   unless ptr do return r
-  let p ← compactArrayKindsRun decls casts inits roots true r.boxed natInt
+  let p ← compactArrayKindsRun decls casts inits roots true r.boxed
   return { r with ptrOn := p.ptrOn, ptrOff := p.ptrOff,
                   boxed := p.boxed.toList.foldl (fun s n => s.insert n) r.boxed }
 
@@ -864,7 +858,7 @@ String` maps with every kind off allocated 96 bytes per element, native
 and the `let`s of `dst` and of the source's size go. Splits for a storage
 kind stay, as before typed arrays. The program changes, so the caller
 runs the check again; the number of entries changed is returned. -/
-partial def revertPtrSplits (decls : Array (Decl .pure)) (ca : CAResult) (natInt : Bool) :
+partial def revertPtrSplits (decls : Array (Decl .pure)) (ca : CAResult) :
     CoreM (Array (Decl .pure) × Nat) := do
   let byName : Std.HashMap Name (Decl .pure) := decls.foldl (fun m d => m.insert d.name d) {}
   let on : Std.HashSet String := (ca.on ++ ca.ptrOn).foldl (·.insert ·) {}
@@ -890,7 +884,7 @@ partial def revertPtrSplits (decls : Array (Decl .pure)) (ca : CAResult) (natInt
       if (← holdsCompactKind cache α) || (← holdsCompactKind cache β) then pure none else
       let mut ok := true
       for t in [α, β] do
-        if let some k ← elemKind? cache t true natInt then
+        if let some k ← elemKind? cache t true then
           if on.contains k then ok := false
       pure (if ok then some (f, i, ps.size) else none)
     memo.modify (·.insert sn r)

@@ -22,11 +22,8 @@ drop (below), the program runs 493 M instructions instead of 602 M
   an element type, so that two element types of one kind have one
   representation (`ArrayKinds.lean`: `ptrKind?`, `elemKind?`,
   `sharedInductive?`):
-  - `Nat`, `Int`: `Nat`, `Int` (their words, `RVec<Nat>`); none under
-    `--int-backend rcgmp` without `--rcgmp-type-args` (`ptrKind?`'s
-    `natInt`: Reussir would pass a raw rcgmp handle at the array
-    functions' type argument and release it after the call; an `Array Nat`
-    then holds boxes and an `Array (Array Nat)` is of kind `A(box)`;
+  - `Nat`, `Int`: `Nat`, `Int` (their words, `RVec<Nat>`; under
+    `--int-backend rcgmp` Reussir's owned handles, local patch R2;
     [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
   - `LStr`: `String`;
   - `I:<name>`: an inductive that the lowering makes a shared record or

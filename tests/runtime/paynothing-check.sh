@@ -29,7 +29,7 @@
 # runtime test (tests/runtime/NAME.lean, run with NAME.args).
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME, L2R_DISABLE_OPTS / L2R_ENABLE_OPTS,
-# L2R_INT_BACKEND, L2R_RCGMP_TYPE_ARGS, L2R_RRC_FLAGS); PAYNOTHING_STRICT.
+# L2R_INT_BACKEND, L2R_RRC_FLAGS); PAYNOTHING_STRICT.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -52,11 +52,9 @@ for o in ${dis[@]+"${dis[@]}"}; do [ -n "$o" ] && opts+=(--disable-opt "$o"); do
 IFS=, read -r -a ena <<< "${L2R_ENABLE_OPTS:-}"
 for o in ${ena[@]+"${ena[@]}"}; do [ -n "$o" ] && opts+=(--enable-opt "$o"); done
 # The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25),
-# under rcgmp with --rcgmp-type-args unless L2R_RCGMP_TYPE_ARGS=0.
+# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
 int_be=${L2R_INT_BACKEND:-rcgmp}
 int_flags=(--int-backend "$int_be")
-if [ "$int_be" = rcgmp ] && [ "${L2R_RCGMP_TYPE_ARGS:-1}" != 0 ]; then int_flags+=(--rcgmp-type-args); fi
 opts+=("${int_flags[@]}")
 # The baseline file's suffix for the representation (NAME.fp, NAME.leanrt.fp).
 sfx=.fp; [ "$int_be" = leanrt ] && sfx=.leanrt.fp

@@ -18,7 +18,7 @@
 # run.sh builds and runs every runtime test with the pass on (the default).
 #   tests/runtime/prelude-liveness-check.sh
 # Environment: as run.sh (L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN,
-# L2R_INT_BACKEND, L2R_RCGMP_TYPE_ARGS).
+# L2R_INT_BACKEND).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -34,11 +34,9 @@ t=RtIO
 cp "$HERE/$t.lean" .
 lean -o "$t.olean" "$t.lean" > lean.log 2>&1 || { echo "FAIL prelude-liveness: lean (see $OUT/lean.log)"; exit 1; }
 # The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25),
-# under rcgmp with --rcgmp-type-args unless L2R_RCGMP_TYPE_ARGS=0.
+# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
 int_be=${L2R_INT_BACKEND:-rcgmp}
 int_flags=(--int-backend "$int_be")
-if [ "$int_be" = rcgmp ] && [ "${L2R_RCGMP_TYPE_ARGS:-1}" != 0 ]; then int_flags+=(--rcgmp-type-args); fi
 # translate OUT.rr [lean2rr flags]
 translate() {
   local o=$1; shift

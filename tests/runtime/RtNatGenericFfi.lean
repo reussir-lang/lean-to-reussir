@@ -2,11 +2,10 @@
 through its generic functions: computed constants (a once-cell each),
 `dbgTraceIfShared` at `Nat` (a polymorphic extern whose `α` is `Nat`),
 references, thunks and tasks of `Nat`, and arrays of `Nat` and `Int`
-(typed arrays: `RVec<Nat>` under `--int-backend leanrt`; under `rcgmp`
-without Reussir's patch R2 (`--rcgmp-type-args`) a `Nat` or `Int` is never
-a type argument of the runtime's FFI functions, so these go through a
-wrapper record or a box: `isFfiTypeArgTy`, IntBackendCheck). Small and big
-values, each released and shared. -/
+(typed arrays: `RVec<Nat>`; under `--int-backend rcgmp` the runtime's FFI
+functions hold Reussir's owned handles at `Nat`/`Int`, Reussir's patch
+R2: `isFfiTypeArgTy`). Small and big values, each released and
+shared. -/
 
 @[noinline] def grow (n : Nat) : Nat := n * n + 1
 

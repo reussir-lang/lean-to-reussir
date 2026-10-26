@@ -192,22 +192,18 @@ structure LowerCtx where
   unboxed by `l2r_any_as_nat`/`_int` and `l2r_any_raw_take_nat`/`_int`
   (`boxValue`, `boxUnboxWith`, `boxTake`). -/
   intBackend : IntBackend := .rcgmp
-  /-- Whether a `Nat` or `Int` may be a type argument of a generic FFI
-  function of the prelude, or the element of an `RVec`, `LRef` or `LCell`
-  (`isFfiTypeArgTy`): always under `leanrt` (a counted word); under
-  `rcgmp` only with `--rcgmp-type-args` (Reussir's local patch R2, an owned
-  handle there). Without it rcgmp's texture glue would give the generic
-  function the raw handle at such a type argument and release it after the
-  call, so a value the function keeps (a once-cell's, an array's element)
-  would be released twice; the check `IntBackendCheck` stops lean2rr if
-  one is left. -/
-  natIntTypeArgs : Bool := true
   /-- Whether a chain of tests `Nat.decEq n k` (`Nat.beq`, `Int.decEq`)
   of one `Nat` or `Int` against literals is one Reussir `match` on `n` with
   an arm per literal (`PassConfig.intMatch`; optimization `int-match`,
   Lower/IntMatch). A `cases` on a `Nat` or `Int`, which Stage 2 keeps only
   with it, is always such a `match`. -/
   intMatch : Bool := false
+  /-- The variables (Reussir names) whose index word `bindReadIndex` gives
+  to the `let` being lowered instead of binding it in the access's block
+  (`LowerState.indexWords`): the `Nat` arguments, used again later, of an
+  access that a proof keeps in range (`boundedIndexSyms`; Lower/Code's
+  let-run, under rcgmp only). Empty everywhere else. -/
+  hoistIndexWords : Std.HashSet String := {}
 
 /-- How the target of a function value is called with all its arguments
 (data, so that the lowering state can hold it; see Lower's
@@ -479,6 +475,10 @@ structure LowerState where
   /-- The once-cell accessors of the placeholders that `take` stores into
   typed cells when `placeholder-cache` is off (`cellZero`), by type. -/
   cellZeroFns : Std.HashMap RR.Ty String := {}
+  /-- The index words that `bindReadIndex` gave to the `let` being lowered
+  (`LowerCtx.hoistIndexWords`): the word's name and the variable it is the
+  word of, in order. Lower/Code's let-run binds them before the `let`. -/
+  indexWords : Array (String × String) := #[]
   counter : Nat := 0
   /-- The state of `conv-liveness` (Lower/Live; unused without it). -/
   live : LiveState := {}
@@ -645,33 +645,20 @@ def isBoundaryTy (t : RR.Ty) : LowerM Bool := do
   | .fn .. => return true
   | .cls .. => return false
 
-/-- Whether Reussir type `t` mentions `Nat` or `Int` other than in a
-type of the program (a record's field, a function value's enum). -/
-partial def mentionsNatInt (t : RR.Ty) : Bool :=
-  match t with
-  | .named n => n == "Nat" || n == "Int"
-  | .app _ args => args.any mentionsNatInt
-  | .fn .. => false
-  | .cls d c => mentionsNatInt d || mentionsNatInt c
-
 /-- Types that may be a type argument of the prelude's generic FFI
 functions (`l2r_once_put<T>`, a polymorphic extern's `T`): those of
-`isBoundaryTy`, except, when `LowerCtx.natIntTypeArgs` is off (`rcgmp`
-without `--rcgmp-type-args`), a type that mentions `Nat` or `Int`
-(`Nat` itself, `RVec<Nat>`). Reussir passes such a value to the FFI
-function as a raw handle there and releases it after the call, so the
-function could not keep it. A parameter declared `Nat` is fine
-(`isBoundaryTy`: a borrowed handle). -/
-def isFfiTypeArgTy (t : RR.Ty) : LowerM Bool := do
-  if !(← read).natIntTypeArgs && mentionsNatInt t then return false
-  isBoundaryTy t
+`isBoundaryTy`. Under `--int-backend rcgmp` a `Nat` or `Int` there is
+Reussir's owned handle (`reussir_rt::rcgmp::Mpz`, local patch R2), which
+the function may keep. (Until 2026-10-25 a lowering for measurements,
+without `--rcgmp-type-args`, kept `Nat` and `Int` out of these
+positions.) -/
+def isFfiTypeArgTy (t : RR.Ty) : LowerM Bool := isBoundaryTy t
 
 /-- The type a runtime cell (a once-cell of a constant, `onceCell`; a
 polymorphic extern's value of a type parameter) stores values of Reussir
 type `t` as, and whether it wraps them: a type that cannot be a type
 argument of the prelude's FFI functions (`isFfiTypeArgTy`) is wrapped in
-a one-field shared struct `ElemBox` (also a `Nat` or `Int` under `rcgmp`
-without `--rcgmp-type-args`). -/
+a one-field shared struct `ElemBox`. -/
 def cellStorage (t : RR.Ty) : LowerM (RR.Ty × Bool) := do
   if ← isFfiTypeArgTy t then return (t, false)
   let key := #[t, .named "__elem_box"]
@@ -1135,8 +1122,10 @@ box, and unboxing a box's word that owns its reference (`l2r_any_of_nat`,
 a `Nat` below 2^63 and an `Int` in the `int32` range are immediates,
 tested in Reussir code, and a bigger value is a leanrt cell of kind `n`
 holding the rcgmp reference. The generic `l2r_any_of<T>`/`l2r_any_as<T>`
-would receive a raw handle at `T := Nat` and could not test it (and the
-FFI releases a value at a type argument after the call: `isFfiTypeArgTy`).
+would receive the handle at `T := Nat` and could not tell a small value
+(leanrt's `generic_mpz_box`). A big value's cell takes the owned handle
+(the prelude's `l2r_any_of_big<Nat>`: no retain and no release around the
+box).
 `none` under `leanrt` (the generic functions) and for any other kind. -/
 def natIntBoxFns? (n : Nat) : LowerM (Option (String × String × String)) := do
   if (← read).intBackend != .rcgmp then return none
@@ -2046,7 +2035,7 @@ mutual
   that both name one kind), cached in `LowerState.ptrKindCache`. -/
   partial def arrayPtrKindOf (t : Expr) : LowerM (Option String) := do
     let cache ← IO.mkRef (← get).ptrKindCache
-    let k ← ptrKind? cache t (← read).natIntTypeArgs
+    let k ← ptrKind? cache t
     let c ← cache.get
     modify fun s => { s with ptrKindCache := c }
     return k

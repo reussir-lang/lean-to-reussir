@@ -64,7 +64,7 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
     1/2 and Lean's immediates through the prelude's non-generic
     `l2r_any_of_nat`/`_int`, `l2r_any_as_nat`/`_int` and
     `l2r_any_raw_take_nat`/`_int`, `natIntBoxFns?`, a bigger value being a
-    leanrt cell that holds the rcgmp reference:
+    leanrt cell that takes the owned rcgmp reference, `l2r_any_of_big<T>`:
     [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
     a compact array (`compact-arrays`,
     [compact-arrays.md](compact-arrays.md)) by its storage: `RVec<u8>` 7
@@ -299,8 +299,9 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   taken at `T` (`l2r_any_take_as`). Only without `slow` (a program that
   casts reads other payloads through the generated function, which needs
   the box), and not at `Nat` or `Int` under `--int-backend rcgmp` (the
-  `_as<T>` reads would take a raw rcgmp handle at `T`; the check
-  `IntBackendCheck` refuses such a read). `boxUnboxed?` folds the boxing of such a read back into the
+  `_as<T>` reads end in the generic `l2r_any_as<T>`, which cannot tell a
+  small value at `T := Nat`; such a box is read by the prelude's
+  `l2r_any_as_nat`/`_int`, `natIntBoxFns?`). `boxUnboxed?` folds the boxing of such a read back into the
   read of the box.
 - **Why:** The read copied the element (`LAny::clone`: a test of bit 0,
   an increment for a pointer) and the unboxing tested bit 0 again (review

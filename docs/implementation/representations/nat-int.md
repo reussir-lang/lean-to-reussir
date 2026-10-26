@@ -198,6 +198,35 @@ D8).
     (the lowering's entry below). `lean_array_fget_as_w` and
     `lean_array_get_as_w` (in the rcgmp blocks too) are the reads at a type
     (`boxWordRead?`) of `lean_array_fget_w` and `lean_array_get_w`.
+  - A read whose position or index a proof keeps in range (`get'`,
+    `next'`, at an index word or at a `Nat`) tests it inside the read,
+    after the read's release decision (`l2r_string_get_fast_k`,
+    `l2r_string_next_fast_k`; as the leanrt backend's word reads): tested in
+    front of it, the unreachable branch's call came between the caller's
+    increment of the string and the read's decrement, and LLVM kept both
+    (2 stores and about 4 instructions per character of a `String.map`).
+    `l2r_index_of_nat` (`fset`, `fswap`) and `String.set` take the index
+    with one test: the flag of the truncation to `i64`, set exactly from
+    2^63 (through `l2r_nat_raw`, bit 63 was tested twice). Run 14's
+    profile: X07 300.1 to 275.1 million instructions (-8.3%), L17 14.76 to
+    14.31 G (-3.1%).
+  - Updates at an index word: `lean_array_fset_w`, `lean_byte_array_fset_w`
+    and `lean_array_fswap_w` (rcgmp blocks) are `Array.set`,
+    `ByteArray.set` and `Array.swap` at words: a word from 2^63 is
+    unreachable code (`l2r_index_of_word`, as `l2r_index_of_nat`), another
+    word at or above the size the update's `index_bug`. With `fget_w`, its
+    read at a type and `ByteArray`'s `fget_w`, they return only for words
+    below the size. After one returned, `l2r_nat_of_index(k)` is the index
+    as a `Nat`: the word masked to 60 bits (`k` is below the size, far
+    below 2^60, the mask's bound: sizes are bounded by the address space),
+    so LLVM knows that the value is an immediate and that a small
+    constant added to it stays one (no tag test, no overflow path; the
+    61-bit mask of `l2r_nat_size` leaves `i + 1` an overflow path, because
+    2^61 is past the immediates). The lowering's entry below
+    (`rebindIndex`). Under rcgmp the lowering calls these for every
+    `fset`, `fswap` and `ByteArray` `fset`, so `l2r_index_of_nat`'s rcgmp
+    twin serves its other callers (`FloatArray.set`, `String.extract`'s
+    fast path).
   - Boxes stay Lean's: a `Nat` below 2^63 and an `Int` in the `int32` range
     are immediates (`l2r_any_of_nat`, `l2r_any_of_int`, tested in Reussir
     code); a bigger value is a leanrt cell of kind 1 or 2 that holds an
@@ -206,6 +235,15 @@ D8).
     immediate in Reussir code. The lowering calls these four for the box
     kinds 1 and 2 under rcgmp (a generic texture at `Nat` gets the raw
     handle, so it cannot test a small value).
+  - A big value's cell takes the owned handle: `l2r_any_of_nat` and
+    `l2r_any_of_int` call the generic `l2r_any_of_big<Nat>`/`<Int>` on
+    their heap path, where Reussir passes `reussir_rt::rcgmp::Mpz` (local
+    patch R2), and `leanrt::rcgmp::box_owned` puts it in the cell as it is:
+    no retain in leanrt and no release after the call. Until 2026-10-25 a
+    non-generic texture got the borrowed handle, retained it, and Reussir
+    released it after the call (L10, run 14: 2.3% of its instructions,
+    rcgmp/leanrt 1.056 to 1.032). Tests `RtNatBoxBig` (with
+    tests/runtime/int-backend-check.sh) and `RtBoxBigReuse` (peak memory).
   - leanrt's part is `leanrt::rcgmp` (`--cfg leanrt_rcgmp`): the box cells
     (of `reussir_rt::rcgmp::Mpz`, the owned handle that local Reussir patch
     R2 renders at polyffi type arguments, re-exported), decimal text
@@ -274,23 +312,21 @@ D8).
   default until 2026-10-25) translates every program to the same `.rr` as
   before step D (the prelude after its leanrt blocks are kept).
   - **Options.** `--int-backend rcgmp|leanrt` (`Main.lean`; scripts:
-    `L2R_INT_BACKEND`) and `--rcgmp-type-args` (Reussir's local patch R2
-    is there: a `Nat` or `Int` at a type argument of a generic FFI function
-    is an owned handle). Both are in `PassConfig` (`intBackend`,
-    `rcgmpTypeArgs`), set before the optional passes are installed, in
-    `MonoConfig.intBackend` and in `LowerCtx` (`intBackend`,
-    `natIntTypeArgs`: true under leanrt or with `--rcgmp-type-args`).
+    `L2R_INT_BACKEND`), in `PassConfig.intBackend` (set before the
+    optional passes are installed), `MonoConfig.intBackend` and
+    `LowerCtx.intBackend`. Under rcgmp a `Nat` or `Int` at a type argument
+    of a generic FFI function is Reussir's owned handle (local patch R2,
+    which scripts/l2r.py requires). `--rcgmp-type-args` is accepted and
+    ignored: until 2026-10-25 it chose this lowering, and without it a
+    lowering for measurements (guard mode) kept `Nat` and `Int` out of
+    type arguments, with a check of its own (`Emit/IntBackendCheck`).
   - **Defaults.** Since 2026-10-25 `rcgmp` is the default of
     `--int-backend` (`CliOptions`, `PassConfig`, `MonoConfig`, `LowerCtx`,
     `Opt.config`) and of `L2R_INT_BACKEND` (scripts/l2r.py, run.sh and the
     check scripts: unset or empty is `rcgmp`); before, it was `leanrt`.
-    scripts/l2r.py always passes `--int-backend`, and under rcgmp also
-    `--rcgmp-type-args` (unless `L2R_RCGMP_TYPE_ARGS=0`). lean2rr's own
-    `--rcgmp-type-args` stays off unless given, so `lean2rr` called
-    without options lowers in the guard mode below, which needs no patch
-    R2. The check scripts that call lean2rr directly pass what
-    scripts/l2r.py passes (`int_flags`); those that test one
-    representation name it.
+    scripts/l2r.py always passes `--int-backend`. The check scripts that
+    call lean2rr directly pass what scripts/l2r.py passes (`int_flags`);
+    those that test one representation name it.
   - **Prelude blocks.** `filterIntBackend` (`NatEncoding.lean`) keeps the
     chosen backend's blocks and drops the marker lines, right after the
     prelude is read (`Main.pipeline`), so Stage 1's list of prelude
@@ -335,30 +371,12 @@ D8).
     evaluated.
     `Lower/Live` counts `l2r_any_of_nat` as payload `b1` and
     `l2r_any_of_int` as `b2`.
-  - **No `Nat` or `Int` at the FFI's type arguments** (without
-    `--rcgmp-type-args`). `isFfiTypeArgTy` (LowerBase) is `isBoundaryTy`
-    minus the types that mention `Nat` or `Int`; `cellStorage` uses it,
-    so a once-cell of a computed `Nat` constant (`onceCell`) and a
-    polymorphic extern's value at `α := Nat` (`lowerExternCall`) go
-    through an `ElemBox` record, which holds the integer as a field.
-    `ArrayKinds.ptrKind?` gives `Nat` and `Int` no pointer kind
-    (`natInt`; also in the whole-program check, the typed `map` loops
-    and the lowering's `arrayPtrKindOf`), so an `Array Nat` holds boxes
-    and an `Array (Array Nat)` is of kind `A(box)`. `CellKinds.cellKind?`
-    gives them no cell kind either (`typed-cells`: a reference of `Nat`
-    keeps its cell of boxes; the glue `l2r_rc_set_ref<T, R>` passes the
-    old value to the texture `l2r_release_value_then<T, R>`). Thunks and
-    tasks hold boxes anyway.
-  - **The check.** `Emit/IntBackendCheck.lean` (`intBackendCheck`, run
-    by `Main.pipeline` on the finished program under rcgmp without
-    `--rcgmp-type-args`) stops lean2rr with an internal error at any call
-    of a generic FFI function of the prelude whose type argument mentions
-    `Nat` or `Int` (also through a plain generic prelude function that
-    passes the type parameter on, `ffiTypeParams`: `lean_array_fget_as<T>`
-    calls `l2r_view_take_as<T>`), and at any `RVec`, `LRef` or `LCell` of
-    them, in the generated items and in the prelude's text. Test hook:
-    `L2R_TEST_NAT_TYPE_ARGS=1` lowers as with `--rcgmp-type-args` but
-    keeps the check on (`tests/runtime/int-backend-check.sh`).
+  - **`Nat` and `Int` at the FFI's type arguments.** `isFfiTypeArgTy`
+    (LowerBase) is `isBoundaryTy`: a once-cell of a computed `Nat`
+    constant (`onceCell`), a polymorphic extern's value at `α := Nat`
+    (`lowerExternCall`), the typed arrays (`ArrayKinds.ptrKind?`) and the
+    typed cells (`CellKinds.cellKind?`) of `Nat` and `Int` hold Reussir's
+    owned handles. Thunks and tasks hold boxes.
   - **Reads at an index word.** `bindReadIndex` (`Lower/ExternCall.lean`)
     calls the prelude's `_w` twin of a read at a `Nat` index or position
     (`wordReadSym?`: `Array` `fget`/`get!` and their `_borrowed` symbols,
@@ -403,14 +421,81 @@ D8).
     and converting only where the container is retained around the read
     does not tell X07 from Z01c (both containers are used after the
     read). rcgmp has no test of an immediate that Reussir code could use
-    to keep the big path apart. Under leanrt nothing changes (the `.rr`
-    is byte-identical). `tests/runtime/int-backend-check.sh` checks the
-    shape on `RtNatIdxWord`: every `_w` read called, each after its
+    to keep the big path apart; after a proved access the code uses the
+    word's value instead (`rebindIndex`, below). Under leanrt nothing
+    changes (the `.rr` is byte-identical).
+    `tests/runtime/int-backend-check.sh` checks the shape on
+    `RtNatIdxWord`: every `_w` read called, each after its
     `l2r_nat_index`, and no read at a `Nat` that has a twin. A read whose
     `Nat` arguments are not exactly one would keep the `Nat` read without
     a message, and RtNatIdxWord's output is the same either way.
-- **Why:** Reussir renders a built-in integer at a polyffi type argument
-  as the raw handle and releases it after the call (its `rcgmp_handle`
+  - **The index after a proved access** (`rebindIndex`). The updates at a
+    proved index get index words too (`wordUpdateSym?`: `Array.set`,
+    `ByteArray.set`, `Array.swap` call `lean_array_fset_w`,
+    `lean_byte_array_fset_w`, `lean_array_fswap_w`, one word per `Nat`
+    argument). An access at a `Nat` index that a proof keeps below the
+    size (`boundedIndexSyms`: `a[i]'h` and its `_borrowed` symbol,
+    `ByteArray.get`, those three updates) returns only when each word is
+    below the size, so after it the index is the word. When the index is a
+    variable that the code after the access uses (`indexWordsWanted`:
+    `hasFVar` on the `let`'s continuation), the let-run (`Lower/Code`)
+    asks `bindReadIndex` for the word instead of its block
+    (`LowerCtx.hoistIndexWords`, `LowerState.indexWords`), binds it before
+    the access's `let`, and after the `let` binds `l2r_nat_of_index` of the
+    word and maps the variable to it for the rest of the code (the run's
+    later `let`s and the continuation):
+
+    ```
+    let ix750 : u64 = l2r_nat_index(a748);
+    let x751 : u32 = lean_array_fget_w<u32>(a746, ix750);
+    let ib752 : Nat = l2r_nat_of_index(ix750);
+    ...
+    let x766 : Nat = lean_nat_add(ib752, x765);
+    ```
+
+    The rebinding needs the access to run whenever the `let` completes
+    (`evalsBoundedAccess`: the call itself, or one in the arguments, fields,
+    casts, scrutinees, conditions or block `let`s of the value); otherwise
+    the word is still bound first and nothing is rebound. An index that
+    nothing after the access uses keeps the read's block. A join point's
+    body copied to a jump after the access (J1) reads the rebinding, which
+    holds there; a body lowered once (J2, J3, a state machine's arm) reads
+    the variable, which Reussir then keeps. For every `Nat`: from 2^63 the
+    word is `u64::MAX` and the access is unreachable code, a word in
+    [size, 2^63) is the runtime's `index_bug`, and both end the program, so
+    the rebinding runs only for an index below the size, which the mask
+    keeps (test `RtNatIdxRebind`: arithmetic on the index after the access
+    past the immediates, big indices of `get!`, `set!`, `swapIfInBounds`
+    made from it). The variable itself kept the access's big path, which
+    rejoins after it (a `Nat` in [2^61, 2^63) is a heap value with a valid
+    word), so every later use tested its tag again (X07's +3.9% above).
+    With the rebinding `i + 1` after `a[i]` is one add (no tag test, no
+    overflow path), a later access at it has no tag test, a copy of it no
+    count, and a loop whose indices all come from accesses (X07's
+    partition loop, entered with the indices `qsort.sort` read) carries
+    known immediates. Instruction counts under rcgmp (cachegrind, the
+    SVE-free builds, the bench set's arguments, outputs identical), before
+    and after, leanrt for reference: on top of run 14's prelude reads
+    (dfb62b22), X07 275.1 to 217.9 million (-20.8%; leanrt 253.2) and
+    Z01c 153.3 to 137.8 billion (-10.1%; leanrt 150.6); on dev 1886d7bf,
+    X07 300.1 to 217.9 million, Z01c 153.5 to 137.8 billion, L12 9.94 to
+    9.67 billion (-2.8%; leanrt 10.51), L08 6.22 to 6.01 (-3.3%; leanrt
+    5.93), L18 6.25 to 6.16 (-1.5%; leanrt 6.33), X12 and E05 -0.2%, E08
+    unchanged. L07, L13, E03, X08, X09 and L17 have no such access whose
+    index is used again (`get!`, `set!`) and get the same generated code.
+    Under leanrt nothing changes (the `.rr` of the bench programs checked,
+    14 on dev and 9 on dfb62b22, is byte-identical).
+    `tests/runtime/int-backend-check.sh` checks the shape on
+    `RtNatIdxRebind`, translated with the default passes and with
+    `compact-arrays` off: each rebinding right after its access, the
+    variable not read again in the rest of its block (nested blocks
+    included), each kind rebound (the read at a type in the second
+    translation), and no update at a `Nat`. The rcgmp baselines of
+    `paynothing-check.sh` for `Unionfind` and `RtLazyFields` were
+    refreshed with the rebinding: their functions' shapes changed, their
+    counts and allocations did not.
+- **Why:** upstream Reussir (without local patch R2) renders a built-in
+  integer at a polyffi type argument as the raw handle and releases it after the call (its `rcgmp_handle`
   comes from the substituted parameter type): `l2r_once_put<Nat>` stored a
   handle that the wrapper then released, `l2r_array_push<Nat>` the same,
   and `l2r_once_get`/`l2r_view_take` copied without a retain (review
@@ -419,32 +504,36 @@ D8).
   fine (#795: a borrowed handle). The boxes keep native's words, so casts
   and `ptrAddrUnsafe` of small values stay native's (`RtBoxPassOnCast`,
   `RtCastBoxImm`).
-- **Where:** `lean2rr/Main.lean` (options, `filterIntBackend`, the check);
+- **Where:** `lean2rr/Main.lean` (options, `filterIntBackend`);
   `NatEncoding.lean`; `PassConfig.lean`, `Opt/Registry.lean` (`config`);
   `Mono.lean` (`MonoConfig.intBackend`, `constComputes`);
-  `LowerBase.lean` (`LowerCtx.intBackend`, `natIntTypeArgs`,
-  `mentionsNatInt`, `isFfiTypeArgTy`, `cellStorage`, `onceCell`,
+  `LowerBase.lean` (`LowerCtx.intBackend`, `isFfiTypeArgTy`,
+  `cellStorage`, `onceCell`,
   `natIntBoxFns?`, `boxValue`, `boxTake`, `boxUnboxWith`, `boxUnboxed?`,
   `boxAllocates`, `arrayPtrKindOf`, `boxWordReadAs`);
-  `Lower/ExternCall.lean` (`bindReadIndex`, `wordReadSym?`);
+  `Lower/ExternCall.lean` (`bindReadIndex`, `wordReadSym?`,
+  `wordUpdateSym?`, `boundedIndexSyms`, `boundedWordAccesses`);
+  `Lower/Code.lean` (`indexWordsWanted`, `evalsBoundedAccess`, the
+  let-run's rebinding; `LowerCtx.hoistIndexWords`,
+  `LowerState.indexWords`);
   `ArrayKinds.lean` (`ptrKind?`);
-  `CompactArrays.lean`, `Opt/SplitMapLoops.lean`, `MonoRetype.lean`
-  (`natIntKinds`); `CellKinds.lean`, `TypedCells.lean`, `Lower/Externs.lean`
+  `CompactArrays.lean`, `Opt/SplitMapLoops.lean`; `CellKinds.lean`,
+  `TypedCells.lean`, `Lower/Externs.lean`
   (`refElemTy`); `Lower/Values.lean` (`natLiteral`); `Lower/Conv.lean`
   (`zeroTry`); `Lower/Live.lean`; `Opt/CheapConsts.lean`;
-  `Opt/ModPow2.lean` (`minLitExp`); `Emit/IntBackendCheck.lean`. Tests:
+  `Opt/ModPow2.lean` (`minLitExp`). Tests:
   `RtNatImmEdges`, `RtNatDivZero`, `RtNatLitHuge`, `RtNatGenericFfi`,
-  `RtNatGenericBig`, `RtNatIdxWord`, `tests/runtime/int-backend-check.sh`; run.sh's
+  `RtNatGenericBig`, `RtNatIdxWord`, `RtNatIdxRebind`,
+  `tests/runtime/int-backend-check.sh`; run.sh's
   `int:NAME` items of an expectation line's `[OPT,…]` prefix and
   `NAME.int-backend`.
 - **Remove only if:** the rcgmp backend is dropped; the leanrt paths go
   when the leanrt representation is retired (clean-integration plan, D8;
-  rcgmp is the default since 2026-10-25). With an owned handle at type arguments
-  (`--rcgmp-type-args`: Reussir's local patch R2, which scripts/l2r.py
-  requires for rcgmp) typed arrays, typed cells and once-cells hold `Nat`
-  and `Int` directly and the check is off; the guard and the check (rows
-  10, 11, 19) stay as a lowering option (for measurements) until it is
-  dropped.
+  rcgmp is the default since 2026-10-25). `Nat` and `Int` at type
+  arguments need Reussir's local patch R2 (scripts/l2r.py requires it for
+  rcgmp). Guard mode (rows 10, 11, 19 of the plan: a lowering without
+  `--rcgmp-type-args` that kept them out, on a Reussir with R2 that it did
+  not use, and its check) existed until 2026-10-25, for measurements.
 
 ### `--int-backend rcgmp`: bit tests and float conversions by rcgmp (`prelude-int-ops`)
 
@@ -1162,10 +1251,7 @@ D8).
   FFI boundary and keeps in cells (the old Reussir bug with cells, fixed
   upstream in #666 and #681, only concerned `[value]` records).
 - **Where:** `LowerBase.lean`: `isBoundaryTy`, `refType`.
-- **Remove only if:** `Nat` stops being a counted handle. Under
-  `--int-backend rcgmp` without `--rcgmp-type-args` a `Nat`/`Int` is a
-  parameter type of the FFI but no type argument (`isFfiTypeArgTy`: a
-  once-cell holds it in an `ElemBox`; the lowering's entry above).
+- **Remove only if:** `Nat` stops being a counted handle.
 
 ### `ptrAddrUnsafe` and casts read a `Nat`/`Int` word as native does
 

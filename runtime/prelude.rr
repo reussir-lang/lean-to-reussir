@@ -271,16 +271,19 @@ fn l2r_any_raw_take_int(w : u64) -> Int { l2r_any_raw_as<Int>(w, 2) }
 // `lean_box((unsigned)(int)i)`), tested with Reussir's operations; an `Int`
 // in [2^32, 2^62) or [-2^62, -2^31) is a wider immediate
 // (`l2r_int_box_wide`); another value is a leanrt cell of kind 1 (`Nat`) or
-// 2 (`Int`) that holds a reference (`leanrt::rcgmp::box_big`). Unboxing
+// 2 (`Int`) that holds a reference (`l2r_any_of_big`). Unboxing
 // decodes an immediate here (`box(0)` is 0; at `Nat` the value; at `Int`
 // below 2^32 the low 32 bits signed, as `l2r_any_as<T>` reads them at
 // leanrt's backend, from there the wider immediate's value) and takes a
 // reference out of a cell (`unbox_big`; a pointer of another kind is a
 // mismatch).
+// The cell takes the value's handle as it is: a generic at `Nat` or `Int`
+// receives the owned handle `reussir_rt::rcgmp::Mpz` (local Reussir patch
+// R2), so there is no retain in leanrt and no release after the call
+// (`leanrt::rcgmp::box_owned`; the borrowed handle of a non-generic
+// texture cost that pair: L10, run 14, 2.3% of its instructions).
 #[ffi(import)]
-fn l2r_any_of_nat_big(x : Nat) -> LAny [{ leanrt::rcgmp::box_big(x, leanrt::any::NUM_NAT) }];
-#[ffi(import)]
-fn l2r_any_of_int_big(x : Int) -> LAny [{ leanrt::rcgmp::box_big(x, leanrt::any::NUM_INT) }];
+fn l2r_any_of_big<T>(x : T, num : u64) -> LAny [{ leanrt::rcgmp::box_owned::<[:T:]>(x, num) }];
 #[ffi(import)]
 fn l2r_any_nat_big(a : LAny) -> Nat [{ leanrt::rcgmp::unbox_big(a, leanrt::any::NUM_NAT) }];
 #[ffi(import)]
@@ -289,13 +292,13 @@ fn l2r_any_int_big(a : LAny) -> Int [{ leanrt::rcgmp::unbox_big(a, leanrt::any::
 fn l2r_any_of_nat(x : Nat) -> LAny {
     let (vs, wide) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(x);
     let v : u64 = vs as u64;
-    if !wide && (v >> 63) == 0 { l2r_any_imm(v) } else { l2r_any_of_nat_big(x) }
+    if !wide && (v >> 63) == 0 { l2r_any_imm(v) } else { l2r_any_of_big<Nat>(x, 1) }
 }
 fn l2r_any_of_int(x : Int) -> LAny {
     let (v, wide) : (i32, bool) = core::intrinsic::bigint::trunci_overflow(x);
     if !wide { l2r_any_imm((v as u32) as u64) } else {
         let (w, wide64) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(x);
-        if !wide64 && l2r_int_box_wide(w) { l2r_any_of_raw(((w as u64) << 1) | 1) } else { l2r_any_of_int_big(x) }
+        if !wide64 && l2r_int_box_wide(w) { l2r_any_of_raw(((w as u64) << 1) | 1) } else { l2r_any_of_big<Int>(x, 2) }
     }
 }
 fn l2r_any_as_nat(a : LAny) -> Nat { l2r_any_raw_take_nat(l2r_any_raw(a)) }
@@ -2069,15 +2072,26 @@ fn l2r_nat_index(n : Nat) -> u64 {
     if w { 18446744073709551615 } else { ks as u64 }
 }
 
+// The index of an access that a proof keeps in range, after the access at
+// its word `k` returned (`fget`, `fset`, `fswap` at a word: they end the
+// program for a word at or above the size), as a `Nat`: `k` is below the
+// size, so far below 2^60, the mask's bound (sizes are bounded by the
+// address space), and the mask to 60 bits keeps it. The mask
+// tells LLVM that the value is an rcgmp immediate and that a small
+// constant added to it stays one, so `i + 1` after `a[i]` has no tag test
+// and no overflow path. lean2rr uses it in place of the index after such
+// an access (`rebindIndex`, Lower/Code). (`l2r_nat_size` masks to 61 bits:
+// a string position from 2^60 must stay.)
+fn l2r_nat_of_index(k : u64) -> Nat { (k & 1152921504606846975) as Nat }
+
 // `String.Pos.Raw.get`, `get'`/`Pos.get` (`get_fast`), `next'`/`Pos.next`
 // (`next_fast`) and `atEnd` at an index word.
 fn lean_string_utf8_get_w(s : LStr, k : u64) -> u32 { l2r_string_get(s, k) }
-fn lean_string_utf8_get_fast_w(s : LStr, k : u64) -> u32 {
-    if (k >> 63) != 0 { l2r_unreachable<u32>() } else { l2r_string_get_fast(s, k) }
-}
+fn lean_string_utf8_get_fast_w(s : LStr, k : u64) -> u32 { l2r_string_get_fast_k(s, k) }
 fn lean_string_utf8_next_fast_w(s : LStr, k : u64) -> Nat {
-    // A valid position is below 2^60 (see `lean_string_utf8_next_fast`).
-    if (k >> 60) != 0 { l2r_unreachable<Nat>() } else { l2r_nat_size(l2r_string_next_fast(s, k)) }
+    // A valid position is below 2^60 (see `lean_string_utf8_next_fast`), and
+    // the read ends the program for one from there (`l2r_string_next_fast_k`).
+    l2r_nat_size(l2r_string_next_fast_k(s, k))
 }
 fn lean_string_utf8_at_end_w(s : LStr, k : u64) -> bool { l2r_string_at_end(s, k) }
 // @int-backend end
@@ -2148,12 +2162,9 @@ fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 { l2r_string_get_fast_wor
 // @int-backend rcgmp
 fn lean_string_utf8_get_fast(s : LStr, p : Nat) -> u32 {
     let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
-    let v : u64 = vs as u64;
-    if w || (v >> 63) != 0 { l2r_unreachable<u32>() } else {
-        let c = l2r_string_get_fast(s, v);
-        let d = l2r_consume<Nat>(p);
-        c
-    }
+    let c = l2r_string_get_fast_k(s, if w { 18446744073709551615 } else { vs as u64 });
+    let d = l2r_consume<Nat>(p);
+    c
 }
 // @int-backend end
 
@@ -2185,18 +2196,26 @@ fn lean_string_utf8_next(s : LStr, p : Nat) -> Nat {
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat { l2r_nat_small(l2r_string_next_fast_word(s, l2r_nat_raw(p))) }
 // @int-backend end
 // @int-backend rcgmp
+// `get'` and `next'` at an index word that a proof keeps below the size: a
+// word from 2^60 is unreachable code, tested inside the read after its
+// release decision (as `l2r_string_get_fast_word`), so that nothing comes
+// between the caller's increment of the string and the read's decrement
+// and LLVM removes both. Tested in front of the read, the panic's call kept
+// them: 2 stores and 4 more instructions per character of a `String.map`
+// (L17, run 14).
 #[ffi(import)]
-fn l2r_string_next_fast(s : LStr, i : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next_fast(b, i)) }];
+fn l2r_string_get_fast_k(s : LStr, k : u64) -> u32 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_get_fast(b, if (k >> 60) != 0 { leanrt::unreachable_code() } else { k })) }];
+#[ffi(import)]
+fn l2r_string_next_fast_k(s : LStr, k : u64) -> u64 [{ leanrt::string::read_owned(s, |b| sem::string::utf8_next_fast(b, if (k >> 60) != 0 { leanrt::unreachable_code() } else { k })) }];
 fn lean_string_utf8_next_fast(s : LStr, p : Nat) -> Nat {
     let (vs, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
     let v : u64 = vs as u64;
     // A valid position (the proof) is below the size, so below 2^60 (sizes
-    // stay below 2^48), and the result at most the size plus 3.
-    if w || (v >> 60) != 0 { l2r_unreachable<Nat>() } else {
-        let r = l2r_string_next_fast(s, v);
-        let d = l2r_consume<Nat>(p);
-        l2r_nat_size(r)
-    }
+    // stay below 2^48), and the result at most the size plus 3; a word from
+    // 2^60 is unreachable code (`l2r_string_next_fast_k`).
+    let r = l2r_string_next_fast_k(s, if w { 18446744073709551615 } else { v });
+    let d = l2r_consume<Nat>(p);
+    l2r_nat_size(r)
 }
 // @int-backend end
 
@@ -2297,10 +2316,20 @@ fn lean_string_utf8_extract_fast(s : LStr, b : Nat, e : Nat) -> LStr {
 }
 // @int-backend end
 
+// @int-backend leanrt
 fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
     let x = l2r_nat_raw(p);
     if l2r_nat_word_is_small(x) { l2r_string_set(s, l2r_nat_word_val(x), c) } else { let d = l2r_nat_drop_raw(x); s }
 }
+// @int-backend end
+// @int-backend rcgmp
+// One test, as `l2r_index_of_nat` (a position from 2^63 leaves the string
+// unchanged, as one past its end).
+fn lean_string_utf8_set(s : LStr, p : Nat, c : u32) -> LStr {
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(p);
+    if w { s } else { l2r_string_set(s, ks as u64, c) }
+}
+// @int-backend end
 
 // @int-backend leanrt
 fn lean_string_get_byte_fast(s : LStr, i : Nat) -> u8 { l2r_string_get_byte(s, lean_usize_of_nat(i)) }
@@ -2532,10 +2561,23 @@ fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) 
 // update (`fset`, `fswap`): a rejoining path with refcount traffic on the
 // big number would make LLVM reload the array's count. Reads take the
 // index as its word instead (`l2r_array_get_word`).
+// @int-backend leanrt
 fn l2r_index_of_nat(i : Nat) -> u64 {
     let x = l2r_nat_raw(i);
     if l2r_nat_word_is_small(x) { l2r_nat_word_val(x) } else { l2r_unreachable<u64>() }
 }
+// @int-backend end
+// @int-backend rcgmp
+// One test: the flag of the truncation to `i64` is set exactly from 2^63 (a
+// `Nat` is never negative); through `l2r_nat_raw` the value's bit 63 was
+// tested twice (`fswap`, `fset`: X07, run 14). The lowering now calls the
+// `_w` twins of `fset`, `fswap` and `ByteArray` `fset` under rcgmp; this
+// serves `FloatArray.set` and `String.extract`'s fast path.
+fn l2r_index_of_nat(i : Nat) -> u64 {
+    let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
+    if w { l2r_unreachable<u64>() } else { ks as u64 }
+}
+// @int-backend end
 
 // A read at the word `x` of a `Nat` index that a proof keeps in bounds
 // (`a[i]'h`, `ByteArray.get`, `FloatArray.get`): the big and out-of-bounds
@@ -2794,6 +2836,22 @@ fn lean_array_pop<T>(v : RVec<T>) -> RVec<T> { l2r_array_pop(v) }
 fn lean_array_fswap<T>(v : RVec<T>, i : Nat, j : Nat) -> RVec<T> {
     l2r_array_swap(v, l2r_index_of_nat(i), l2r_index_of_nat(j))
 }
+// @int-backend rcgmp
+// `Array.set` and `Array.swap` (and `ByteArray.set` below) at index words
+// (`l2r_nat_index`), for `--int-backend rcgmp`: the lowering computes the
+// words before it passes the array, as for the reads at a word. As
+// `lean_array_fset` and `lean_array_fswap`: a word from 2^63 (a big index)
+// is unreachable code (`l2r_index_of_word`, as `l2r_index_of_nat`), another
+// word at or above the size the update's `index_bug`; each returns only
+// for words below the size (`l2r_nat_of_index`).
+fn l2r_index_of_word(k : u64) -> u64 {
+    if (k >> 63) != 0 { l2r_unreachable<u64>() } else { k }
+}
+fn lean_array_fset_w<T>(v : RVec<T>, k : u64, x : T) -> RVec<T> { l2r_array_set(v, l2r_index_of_word(k), x) }
+fn lean_array_fswap_w<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> {
+    l2r_array_swap(v, l2r_index_of_word(i), l2r_index_of_word(j))
+}
+// @int-backend end
 
 fn lean_array_uswap<T>(v : RVec<T>, i : u64, j : u64) -> RVec<T> { l2r_array_swap(v, i, j) }
 
@@ -2870,6 +2928,8 @@ fn lean_byte_array_get_w(v : RVec<u8>, k : u64) -> u8 {
         0
     }
 }
+// `ByteArray.set` at an index word (`lean_array_fset_w`).
+fn lean_byte_array_fset_w(v : RVec<u8>, k : u64, x : u8) -> RVec<u8> { lean_array_fset_w<u8>(v, k, x) }
 // @int-backend end
 fn lean_byte_array_push(v : RVec<u8>, x : u8) -> RVec<u8> { l2r_array_push(v, x) }
 fn lean_byte_array_uset(v : RVec<u8>, i : u64, x : u8) -> RVec<u8> { l2r_array_set(v, i, x) }

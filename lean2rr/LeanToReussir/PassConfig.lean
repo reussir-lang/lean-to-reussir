@@ -34,11 +34,6 @@ structure PassConfig where
   (`cheap-consts`, `mod-pow2`), and so does the lowering
   (`LowerCtx.intBackend`). -/
   intBackend : IntBackend := .rcgmp
-  /-- `--rcgmp-type-args`: Reussir passes a `Nat` or `Int` at a type
-  argument of a generic FFI function as an owned handle (Reussir's local
-  patch R2), so `rcgmp` may instantiate one at them
-  (`LowerCtx.natIntTypeArgs`). -/
-  rcgmpTypeArgs : Bool := false
   /-- Whether a test of a `Nat` or `Int` against literals (`Nat.decEq n
   k`, `Int.decEq i k`, a chain of them) is a Reussir `match` on it
   (`LowerCtx.intMatch`); set with

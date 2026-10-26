@@ -2,8 +2,8 @@
 # Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
 allocs 175033
 bytes 6301288
-native-allocs 2956306
-native-bytes 61730385
+native-allocs 2956318
+native-bytes 61730561
 items 170
 functions 127
 conversion-fns 0
@@ -160,25 +160,25 @@ item l_findEntryAux___l2r_#____closed__1 9b6b37e9e6c0
 item l_findEntryAux___l2r_#____closed__1_init 369b82d7f056
 item l_findEntryAux___l2r_#____closed__3 299d9df7966b
 item l_findEntryAux___l2r_#____closed__3_init 7aa8e7ec2c22
-item l_findEntryAux___l2r_#____l2r__flat 662e37357897
-item l_findEntry___l2r_#____l2r__flat aeced629f27d
-item l_find___l2r_#____l2r__flat 16e997bc1932
+item l_findEntryAux___l2r_#____l2r__flat 071f7a6ffcf5
+item l_findEntry___l2r_#____l2r__flat 769118a2731f
+item l_find___l2r_#____l2r__flat 855fc76477ea
 item l_main___l2r_#_ 49d29a5e019c
 item l_main___l2r_#____closed__0 18cbbb0902f9
 item l_main___l2r_#____closed__0_init ccf66ade4df5
-item l_mergePackAux___l2r_#____l2r__flat 3e3a152c8322
-item l_mergePack___l2r_#____l2r__flat f68a99b12ecd
+item l_mergePackAux___l2r_#____l2r__flat fff42b963b23
+item l_mergePack___l2r_#____l2r__flat 5c2a3200b4ed
 item l_mkNodes___l2r_#____closed__0 56324649a9fe
 item l_mkNodes___l2r_#____closed__0_init 40963baefd1e
 item l_mkNodes___l2r_#____l2r__flat 69427a381c5a
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat dcd3cd6f3d00
 item l_mk___l2r_#____l2r__flat f3acc31dbac7
-item l_numEqsAux___l2r_#____l2r__flat 620605ce6927
-item l_numEqs___l2r_#____l2r__flat 3cc314fd3e1f
+item l_numEqsAux___l2r_#____l2r__flat 7075a69f1d21
+item l_numEqs___l2r_#____l2r__flat adb2102b224d
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item l_test___l2r_#____closed__1 d1b885163d7f
 item l_test___l2r_#____closed__1_init 3dddd63f0fa0
 item l_test___l2r_#____l2r__flat 177b62e5c266
-item l_union___l2r_#____l2r__flat 14c3c10a7808
+item l_union___l2r_#____l2r__flat 83ac3b3017d5
 item lean_main_entry cfcc2a3788db

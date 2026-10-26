@@ -250,10 +250,6 @@ structure MRetypeState where
   also take element types with a pointer kind (optimization
   `typed-arrays`; set by `compact-arrays`' hooks). -/
   typedArrays : Bool := false
-  /-- Whether `Nat` and `Int` have pointer kinds (`ArrayKinds.ptrKind?`):
-  not under `--int-backend rcgmp` without `--rcgmp-type-args` (set by
-  `compact-arrays`' hooks, as `typedArrays`). -/
-  natIntKinds : Bool := true
   /-- The `map` loops that have a split instance only for a pointer kind
   (`typed-arrays`; neither element type holds a storage kind): kept, so
   that the lowering can enter them again in place when those kinds end up

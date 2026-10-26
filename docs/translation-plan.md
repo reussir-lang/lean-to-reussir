@@ -764,13 +764,12 @@ chosen backend's. The lowering emits Reussir's literal of any size (a
 value outside the immediates is a read-only object of the program's
 data), boxes and unboxes through the prelude's non-generic
 `l2r_any_of_nat`/`l2r_any_as_nat` (a box keeps Lean's immediates: a `Nat`
-below 2^63, an `Int` in the `int32` range), and keeps `Nat` and `Int` out
-of the type arguments of the runtime's generic FFI functions, where
-Reussir would pass a raw handle and release it after the call: a once-cell
-or a polymorphic extern holds them in an `ElemBox` record, an array of
-them holds boxes, and a check over the finished program refuses any such
-type argument that is left. With Reussir's local patch R2
-(`--rcgmp-type-args`) they are owned handles there, and these limits go.
+below 2^63, an `Int` in the `int32` range), and
+passes them at the type arguments of the runtime's generic FFI functions
+as owned handles (Reussir's local patch R2): a once-cell, a polymorphic
+extern's value, a typed array or cell holds the handle itself. (Until
+2026-10-25 a lowering for measurements, which did not use R2, kept them
+out of type arguments.)
 lean2rr's cost model (which values are small, which literals cost
 nothing) follows the backend. A case split on a `Nat` or `Int` is a
 Reussir `match` (optimization `int-match`): Stage 2 keeps Lean's `cases`

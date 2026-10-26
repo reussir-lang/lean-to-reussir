@@ -99,10 +99,9 @@ partial def cellBaseApart (a b : Expr) (fuel : Nat := 32) : CoreM Bool := do
 declarations `decls` (extern instances included) with their instance keys,
 given whether the program can cast (`casts`) and the array decisions (the
 compact storage kinds `compactOn` and the typed pointer kinds `typedOn`,
-which give an array's cell kind), and whether `Nat` and `Int` have cell kinds
-(`natInt`, `cellKind?`). -/
+which give an array's cell kind). -/
 def typedRefKinds (decls : Array (Decl .pure)) (keys : NameMap InstKey) (casts : Option Name)
-    (compactOn : Array String) (typedOn : Std.HashSet String) (natInt : Bool) : CoreM TCResult := do
+    (compactOn : Array String) (typedOn : Std.HashSet String) : CoreM TCResult := do
   let env ← getEnv
   -- The element types of the references made and of the operations, as
   -- the instances' type arguments give them (`lcAny` where unknown), each
@@ -142,7 +141,7 @@ def typedRefKinds (decls : Array (Decl .pure)) (keys : NameMap InstKey) (casts :
   let mut off : Std.HashMap String String := {}
   for (_, t, _) in makesL ++ opsL do
     if kinds.contains t then continue
-    let k ← cellKind? cache compactOn typedOn natInt t
+    let k ← cellKind? cache compactOn typedOn t
     kinds := kinds.insert t k
     let some k := k | continue
     unless seen.contains k do seen := seen.push k

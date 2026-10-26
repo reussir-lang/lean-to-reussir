@@ -202,6 +202,68 @@ def tailCallEntry (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) : LowerM
     if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
   return some (← enter vals)
 
+/-! ## Indices after a proved access (`rebindIndex`, `--int-backend rcgmp`)
+
+An access at a `Nat` index that a proof keeps below the size
+(`boundedIndexSyms`: `a[i]'h`, `ByteArray.get`, `a.set i x h`,
+`ByteArray.set`, `a.swap i j`) returns only when the index is below the
+size: its prelude twin at the index word ends the program otherwise. So
+after the `let` of the access, the index is the word, far below 2^60, the
+mask's bound (sizes are bounded by the address space).
+When the index is a variable used again later, the let-run binds its word
+before the `let` (`bindReadIndex` gives it, `LowerState.indexWords`) and,
+after it, `l2r_nat_of_index(k)` (the word masked to 60 bits, as a `Nat`)
+in place of the variable for the rest of the code:
+
+```
+let ix749 : u64 = l2r_nat_index(a747);
+let x750 : u32 = lean_array_fget_w<u32>(a745, ix749);
+let ib751 : Nat = l2r_nat_of_index(ix749);
+```
+
+LLVM then knows that the index is an rcgmp immediate and that adding a
+small constant to it gives one: `i + 1` has no tag test and no overflow
+path, a later access at it no tag test, and a copy of it no count. The
+`Nat` itself would keep the access's big path, which rejoins after the
+access (a `Nat` in [2^61, 2^63) is a heap value whose word is valid), so
+every later use tested its tag again. Under leanrt nothing changes. -/
+
+/-- Whether `e` evaluates, whenever it completes, a call of a
+`boundedWordAccesses` access with the word `k` among its arguments: the
+call itself, or one inside the arguments of a call or constructor, a field,
+a cast, an application, the scrutinee of a `match` or the condition of an
+`if`, or a block's `let`s and result (all evaluated before any branch). -/
+partial def evalsBoundedAccess (k : String) : RR.Expr → Bool
+  | .call g _ args =>
+    (boundedWordAccesses.contains g && args.any (fun (a : RR.Expr) => match a with
+      | .var n => n == k
+      | _ => false)) || args.any (evalsBoundedAccess k)
+  | .ctor _ _ args => args.any (evalsBoundedAccess k)
+  | .field e _ | .cast e _ => evalsBoundedAccess k e
+  | .apply f a => evalsBoundedAccess k f || evalsBoundedAccess k a
+  | .mtch s _ => evalsBoundedAccess k s
+  | .ite c _ _ => evalsBoundedAccess k c
+  | .block b => b.lets.any (fun (_, _, v) => evalsBoundedAccess k v) || evalsBoundedAccess k b.result
+  | _ => false
+
+/-- The variables (Reussir names, `vars`) whose index words the let-run
+wants from `bindReadIndex` for `let d` followed by `k`: under rcgmp, for a
+call of a `boundedIndexSyms` extern, its `Nat` arguments that `k` uses. -/
+def indexWordsWanted (d : LetDecl .pure) (k : Code .pure) (vars : Std.HashMap FVarId (String × RR.Ty)) :
+    LowerM (Std.HashSet String) := do
+  unless (← read).intBackend == .rcgmp do return {}
+  let .const f _ args _ := d.value | return {}
+  -- An instance of a polymorphic extern is named by its key (`calleeOf`).
+  let orig := ((← read).keys.find? f).map (·.decl) |>.getD f
+  let some sym := getExternNameFor (← getEnv) `c orig | return {}
+  unless boundedIndexSyms.contains sym do return {}
+  let mut out : Std.HashSet String := {}
+  for a in args do
+    if let .fvar y := a then
+      if let some (n, t) := vars[y]? then
+        if t == .named "Nat" && hasFVar y k then out := out.insert n
+  return out
+
 mutual
   /-- Lower a code block whose value has Reussir type `retTy`. -/
   partial def lowerCode (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (c : Code .pure) :
@@ -252,10 +314,31 @@ mutual
         -- `Box` result is not unboxed only to be boxed again.
         let t ← if t != RR.Ty.box && t != .unit && ctx.boxedOnly.contains d.fvarId &&
             (← letValueBoxed ctx d.value) then pure RR.Ty.box else pure t
-        let e ← try lowerLetValue ctx d.value d.type t
+        -- `rebindIndex`: the index words of a proved access, bound before
+        -- its `let` (`indexWordsWanted`, `bindReadIndex`).
+        let want ← indexWordsWanted d k small
+        let saved := (← get).indexWords
+        unless want.isEmpty do modify fun s => { s with indexWords := #[] }
+        let e ← try withReader (fun r => { r with hoistIndexWords := want }) (lowerLetValue ctx d.value d.type t)
           catch ex => throwError "{ex.toMessageData}\n  in let {d.binderName} : {d.type}"
+        let words ← if want.isEmpty then pure #[] else pure (← get).indexWords
+        unless want.isEmpty do modify fun s => { s with indexWords := saved }
+        for (w, n) in words do
+          lets := lets.push (w, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[.var n])
         let x ← fresh "x"
         lets := lets.push (x, some t, e)
+        -- After the access, the index is its word's `Nat`: one per word,
+        -- for every argument of that name (`small` holds this `let`'s).
+        let mut rebound : Std.HashSet String := {}
+        for (w, n) in words do
+          if rebound.contains n || !evalsBoundedAccess w e then continue
+          rebound := rebound.insert n
+          let ys := small.fold (init := #[]) fun acc y (yn, yt) =>
+            if yn == n && yt == RR.Ty.named "Nat" && !ctx.rebuild.contains y then acc.push y else acc
+          if ys.isEmpty then continue
+          let b ← fresh "ib"
+          lets := lets.push (b, some (RR.Ty.named "Nat"), .call "l2r_nat_of_index" #[] #[.var w])
+          for y in ys do runVars := runVars.insert y (b, RR.Ty.named "Nat")
         if ctx.intInfo.litLet d then litNames := litNames.insert x
         runVars := runVars.insert d.fvarId (x, t)
         if let some v ← closedLetValue d.value e then

@@ -132,12 +132,12 @@ def required : Array RequiredPass := #[
 
 /-- The configuration with the enabled optimizations, after turning off
 those named in `disabled` and on those named in `enabled`, for the
-representation `intBackend` of `Nat` and `Int` (with `rcgmpTypeArgs`,
-`--rcgmp-type-args`), which the passes' installs read. An unknown name,
+representation `intBackend` of `Nat` and `Int`, which the passes'
+installs read. An unknown name,
 the name of a required part, or a name both turned off and on is an
 error. -/
-def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := .rcgmp)
-    (rcgmpTypeArgs : Bool := false) : Except String PassConfig := do
+def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := .rcgmp) :
+    Except String PassConfig := do
   for n in disabled ++ enabled do
     if let some r := required.find? (·.name == n) then
       throw s!"'{n}' is required, not an optimization: {r.reason}"
@@ -146,7 +146,7 @@ def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := 
     if disabled.contains n && enabled.contains n then
       throw s!"'{n}' is both disabled and enabled"
   let on (o : OptPass) : Bool := (o.enabled || enabled.contains o.name) && !disabled.contains o.name
-  return optimizations.foldl (init := { stage2, intBackend, rcgmpTypeArgs }) fun c o => if on o then o.install c else c
+  return optimizations.foldl (init := { stage2, intBackend }) fun c o => if on o then o.install c else c
 
 /-- The registry as text (`lean2rr --list-opts`). -/
 def listing : String := Id.run do

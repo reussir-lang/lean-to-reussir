@@ -72,7 +72,8 @@ Reussir's operators.
   no cell to fill at startup.
 - **Boxes.** In a box, a `Nat` or `Int` keeps Lean's words: a `Nat`
   below 2^63 is the word `2n+1`. A bigger value is a runtime cell that
-  holds the integer.
+  holds the integer. The integer moves into the cell, with no extra
+  reference count.
 - **Indices.** A read at a `Nat` index (an array, a byte array, a string
   position) first makes the index a 64-bit word, and then reads at that
   word.
