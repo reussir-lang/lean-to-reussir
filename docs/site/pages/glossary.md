@@ -102,10 +102,10 @@ immediate
 :   A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.
 
 tagged handle
-:   An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. The box `LAny` is a tagged handle. With `--int-backend leanrt`, `Nat` and `Int` are tagged handles too.
+:   An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. The box `LAny` is a tagged handle.
 
 built-in integer
-:   Reussir's own `Nat` and `Int` (rcgmp): one word, a small value in the word or a pointer to a counted big integer. The default representation of Lean's `Nat` and `Int` since 2026-10-25 (`--int-backend rcgmp`).
+:   Reussir's own `Nat` and `Int` (rcgmp): one word, a small value in the word or a pointer to a counted big integer. lean2rr's representation of Lean's `Nat` and `Int`.
 
 box (`LAny`)
 :   The uniform type: one word, as Lean's `lean_object*`. An odd word is an immediate (a small scalar, a small `Nat`, an enumeration's index, `box(0)`). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.

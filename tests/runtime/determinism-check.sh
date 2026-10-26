@@ -33,7 +33,7 @@
 # A PROGRAM is the name of a test in tests/runtime (RtFoo) or of a classic
 # program in tests/classic (Rbtree); default: the list below.
 # Environment: as run.sh (L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN,
-# L2R_DISABLE_OPTS / L2R_ENABLE_OPTS, L2R_INT_BACKEND).
+# L2R_DISABLE_OPTS / L2R_ENABLE_OPTS).
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -56,11 +56,6 @@ IFS=, read -r -a dis <<< "${L2R_DISABLE_OPTS:-}"
 for o in ${dis[@]+"${dis[@]}"}; do [ -n "$o" ] && opts+=(--disable-opt "$o"); done
 IFS=, read -r -a ena <<< "${L2R_ENABLE_OPTS:-}"
 for o in ${ena[@]+"${ena[@]}"}; do [ -n "$o" ] && opts+=(--enable-opt "$o"); done
-# The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
-int_be=${L2R_INT_BACKEND:-rcgmp}
-int_flags=(--int-backend "$int_be")
-opts+=("${int_flags[@]}")
 
 # translate DIR MODULE ROOT OUT.rr
 translate() {

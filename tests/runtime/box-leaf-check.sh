@@ -6,12 +6,12 @@
 # and leanrt releases it directly, also inside a free; a typed array of
 # records is not a leaf. Translation only (`lean2rr --emit rr`, no Reussir
 # build), on tests/runtime/RtBoxLeafArrays, whose output run.sh checks:
-# - under `--int-backend leanrt`, the program's release table
-#   (`fn l2r_any_rel_<num>(x : <type>)`, one per payload type) has `RVec<Nat>`, `RVec<Int>`, `RVec<LStr>` and
-#   `RVec<RVec<u8>>` at numbers with `LEAF_BIT`, and an `RVec` of a record
-#   (`RVec<T_Pt_…>`) at a number without it;
-# - the same under `--int-backend rcgmp` (the typed arrays of Reussir's
-#   built-in integers, leanrt's `Mpz` elements).
+# the program's release table (`fn l2r_any_rel_<num>(x : <type>)`, one per
+# payload type) has `RVec<Nat>`, `RVec<Int>` (typed arrays of Reussir's
+# built-in integers, leanrt's `Mpz` elements), `RVec<LStr>` and
+# `RVec<RVec<u8>>` at numbers with `LEAF_BIT`, and an `RVec` of a record
+# (`RVec<T_Pt_…>`) at a number without it. (Until 2026-10-26 it checked the
+# same for the leanrt representation of `Nat` and `Int`.)
 #   tests/runtime/box-leaf-check.sh
 # Environment: as determinism-check.sh (L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
@@ -55,9 +55,7 @@ check() {
   fi
   [ $fails -eq $before ] && echo "ok   $P ($name): RVec<Nat|Int|LStr|RVec<u8>> leaf payloads, RVec<Pt> not"
 }
-if translate "$OUT/leanrt.rr" --int-backend leanrt; then check "$OUT/leanrt.rr" leanrt
-else fail "leanrt did not translate (see $OUT/leanrt.rr.log)"; fi
-if translate "$OUT/rcgmp.rr" --int-backend rcgmp; then check "$OUT/rcgmp.rr" rcgmp
-else fail "--int-backend rcgmp did not translate (see $OUT/rcgmp.rr.log)"; fi
+if translate "$OUT/rcgmp.rr"; then check "$OUT/rcgmp.rr" rcgmp
+else fail "did not translate (see $OUT/rcgmp.rr.log)"; fi
 [ $status -eq 0 ] && echo "PASS  box-leaf-check"
 exit $status

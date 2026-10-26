@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# The shapes of the optimization `int-match` (Lower/IntMatch): under
-# `--int-backend rcgmp` a case split on a `Nat` or `Int` is a Reussir
-# `match` on the built-in integer. Translation only (`lean2rr --emit rr`,
+# The shapes of the optimization `int-match` (Lower/IntMatch): a case split
+# on a `Nat` or `Int` is a Reussir `match` on the built-in integer. Translation only (`lean2rr --emit rr`,
 # no Reussir build), on tests/runtime/RtNatMatch and RtIntMatch, whose
 # outputs run.sh checks:
-# - with `--int-backend rcgmp`: `sumTo` is one match
+# - with the default passes: `sumTo` is one match
 #   with the arms `0` and `Nat::Succ(p)` and no `lean_nat_dec_eq`/
 #   `lean_nat_sub`; `fib` one match `0`, `1`, `Nat::Succ(Nat::Succ(p))`;
 #   `lits` one match with an arm per literal (also 2^64 and 10^30, which
@@ -16,10 +15,9 @@
 #   `namedI` matches a copy; `intLit`'s tests of `Int` literals (0, 1, -1,
 #   5, -7, read from closed terms) are one match;
 # - with `--disable-opt int-match` too: no match on a `Nat` or `Int`
-#   (no `Nat::Succ(`, `Int::OfNat(`, `Int::NegSucc(` pattern);
-# - under leanrt (`--int-backend leanrt`, named: rcgmp is lean2rr's default
-#   since 2026-10-25) the .rr is the same with and without the
-#   optimization.
+#   (no `Nat::Succ(`, `Int::OfNat(`, `Int::NegSucc(` pattern). (Until
+#   2026-10-26 it also checked that under the leanrt representation the
+#   .rr was the same with and without the optimization.)
 #   tests/runtime/int-match-check.sh
 # Environment: as determinism-check.sh (L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
@@ -55,8 +53,8 @@ for P in RtNatMatch RtIntMatch; do
   (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1 \
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
   before=$fails
-  if ! translate "$OUT/on.rr" --int-backend rcgmp; then
-    fail "--int-backend rcgmp did not translate (see $OUT/on.rr.log)"
+  if ! translate "$OUT/on.rr"; then
+    fail "did not translate (see $OUT/on.rr.log)"
   elif [ $P = RtNatMatch ]; then
     R=$OUT/on.rr
     has $R sumTo "match " "0 => " "Nat::Succ(f"; lacks $R sumTo lean_nat_dec_eq lean_nat_sub
@@ -74,18 +72,12 @@ for P in RtNatMatch RtIntMatch; do
     has $R intLit "0 => " "1 => " "-1 => " "5 => " "-7 => " "_ => "
     lacks $R intLit lean_int_dec_eq
   fi
-  if ! translate "$OUT/off.rr" --int-backend rcgmp --disable-opt int-match; then
+  if ! translate "$OUT/off.rr" --disable-opt int-match; then
     fail "--disable-opt int-match did not translate (see $OUT/off.rr.log)"
   elif grep -nE 'Nat::Succ\(|Int::(OfNat|NegSucc)\(' "$OUT/off.rr" > "$OUT/off.hits"; then
     fail "--disable-opt int-match left a match on Nat or Int (see $OUT/off.hits)"
   fi
-  if ! translate "$OUT/leanrt.rr" --int-backend leanrt \
-     || ! translate "$OUT/leanrt-off.rr" --int-backend leanrt --disable-opt int-match; then
-    fail "leanrt did not translate (see $OUT/leanrt*.rr.log)"
-  elif ! cmp -s "$OUT/leanrt.rr" "$OUT/leanrt-off.rr"; then
-    fail "under leanrt int-match changed the .rr"
-  fi
-  [ $fails -eq $before ] && echo "ok   $P: matches under rcgmp, none with int-match off, leanrt unchanged"
+  [ $fails -eq $before ] && echo "ok   $P: matches, none with int-match off"
 done
 [ $status -eq 0 ] && echo "PASS  int-match-check"
 exit $status

@@ -143,9 +143,11 @@ plain_value() {
 WRAP=$ROOT/runtime/leanrt/target/run-sh/checkout-$(echo "$CK" | sha256sum | cut -c1-12)
 mkdir -p "$WRAP/build/bin"
 ln -sfn "$CK/build/target-rt" "$WRAP/build/target-rt"
-# l2r.py checks the checkout's runtime sources for the patches it requires.
+# l2r.py checks the checkout's runtime sources for the patches it requires,
+# and builds the interface of its core package (`Nat` and `Int`).
 ln -sfn "$CK/crates" "$WRAP/crates"
 ln -sfn "$CK/lib" "$WRAP/lib"
+ln -sfn "$CK/library" "$WRAP/library"
 cat > "$WRAP/build/bin/rrc" <<EOF
 #!/bin/sh
 exec /usr/bin/time -a -o "\${RRC_STATS:-/dev/null}" -f "%e %M" "$RRC" "\$@"
@@ -164,11 +166,7 @@ lean_build() {
     cp "$src" "$WORK/lean/$mod.lean"
     (cd "$WORK/lean" && lean -o "$mod.olean" "$mod.lean") > "$out.log" 2>&1 || { RC=1; return; }
     rm -f "$out.stats"
-    # The leanrt representation of `Nat` and `Int` (lean2rr's default until
-    # 2026-10-25): the repros do not depend on it, and it needs none of
-    # entry 20's patches (rcgmp, the default since, needs 20-a and 20-b and
-    # the checkout's core library, which $WRAP does not link).
-    (cd "$WORK/run" && RRC_STATS=$out.stats L2R_REUSSIR=$WRAP L2R_LEAN2RR=$LEAN2RR L2R_INT_BACKEND=leanrt \
+    (cd "$WORK/run" && RRC_STATS=$out.stats L2R_REUSSIR=$WRAP L2R_LEAN2RR=$LEAN2RR \
         python3 "$ROOT/scripts/l2r.py" "$mod" -o "$out" --lean-path "$WORK/lean" "$@") >> "$out.log" 2>&1
     RC=$?
     read -r RSECS RKB < <(tail -1 "$out.stats" 2>/dev/null) || true

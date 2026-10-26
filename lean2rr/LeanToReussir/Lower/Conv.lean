@@ -233,13 +233,8 @@ partial def zeroTry (t : RR.Ty) : LowerM (Option RR.Expr × Nat) := do
       if n ∈ ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"] then pure (some (lit "0"), inf)
       else if n ∈ ["f32", "f64"] then pure (some (lit "0.0"), inf)
       else if n == "bool" then pure (some (.ofExpr (.atom "false")), inf)
-      -- (Under `rcgmp`, Reussir's literal: NatEncoding.)
-      else if n == "Nat" || n == "Int" then
-        if (← read).intBackend == .rcgmp then pure (some (lit "0"), inf)
-        else if n == "Nat" then
-          pure (some ⟨#[("z", some (.named "u64"), .atom "0")], .call "l2r_nat_small" #[] #[.var "z"]⟩, inf)
-        else
-          pure (some ⟨#[("z", some (.named "i64"), .atom "0")], .call "l2r_int_small" #[] #[.var "z"]⟩, inf)
+      -- (Reussir's literal: NatEncoding.)
+      else if n == "Nat" || n == "Int" then pure (some (lit "0"), inf)
       else if n == "LStr" then
         -- With the literal cache the empty string is a cached literal, as a
         -- literal constant (`strLitCached`): no once-cell (see below).

@@ -1,0 +1,6 @@
+# Big constants used in a loop (RV8N-01; until D8, nat-alloc-check.sh's "made once" with leanrt's counters): lean2rr
+# allocates nothing per iteration (natively one 16-byte block per iteration), so the bound is no growth (FACTOR 0). A
+# `Nat` or `Int` constant recomputed at every use (PB and PI, computed by a loop, with no once-cell: a fault injected
+# in the lowering) makes 2 allocations per iteration, +600001 at these sizes against the allowed +2000. The literal
+# constants are static under Reussir's integers, recomputed or not. Heap integers alive at exit: 0 at both sizes.
+100000 | 400000 | 0 2000 | live 0

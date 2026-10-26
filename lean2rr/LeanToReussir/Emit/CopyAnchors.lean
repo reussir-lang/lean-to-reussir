@@ -11,7 +11,7 @@ rrc's MLIR inliner (Reussir's default inliner) inlines a callee of at most
 a callee's own callees are inlined into it first. When one function calls
 such callees from many places, every call gets a copy, and LLVM's passes
 over the result are superlinear in the function's size. Example:
-`RtJpWide` under `--int-backend rcgmp`. Its 800-arm `match` on a `Nat` is
+`RtJpWide`. Its 800-arm `match` on a `Nat` is
 one function (`int-match`). The arms call three outlined join points (J3)
 of about 160 operations, each one about 266 times. The copies made one LLVM
 function of about a million blocks. LLVM's CorrelatedValuePropagation
@@ -49,10 +49,10 @@ the most is kept out of rrc's inliner (`#[transform_anchor]`).
   large (more anchoring: the safe side); for `low`, the pass is repeated,
   with every function anchored so far anchored from the start, until it
   anchors nothing new, so the last pass's `low` counts no anchored
-  function. `RtJpWide`'s join points: 160 under rcgmp, 310 under leanrt
-  (rrc: about 180 and more). `fnSize` counts fewer operations than rrc
-  makes (no reference counting), so a function whose `low` is over 256 is
-  taken to be over the inliner's limit, and its calls add no copies.
+  function. `RtJpWide`'s join points: 160 (rrc: about 180). `fnSize`
+  counts fewer operations than rrc makes (no reference counting), so a
+  function whose `low` is over 256 is taken to be over the inliner's
+  limit, and its calls add no copies.
 - A small function is never anchored: a copy is about as small as the
   call, and LLVM would inline it again anyway. (`RtJpAnchors`' `tiny`: a
   join point of size 23 called from 300 arms, 299 × 23 = 6877, over the
@@ -82,12 +82,6 @@ the most is kept out of rrc's inliner (`#[transform_anchor]`).
   with the callee's sizes before the cycle's decisions (its own size and
   the callees outside the cycle) (`RtCopyAnchors`' `fc`, in the cycle
   `fa` → `fb` → `fc` → `fa`, called from every arm of `fb`).
-
-The rule does not depend on the representation of `Nat` and `Int`. Under
-`leanrt` the 800-arm `match` is a chain of tests that `Outline` cuts into
-functions of a few arms each, so `RtJpWide`'s join points have at most 3
-calls in one function (and at about 310 operations they are over the
-inliner's limit anyway).
 
 Out of line, a function costs a call at each call site. LLVM, which runs
 after Reussir's passes, can still inline it (the anchor's `no_inline`

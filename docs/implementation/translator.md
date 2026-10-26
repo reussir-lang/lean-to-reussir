@@ -106,20 +106,19 @@ relative to `lean2rr/` unless they start with `scripts/`.
   need `Box` (its re-typing takes a `◾` argument as a placeholder, as
   Stage 3 does: `◾` arguments alone do not give a parameter a type);
   `--no-check` turns off Lean's checker between Stage 2's
-  passes. `--int-backend rcgmp|leanrt` chooses the representation of
-  `Nat` and `Int` (default `rcgmp`, Reussir's built-in integers, since
-  2026-10-25; until then `leanrt`, Lean's one-word encoding, which
-  `--int-backend leanrt` still selects); under rcgmp Reussir passes them
-  as owned handles at type arguments of generic FFI functions (Reussir's
-  local patch R2, which scripts/l2r.py requires; `--rcgmp-type-args` is
-  accepted and ignored; until 2026-10-25 a lowering for measurements
-  that did not use R2 kept them out of type arguments):
-  [representations/nat-int.md](representations/nat-int.md#--int-backend-rcgmp-the-lowering).
+  passes. `Nat` and `Int` have one representation, Reussir's built-in
+  integers: `--int-backend rcgmp` is accepted and ignored, and
+  `--int-backend leanrt` is refused (until D8, 2026-10-26, it selected
+  leanrt's one-word encoding, the default until 2026-10-25). Reussir
+  passes them as owned handles at type arguments of generic FFI functions
+  (Reussir's local patch R2, which scripts/l2r.py requires;
+  `--rcgmp-type-args` is accepted and ignored; until 2026-10-25 a lowering
+  for measurements that did not use R2 kept them out of type arguments):
+  [representations/nat-int.md](representations/nat-int.md#the-lowering).
   Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
   repros of three Reussir costs, fixed upstream in #672, #670 and #674,
-  and of the inliner's copies into one function, `RtJpWide` under
-  `--int-backend rcgmp`),
+  and of the inliner's copies into one function, `RtJpWide`),
   `L2R_ALLOW_MISSING_EXTERNS`
   turns the rejection of a program that reaches an extern lean2rr cannot
   serve into a warning (the generated program then does not build: a
@@ -135,7 +134,7 @@ relative to `lean2rr/` unless they start with `scripts/`.
   that kept code reaches, the chain of declarations and reasons that
   keeps it ([optional-passes.md](optional-passes.md#values-in-unread-fields-are-left-out-unread-fields)).
   The driver reads `L2R_REUSSIR`,
-  `L2R_RUSTC`, `L2R_INT_BACKEND`,
+  `L2R_RUSTC`, `L2R_INT_BACKEND` (only to refuse `leanrt`),
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,
   `L2R_RRC_FLAGS`, and `REUSSIR_FFI_CACHE_DIR`, which it sets for rrc
   unless given (rrc's texture cache, for a Reussir cost:

@@ -21,8 +21,8 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 
 | Lean | lean2rr build | Notes |
 |---|---|---|
-| `Nat` | `Nat`: one word, Reussir's built-in integer | a value in [-2^61, 2^61) is in the word; a bigger value is a pointer to a counted big integer. With `--int-backend leanrt`: a *tagged handle*, a small value `n` (below 2^63) is the word `2n+1` ([numbers](#numbers)) |
-| `Int` | `Int`: one word, Reussir's built-in integer | the same scheme. With `--int-backend leanrt`: small in the `int32` range |
+| `Nat` | `Nat`: one word, Reussir's built-in integer | a value in [-2^61, 2^61) is in the word; a bigger value is a pointer to a counted big integer ([numbers](#numbers)) |
+| `Int` | `Int`: one word, Reussir's built-in integer | the same scheme |
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | 64-bit targets only |
 | `Int8…Int64`, `ISize` | the unsigned words | signed operations on the bit pattern, as `lean.h` |
 | `Float`, `Float32` | `f64`, `f32` | |
@@ -43,19 +43,10 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 
 ## Numbers
 
-`Nat` and `Int` have two representations. The option `--int-backend`
-selects one (the scripts read `L2R_INT_BACKEND`):
-
-- `rcgmp`, the default since 2026-10-25: Reussir's built-in integers.
-- `leanrt`, the default until 2026-10-25: Lean's own one-word encoding,
-  with lean2rr's runtime for the big values.
-
-Both representations give the same results. The prelude keeps the code of
-the two representations in marked blocks, and lean2rr keeps only the
-blocks of the selected one. Each function has the same name and signature
-in the two blocks, so the generated code calls the same functions.
-
-### Reussir's built-in integers (`rcgmp`)
+`Nat` and `Int` are Reussir's built-in integers (rcgmp). (Until
+2026-10-26, the option `--int-backend leanrt` selected a second
+representation: Lean's own one-word encoding, with lean2rr's runtime for
+the big values. It was removed.)
 
 A `Nat` or `Int` is one word. A value in [-2^61, 2^61) is stored in the
 word itself. Any other value is a pointer to a counted big integer of
@@ -77,45 +68,9 @@ Reussir's operators.
 - **Indices.** A read at a `Nat` index (an array, a byte array, a string
   position) first makes the index a 64-bit word, and then reads at that
   word.
-
-### Lean's one-word encoding (`leanrt`)
-
-Status: planned: the removal of this representation.
-
-{{svg:natword}}
-
-`Nat` and `Int` use Lean's own encoding of small values. Reussir inserts the
-reference counting, and normally it counts every handle at its address. A
-small `Nat` has no address. So `Nat` and `Int` are *tagged opaque
-handles*: Reussir counts such a handle only when its low bit is 0. Copying
-or dropping a small value costs one bit test, as natively.
-
-The prelude's functions take each argument as its raw word once
-(`l2r_nat_raw`). Small values are computed inline; a big value or an
-overflow calls the runtime, which uses GMP. Every value has exactly one
-form: a value in the small range is always small. So two small words are
-equal exactly when their values are equal, and a small `Int` is never
-equal to a big one. So the equality of a small and a big `Int` does not
-call the runtime. Builds with debug assertions check the rule where the
-runtime makes a big `Int` and where it reads one.
-
-One small set of prelude helpers knows the encoding. They test a word
-(`l2r_nat_word_is_small`), read the value of a small word
-(`l2r_nat_word_val`) and make a small value (`l2r_nat_small`), with the
-same helpers for `Int`. The other prelude functions and the generated code
-use only these helpers. They never use bit operations on a `Nat` or `Int`
-word. Only the prelude's `Nat` and `Int` functions also calculate on the
-words, for speed. The runtime has its own copy of the helpers. The
-translator knows only which values are small (a `Nat` below 2^63, an
-`Int` in the `int32` range). A different representation of numbers
-changes only these places.
-
-{{svg:bigblock}}
-
-A two-limb number takes 32 bytes here, and 56 bytes natively. A million
-live two-limb numbers take 49.5 MB, 0.67× native. The capacity of a block is
-the whole mimalloc block. Up to 64 bytes (six limbs) the runtime knows that
-size without asking mimalloc: there, mimalloc's sizes are all multiples of 8.
+- **Limits.** `Nat.pow` and `Nat.shiftLeft` stop the program when the
+  result has more than about 2^37 bits, GMP's limit
+  ([differences](differences.html#limits)).
 
 ## Strings and arrays
 

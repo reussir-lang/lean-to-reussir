@@ -24,8 +24,7 @@
 # texture at a box, and the order of observable releases (o1, o4, o5:
 # native Lean's orders, from any-probe/Order.lean built natively).
 #   tests/runtime/any-probe.sh
-# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN,
-# L2R_INT_BACKEND (as run.sh).
+# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -38,12 +37,8 @@ cp "$HERE/any-probe/AnyHost.lean" .
 lean -o AnyHost.olean AnyHost.lean
 # The whole prelude (`--disable-opt prelude-liveness`): the probe calls
 # prelude functions that the host does not use.
-# The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
-int_be=${L2R_INT_BACKEND:-rcgmp}
-int_flags=(--int-backend "$int_be")
 LEAN_PATH=. L2R_SHIM_DIR=${L2R_SHIM_DIR:-$(dirname "$LEAN2RR")/../lib/lean} "$LEAN2RR" AnyHost --root main --emit rr \
-  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness "${int_flags[@]}"
+  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness
 python3 - "$HERE/any-probe/probe.rr" <<'PY'
 import sys
 s = open('host.rr').read()
@@ -78,9 +73,8 @@ cmd = ([str(l2r.REUSSIR / "build" / "bin" / "rrc"), os.path.abspath("prog.rr"), 
        + ["--link-lib", str(l2r.gmp_archive()), "--no-pack-record-members",
           "--relocation-mode", "pic", "--reuse-across-call",
           "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")]
-       # `--int-backend rcgmp`: Reussir's core package, as scripts/l2r.py.
-       + (["--package-name", "prog", "--extern", f"core={l2r.core_interface()}"]
-          if l2r.INT_BACKEND == "rcgmp" else [])
+       # Nat and Int: Reussir's core package, as scripts/l2r.py.
+       + ["--package-name", "prog", "--extern", f"core={l2r.core_interface()}"]
        + sys.argv[4:])
 with tempfile.TemporaryDirectory(dir=".") as tmp:
     sys.exit(subprocess.run(cmd, env=env, cwd=tmp).returncode)

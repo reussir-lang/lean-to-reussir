@@ -15,9 +15,9 @@ Lean's `toMono` pass, unchanged except that types are converted with
 mono types keep closed, non-dependent type-former arguments (the value type
 of a `HashMap`), and that a `cases` on `Array`, `ByteArray` or `FloatArray`
 binds its field at the field's own type, not `lcAny`
-(`casesArrayToMonoK`). Under `--int-backend rcgmp` with the optimization
-`int-match` (Opt/IntMatch, `keepIntCases`) a `cases` on a `Nat` or `Int`
-stays a `cases` instead of Lean's tests (`casesNatToMonoK`,
+(`casesArrayToMonoK`). With the optimization `int-match` (Opt/IntMatch,
+`keepIntCases`) a `cases` on a `Nat` or `Int` stays a `cases` instead of
+Lean's tests (`casesNatToMonoK`,
 `casesIntToMonoK`): the lowering makes it a Reussir `match` on the
 built-in integer (Lower/IntMatch). Definitions carry a `K` suffix to stay
 apart from Lean's.
@@ -28,10 +28,9 @@ open LeanToReussir
 
 structure ToMonoKM.State where
   typeParams : FVarIdHashSet := {}
-  /-- Whether a `cases` on `Nat` or `Int` stays a `cases` (`--int-backend
-  rcgmp`, optimization `int-match`: the lowering makes it a Reussir
-  `match`, Lower/IntMatch) instead of Lean's tests (`casesNatToMonoK`,
-  `casesIntToMonoK`). -/
+  /-- Whether a `cases` on `Nat` or `Int` stays a `cases` (optimization
+  `int-match`: the lowering makes it a Reussir `match`, Lower/IntMatch)
+  instead of Lean's tests (`casesNatToMonoK`, `casesIntToMonoK`). -/
   keepIntCases : Bool := false
 
 abbrev ToMonoKM := StateRefT ToMonoKM.State CompilerM
@@ -400,7 +399,7 @@ partial def Code.toMonoK (code : Code .pure) : ToMonoKM (Code .pure) := do
     if h : c.typeName == ``Decidable then
       decToMonoK c h
     else if (c.typeName == ``Nat || c.typeName == ``Int) && (← get).keepIntCases then
-      -- `int-match` under rcgmp: the `cases` stays, its fields at `Nat`.
+      -- `int-match`: the `cases` stays, its fields at `Nat`.
       let resultType ← toMonoTypeKeep c.resultType
       let alts ← c.alts.mapM fun alt =>
         match alt with
@@ -476,8 +475,8 @@ where
     decl.saveMono
     return decl
 
-/-- `keepIntCases`: `cases` on `Nat` and `Int` stay (`--int-backend rcgmp`,
-`ToMonoKM.State.keepIntCases`). -/
+/-- `keepIntCases`: `cases` on `Nat` and `Int` stay (optimization
+`int-match`, `ToMonoKM.State.keepIntCases`). -/
 def toMonoK (keepIntCases : Bool := false) : Pass where
   name     := `toMonoK
   run      := (·.mapM (·.toMonoK keepIntCases))

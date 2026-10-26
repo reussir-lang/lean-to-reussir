@@ -188,7 +188,7 @@ rest.
      `tests/runtime/wait-inline-check.sh` (the fast paths of its wait
      cores stay inline in an executable's loops), the runtime tests
      (`tests/runtime/run.sh`),
-     `tests/runtime/nat-alloc-check.sh`, `tests/env/run.sh`, the classic
+     `tests/runtime/alloc-check.sh`, `tests/env/run.sh`, the classic
      corpus (`tests/oracle.py check`, with the optional passes on and off)
      and `tests/reussir-benchmark/run.sh`;
   3. commit the new pin on its own, naming the old and new commits and the
@@ -207,9 +207,10 @@ rest.
     `String.length` reads the cached count), the UTF-8 encoding of a
     character (`push_unicode_scalar`, inline in `String.push`'s and
     `String.set`'s slow paths) and the lossy decoding of bytes
-    (`lossy_utf8`, `lean_mk_string_lossy_recover`). A big `Nat` position is
-    passed as `u64::MAX` (`l2r_pos_of_nat`); `next` takes a position below
-    2^63 and may answer 2^63, which becomes a big `Nat`;
+    (`lossy_utf8`, `lean_mk_string_lossy_recover`). A position from 2^60
+    is past the end of every string: the prelude's rules on a `Nat`
+    position answer for it in Reussir code (docs/implementation/
+    representations/nat-int.md);
   - `float`, `float32`: `toString` (written into a stack buffer by
     `leanrt::float`), `ofBits`/`toBits`, `frExp`, `scaleB` (a big `Int` is
     passed as `i64::MIN`/`MAX` by its sign, `l2r_int_sat_i64`), `isNaN`,
@@ -224,15 +225,19 @@ rest.
     them stays a loop; `sin`, `cos`, `sinf` and `cosf` are out of line in
     lean-runtime itself (`#[inline(never)]`), so a sine and a cosine of one
     operand stay two calls, never one `sincos` (review HF-01);
-  - `nat`, `int`, over `bignum`'s traits: every `Nat`/`Int` slow path
-    (`leanrt::nat`, below: the prelude's inline small cases stay lean2rr's)
-    is lean-runtime's rule on its words, with `leanrt::big`'s numbers as
-    `BigNat`/`BigInt` (`big::GNat`, `big::GInt`; `big::MAX_BITS`, the
-    largest result, is GMP's `INT_MAX` limbs less `mpz_pow_ui`'s margin of
-    5 limbs, (2^31 - 6) × 64 bits: above it the rules end with `INTERNAL
-    PANIC: out of memory`, LB-05). The rules lift Lean's limits where the
-    result fits (`Nat.pow` and `Nat.shiftLeft` by 2^32 or more,
-    `Nat.shiftRight` of a huge value; LB-04, LB-11, LB-12);
+  - `nat`: the lifted limits of `Nat.pow`, `Nat.shiftLeft` and
+    `Nat.shiftRight` (LB-04, LB-11, LB-12), which the prelude's rules over
+    Reussir's built-in integers follow (`sem::nat::pow`, `shiftl`, `shiftr`
+    name them): computed where the result fits `MAX_BITS`
+    (`leanrt::rcgmp::MAX_BITS`, the limit of lean-runtime's rules, GMP's
+    `INT_MAX` limbs less `mpz_pow_ui`'s margin of 5 limbs, (2^31 - 6) × 64
+    bits), above it native's message for an exponent or shift of 2^32 or
+    more, else `INTERNAL PANIC: out of memory` (LB-05). A larger sum or
+    product is computed by rcgmp, or the process ends as its allocation
+    does (Reussir's `allocation failed` or GMP's `Cannot allocate memory`,
+    an abort). Every other `Nat`/`Int` operation is Reussir's (rcgmp);
+    lean-runtime's `nat`/`int` rules over `bignum`'s traits served
+    leanrt's own big numbers until clean-integration D8 (2026-10-26);
   - `array`: the allocation sizes (`alloc_bytes`, `replicate_len`,
     `empty_with_capacity`: a capacity that cannot be reserved reserves
     nothing, LB-37), `copySlice`'s plan (offsets and lengths of 2^64
@@ -347,11 +352,8 @@ rest.
 
 | Lean (mono) | Reussir | Notes |
 |---|---|---|
-| `Nat` (default, `--int-backend rcgmp`) | Reussir's built-in `core::num::Nat` (rcgmp), one word | an immediate for a value below 2^61, else a counted heap integer of Reussir's runtime (GMP); in a box Lean's words, a big value a leanrt cell holding the `Mpz` (`leanrt::rcgmp`) |
-| `Int` (default) | `core::num::Int`, likewise | an immediate in [-2^61, 2^61) |
-| `Nat` (`--int-backend leanrt`, the default until 2026-10-25) | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 10-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
-| `Int` (`--int-backend leanrt`) | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
-| big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
+| `Nat` | Reussir's built-in `core::num::Nat` (rcgmp), one word | an immediate for a value below 2^61, else a counted heap integer of Reussir's runtime (GMP's `mpn` functions on its limbs); in a box Lean's words, a big value a leanrt cell holding the `Mpz` (`leanrt::rcgmp`). (Until clean-integration D8, 2026-10-26, `--int-backend leanrt` chose leanrt's own words and GMP numbers instead.) |
+| `Int` | `core::num::Int`, likewise | an immediate in [-2^61, 2^61) |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
 | `Array α` | `RVec<LAny>` = `leanrt::drop::Vec<LAny>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | the elements are boxes (`LAny`, one word each) for every `α` without a storage kind, and for every `α` when the program's check turns its kind off; copy-on-write, grows by `realloc`; freed without recursion (below) |
 | `Array S`, `S` a scalar (lean2rr's `compact-arrays`) | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | the same block with the scalars inline; in a box, kinds 7 to 12 (below); lean2rr's whole-program check decides per storage kind (`docs/implementation/representations/compact-arrays.md`) |
@@ -407,47 +409,22 @@ all. Updates (`fset`, `fswap`) convert theirs with `l2r_index_of_nat`,
 whose impossible big case ends the program instead of rejoining the
 update with refcount traffic on the big number; positions proved valid
 (`String.Pos.get`, `next`) are words whose big case is unreachable code
-inside the texture (`leanrt::index_word`). The rules and the measurements:
+inside the texture (`leanrt::unreachable_code`). The rules and the measurements:
 docs/implementation/ownership.md, "Reads give their reference up first,
 for a view".
 
-**`Nat`/`Int`.** Under the default representation since 2026-10-25,
-`--int-backend rcgmp`, they are Reussir's built-in integers, and leanrt
-only boxes a big one (`leanrt::rcgmp`, built with `--cfg leanrt_rcgmp`;
-docs/implementation/representations/nat-int.md, "`--int-backend rcgmp`:
-Reussir's built-in integers"). Under `--int-backend leanrt` (the default
-until 2026-10-25), the rest of this paragraph: one word each, with Lean's exact encoding
-(`leanrt::nat`): an odd word is a small value, `lean_box(n)` for a `Nat`
-below 2^63 and `lean_box((unsigned)(int)i)` for an `Int` in the `int32`
-range; an even word is an owned reference to a big number, one block
-with a 16-byte header and the limbs inline (`leanrt::big`; native Lean's
-`lean_mpz_object` keeps the limbs in a second allocation). C code written
-against `lean.h` could take and return the small words unchanged; a big
-number would be converted. Reussir copies and drops them as handles of an opaque type declared
-`#[ffi(rust = "::leanrt::nat::LNat", tagged)]`: with Reussir patch 10-a it
-counts only even words (`rc.inc` and the drop hook, `LNat`'s `Drop`, run
-only when the low bit is clear). The prelude's functions take each `Nat`
-argument as its word once (`l2r_nat_raw`, which then owns the reference),
-compute small results inline, and call `leanrt::nat`'s slow paths
-(`nat_add`, ... taking owned words, every small/big combination: each
-views its words as lean-runtime's `Nat`/`Int`, runs lean-runtime's rule
-and normalizes the result) for the rest; `l2r_nat_of_raw` makes a handle of a word, `l2r_nat_drop_raw`
-releases one. The encoding is known in one place: the helpers at the start
-of the Nat and Int sections (`l2r_nat_word_is_small`, `l2r_nat_word_val`,
-`l2r_nat_small`, `l2r_int_word_val`, `l2r_int_small`, ...) and the fast
-paths of those two sections; the rest of the prelude and lean2rr's
-generated code use only the helpers, and leanrt has its own copy in
-`leanrt::nat` (docs/implementation/representations/nat-int.md, "The
-encoding is known in one place"). The slow paths normalize: a `Nat` below 2^63 (an `Int` in
-`int32`) is always small, so two small words are equal exactly when the
-values are, and a small `Int` never equals a big one: `lean_int_dec_eq`
-answers a small and a big word `false` without a call (releasing the big
-one). `LInt::of_big` is the one place where a big `Int` handle is made;
-builds with debug assertions check there, and where a slow path reads a
-big `Int` (`int_view`), that it is outside the small range. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
-counts the big numbers made and freed and prints the counts at exit
-(`tests/runtime/nat-alloc-check.sh`, which builds with
-`L2R_INT_BACKEND=leanrt` for them).
+**`Nat`/`Int`.** They are Reussir's built-in integers (rcgmp), lean2rr's
+one representation of them since clean-integration D8 (2026-10-26): the
+prelude's Nat and Int sections are Reussir code over them, and leanrt
+only boxes a big one, prints one (decimal text) and sizes an
+`Array.replicate` by one (`leanrt::rcgmp`; docs/implementation/
+representations/nat-int.md, "Reussir's built-in integers (rcgmp)").
+leanrt never reads an integer's encoding: it passes the handle to rcgmp's
+public C API. Until D8, `--int-backend leanrt` (the default until
+2026-10-25) chose Lean's own one-word encoding with leanrt's big numbers
+(`leanrt::nat`, `leanrt::big`; nat-int.md, its history entry). The tests'
+allocation counter counts rcgmp's heap integers alive at exit
+(`tests/runtime/alloccount`, alloc-check's `live` bound).
 
 **Runtime-owned objects.** `LStr` and the arrays (`RVec`,
 `LRef`: `leanrt::drop::Vec`) are `leanrt` types: a `#[repr(transparent)]`
@@ -483,9 +460,10 @@ one block each").
 `dbgTraceIfShared` (`leanrt::is_shared`) recognizes leanrt's counted
 storage types by their Rust type names: `leanrt::string::`,
 `leanrt::drop::` (arrays, `ByteArray`, `FloatArray`; a thunk or task cell
-through `reussir_rt::rc::Rc`'s count) and `leanrt::nat::` (a big number's
-count; a small one is a scalar), and the runtime handles
-(`Rc<Box<dyn Any>>`, by `TypeId`); a box answers for its payload. At a
+through `reussir_rt::rc::Rc`'s count), a built-in `Nat` or `Int`
+(Reussir's `Mpz`, by `TypeId`: Reussir's own query; an immediate is never
+shared) and the runtime handles (`Rc<Box<dyn Any>>`, by `TypeId`); a box
+answers for its payload. At a
 Reussir record type lean2rr calls the record texture
 `l2r_dbg_trace_if_shared_rec`, and `leanrt::is_shared_record` answers from
 the handle word: an immediate (a nullary constructor under the `tbi` or
@@ -1481,11 +1459,10 @@ lean2rr run under `L2R_DEBUG=1`). `tests/runtime/shim-types.sh`
 checks that each `@[export]` definition of lean2rr's shim (`L2RShim`) has
 the type of the `@[extern]` declaration of its C symbol (Lean pairs them by
 name only). The Rust unit tests of `leanrt`
-(bignums, one-word `Nat`/`Int` at the boundaries, tagged arrays, string
-layout and counts, the last-error slot over lean-runtime's decoding) run
-with
-`tests/runtime/leanrt-unit.sh` (for both representations of `Nat` and
-`Int` unless `L2R_INT_BACKEND` names one); `tests/runtime/rows-check.sh` checks
+(boxes and their cells of big integers, tagged arrays, string layout and
+counts, the drop stack, the last-error slot over lean-runtime's decoding)
+run with `tests/runtime/leanrt-unit.sh` (one build, linked with Reussir's
+rcgmp runtime); `tests/runtime/rows-check.sh` checks
 lean-runtime's rows through a lean2rr build of its row oracle (an `LB-nn`
 row, a Lean bug or limit lean2rr does not reproduce, against the
 definition's result).
@@ -1498,9 +1475,11 @@ and fails when a fast path of lean-runtime's wait cores (a reference
 point, a thunk's store or its `done_keyed`) is reached by a call or branch
 in the functions that hold its loops, or a thread-local access is not
 direct (TLS descriptor or module relocations).
-`tests/runtime/nat-alloc-check.sh`
-builds `RtNatStress` with leanrt's big-number counters and checks that
-every big number made is freed exactly once. `tests/runtime/conv-count-check.sh`
+`tests/runtime/alloc-check.sh`'s `live` bound checks with the
+allocation counter's count of rcgmp's heap integers alive at exit that
+every big number `RtNatStress` makes is freed exactly once (until D8,
+`tests/runtime/nat-alloc-check.sh` read leanrt's own counters).
+`tests/runtime/conv-count-check.sh`
 translates the `RtUniformUpdates*` tests and three others whose values
 cross between typed and uniform code and checks that their code has no
 conversion function (one representation per datatype: nothing is rebuilt

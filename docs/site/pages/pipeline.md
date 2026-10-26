@@ -365,8 +365,8 @@ What lean2rr uses from Reussir:
 |---|---|
 | shared and `[value]` records and enums | Lean's inductive types ([Representations](representations.html)) |
 | opaque `#[ffi]` types | `LStr`, `RVec`, `LCell`, handles: runtime types that do their own counting |
-| built-in integers `Nat` and `Int` (rcgmp) | Lean's `Nat` and `Int`, the default representation |
-| tagged opaque handles | the box `LAny`; with `--int-backend leanrt`, one-word `Nat` and `Int` |
+| built-in integers `Nat` and `Int` (rcgmp) | Lean's `Nat` and `Int` (the only representation) |
+| tagged opaque handles | the box `LAny` |
 | textures (`#[ffi(import)]` functions with a Rust body) | the prelude's calls into `leanrt`; inlined when compiled for the same CPU |
 | token reuse, `--reuse-across-call` | in-place updates, as Lean's reset/reuse |
 | `#[transform_anchor]` | keeps unboxing, wrapper and cast functions out of Reussir's MLIR inliner, and also functions that one function calls so often that their copies would make it too large |

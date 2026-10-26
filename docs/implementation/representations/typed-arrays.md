@@ -22,9 +22,9 @@ drop (below), the program runs 493 M instructions instead of 602 M
   an element type, so that two element types of one kind have one
   representation (`ArrayKinds.lean`: `ptrKind?`, `elemKind?`,
   `sharedInductive?`):
-  - `Nat`, `Int`: `Nat`, `Int` (their words, `RVec<Nat>`; under
-    `--int-backend rcgmp` Reussir's owned handles, local patch R2;
-    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
+  - `Nat`, `Int`: `Nat`, `Int` (`RVec<Nat>` of Reussir's owned handles,
+    local patch R2;
+    [nat-int.md](nat-int.md#the-lowering));
   - `LStr`: `String`;
   - `I:<name>`: an inductive that the lowering makes a shared record or
     enum (rule 1 gives `List Nat` and `List String` the one type

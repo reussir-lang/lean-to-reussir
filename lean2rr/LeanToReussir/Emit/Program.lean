@@ -565,8 +565,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
                           programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
                           convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields,
-                          refKindsOn, intBackend := cfg.intBackend,
-                          intMatch := cfg.intMatch }
+                          refKindsOn, intMatch := cfg.intMatch }
   let act : LowerM (Array RR.Item × Std.HashSet String) := do
     -- `Box` always exists (with at least the unit payload, `box(0)`): types
     -- may mention it even when nothing is ever boxed.

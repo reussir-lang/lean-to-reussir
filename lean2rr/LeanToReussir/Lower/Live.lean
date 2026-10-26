@@ -98,8 +98,8 @@ mutual
     | .atom t => if t.any (fun c => c.isAlpha || c == '_') then textRefs t r else r
     | .call f _ args =>
       -- A box construction makes payload `b<n>` (the box API's `boxValue`;
-      -- under `--int-backend rcgmp` a `Nat` is boxed by `l2r_any_of_nat`,
-      -- payload `b1`, an `Int` by `l2r_any_of_int`, `b2`: `natIntBoxFns?`).
+      -- a `Nat` is boxed by `l2r_any_of_nat`, payload `b1`, an `Int` by
+      -- `l2r_any_of_int`, `b2`: `natIntBoxFns?`).
       let r := match f, args[1]? with
         | "l2r_any_of", some (.atom n) | "l2r_any_of_ptr", some (.atom n) =>
           { r with made := r.made.push (boxName, s!"b{n}") }

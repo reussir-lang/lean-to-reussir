@@ -99,8 +99,8 @@ def optimizations : Array OptPass := #[
   ⟨"float-lits", true, "Float literals (Float.ofScientific/ofNat on literals) folded to their bits at compile time", FloatLits.install⟩,
   ⟨"cheap-consts", true, "constants built from small literals and scalar conversions recomputed at each use, not cached", CheapConsts.install⟩,
   ⟨"prelude-repr", true, "Nat.repr/Int.repr calls replaced by the runtime's GMP versions (same strings; the runtime keeps them, unused, without the pass)", PreludeRepr.install⟩,
-  ⟨"prelude-int-ops", true, "under --int-backend rcgmp, Nat.testBit, Float.ofNat (Nat.toFloat) and Float.ofInt (Int.toFloat) computed by the runtime's rcgmp versions (l2r_nat_test_bit: the bit read in place, where Lean's definition makes m >>> i; l2r_float_of_nat/_int: sitofp, the same bits as Lean's Float.ofScientific in linear rather than quadratic time): their calls and their instances' own code (for function values); under leanrt nothing changes", PreludeIntOps.install⟩,
-  ⟨"int-match", true, "under --int-backend rcgmp, a case split on a Nat or Int (Lean's Nat.casesOn and Int.casesOn, n+1 and negSucc patterns) is a Reussir match on the built-in integer, nested splits of its field one match (0, 1, n+2), and a chain of tests of one Nat or Int against literals one match with an arm per literal, instead of Lean's tests (Nat.decEq, Nat.sub, Int.decLt, Int.natAbs, Int.decEq); nothing under leanrt", IntMatch.install⟩,
+  ⟨"prelude-int-ops", true, "Nat.testBit, Float.ofNat (Nat.toFloat) and Float.ofInt (Int.toFloat) computed by the runtime's rcgmp versions (l2r_nat_test_bit: the bit read in place, where Lean's definition makes m >>> i; l2r_float_of_nat/_int: sitofp, the same bits as Lean's Float.ofScientific in linear rather than quadratic time): their calls and their instances' own code (for function values)", PreludeIntOps.install⟩,
+  ⟨"int-match", true, "a case split on a Nat or Int (Lean's Nat.casesOn and Int.casesOn, n+1 and negSucc patterns) is a Reussir match on the built-in integer, nested splits of its field one match (0, 1, n+2), and a chain of tests of one Nat or Int against literals one match with an arm per literal, instead of Lean's tests (Nat.decEq, Nat.sub, Int.decLt, Int.natAbs, Int.decEq)", IntMatch.install⟩,
   ⟨"mod-pow2", true, "x % 2^w (Nat.mod x (Nat.pow 2 w), x % (1 <<< w), x modulo a literal 2^k with k >= 63; every BitVec.ofNat) computed as the low w bits of x by the runtime (l2r_nat_truncate_bits), without making 2^w; the power's let goes when nothing else uses it (the same value for every x and w)", ModPow2.install⟩,
   ⟨"jp-sink", true, "join points moved down to the smallest code containing their jumps, before the J1-J4 choice", JpSink.install⟩,
   ⟨"jp-small", true, "small join points (own body at most 40 nodes, a copy expanding to at most 480 with the join points inlined into it, the copies beyond the first adding at most 2000, 4000 for a loop's continuation) duplicated at their jumps (J1') instead of outlined", JpSmall.install⟩,
@@ -128,16 +128,13 @@ def required : Array RequiredPass := #[
   ⟨"outline", "deep and long tail paths and let values of a function cut into functions, recursive functions included (their loops through step values) (Outline)",
     "rrc's analyses are superlinear in nesting depth and straight-line length (Reussir issues fixed upstream in #672 and #670, costs), and so is the .rr text, whose indentation follows the nesting: without it a 3000-arm literal match in tail position gives 126 MB of .rr instead of 1 MB"⟩,
   ⟨"inline-anchors", "conversions, unboxings, and the applications of wrapped function values and of those of uniform types, kept out of rrc's MLIR inliner (#[transform_anchor]; Lower/Finish, anchoredFns); and, at each function, while the copies of the callees that rrc can inline into it (a lower bound of their size at most 256 operations, without their recursive callees; their size, with what rrc may inline into them first, over 32) add more than 4000 to it, sum of (calls in it - 1) x size, the callee that adds the most (Emit/CopyAnchors)",
-    "rrc's build time and memory grow superlinearly on the conversion code of polymorphic recursion through monad transformers when it is inlinable (Reussir issue fixed upstream in #674, a cost): an 8-line StateT tower used at IO did not build within 30 minutes or 15 GB; rrc's inliner copies a callee of up to 256 operations into every call, however many, and LLVM's passes are superlinear in the size of one function: RtJpWide under --int-backend rcgmp (three outlined join points called about 266 times each from one 800-arm match) took 740 s to build instead of 5 s"⟩]
+    "rrc's build time and memory grow superlinearly on the conversion code of polymorphic recursion through monad transformers when it is inlinable (Reussir issue fixed upstream in #674, a cost): an 8-line StateT tower used at IO did not build within 30 minutes or 15 GB; rrc's inliner copies a callee of up to 256 operations into every call, however many, and LLVM's passes are superlinear in the size of one function: RtJpWide (three outlined join points called about 266 times each from one 800-arm match) took 740 s to build instead of 5 s"⟩]
 
 /-- The configuration with the enabled optimizations, after turning off
-those named in `disabled` and on those named in `enabled`, for the
-representation `intBackend` of `Nat` and `Int`, which the passes'
-installs read. An unknown name,
+those named in `disabled` and on those named in `enabled`. An unknown name,
 the name of a required part, or a name both turned off and on is an
 error. -/
-def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := .rcgmp) :
-    Except String PassConfig := do
+def config (disabled enabled : Array String := #[]) : Except String PassConfig := do
   for n in disabled ++ enabled do
     if let some r := required.find? (·.name == n) then
       throw s!"'{n}' is required, not an optimization: {r.reason}"
@@ -146,7 +143,7 @@ def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := 
     if disabled.contains n && enabled.contains n then
       throw s!"'{n}' is both disabled and enabled"
   let on (o : OptPass) : Bool := (o.enabled || enabled.contains o.name) && !disabled.contains o.name
-  return optimizations.foldl (init := { stage2, intBackend }) fun c o => if on o then o.install c else c
+  return optimizations.foldl (init := { stage2 }) fun c o => if on o then o.install c else c
 
 /-- The registry as text (`lean2rr --list-opts`). -/
 def listing : String := Id.run do

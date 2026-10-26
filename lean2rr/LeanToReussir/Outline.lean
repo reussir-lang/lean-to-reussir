@@ -516,8 +516,8 @@ end
 
 /-- Field types of the variants of the enums declared by `items` and by the
 prelude's source (`enum [value] L2RUnit { u }`), and of Reussir's built-in
-integers' constructors (`--int-backend rcgmp`: the arms of a match on a
-`Nat` or `Int`, Lower/IntMatch, bind `Nat`s). -/
+integers' constructors (the arms of a match on a `Nat` or `Int`,
+Lower/IntMatch, bind `Nat`s). -/
 def variantTable (items : Array Item) (prelude : String) : Std.HashMap (String × String) (Array Ty) := Id.run do
   let nat := Ty.named "Nat"
   let mut out : Std.HashMap (String × String) (Array Ty) :=

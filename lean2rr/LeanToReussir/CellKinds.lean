@@ -18,8 +18,8 @@ two element types of one kind that can be one type (`List Nat` and
 * `bool`, `u8`, `u16`, `u32`, `f32`: `Bool`, `UInt8`, `UInt16`, `UInt32`
   (and `Char`, whose mono type is `UInt32`), `Float32`, the scalars that a
   box holds as an immediate;
-* `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (under `--int-backend rcgmp`
-  a typed cell of `Nat` holds Reussir's owned handle, local patch R2);
+* `Nat`, `Int`, `LStr`: `Nat`, `Int`, `String` (a typed cell of `Nat`
+  holds Reussir's owned handle, local patch R2);
 * `I:<name>`: an inductive the lowering makes a shared record or enum
   (`sharedInductive?`, as for typed arrays);
 * `A(<s>)`: an `Array Y`, where `s` is the storage of `Y` in the array as

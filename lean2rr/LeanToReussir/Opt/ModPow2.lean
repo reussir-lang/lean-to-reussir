@@ -17,25 +17,26 @@ The pass rewrites, in the mono code after Stage 3, each `Nat.mod x p`
 whose divisor is bound in the same declaration to
 - `Nat.pow b w` with `b` the literal 2, or `Nat.shiftLeft o w` with `o`
   the literal 1: `L2RNat.truncateBits x w`;
-- the literal `2^k`, `k ≥ 63` (`k ≥ 61` under `--int-backend rcgmp`:
-  `minLitExp`), or a read of a constant whose code is that
-  literal (Lean folds `2 ^ 64` to a literal, which Stage 2 extracts as a
-  closed term): `L2RNat.truncateBits x k`, with a `let` of the literal `k`.
+- the literal `2^k`, `k ≥ 61` (`minLitExp`), or a read of a constant
+  whose code is that literal (Lean folds `2 ^ 64` to a literal, which
+  Stage 2 extracts as a closed term): `L2RNat.truncateBits x k`, with a
+  `let` of the literal `k`.
 `L2RNat.truncateBits` is an extern (`l2r_nat_truncate_bits`) that the pass
 adds to the environment (a definition whose value is the rule, never an
 axiom: `programCasts` would read one as a possible cast) and to the
-declarations; the prelude computes it
-(two small words in line, else `leanrt::nat::nat_truncate_bits`, which
-keeps a big `x` that has at most `w` bits as it is). The `let` of `p`, and
-of the literal 2 or 1 it took, goes when nothing else uses it.
+declarations; the prelude computes it (rcgmp's `floormod2expi`, which
+keeps immediates in line and reads the low limb of a big `x` for `w` below
+62). The `let` of `p`, and of the literal 2 or 1 it took, goes when nothing
+else uses it.
 
 The value is `x % 2 ^ w` for every `x` and `w`. Natively, and in lean2rr
 before this pass, `2 ^ w` ends the process where it cannot be made
 (natively from `w = 2^32`: `Nat.pow exponent is too big`; in lean2rr above
-`big::MAX_BITS` bits); the truncation needs no power, so it gives the value
-there too (lean2rr lifts such limits where the result can be computed:
-LB-11, plan §10). `L2R_DEBUG=1` prints how many `Nat.mod` calls it
-rewrote. Without this pass, the power is made and divided by, as natively.
+`l2r_nat_max_bits` bits); the truncation needs no power, so it gives the
+value there too (lean2rr lifts such limits where the result can be
+computed: LB-11, plan §10). `L2R_DEBUG=1` prints how many `Nat.mod` calls
+it rewrote. Without this pass, the power is made and divided by, as
+natively.
 -/
 
 namespace LeanToReussir.Opt.ModPow2
@@ -61,10 +62,10 @@ inductive Def where
 def log2Exact? (n : Nat) : Option Nat :=
   if n != 0 && n &&& (n - 1) == 0 then some n.log2 else none
 
-/-- The smallest exponent of a literal divisor the rule takes under backend
-`b`: below it the divisor is small (`natSmallBits`: 2^63 under `leanrt`,
-2^61 under `rcgmp`), and its `%` is computed in line. -/
-def minLitExp (b : IntBackend) : Nat := natSmallBits b
+/-- The smallest exponent of a literal divisor the rule takes: below it
+the divisor is small (`natSmallBits`, 61), and its `%` is computed in
+line. -/
+def minLitExp : Nat := natSmallBits
 
 structure St where
   /-- `Nat.mod` calls rewritten. -/
@@ -247,9 +248,8 @@ end LeanToReussir.Opt.ModPow2
 
 namespace LeanToReussir
 
-/-- Registry entry point (the smallest literal exponent by the
-representation of `Nat`: `minLitExp`). -/
+/-- Registry entry point (the smallest literal exponent: `minLitExp`). -/
 def Opt.ModPow2.install (c : PassConfig) : PassConfig :=
-  { c with monoPassesCore := c.monoPassesCore.push (Opt.ModPow2.run (Opt.ModPow2.minLitExp c.intBackend)) }
+  { c with monoPassesCore := c.monoPassesCore.push (Opt.ModPow2.run Opt.ModPow2.minLitExp) }
 
 end LeanToReussir

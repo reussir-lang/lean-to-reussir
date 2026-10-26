@@ -38,7 +38,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (703 programs, `tests/runtime`) | at its last full run (gate29 = dev 11c498da + Reussir base l2r-base10, whose pending child records are linked through their headers, and RtAltTreeFree's native bounds, 2026-10-26, Reussir upstream 00906e38 + 24 patches with entries 20, 21 and 23, lean-runtime 50840bb), with the default rcgmp representation of Nat and Int 701 of 703 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), and with `L2R_INT_BACKEND=leanrt` the same 701 of 703 and the same 2; the classic corpus 36 of 36 (18 programs at two sizes) with all optional passes on and with all 26 default-on passes off, 18 of 18 with `unread-fields` on, and 36 of 36 under leanrt; every check passes (18) under each representation; the raytracer's images equal native's under each representation. At gate28 (dev 0091855a + Phase 2 on Reussir l2r-base9-shared, 21 patches), 699 of 701 identical under each representation and 2 expected failures. At gate27 (dev 419a74d4 + run 14's rcgmp reads, owned boxes, guard mode removed, the index after a proved access; Reussir 00906e38 + 14 patches), 688 of 690 identical under each representation and 2 expected failures. At gate26 (dev 1886d7bf + the default flip to rcgmp), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int25 (dev 8ee78dc0 + the rcgmp index and size reads, leanrt then the default), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int24 (dev 2c4083d9 + the inline-anchors guard, Reussir 00906e38 + 13 patches), 683 of 685 identical under each representation and 2 expected failures. At the combined gate on int22 (dev 27ea78da + step D, 2026-10-25), 680 of 682 identical under each representation and 2 expected failures. At the combined gate on int21 (2026-10-25, Reussir upstream 00906e38 + 8 patches), 669 of 671 identical and 2 expected failures. At the combined gate on int20 (2026-10-25, Reussir l2r-base5 on 0378b744), 667 of 670 identical and 3 expected failures. At the combined gate on dev 0810b9ec with Reussir l2r-base5 (2026-10-24), 658 of 660 identical and 2 expected failures, and the same results on Reussir l2r-base3 (13de3101, 2026-10-21). At the combined gate on dev 42e8e15b (2026-10-10, Reussir upstream 943f2195 + 35 patches), 632 of 634 identical and the same 2 expected failures. At the gate of switch step 10 ( branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
+| Runtime test suite (703 programs, `tests/runtime`) | at its last full run (gate30 = dev 3e03d989 + D8: the leanrt representation of `Nat` and `Int` removed, rcgmp the only one, 2026-10-26, Reussir l2r-base10: upstream 00906e38 + 24 patches, lean-runtime 50840bb), 701 of 703 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`); the classic corpus 36 of 36 (18 programs at two sizes) with all optional passes on and with all 26 default-on passes off, and 18 of 18 with `unread-fields` on; every check script of tests/runtime passes (18, box-leaf-check included); the raytracer's images equal native's. At gate29 (dev 11c498da + Reussir l2r-base10), with both representations, 701 of 703 identical under each and 2 expected failures. At gate28 (dev 0091855a + Phase 2 on Reussir l2r-base9-shared, 21 patches), 699 of 701 identical under each representation and 2 expected failures. At gate27 (dev 419a74d4 + run 14's rcgmp reads, owned boxes, guard mode removed, the index after a proved access; Reussir 00906e38 + 14 patches), 688 of 690 identical under each representation and 2 expected failures. At gate26 (dev 1886d7bf + the default flip to rcgmp), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int25 (dev 8ee78dc0 + the rcgmp index and size reads, leanrt then the default), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int24 (dev 2c4083d9 + the inline-anchors guard, Reussir 00906e38 + 13 patches), 683 of 685 identical under each representation and 2 expected failures. At the combined gate on int22 (dev 27ea78da + step D, 2026-10-25), 680 of 682 identical under each representation and 2 expected failures. At the combined gate on int21 (2026-10-25, Reussir upstream 00906e38 + 8 patches), 669 of 671 identical and 2 expected failures. At the combined gate on int20 (2026-10-25, Reussir l2r-base5 on 0378b744), 667 of 670 identical and 3 expected failures. At the combined gate on dev 0810b9ec with Reussir l2r-base5 (2026-10-24), 658 of 660 identical and 2 expected failures, and the same results on Reussir l2r-base3 (13de3101, 2026-10-21). At the combined gate on dev 42e8e15b (2026-10-10, Reussir upstream 943f2195 + 35 patches), 632 of 634 identical and the same 2 expected failures. At the gate of switch step 10 ( branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | Applications (`tests/apps`: lean4-raytracer, two modules, built with Lake) | the image file, stdout, stderr and exit code identical to native at all three settings (60×40 pixels on the main thread and in one task; 200×133 pixels, 4 samples per pixel, depth 30, on the main thread), dev e1e5dde, 2026-10-07 |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
@@ -77,87 +77,41 @@ Think of each Lean type as becoming a Rust type.
 
 | Lean | Reussir / runtime | Notes |
 |---|---|---|
-| `Nat` (natural numbers, unbounded) | `Nat`, one machine word, as natively: Reussir's built-in integer (the default) or, with `--int-backend leanrt`, lean2rr's own word | see below |
-| `Int` (unbounded integers) | `Int`, one machine word, as natively (the same two representations) | small in [-2^61, 2^61) (default) or in the 32-bit range (leanrt) |
+| `Nat` (natural numbers, unbounded) | `Nat`, one machine word, as natively: Reussir's built-in integer | see below |
+| `Int` (unbounded integers) | `Int`, one machine word, as natively: Reussir's built-in integer | small in [-2^61, 2^61) |
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | 64-bit targets only |
 | `Int8…Int64`, `ISize` | the same unsigned words, signed operations on the bit pattern | as Lean's C runtime does |
 | `Float`, `Float32` | `f64`, `f32` | printing follows Lean's exactly |
 | `Char` | `u32` | |
 | `Bool` | `bool` | |
 
-**Two representations.** Since 2026-10-25 lean2rr's default
-(`--int-backend rcgmp`) makes `Nat` and `Int` Reussir's built-in integers
-(rcgmp): a value in [-2^61, 2^61) is an immediate in the word, any other a
-reference-counted GMP integer of Reussir's runtime. Arithmetic on
-immediates is inline code that LLVM can fold, a case split on a `Nat` or
+**One representation.** `Nat` and `Int` are Reussir's built-in integers
+(rcgmp; lean2rr's default since 2026-10-25, its only representation since
+2026-10-26): a value in [-2^61, 2^61) is an immediate in the word, any
+other a reference-counted GMP integer of Reussir's runtime, one block with
+its limbs. Arithmetic on immediates is inline code that LLVM can fold
+(Reussir also folds arithmetic on constants), a case split on a `Nat` or
 `Int` is a Reussir `match`, and a boxed `Nat` or `Int` keeps Lean's
 words (a `Nat` below 2^63 is an immediate; a bigger value is a runtime
-cell that holds the integer). `--int-backend leanrt`
-(`L2R_INT_BACKEND=leanrt`), the default until 2026-10-25, selects
-lean2rr's own one-word encoding, described in the rest of this section.
-Both give the same results: at the combined gate of 2026-10-25 (gate 25)
-the whole runtime suite and the classic corpus passed under each (the
-checks under leanrt, five of them under rcgmp too), and timing run 14
-measured a per-case geometric mean of 0.990 for rcgmp against leanrt
-(wall time; details:
+cell that holds the integer). Lean's rules (subtraction stops at 0,
+division by 0 gives 0, the limits of shifts and exponents) are composed in
+the prelude of Reussir's operators, as the shared crate lean-runtime
+writes them. Until 2026-10-26, `--int-backend leanrt`
+(`L2R_INT_BACKEND=leanrt`), the default until 2026-10-25, selected
+lean2rr's own one-word encoding (Lean's `lean_box(n)` words, big numbers
+in one block of leanrt's with GMP); both gave the same results at the
+combined gates, and timing run 14 measured a per-case geometric mean of
+0.990 for rcgmp against leanrt (wall time). Clean-integration D8 removed
+it (details:
 [nat-int.md](implementation/representations/nat-int.md)).
-
-**How `Nat` works under leanrt.** A `Nat` is one machine word, as in native Lean: a
-small value `n` (below 2^63) is stored in the word itself as `2n+1` (an
-odd number), and a bigger one is a pointer (an even number) to a
-reference-counted big number. Arithmetic on two small values is inline
-code: `a + b` is a test of both low bits, an add and an overflow check;
-only a big operand or an overflow calls the runtime. Big numbers use GMP
-(the same library Lean uses), stored as a reference-counted sign and limb
-vector, updated in place when unique. `Nat.repr` (printing) of big
-numbers uses GMP too. Lean's rules (subtraction stops at 0, division by
-0 gives 0, the limits of shifts and exponents, which result is too big)
-are those of the shared crate lean-runtime, written once for both Lean
-translators that use it: the runtime calls them for everything but the
-inline small cases, with its GMP numbers behind lean-runtime's big-number
-traits.
-
-Reussir generates the reference counting itself, and normally treats every
-handle as a pointer whose count it increments when the value is copied. A
-small `Nat` is not a pointer, so lean2rr declares `Nat` and `Int` as
-*tagged* opaque handles, a small local Reussir extension (patch 10-a):
-Reussir counts such a handle only when its low bit is clear, exactly as
-Lean's C runtime tests the bit before every count update. Copying or
-dropping a small `Nat` is a bit test; it is never allocated.
-
-`Int` works the same way, with Lean's encoding too: a value in the 32-bit
-range is stored in the word, any other is a big number. Every result is
-normalized (a big number never holds a value that fits the word), so a
-small and a big `Int` are never equal: that comparison needs no call
-(switch step 10, after an audit of every place that makes an `Int`;
-builds with debug assertions check the rule where a big `Int` is made and
-read).
-
-A small value is exactly Lean's `lean_box(n)`. A big number is lean2rr's
-own: one block with the reference count, the sign and size, and the limbs
-(native Lean's `lean_mpz_object` keeps the limbs in a second allocation,
-made by GMP). C code written against `lean.h` could take the small words
-as they are and a big number after a conversion, but calling a program's
-own C code is not supported (below).
 
 Compared with native Lean:
 - a `Nat` or `Int` field in a record takes 8 bytes, as natively;
 - a big number is one allocation (natively two: the object and GMP's
-  limbs), 32 bytes for a two-limb number (natively 56);
-- a `Nat` in the generic `Box` (a field or an array element of a type
-  parameter's type, code whose types cannot be made concrete, below) is
-  its own word when small, as natively: boxing it allocates nothing.
-
-Peak memory (max RSS, 2026-10-03, against the native build): `rbmap`
-(a red-black tree with `Nat` keys and values) 0.84× (with the earlier
-two-word `Nat`: 1.00×); an array of 2 million records with four `Nat`
-fields and a list of `Nat` pairs 0.80× (1.26×); `bignum` about 1.1×
-(1.2–1.3×; a few MB, noisy). With big numbers in one block (perf-big,
-2026-10-03, measured without transparent huge pages, which round RSS to
-2 MiB steps): a million live two-limb numbers 49.5 MB, 0.67× native
-(65.2 MB with the two-allocation layout); the classic Bignum 3.6 MB and
-Liasolver 5.8 MB, within a few hundred KB of the two-allocation layout
-(3.2 and 5.5 MB) and below native (5.8 and 7.4 MB).
+  limbs);
+- a `Nat` below 2^63 in the generic `Box` (a field or an array element of
+  a type parameter's type, code whose types cannot be made concrete,
+  below) is its own word, as natively: boxing it allocates nothing.
 
 ### Text, arrays, references
 
@@ -451,9 +405,10 @@ with examples, is §10 of the translation plan.
   result can be computed: `Nat.pow` with an exponent of 2^32 or more
   (`1 ^ e`, `0 ^ e`, and any power that fits, LB-11), `Nat.shiftLeft` and
   `Nat.shiftRight` by 2^32 or more (LB-12, LB-04), `ByteArray.copySlice`
-  with an offset or length of 2^64 or more (LB-06); a power too big for
-  GMP ends at once with `INTERNAL PANIC: out of memory`, where natively
-  GMP kills the program with SIGFPE (LB-05). With `mod-pow2`, `x % 2 ^ w`
+  with an offset or length of 2^64 or more (LB-06); a power or left shift
+  too big for GMP ends at once with `INTERNAL PANIC: out of memory`, where
+  natively GMP kills the program with SIGFPE (LB-05; a larger sum or
+  product is computed, or ends with an abort where memory runs out). With `mod-pow2`, `x % 2 ^ w`
   and `x % (1 <<< w)` make no power and give their value for every `w`:
   `x` itself above `MAX_BITS`, and no message for a `w` of 2^32 or more,
   where natively (and in lean2rr without the pass, above `MAX_BITS`) the
@@ -597,10 +552,10 @@ soundness.
 | `boxed-consts` | a constant whose boxing allocates (a `Float`, a `UInt64` from 2^63) boxed once, as native Lean's `_boxed_const` |
 | `literal-consts` | a constant whose code is one string literal, or one read of such a constant, read from the runtime's literal cache, without a once-cell accessor and `_init`: 50 programs' `.rr` 35.2 MB → 27.8 MB (2284 accessor pairs fewer; L11 −11.9%; lean-zip's two drivers (Survey.Main, ZipBench) −41.5%, as their unread `bv_decide` certificate strings, 3 MB, leave the literal table) |
 | `float-lits` | float literals computed at compile time |
-| `cheap-consts` | constants made of small literals (one-word `Nat`/`Int` values only) recomputed instead of cached |
+| `cheap-consts` | constants made of small literals (for `Nat`/`Int`: any literal, computed values only within rcgmp's immediates) recomputed instead of cached |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code |
-| `prelude-int-ops` | under `--int-backend rcgmp`, `Nat.testBit` read in place (rcgmp's `testbiti`) and `Float.ofNat`/`Float.ofInt` (also `Nat.toFloat`/`Int.toFloat`) by `sitofp`; nothing under leanrt. Cachegrind, rcgmp, SVE-free builds: lean-regex's backtracker (Z03b) 19.16 → 18.88 G instructions (−1.5 %); a loop of `toFloat` on small, 2-limb and negative 2-limb values 4.17 G → 80.1 M (−98 %), on small values only 41.5 → 17.5 M (−58 %); `testBit` over each bit of a 9512-bit number 142.6 → 7.8 M (−95 %) |
-| `int-match` | under `--int-backend rcgmp`, a case split on a `Nat` or `Int` (`0`/`n+1`, `ofNat`/`negSucc`, nested splits, chains of literal tests) is a Reussir `match` on the built-in integer; nothing under leanrt. Cachegrind against the pass off: a loop through `n+1` −7.9 %, E01 −3.0 %, X14, X13, L04, L11 unchanged, X04 +1.7 %, L08 +2.2 %, `fib` +6.6 % (rcgmp's selection among immediates costs a few instructions more than one test for two or three arms) |
+| `prelude-int-ops` | `Nat.testBit` read in place (rcgmp's `testbiti`) and `Float.ofNat`/`Float.ofInt` (also `Nat.toFloat`/`Int.toFloat`) by `sitofp`. Cachegrind, SVE-free builds: lean-regex's backtracker (Z03b) 19.16 → 18.88 G instructions (−1.5 %); a loop of `toFloat` on small, 2-limb and negative 2-limb values 4.17 G → 80.1 M (−98 %), on small values only 41.5 → 17.5 M (−58 %); `testBit` over each bit of a 9512-bit number 142.6 → 7.8 M (−95 %) |
+| `int-match` | a case split on a `Nat` or `Int` (`0`/`n+1`, `ofNat`/`negSucc`, nested splits, chains of literal tests) is a Reussir `match` on the built-in integer. Cachegrind against the pass off: a loop through `n+1` −7.9 %, E01 −3.0 %, X14, X13, L04, L11 unchanged, X04 +1.7 %, L08 +2.2 %, `fib` +6.6 % (rcgmp's selection among immediates costs a few instructions more than one test for two or three arms) |
 | `mod-pow2` | `x % 2^w` (every `BitVec.ofNat`) computed as the low `w` bits of `x`, without making `2^w`: lean-regex's backtracker (Z03b) −41 % instructions on dev, −50 % with the runtime's big-number fixes |
 | `jp-sink`, `jp-small` | join points moved to where they are used; small ones duplicated |
 | `state-machines` | loops through join points: entering the loop and every jump inside it allocate nothing |
@@ -679,8 +634,7 @@ adversarially. Only the bugs are wrong: the other kinds have correct
 output, and their patches are optimizations or features, not fixes.
 
 - **The interface for `Nat` and `Int` on rcgmp (issue 20, 5 patches),
-  for step D (`--int-backend rcgmp`, on dev since `1e57ed53`,
-  2026-10-25):** intrinsics for
+  for step D (on dev since `1e57ed53`, 2026-10-25):** intrinsics for
   Lean's division modes and the power-of-two remainder, with unsigned
   division of `Nat` immediates; `Nat` and `Int` at polyffi type
   arguments as an owned handle (this patch also fixes a bug: before it,
@@ -689,13 +643,13 @@ output, and their patches are optimizations or features, not fixes.
   that inlines into textures; a sharing query for `dbgTraceIfShared`;
   big literals given to MLIR in hexadecimal (a 100k-digit literal: 17 min
   to 0.5 s). rcgmp is lean2rr's default backend since 2026-10-25, so a
-  default build needs 20-a and 20-b (scripts/l2r.py checks for them);
-  `--int-backend leanrt` does not need them.
+  default build needs 20-a and 20-b (scripts/l2r.py checks for them),
+  and since clean-integration D8 (2026-10-26) every build.
 - **An optimization of code with rcgmp integers (issue 21, 1 patch):**
   inc/dec cancellation also cancels the retain of an integer member
   extracted from a `[value]` record or tuple against the member's release
-  in the record's drop, as it does for an rc member (under
-  `--int-backend rcgmp`: L12 -9.6% instructions, L17 -7.8%, Z01c -6.0%).
+  in the record's drop, as it does for an rc member (L12 -9.6%
+  instructions, L17 -7.8%, Z01c -6.0%).
   Nothing requires it.
 - **The memory of deep frees (issue 23, 16 patches; a cost, not a
   bug):** upstream frees the records of a recursive type that is neither
@@ -745,7 +699,7 @@ also works with a Reussir without the patches that fix or improve them
 (except for the patches it requires: its prelude needs 10-a,
 `scripts/l2r.py` requires 23-f, 23-k, 23-m and 07-a
 (`REQUIRED_REUSSIR_PATCHES`),
-and `--int-backend rcgmp`, the default, requires 20-a and 20-b
+and `Nat` and `Int` on Reussir's built-in integers require 20-a and 20-b
 (`check_rcgmp`)); the workarounds for the issues fixed
 upstream are listed as removable after the move (now) in
 [`implementation/reussir-workarounds/`](implementation/reussir-workarounds/README.md).

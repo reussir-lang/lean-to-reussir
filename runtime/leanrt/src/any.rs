@@ -4,13 +4,16 @@
 //! - An odd word is an immediate, `(v << 1) | 1` (`v` below 2^63): `Bool`,
 //!   an enumeration's index, `UInt8/16/32`, `Char`, the bits of a `Float32`,
 //!   a `UInt64`/`USize` below 2^63, unit (`1`, Lean's `box(0)`), a nullary
-//!   constructor of a Reussir enum (its variant index), and a small `Nat` or
-//!   `Int`, whose words are already this encoding (`nat`).
+//!   constructor of a Reussir enum (its variant index), a small `Nat` (below
+//!   2^63) and a small `Int` (an `int32` as its 32-bit pattern, a value in
+//!   [2^32, 2^62) or [-2^62, -2^31) as `2v + 1`), which the prelude encodes
+//!   and decodes in Reussir code (`l2r_any_of_nat`/`_int`,
+//!   `l2r_any_as_nat`/`_int`).
 //! - An even word owns one reference to a counted object: the low 48 bits
 //!   are the object's address, the top 16 bits the number of the payload's
 //!   type (`num`). Every object that can be boxed is one pointer to a block
 //!   whose `u32` count is at offset 0 (Reussir records and enums, function
-//!   values, `LStr`, `RVec`, `LCell`, big numbers, the cells below), so a
+//!   values, `LStr`, `RVec`, `LCell`, the cells below), so a
 //!   copy of an `LAny` is a copy of its payload: the payload's count goes
 //!   up, and an unboxed payload is the same object (uniqueness carries
 //!   over).
@@ -22,7 +25,8 @@
 //! `rc.dec` calls the drop hook (`Drop` below) for an even word.
 //!
 //! Payload numbers: 0 is never used; 1 to 15 are leanrt's own payload kinds
-//! (`NUM_*`), released here: 1 a big `Nat`, 2 a big `Int`, 3 a `String`, 4
+//! (`NUM_*`), released here: 1 a big `Nat`'s cell, 2 a big `Int`'s cell
+//! (`of_mpz`), 3 a `String`, 4
 //! a `Float`'s cell, 5 a large `UInt64`'s cell, 6 an array of boxes, 7 to
 //! 12 the arrays of scalars (7 `RVec<u8>`, a `ByteArray` or a compact
 //! `Array` of `UInt8`, `Bool` or a small enumeration; 8 `RVec<f64>`, a
@@ -51,7 +55,9 @@
 //!
 //! A payload that is not one counted pointer is boxed in a cell first: an
 //! `f64` and a `UInt64`/`USize` from 2^63 here (`NUM_F64`, `NUM_U64`, a
-//! `reussir_rt::rc::Rc`, as native Lean allocates for them); a multi-word
+//! `reussir_rt::rc::Rc`, as native Lean allocates for them), a big `Nat` or
+//! `Int` (`NUM_NAT`, `NUM_INT`: a `reussir_rt::rc::Rc` of Reussir's handle,
+//! which leanrt does not read; natively the number's own object); a multi-word
 //! `[value]` record in a one-field shared record that lean2rr generates.
 //!
 //! The 48-bit address is checked when a pointer is boxed (a panic if a top
@@ -69,9 +75,6 @@
 //! constructor by index). leanrt never reads Reussir's representation of a
 //! nullary variant: a box of a Reussir type is always a pointer here.
 
-#[cfg(not(leanrt_rcgmp))]
-use crate::big::LBig;
-use crate::nat::{LInt, LNat};
 use crate::string::LStr;
 use reussir_rt::rc::Rc;
 use std::mem::{forget, size_of, transmute_copy};
@@ -86,9 +89,9 @@ pub const ADDR_BITS: u32 = 48;
 pub const ADDR_MASK: u64 = (1 << ADDR_BITS) - 1;
 
 /// leanrt's payload kinds (the program's start at `FIRST_PROGRAM_NUM`).
-/// A big `Nat` (an even `LNat` word: `LBig`).
+/// A big `Nat`: a cell of Reussir's handle (`of_mpz`).
 pub const NUM_NAT: u64 = 1;
-/// A big `Int` (an even `LInt` word: `LBig`).
+/// A big `Int`: a cell of Reussir's handle (`of_mpz`).
 pub const NUM_INT: u64 = 2;
 /// A `String` (`LStr`).
 pub const NUM_STR: u64 = 3;
@@ -413,11 +416,8 @@ extern "C" fn release_kind(w: u64, num: u64) {
     let p = ptr_of(w).mask(ADDR_MASK as usize);
     unsafe {
         match num {
-            #[cfg(not(leanrt_rcgmp))]
-            NUM_NAT | NUM_INT => drop(std::mem::transmute::<*mut u8, LBig>(p)),
-            // Under `--int-backend rcgmp`: the cell of a big built-in
-            // integer (`of_mpz`), whose release is rcgmp's.
-            #[cfg(leanrt_rcgmp)]
+            // The cell of a big built-in integer (`of_mpz`), whose release
+            // is rcgmp's.
             NUM_NAT | NUM_INT => drop(std::mem::transmute::<*mut u8, Rc<crate::rcgmp::Mpz>>(p)),
             NUM_STR => drop(std::mem::transmute::<*mut u8, LStr>(p)),
             // A scalar cell holds nothing to drop.
@@ -548,38 +548,13 @@ extern "C" fn unit_at_program_type(num: u64) -> ! {
     crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::Unreachable)
 }
 
-/// A `Nat`: a small one is its own word (an immediate), a big one a
-/// pointer of kind `NUM_NAT` (the `num` argument is not used).
-impl Payload for LNat {
-    #[inline(always)]
-    fn into_any(self, _num: u64) -> LAny {
-        of_nat(self)
-    }
-    #[inline(always)]
-    unsafe fn from_any_word(w: u64, _num: u64) -> Self {
-        nat_of_word(w)
-    }
-}
-
-impl Payload for LInt {
-    #[inline(always)]
-    fn into_any(self, _num: u64) -> LAny {
-        of_int(self)
-    }
-    #[inline(always)]
-    unsafe fn from_any_word(w: u64, _num: u64) -> Self {
-        int_of_word(w)
-    }
-}
-
-/// Under `--int-backend rcgmp`, a generic box texture at `Nat` or `Int`
+/// A generic box texture at `Nat` or `Int`
 /// (`l2r_any_of<T>`, `l2r_any_as<T>` with `T` = `Mpz`). lean2rr boxes and
 /// unboxes them through `l2r_any_of_nat`/`_int` and `l2r_any_as_nat`/`_int`,
 /// which keep a small value Lean's immediate by a test in Reussir code;
 /// leanrt does not read a handle, so the generic path ends the program
 /// (a line on descriptor 2, then Lean's internal panic) instead of storing
 /// the handle as a pointer of a kind whose release is another's.
-#[cfg(leanrt_rcgmp)]
 impl Payload for crate::rcgmp::Mpz {
     fn into_any(self, num: u64) -> LAny {
         generic_mpz_box(num)
@@ -589,14 +564,13 @@ impl Payload for crate::rcgmp::Mpz {
     }
 }
 
-#[cfg(leanrt_rcgmp)]
 #[cold]
 #[inline(never)]
 fn generic_mpz_box(num: u64) -> ! {
     use std::io::Write;
     let _ = writeln!(
         std::io::stderr(),
-        "leanrt: a generic box texture at a built-in Nat or Int (payload {num}): under --int-backend rcgmp lean2rr boxes them with l2r_any_of_nat/_int and unboxes them with l2r_any_as_nat/_int"
+        "leanrt: a generic box texture at a built-in Nat or Int (payload {num}): lean2rr boxes them with l2r_any_of_nat/_int and unboxes them with l2r_any_as_nat/_int"
     );
     crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::Unreachable)
 }
@@ -809,72 +783,12 @@ pub unsafe fn raw_take<T>(w: u64) -> T {
     unsafe { take_word(w) }
 }
 
-#[inline(always)]
-pub fn of_nat(n: LNat) -> LAny {
-    let w = n.into_raw();
-    if crate::nat::is_small(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_NAT) } }
-}
-
-#[inline(always)]
-pub fn of_int(i: LInt) -> LAny {
-    let w = i.into_raw();
-    if crate::nat::is_small(w) { LAny(ptr_of(w)) } else { unsafe { of_ptr(w, NUM_INT) } }
-}
-
-#[inline(always)]
-unsafe fn nat_of_word(w: u64) -> LNat {
-    if is_imm(w) {
-        return unsafe { LNat::from_raw(w) };
-    }
-    if num_of(w) != NUM_NAT {
-        mismatch(w, NUM_NAT);
-    }
-    unsafe { LNat::from_raw(w & ADDR_MASK) }
-}
-
-#[inline(always)]
-unsafe fn int_of_word(w: u64) -> LInt {
-    if is_imm(w) {
-        return unsafe { LInt::from_raw(w) };
-    }
-    if num_of(w) != NUM_INT {
-        mismatch(w, NUM_INT);
-    }
-    unsafe { LInt::from_raw(w & ADDR_MASK) }
-}
-
-/// A copy of the `Nat` that box `a` holds, read through a reference (the
-/// prelude's `l2r_view_take_as`: an element of an array of boxes read at
-/// `Nat`): an immediate is the small `Nat`'s own word, taken without a
-/// count; a big one is copied as `as_` copies it (`copy_big`).
-#[inline(always)]
-pub fn nat_of_ref(a: &LAny) -> LNat {
-    let w = a.word();
-    if is_imm(w) { unsafe { LNat::from_raw(w) } } else { copy_big(a, NUM_NAT) }
-}
-
-/// `nat_of_ref` at `Int`.
-#[inline(always)]
-pub fn int_of_ref(a: &LAny) -> LInt {
-    let w = a.word();
-    if is_imm(w) { unsafe { LInt::from_raw(w) } } else { copy_big(a, NUM_INT) }
-}
-
-/// The pointer case of `nat_of_ref`/`int_of_ref`, out of line: the
-/// prelude's texture stays small enough for LLVM to inline it at a cold
-/// call site.
-#[cold]
-#[inline(never)]
-fn copy_big<B>(a: &LAny, num: u64) -> B {
-    as_(a.clone(), num)
-}
-
-/// Under `--int-backend rcgmp`, a big built-in `Nat` (`num` = `NUM_NAT`)
+/// A big built-in `Nat` (`num` = `NUM_NAT`)
 /// or `Int` (`NUM_INT`) in a box: a cell holding the reference `x`
-/// (`rcgmp::box_owned`). The prelude boxes every other value as Lean's
-/// immediate (a `Nat` below 2^63, an `Int` in the `int32` range), tested
-/// in Reussir code; leanrt does not read the handle.
-#[cfg(leanrt_rcgmp)]
+/// (`rcgmp::box_owned`). The prelude boxes every other value as an
+/// immediate (a `Nat` below 2^63, an `Int` in the ranges of
+/// `l2r_any_of_int`), tested in Reussir code; leanrt does not read the
+/// handle.
 #[inline]
 pub fn of_mpz(x: crate::rcgmp::Mpz, num: u64) -> LAny {
     debug_assert!(matches!(num, NUM_NAT | NUM_INT));
@@ -886,7 +800,6 @@ pub fn of_mpz(x: crate::rcgmp::Mpz, num: u64) -> LAny {
 /// holds (`of_mpz`), the box given up: moved out of a unique cell, else a
 /// new reference. Any other word, an immediate too, is `mismatch` (the
 /// prelude decodes immediates).
-#[cfg(leanrt_rcgmp)]
 #[inline]
 pub fn mpz_of(a: LAny, num: u64) -> crate::rcgmp::Mpz {
     let w = a.into_raw();
@@ -1165,27 +1078,21 @@ mod tests {
         assert!(as_f64(of_f64(f64::NAN)).is_nan());
     }
 
+    /// A big `Nat` or `Int`: a cell of kind `NUM_NAT` or `NUM_INT` that
+    /// holds Reussir's handle, shared by copies of the box. (Small values are
+    /// immediates that the prelude makes and reads.)
     #[test]
-    fn small_and_big_numbers() {
-        // A small Nat is its own word.
-        let n = of_nat(LNat::small(5));
-        assert_eq!(n.word(), 11);
-        assert_eq!(as_::<LNat>(n, 0).low_u64(), 5);
-        // A big Nat: a pointer of kind NUM_NAT, shared by copies.
-        let b = of_nat(LNat::of_u64(u64::MAX));
+    fn big_number_cells() {
+        let b = of_mpz(crate::rcgmp::of_word(u64::MAX, false), NUM_NAT);
         assert_eq!(b.num(), NUM_NAT);
         let b2 = b.clone();
         assert_eq!(count(&b), 2);
-        assert_eq!(as_::<LNat>(b2, 0).low_u64(), u64::MAX);
+        assert!(mpz_of(b2, NUM_NAT) == crate::rcgmp::of_word(u64::MAX, false));
         assert_eq!(count(&b), 1);
         drop(b);
-        // A big Int.
-        let i = of_int(LInt::of_i64(i64::MIN));
+        let i = of_mpz(crate::rcgmp::of_word(1 << 63, true), NUM_INT);
         assert_eq!(i.num(), NUM_INT);
-        drop(i);
-        let s = of_int(LInt::of_i64(-3));
-        assert!(s.is_imm());
-        drop(as_::<LInt>(s, 0));
+        assert!(mpz_of(i, NUM_INT) == crate::rcgmp::of_word(1 << 63, true));
     }
 
     #[test]
@@ -1440,8 +1347,8 @@ mod tests {
         assert_eq!(take_seen(), vec![(3, false, 0)]);
         for e in [
             of(crate::string::from_bytes(b"t"), NUM_STR),
-            of_nat(LNat::of_u64(u64::MAX)),
-            of_int(LInt::of_i64(i64::MIN)),
+            of_mpz(crate::rcgmp::of_word(u64::MAX, false), NUM_NAT),
+            of_mpz(crate::rcgmp::of_word(1 << 63, true), NUM_INT),
             of_f64(0.5),
             of_u64(u64::MAX),
         ] {
@@ -1562,8 +1469,6 @@ mod tests {
         assert_eq!(as_::<crate::drop::Vec<f32>>(LAny::unit(), NUM_F32S).len(), 0);
         assert_eq!(as_f64(LAny::unit()), 0.0);
         assert_eq!(as_u64(LAny::unit()), 0);
-        assert_eq!(as_::<LNat>(LAny::unit(), 0).low_u64(), 0);
-        assert_eq!(crate::nat::int_of_small_word(as_::<LInt>(LAny::unit(), 0).into_raw()), 0);
     }
 
     /// A compact array of scalars boxed at its kind (whatever number is

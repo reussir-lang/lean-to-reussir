@@ -54,14 +54,14 @@ after them.
   Rust type, and the wrapper around the body decides which arguments to
   release after the body. Reussir's std collections (`Vec`, `HashMap`,
   `BTreeMap` and the others) are textures over Rust's own.
-- **lean2rr's step D.** lean2rr represents Lean's `Nat` and `Int` as one
-  word with its own runtime (`leanrt`, tagged FFI handles: patch 10-a,
-  [issue 10](10-tagged-ffi-objects.md)). Step D adds a second backend,
-  `--int-backend rcgmp`, in which `Nat` and `Int` are Reussir's built-in
-  integers: the arithmetic inlines on immediates, and the runtime's
-  containers hold the same handle. rcgmp is lean2rr's default backend
-  since 2026-10-25; the leanrt backend (`--int-backend leanrt`, the
-  default until then) does not need the five patches.
+- **lean2rr's step D.** lean2rr's `Nat` and `Int` are Reussir's
+  built-in integers: the arithmetic inlines on immediates, and the
+  runtime's containers hold the same handle. Step D added this
+  representation (`--int-backend rcgmp`, the default since 2026-10-25)
+  beside lean2rr's own one-word encoding with its own runtime (`leanrt`,
+  tagged FFI handles: patch 10-a, [issue 10](10-tagged-ffi-objects.md)),
+  which did not need the five patches; clean-integration D8 removed that
+  encoding on 2026-10-26, so every lean2rr build needs 20-a and 20-b.
 
 ## 20-a (R1): bigint intrinsics for Lean's division modes and `floormod2expi`
 

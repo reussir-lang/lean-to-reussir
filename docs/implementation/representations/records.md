@@ -111,7 +111,7 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   [../control-flow/state-machines.md](../control-flow/state-machines.md#the-entry-point-of-nullary-variants-is-an-integer-state-machines));
   the core form's J4 entry enum is shared, for its cost
   ([../control-flow/state-machines.md](../control-flow/state-machines.md#a-loop-through-outlined-join-points-is-one-state-machine)).
-  `Nat`/`Int` are one-word tagged handles
+  `Nat`/`Int` are one word, Reussir's built-in integers
   ([nat-int.md](nat-int.md)); multi-field value records are `[value]`
   structs (join-point tuples), whose padding is explicit.
 - **Why:** A value of an inductive with fields is one heap object, as

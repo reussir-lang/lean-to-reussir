@@ -13,12 +13,12 @@ makes automatically on every program, the "guard" column: what soundness
 requires, and for some passes bounds on code size or translation work, or
 the shapes where the pass applies at all. Plan
 [§1](../translation-plan.md#code-structure-and-passes) ("Code structure
-and passes"). Some passes depend on the representation of `Nat` and `Int`
-(`--int-backend`: `rcgmp`, the default since 2026-10-25, or `leanrt`, the
-default until then): `prelude-int-ops` and `int-match` act only under
-rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
-`boxed-consts` read it
-([nat-int](representations/nat-int.md#--int-backend-rcgmp-the-lowering)).
+and passes"). The cost models of `cheap-consts`, `mod-pow2` and
+`boxed-consts` follow the representation of `Nat` and `Int`, Reussir's
+built-in integers
+([nat-int](representations/nat-int.md#the-lowering)). (Until D8,
+2026-10-26, `--int-backend leanrt` chose leanrt's own representation, and
+`prelude-int-ops` and `int-match` acted only under rcgmp.)
 
 ## The passes, in installation order
 
@@ -32,14 +32,14 @@ rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
 | `compact-arrays` | an `Array` of a scalar is `RVec<u8\|u16\|u32\|u64\|f32\|f64>` of its storage kind; the loops of `Array.map` typed at their element types (Stage 3); `Array lcAny` parameters typed from their callers when they get compact arrays; a field `Array α` boxed in an inductive the program uses with a compact array | the whole-program check (`compactArrayKinds`) turns a storage kind off when a value of it could meet an array of boxes: a crossing at any edge of the reachable code, a flow class that holds `Array lcAny`, or a program that casts (`programCasts`); a typed `map` loop only in Lean's shape, its stored values checked once typed; a parameter only when every caller passes one type and its own calls agree | [compact arrays](representations/compact-arrays.md) |
 | `typed-cells` | the cell of a reference (`ST.Ref σ X`) holds `X`'s own type, `L2RRef(Cell<T>)`, one record type per cell type, for `X` a shared record or enum, `Nat`, `Int`, `String`, an array, or a scalar a box holds as an immediate (`Bool`, `UInt8`, `UInt16`, `UInt32`, `Char`, `Float32`) | a whole-program check over the instances of the reference primitives (`typedRefKinds`): a make and an operation whose element types can be one type up to `lcAny` must have one representation, else both kinds are off (so an operation at `lcAny` turns every kind off); a kind is off when its values can hold something whose release the program can observe (`releaseUnsafe?`), and every kind in a program that can cast (`programCasts`); a missed pair would stop the program at the reference's unboxing (payload numbers differ), never read a cell of another type | [typed cells](representations/typed-cells.md) |
 | `placeholder-cache` | placeholders that would allocate built once, in a once-cell | only heap placeholders; a placeholder is never inspected | [placeholders](representations/placeholders.md#placeholders-that-allocate-are-built-once) |
-| `boxed-consts` | a constant whose boxing allocates boxed once, in a once-cell (native Lean's `_boxed_const`) | only a variable bound to a declaration without parameters that runs once (cached) or cannot trace or panic (`cheap-consts`) and whose value is not a literal that boxes as an immediate (`constIsImmediate`: under `--int-backend rcgmp` also a `Nat` or `Int` constant computed from literals, `constNumValue?`, whose box is an immediate: a `Nat` below 2^63, an `Int` in the `int32` range, in [2^32, 2^62) or in [-2^62, -2^31)), or to a `UInt64` literal from 2^63, at a type whose boxing can allocate (`boxAllocates`), outside the body of a declaration without parameters (`inConstBody`: it runs once); a constant is pure, so one box does as well as a new one | below |
+| `boxed-consts` | a constant whose boxing allocates boxed once, in a once-cell (native Lean's `_boxed_const`) | only a variable bound to a declaration without parameters that runs once (cached) or cannot trace or panic (`cheap-consts`) and whose value is not a literal that boxes as an immediate (`constIsImmediate`: also a `Nat` or `Int` constant computed from literals, `constNumValue?`, whose box is an immediate: a `Nat` below 2^63, an `Int` in the `int32` range, in [2^32, 2^62) or in [-2^62, -2^31)), or to a `UInt64` literal from 2^63, at a type whose boxing can allocate (`boxAllocates`), outside the body of a declaration without parameters (`inConstBody`: it runs once); a constant is pure, so one box does as well as a new one | below |
 | `literal-consts` | a constant whose code is one string literal, or one read of such a constant, gets no once-cell accessor: a read calls the runtime's literal cache, which makes the string at the first read and keeps it | only a declaration without parameters of type `String` whose code is `let x := "…"; return x`, or `let x := c; return x` with `c` such a constant (followed to a fixed point: a chain ends at its literal), not a closed term evaluated where it is used (`uncachedConsts`) nor an `initialize` constant (`literalConsts`); making a literal has no effect, so its first read can make it; the slot keeps a reference, so a value read is never unique, as a once-cell's | [constants](startup/constants.md#a-constant-of-one-string-literal-is-read-from-the-literal-cache) |
 | `float-lits` | float literals folded to their bits at compile time | literal arguments only (the functions are pure and total): a `let` of a literal, a `Bool` discriminant inside an alternative that fixes it, a join point parameter to which every jump passes the same literal; work bound: exponent ≤ 2000, mantissa (or `Float.ofNat`'s argument) at most 4096 bits | below |
-| `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` free (`Nat` literals and `Nat.succ` < 2^63, `Int.ofNat`/`Int.negSucc` of `int32` values; under `--int-backend rcgmp` any literal, computed values in [-2^61, 2^61)), other constructors, total scalar conversions, other cheap constants; no strings | below |
+| `cheap-consts` | constants of small literals recomputed at each use | `isCheapConst`: unboxed types only, every `Nat`/`Int` free (any literal; computed values in [-2^61, 2^61), rcgmp's immediates), other constructors, total scalar conversions, other cheap constants; no strings | below |
 | `prelude-repr` | `Nat.repr`/`Int.repr` by the runtime's GMP code | none needed: the same strings (unary calls only) | [nat-int](representations/nat-int.md#natrepr-of-0127-shares-one-string-per-number) |
-| `prelude-int-ops` | under `--int-backend rcgmp`, `Nat.testBit` by the runtime's `l2r_nat_test_bit` (rcgmp's `testbiti`: the bit read in place, where Lean's definition makes `m >>> i`), `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` by `l2r_float_of_nat`/`_int` (`sitofp`, linear where Lean's `Float.ofScientific` is quadratic from 2^53): every full call of the definitions' instances, and the instances' own code (for function values); under leanrt nothing | none needed: the same results (the float conversions judged bit for bit against Lean 4.34's); only those three definitions, at their own parameter types, and only under rcgmp (leanrt's `l2r_nat_test_bit` is Lean's definition, no gain) | [nat-int](representations/nat-int.md#--int-backend-rcgmp-bit-tests-and-float-conversions-by-rcgmp-prelude-int-ops) |
-| `int-match` | under `--int-backend rcgmp`, a case split on a `Nat` or `Int` (Lean's `Nat.casesOn`, `Int.casesOn`: `n+1`, `negSucc` patterns) is a Reussir `match` on the built-in integer (Stage 2's `toMono` keeps the `cases`), a split of a field that is its only use joins it (`0`, `1`, `n+2`), and a chain of tests of one `Nat` or `Int` against literals (`Nat.decEq`, `Nat.beq`, `Int.decEq`) is one `match` with an arm per literal | none needed: the same branches in the same order (Reussir's first matching arm wins); a test is fused only when its result has no other use, a field's split only when it is the field's only use; arms that do not cover every value end with `_ => l2r_unreachable`; nothing under leanrt | [nat-int](representations/nat-int.md#--int-backend-rcgmp-a-case-split-is-a-reussir-match-int-match) |
-| `mod-pow2` | `x % 2^w` (`Nat.mod x (Nat.pow 2 w)`, `x % (1 <<< w)`, `x` modulo a literal `2^k`, `k ≥ 63` (`k ≥ 61` under `--int-backend rcgmp`); every `BitVec.ofNat`) computed as the low `w` bits of `x` by the runtime, without making `2^w`; the power's `let` goes when nothing else uses it | the divisor's `let` (or the literal constant it reads) in the same declaration, the base the literal 2 (1 for the shift); the same value for every `x` and `w` | [nat-int](representations/nat-int.md#x--2w-is-the-low-w-bits-of-x-without-2w-mod-pow2) |
+| `prelude-int-ops` | `Nat.testBit` by the runtime's `l2r_nat_test_bit` (rcgmp's `testbiti`: the bit read in place, where Lean's definition makes `m >>> i`), `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` by `l2r_float_of_nat`/`_int` (`sitofp`, linear where Lean's `Float.ofScientific` is quadratic from 2^53): every full call of the definitions' instances, and the instances' own code (for function values) | none needed: the same results (the float conversions judged bit for bit against Lean 4.34's); only those three definitions, at their own parameter types | [nat-int](representations/nat-int.md#bit-tests-and-float-conversions-by-rcgmp-prelude-int-ops) |
+| `int-match` | a case split on a `Nat` or `Int` (Lean's `Nat.casesOn`, `Int.casesOn`: `n+1`, `negSucc` patterns) is a Reussir `match` on the built-in integer (Stage 2's `toMono` keeps the `cases`), a split of a field that is its only use joins it (`0`, `1`, `n+2`), and a chain of tests of one `Nat` or `Int` against literals (`Nat.decEq`, `Nat.beq`, `Int.decEq`) is one `match` with an arm per literal | none needed: the same branches in the same order (Reussir's first matching arm wins); a test is fused only when its result has no other use, a field's split only when it is the field's only use; arms that do not cover every value end with `_ => l2r_unreachable` | [nat-int](representations/nat-int.md#a-case-split-is-a-reussir-match-int-match) |
+| `mod-pow2` | `x % 2^w` (`Nat.mod x (Nat.pow 2 w)`, `x % (1 <<< w)`, `x` modulo a literal `2^k`, `k ≥ 61` (rcgmp's immediates end at 2^61); every `BitVec.ofNat`) computed as the low `w` bits of `x` by the runtime, without making `2^w`; the power's `let` goes when nothing else uses it | the divisor's `let` (or the literal constant it reads) in the same declaration, the base the literal 2 (1 for the shift); the same value for every `x` and `w` | [nat-int](representations/nat-int.md#x--2w-is-the-low-w-bits-of-x-without-2w-mod-pow2) |
 | `jp-sink` | join points moved to the smallest code containing their jumps | moves only, never duplicates; binders are unique | [join points](control-flow/join-points.md#join-points-are-sunk-before-the-choice-jp-sink) |
 | `jp-small` | small join points duplicated at their jumps (J1′) | none needed for soundness (a copy runs the same code once per path); code-size bounds: own body ≤ 40, a copy ≤ 480 (join points jumped to once counted at full size), extra copies ≤ 2000 (4000 for a loop's continuation); never a J2 join point | [join points](control-flow/join-points.md#small-join-points-are-duplicated-within-three-bounds-jp-small) |
 | `state-machines` | J4 entered without allocation: every variant nullary (the entry point then an integer, matched on its literals, so LLVM threads the loop), values passed in parameter slots; a jump passes on unchanged the slots its arm does not bind | a jump puts only placeholders in the slots it does not fill (a fresh one, or a slot its arm does not bind, which holds one), never live values; a type without a finite placeholder (`zeroFinite`) gets no slot | [state machines](control-flow/state-machines.md#state-machines-entered-without-allocation-state-machines) |
@@ -298,8 +298,8 @@ rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
 - **What:** When a variable bound to a constant is boxed (`boxOf`, the
   box branch of `tryCoerce`), and boxing its type can allocate
   (`boxAllocates`: a `Float`, a `UInt64` or `i64` word, a `[value]`
-  struct of one, a value in an `ElemBox`, under `--int-backend rcgmp` a
-  `Nat` or `Int`; not an immediate: `UInt8`…
+  struct of one, a value in an `ElemBox`, a `Nat` or `Int`; not an
+  immediate: `UInt8`…
   `UInt32`, `Char`, `Bool`, `Float32`, an enumeration, Lean's `Int8`…
   `Int32`, which Lean erases to `UInt8`…`UInt32`), the box is built
   once and kept in a once-cell, the accessor `l2r_boxed_N` (`boxedConst`;
@@ -311,9 +311,9 @@ rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
   again; not a constant whose value is a literal that boxes as an
   immediate, `constIsImmediate`: `def k : UInt64 := 77` is boxed in line,
   which LLVM folds, where a once-cell read is a load, a test and a copy;
-  under rcgmp also `def k : Nat := 5` and `def k : Int := -7`, a `Nat` or
-  `Int` constant computed from literals whose box is an immediate, see
-  [nat-int](representations/nat-int.md#--int-backend-rcgmp-the-lowering))
+  also `def k : Nat := 5` and `def k : Int := -7`, a `Nat` or `Int`
+  constant computed from literals whose box is an immediate, see
+  [nat-int](representations/nat-int.md#the-lowering))
   or a `UInt64`/`USize` literal from 2^63; `lowerCode` records the
   variables bound to one (`closedLetValue`, `LowerState.closedLets`). Not
   in the body of a declaration without parameters (`inConstBody`, set by
@@ -341,7 +341,7 @@ rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
   pushed, at two sizes). A closed term
   evaluated where it is used (`uncachedConsts`) is left out: the box's
   call ran it a second time, and a trace in it printed twice (test
-  `RtDepBoxedClosedOnce`). Under rcgmp, `RtNatBoxedConsts` (checked by
+  `RtDepBoxedClosedOnce`). `RtNatBoxedConsts` (checked by
   `int-backend-check.sh`): only the `Nat` and `Int` constants whose box is
   a cell get a once-cell.
 - **Where:** `Lower/Conv.lean`: `boxOf`, `boxedConst`; `Lower/Code.lean`:
@@ -416,21 +416,30 @@ rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
   literals, constructors and total scalar conversions (`UInt32.ofNat 0`,
   `Float.ofBits`, or another such constant, up to 8 deep) is recomputed at
   every use instead of read from a once-cell. Every `Nat`/`Int` it builds
-  must be small (one word): the pass tracks the known values of the
-  `Nat`/`Int` variables it binds and accepts `Nat.succ` below 2^63 and
-  `Int.ofNat`/`Int.negSucc` of `int32` values only. Under `--int-backend
-  rcgmp` (`NatEncoding.lean`: `natLitFree`, `natIsSmall`, `intIsSmall` by
-  backend) any literal is free (a read-only object of the program's data)
-  and the computed values must be rcgmp immediates, in [-2^61, 2^61).
+  must be free: any literal is (a read-only object of the program's
+  data), and the pass tracks the known values of the `Nat`/`Int`
+  variables it binds and accepts a computed `Nat.succ`, `Int.ofNat` or
+  `Int.negSucc` only within rcgmp's immediates, [-2^61, 2^61)
+  (`NatEncoding.lean`: `natIsSmall`, `intIsSmall`). (Until D8 the leanrt
+  representation's limits were its small ranges: a `Nat` literal or
+  `Nat.succ` below 2^63, an `Int.ofNat`/`Int.negSucc` in the `int32`
+  range.)
 - **Why:** It cannot panic, trace or allocate, so the change is
   unobservable, and a once-cell read costs more (a load, a test and the
   count's increment, startup/constants.md; the numbers that follow are
   from before a read became one load): deriv 1.20x → 1.11x
   native (a570011); `instInhabitedUInt32` read on every `get!` of an
-  `Array UInt32`: qsort 1.03x → 0.89x (8c58721). A big `Nat`/`Int` is a
-  heap number: `def K : Int := 3000000000` recomputed was allocated at
-  every use, 7-8x native in a loop (RV8N-01; test `RtNatConst` with
-  `nat-alloc-check.sh`).
+  `Array UInt32`: qsort 1.03x → 0.89x (8c58721). The limit on computed
+  values came from the leanrt representation, where a big `Nat`/`Int` was
+  a heap number made at each evaluation: `def K : Int := 3000000000`
+  recomputed was allocated at every use, 7-8x native in a loop (RV8N-01).
+  With Reussir's integers a literal is static, and Reussir folds
+  arithmetic on literals (`+`, `-`, negation; `Int.negSucc` of a literal
+  is static too, even when recomputed), so a value computed from literals
+  usually costs no allocation either. The limit stays, a cost model on
+  the safe side: a constant it refuses is only cached (test `RtNatConst`,
+  whose `.alloc` bound checks that a big constant used in a loop is made
+  once).
 - **Where:** `Opt/CheapConsts.lean`: `isCheapConst` (`smallCtor`), `isUnboxedTy`; hook
   `LowerHooks.recomputeConst`; `Lower/Code.lean`: `lowerDecl`.
 - **Remove only if:** the pass is off (every constant outside closed-term

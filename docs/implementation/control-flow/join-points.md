@@ -214,7 +214,7 @@ relative to `lean2rr/LeanToReussir/`. Plan
   practice `inline-anchors`).
 - **Why:** `jp-small` outlines a join point whose copies would be too much
   code, and the inliner then copied it back into every jump. `RtJpWide`
-  under `--int-backend rcgmp` (one `match` with 800 arms, three outlined
+  (one `match` with 800 arms, three outlined
   join points of about 160 operations, about 266 calls each) took 740 s
   to build, because LLVM's passes are superlinear in the size of the one
   function that got all the copies; with the join points out of line,

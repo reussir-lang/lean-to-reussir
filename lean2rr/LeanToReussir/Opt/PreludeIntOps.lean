@@ -4,9 +4,8 @@ import LeanToReussir.PassConfig
 /-!
 # Bit tests and float conversions by rcgmp (optimization `prelude-int-ops`)
 
-Under `--int-backend rcgmp` three Lean definitions over `Nat` and `Int`
-have a direct counterpart in Reussir's integers, which the prelude's rcgmp
-block uses:
+Three Lean definitions over `Nat` and `Int` have a direct counterpart in
+Reussir's integers, which the prelude uses:
 
 | Lean definition | Lean's code | prelude function |
 |---|---|---|
@@ -42,13 +41,8 @@ value is the Lean definition itself (never an axiom: `programCasts` reads
 one as a possible cast), with `@[extern]` naming the prelude function, and
 an extern declaration of the program.
 
-Under `leanrt` the pass does nothing. The leanrt block's
-`l2r_nat_test_bit` is Lean's definition (the same three operations, the
-same `m >>> i`), so the rewrite would gain nothing there, and the leanrt
-`.rr` stays as it was; Lean's `Float.ofNat`/`Float.ofInt` stay too (the
-leanrt block has no float conversion). `L2R_DEBUG=1` prints how many calls
-and instances were rewritten. Without the pass, Lean's definitions are
-translated like any other code.
+`L2R_DEBUG=1` prints how many calls and instances were rewritten. Without
+the pass, Lean's definitions are translated like any other code.
 -/
 
 namespace LeanToReussir.Opt.PreludeIntOps
@@ -76,11 +70,8 @@ def floatOfInt : Op :=
   { orig := ``Float.ofInt, name := `L2RFloat.ofInt, sym := "l2r_float_of_int",
     params := #[(`i, mkConst ``Int)], result := mkConst ``Float }
 
-/-- The rewrites under backend `b`: none under `leanrt` (see the module
-comment). -/
-def ops : IntBackend → Array Op
-  | .rcgmp => #[testBit, floatOfNat, floatOfInt]
-  | .leanrt => #[]
+/-- The rewrites. -/
+def ops : Array Op := #[testBit, floatOfNat, floatOfInt]
 
 /-- The extern's Lean type. -/
 def Op.type (o : Op) : Expr :=
@@ -200,11 +191,8 @@ end LeanToReussir.Opt.PreludeIntOps
 
 namespace LeanToReussir
 
-/-- Registry entry point (the rewrites of the representation of `Nat`:
-`PreludeIntOps.ops`, none under `leanrt`). -/
+/-- Registry entry point (the rewrites `PreludeIntOps.ops`). -/
 def Opt.PreludeIntOps.install (c : PassConfig) : PassConfig :=
-  match Opt.PreludeIntOps.ops c.intBackend with
-  | #[] => c
-  | os => { c with monoPassesCore := c.monoPassesCore.push (Opt.PreludeIntOps.run os) }
+  { c with monoPassesCore := c.monoPassesCore.push (Opt.PreludeIntOps.run Opt.PreludeIntOps.ops) }
 
 end LeanToReussir

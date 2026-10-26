@@ -107,15 +107,17 @@ pub fn purge_arenas_at_once() {
     }
 }
 
+/// A failed allocation: `INTERNAL PANIC: out of memory`, as natively a Lean
+/// object that cannot be allocated.
 #[cold]
 #[inline(never)]
-fn oom() -> ! {
+pub(crate) fn oom() -> ! {
     crate::lean_internal_panic(lean_runtime::semantics::panic::InternalPanic::OutOfMemory)
 }
 
 /// The bytes a mimalloc block asked for with `bytes` bytes (a multiple of
-/// 8) can hold, mimalloc's size class (`mi_good_size`): the capacity big
-/// numbers, strings and arrays take for a block. Up to 64 bytes it is
+/// 8) can hold, mimalloc's size class (`mi_good_size`): the capacity
+/// strings and arrays take for a block. Up to 64 bytes it is
 /// `bytes` itself, without the call: mimalloc's classes there are every
 /// multiple of 8 (one per word count, `mi_bin`), so `mi_good_size` would
 /// return its argument (unit test `alloc::tests::small_good_size`); and were

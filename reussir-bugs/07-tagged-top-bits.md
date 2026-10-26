@@ -59,15 +59,16 @@ bits set is not a valid address.
 
 ## lean2rr
 
-Not used by generated code yet. lean2rr's `Nat` and `Int` are tagged too;
-their pointers come from mimalloc and have the top 16 bits clear (see
-below), so 07-a changes nothing for them but one AND on the increment of a
-big number. The probe of the one-word box (a hand-written program over the
-prelude: records, enums, function values, strings, arrays of boxes,
-references, cells, big numbers, a chain of 10^6 nested boxes) needs 07-a:
-built against `l2r-local` d79f8b70 it is killed by SIGSEGV at the first copy
-of a boxed pointer; with 07-a it runs and frees every allocation exactly
-once.
+The box `LAny` uses it: a pointer word keeps its payload's type number in
+the top 16 bits (`scripts/l2r.py` requires 07-a). Until D8 (2026-10-26)
+lean2rr's `Nat` and `Int` were tagged too; their pointers came from mimalloc
+with the top 16 bits clear (see below), so 07-a changed nothing for them but
+one AND on the increment of a big number. The probe of the one-word box (a
+hand-written program over the prelude: records, enums, function values,
+strings, arrays of boxes, references, cells, big numbers, a chain of 10^6
+nested boxes) needs 07-a: built against `l2r-local` d79f8b70 it is killed by
+SIGSEGV at the first copy of a boxed pointer; with 07-a it runs and frees
+every allocation exactly once.
 
 ## Patch
 

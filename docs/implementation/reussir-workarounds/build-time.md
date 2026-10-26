@@ -110,12 +110,12 @@ lean2rr's files.
   into it first (rrc's inliner works bottom-up), at most 256 a copy; the
   lower bound leaves out the recursive callees. The rule runs last, on the
   final
-  functions (after `Outline` and the passes over the generated functions),
-  under both representations of `Nat` and `Int`. It is part of the
-  required practice `inline-anchors`, with the anchors above.
+  functions (after `Outline` and the passes over the generated functions).
+  It is part of the required practice `inline-anchors`, with the anchors
+  above.
 - **Why:** Reussir's default inliner inlines every callee of at most 256
-  operations at every call; it does not count the calls. `RtJpWide` under
-  `--int-backend rcgmp` has one function with an 800-arm `match` on a
+  operations at every call; it does not count the calls. `RtJpWide` has
+  one function with an 800-arm `match` on a
   `Nat` (`int-match`), whose arms call three outlined join points (J3) of
   about 160 operations, about 266 times each. The inliner copied them into
   every arm: one LLVM function of about a million blocks. LLVM's
@@ -177,8 +177,9 @@ lean2rr's files.
     the callees outside the cycle).
   - The budget is `jp-small`'s bound for a loop's continuation (4000
     nodes), the most that lean2rr's own copies of a join point may add.
-- **Measured:** on the shared benchmark set (53 programs, `unread-fields`
-  on) and the classic corpus (18), under both representations, 128 of the
+- **Measured** (before D8, with both representations of `Nat` and `Int`
+  of the time, rcgmp and leanrt): on the shared benchmark set (53
+  programs, `unread-fields` on) and the classic corpus (18), 128 of the
   142 translations give the same `.rr` as before the rule. The other 14:
   - lean-zip (Z01c, Z01d, Z01r, Z01t under each representation): one
     function marked, `updateHashesMergedFast` (size 118 under leanrt, 107
@@ -207,8 +208,8 @@ lean2rr's files.
   `tests/runtime/inline-anchors-check.sh` (`RtJpWide`, `RtJpAnchors`,
   `RtCopyAnchors`).
 - **Remove only if:** Reussir's inliner bounds the code that its copies
-  add to one function (a count of the calls), and `RtJpWide` under rcgmp
-  builds in seconds without the anchors.
+  add to one function (a count of the calls), and `RtJpWide` builds in
+  seconds without the anchors.
 
 ### Old issue 35 (cost): every texture was compiled again on every build
 

@@ -1,17 +1,18 @@
 # 10. An opaque FFI handle cannot be an immediate
 
 **Kind:** missing feature. Not a bug: Reussir does not promise handles
-that may be a number instead of a pointer. lean2rr's one-word `Nat` and
-`Int` need them; patch 10-a adds them (*tagged* opaque handles).
+that may be a number instead of a pointer. lean2rr's box `LAny` needs
+them (and its one-word `Nat` and `Int` did, until clean-integration D8 on
+2026-10-26); patch 10-a adds them (*tagged* opaque handles).
 
 ## Summary
 
 **Kind:** missing feature (lean2rr's prelude needs it). **Status:**
 patched (10-a), applied in `./reussir` (`l2r-local` commit `a75ed2cf`).
-lean2rr's prelude declares `Nat` and `Int` `tagged`; rrc rejects the
-attribute without the patch.
+lean2rr's prelude declares the box `LAny` `tagged` (until D8 also `Nat`
+and `Int`); rrc rejects the attribute without the patch.
 
-**Upstream (2026-10-24):** Not upstream at 0378b744: an opaque FFI handle must still be a pointer to a counted box. Upstream 0378b744 has built-in `Nat` and `Int` (#776 `af25863e`, with #770 to #803): rcgmp integers, where a small value is an immediate and a large one a counted heap object. They are another way to a one-word `Nat` and `Int`; lean2rr does not use them yet, so its prelude still needs 10-a. 10-a stays in the series on 0378b744, ea240b19 and 00906e38 (2026-10-25; it applies unchanged), and on `l2r-base10` (Phase 2: the first patch of the series, commit `6272aed4`; only line offsets change; its rebase onto 7954a367 had two conflicts: upstream added the `placement` and `launch` fields to records).
+**Upstream (2026-10-24):** Not upstream at 0378b744: an opaque FFI handle must still be a pointer to a counted box. Upstream 0378b744 has built-in `Nat` and `Int` (#776 `af25863e`, with #770 to #803): rcgmp integers, where a small value is an immediate and a large one a counted heap object. They are another way to a one-word `Nat` and `Int`; since D8 (2026-10-26) lean2rr's `Nat` and `Int` are these built-in integers, and its prelude still needs 10-a for the box `LAny`. 10-a stays in the series on 0378b744, ea240b19 and 00906e38 (2026-10-25; it applies unchanged), and on `l2r-base10` (Phase 2: the first patch of the series, commit `6272aed4`; only line offsets change; its rebase onto 7954a367 had two conflicts: upstream added the `placement` and `launch` fields to records).
 
 Until 2026-10-06 this patch had no entry: it was one of the two "local
 additions" (file `local-additions.md`, now entries
@@ -25,8 +26,10 @@ incrementing the 32-bit count at offset 0 of the box, in line, and releases
 it by calling a generated drop hook (the Rust type's `Drop`). Every handle
 must be a pointer to such a box.
 
-lean2rr represents `Nat` and `Int` as one word, as Lean does. A small `Nat`
-`n` (below 2^63) is the word `2n+1`, a small `Int` (the `int32` range)
+Until D8, lean2rr represented `Nat` and `Int` as one word, as Lean does
+(today the box `LAny` is such a word: an odd word an immediate, an even
+word a pointer to a counted cell). A small `Nat`
+`n` (below 2^63) was the word `2n+1`, a small `Int` (the `int32` range)
 `lean_box` of its 32 bits; a big one is a pointer to a counted big number
 (lean2rr's own layout, one block with the limbs inline). The words are
 Lean's own representation, and Lean's C runtime makes the same low-bit test
@@ -38,7 +41,8 @@ Reussir inserts it (in records, closures, enums, its drop and acquire
 glue). Without the feature, Reussir would increment "the count" of a small
 `Nat` at address `2n+1`, a crash. A clone hook would be the same mechanism
 with a call per copy, and lean2rr cannot change the drop glue Reussir
-generates (plan §5.1, "One-word `Nat` and `Int`", weighs the options).
+generates (plan §5.1, "History: one-word `Nat` and `Int`", weighs the
+options).
 
 **Repro.** None in [`repros/`](repros/): without the patch rrc rejects the
 attribute, and with it the Reussir tests below show the guarded count (see
@@ -89,7 +93,8 @@ handle's low bit is clear.
   is excluded anyway). Nothing else reads through an opaque handle: an
   `ffi_object` produces no reuse token, is not deferred by the drop glue,
   and reaches foreign code only as its Rust type, which knows the encoding
-  (`leanrt::nat::LNat`'s `Drop` and `Clone` make the same test). Real boxes
+  (`leanrt::any::LAny`'s `Drop` and `Clone` make the same test, as did
+`leanrt::nat::LNat`'s until D8). Real boxes
   are at least 4-aligned (the count is a `u32` at offset 0), so the low bit
   of a real handle is always clear, and an immediate (odd) is never null.
 
@@ -119,8 +124,10 @@ handles, so LLVM cannot fold the low-bit test away. The first review's
 optional hardening (exclude tagged objects from `rc.assume_unique`) is in
 the final patch.
 
-**Effect on lean2rr.** `Nat` and `Int` fields take 8 bytes instead of 16,
-small values are never allocated, copying or dropping one is a bit test.
+**Effect on lean2rr.** Until D8, `Nat` and `Int` fields took 8 bytes
+instead of 16, small values were never allocated, copying or dropping
+one was a bit test; the box `LAny` keeps these properties for its
+immediates.
 (When arrays and references had a representation per element type, an
 `Array Nat` without the `nat-arrays` pass was `RVec<Nat>`, one word per
 element, and an `IO.Ref Nat` a cell holding the handle; since rule 1 they
@@ -130,7 +137,8 @@ prelude needs the patch (rrc rejects the `tagged` attribute without it).
 **Extension.** Patch 07-a ([issue 7](07-tagged-top-bits.md)) lets the
 top 16 bits of a tagged pointer handle carry foreign data: `rc.inc` clears
 them before it touches the count (lean2rr's one-word `Box` keeps its
-payload's type number there). `Nat` and `Int` pointers have them clear.
+payload's type number there). `Nat` and `Int` pointers had them clear
+(until D8).
 
 ## Upstream note
 

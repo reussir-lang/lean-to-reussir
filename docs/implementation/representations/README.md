@@ -5,7 +5,7 @@ the special cases behind those choices. The type table is in plan
 [§5.1](../../translation-plan.md#51-type-translation); the runtime's side
 is in [`runtime/README.md`](../../../runtime/README.md).
 
-- [nat-int.md](nat-int.md): `Nat` and `Int`: `--int-backend rcgmp`, Reussir's built-in integers (the default since 2026-10-25), and `--int-backend leanrt`, one word in Lean's encoding (the default until then)
+- [nat-int.md](nat-int.md): `Nat` and `Int`: Reussir's built-in integers (rcgmp; the only representation since clean-integration D8, 2026-10-26; leanrt's one word in Lean's encoding before, its history entry)
   (tagged handles, Reussir patch 10-a), the named helpers that are the one
   place that knows the encoding, fast paths, normalization and the
   call-free equality of a small and a big `Int`, big numbers in one

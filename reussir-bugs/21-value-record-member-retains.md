@@ -11,11 +11,12 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 **Kind:** missed optimization. **Status:** patched (21-a), applied in
 `./reussir`'s series since 2026-10-25 (branch `l2r-base10`, commit
 `9c10b983`; made as `8e9a6293`, `l2r-stepd` plus 21-a, the same code).
-No workaround in lean2rr. It shows only under
-`--int-backend rcgmp` (lean2rr's default since 2026-10-25): with the
-leanrt backend (`--int-backend leanrt`, the default until then), `Nat`
-and `Int` are tagged FFI handles (10-a), whose retains are `rc.inc`
-and already cancel.
+No workaround in lean2rr. It shows because lean2rr's `Nat` and `Int` are
+Reussir's built-in integers (step D; the default since 2026-10-25, the
+only representation since D8, 2026-10-26). With the leanrt backend of
+the time (`--int-backend leanrt`, removed in D8), `Nat` and `Int` were
+tagged FFI handles (10-a), whose retains are `rc.inc` and already
+cancel.
 
 **Upstream (2026-10-25):** Not upstream at 00906e38. Prepared as a pull
 request candidate; not opened.

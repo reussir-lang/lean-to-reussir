@@ -85,8 +85,8 @@ typed, `RVec<T>` of `X`'s own Reussir type `T`, when the whole-program check
 allows it. The *pointer kind* of `X` names the Reussir type the lowering
 gives `X`, so that two element types of one kind have one representation:
 
-* `Nat`, `Int`: `Nat`, `Int` (under `--int-backend rcgmp` an `RVec<Nat>`
-  holds Reussir's owned handles, local patch R2); `String`: `LStr`;
+* `Nat`, `Int`: `Nat`, `Int` (an `RVec<Nat>` holds Reussir's owned
+  handles, local patch R2); `String`: `LStr`;
 * `I:<name>`: an inductive that the lowering makes a shared record or enum
   (`sharedInductive?`); rule 1 gives every instance (`List Nat`,
   `List String`) the one type of the inductive;

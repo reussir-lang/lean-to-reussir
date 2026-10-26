@@ -1,7 +1,8 @@
-//! Reussir's built-in `Nat` and `Int` (rcgmp) under `--int-backend rcgmp`
-//! (leanrt built with `--cfg leanrt_rcgmp`).
+//! Reussir's built-in `Nat` and `Int` (rcgmp), Lean's `Nat` and `Int` in
+//! lean2rr's programs (their one representation since clean-integration D8;
+//! leanrt's own words and GMP numbers before).
 //!
-//! The prelude's `Nat` and `Int` sections are then Reussir code over the
+//! The prelude's `Nat` and `Int` sections are Reussir code over the
 //! built-in integers: Lean's rules composed of Reussir's operators and
 //! `core::intrinsic::bigint`. leanrt never reads a handle's encoding (the
 //! clean-integration rule): a handle is an opaque pointer that this module
@@ -77,7 +78,7 @@ pub extern "C" fn repr(p: *mut c_void) -> crate::LStr {
     let size = unsafe { rcgmp_mpz_decimal_size(p) };
     let mut d: Vec<u8> = Vec::new();
     if d.try_reserve_exact(size).is_err() {
-        crate::big::oom()
+        crate::alloc::oom()
     }
     let len = unsafe { rcgmp_mpz_to_decimal(p, d.as_mut_ptr()) };
     debug_assert!(len <= size);
@@ -112,10 +113,16 @@ pub extern "C" fn replicate_len(v: u64, fits: bool) -> u64 {
 }
 
 /// The largest `Nat` or `Int` result in bits that the prelude's rules ask
-/// for (lean-runtime's `BigNat::MAX_BITS`, leanrt's `big::MAX_BITS`: the
-/// same GMP below rcgmp): `Nat.pow` and `Nat.shiftLeft` above it end the
-/// process as lean-runtime's rules do (`sem::nat::check_result_bits`).
-pub const MAX_BITS: u64 = crate::big::MAX_BITS;
+/// for: the limit of lean-runtime's rules (a backend's `BigNat::MAX_BITS`;
+/// leanrt's own GMP numbers gave it this value until D8), GMP's (an `mpz_t`
+/// holds at most `INT_MAX` limbs; less a margin of 5 limbs for
+/// `mpz_pow_ui`; lean-runtime docs/lean-bugs.md, LB-05). `Nat.pow` and `Nat.shiftLeft`
+/// above it end the process as lean-runtime's rules do
+/// (`sem::nat::check_result_bits`: native's message for an exponent or
+/// shift of 2^32 or more, else `INTERNAL PANIC: out of memory`); rcgmp
+/// computes a larger sum or product, or the process ends as its allocation
+/// does (an abort).
+pub const MAX_BITS: u64 = (i32::MAX as u64 - 5) * 64;
 // The prelude's `l2r_nat_max_bits` spells the value as a literal.
 const _: () = assert!(MAX_BITS == 137_438_953_088);
 

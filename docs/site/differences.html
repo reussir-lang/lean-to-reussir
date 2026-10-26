@@ -220,12 +220,18 @@ PANIC: unreachable code has been reached</code>, where native Lean crashes or re
 garbage.</p>
 <h2 id="limits">Limits</h2>
 <ul>
-<li><strong>Out of memory.</strong> lean2rr ends every failed allocation with <code>INTERNAL
-  PANIC: out of memory</code> and exit 1. Natively the end depends on where it
-  happens (GMP and <code>getLine</code> abort with 134). The two builds use different
-  amounts of memory, so they run out at different points. A <code>Nat</code> or <code>Int</code>
-  result too big for GMP (more than 2^31 limbs) ends at once with <code>INTERNAL
-  PANIC: out of memory</code>, where native GMP raises SIGFPE (LB-05, below).</li>
+<li><strong>Out of memory.</strong> When an allocation fails, the program ends. For an
+  array or a string, it ends with <code>INTERNAL PANIC: out of memory</code> and exit
+  1, as natively for a Lean object. For a record, a closure or a big
+  number, it ends with the message <code>Panic: allocation failed</code> and an abort
+  (134). For GMP's work space, it ends with GMP's message and an abort
+  (134), as natively. Natively the end depends on where it happens (GMP
+  and <code>getLine</code> abort with 134). The two builds use different amounts of
+  memory, so they run out at different points.</li>
+<li><strong>Big numbers.</strong> A result of <code>Nat.pow</code> or <code>Nat.shiftLeft</code> that is too big
+  for GMP (more than about 2^37 bits) ends at once with <code>INTERNAL PANIC:
+  out of memory</code>, where native GMP raises SIGFPE (LB-05, below). A larger
+  sum or product is computed, or the program ends when memory runs out.</li>
 <li><strong>Stack depth.</strong> Frame sizes differ, so the depth of a stack overflow
   differs. The report itself is native's (<code>Stack overflow detected.
   Aborting.</code>, exit 134). lean2rr adds no recursion of its own: conversions,

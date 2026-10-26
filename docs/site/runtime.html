@@ -64,7 +64,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 <tr>
 <td><code>runtime/leanrt/</code></td>
 <td>Rust</td>
-<td>Linked into every program. lean2rr's representations: strings, arrays, cells, once-cells. For <code>Nat</code> and <code>Int</code>: the cells that box a big built-in integer (the default representation, where Reussir's runtime holds the big integers), or the big numbers with GMP (<code>--int-backend leanrt</code>). The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one <code>unsafe</code> step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state.</td>
+<td>Linked into every program. lean2rr's representations: strings, arrays, cells, once-cells. For <code>Nat</code> and <code>Int</code>: the cells that box a big built-in integer (Reussir's runtime holds the big integers). The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one <code>unsafe</code> step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state.</td>
 </tr>
 <tr>
 <td><code>third_party/lean-runtime</code></td>
@@ -501,20 +501,21 @@ can use. lean2rr switched to it in nine steps, from 2026-10-04 to
 <code>50840bb</code>. <code>scripts/l2r.py</code> builds it with cargo (the features <code>io</code>,
 <code>proc-title</code>, <code>startup-fds</code>, <code>sched</code>, <code>stack-overflow</code> and <code>net</code>) and links
 it with <code>leanrt</code> (<a href="../../runtime/README.md">runtime README</a>, "The shared
-crate lean-runtime"). lean2rr keeps its hot paths: the inline
-small-<code>Nat</code>/<code>Int</code> arithmetic, the one-block big numbers with GMP (behind
-lean-runtime's big-number traits), the one-block arrays' reads, writes and
-pushes, and the current standard streams, which <code>IO.println</code> reads at each
-call. Each step passed lean2rr's full suite before its merge.</p>
+crate lean-runtime"). lean2rr keeps its hot paths: the one-block arrays'
+reads, writes and pushes, and the current standard streams, which
+<code>IO.println</code> reads at each call. (<code>Nat</code> and <code>Int</code> were lean2rr's own
+one-word numbers then, with lean-runtime's rules for the big values; since
+2026-10-26 they are Reussir's built-in integers.) Each step passed lean2rr's full suite before its merge.</p>
 <h3 id="fast-paths-of-the-runtime-library-step-10">Fast paths of the runtime library (step 10)</h3>
 <ul>
 <li><strong><code>Float.toString</code></strong> (lean-runtime) computes the six decimals of a value
   below 2^53 with exact integer arithmetic.</li>
-<li><strong><code>Int</code> with one small operand</strong> (lean-runtime and <code>leanrt</code>). The runtime
-  changes the big number in its own block when the block is unique. The
-  small operand does not become a big number.</li>
-<li><strong><code>Int</code> equality.</strong> A small and a big <code>Int</code> are never equal, because
-  every result is normalized. This comparison does not call the runtime.</li>
+<li><strong><code>Int</code> with one small operand</strong> (lean-runtime and <code>leanrt</code>, until
+  2026-10-26). The runtime changed the big number in its own block when
+  the block was unique. The small operand did not become a big number.</li>
+<li><strong><code>Int</code> equality</strong> (until 2026-10-26). A small and a big <code>Int</code> were
+  never equal, because every result was normalized. This comparison did
+  not call the runtime.</li>
 <li><strong>String equality.</strong> Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.</li>

@@ -6,10 +6,13 @@ structures, `List`, `Option`, `IO.Ref` (set, swap and modify alternating
 small and big values), `Thunk`, `Task`, `HashMap`, a tree, closures),
 shared, updated in place and copied, round after round, and through every
 `Nat`/`Int` slow path of the runtime with big operands. Run by
-the suite (outputs compared with native) and by `nat-alloc-check.sh`, which
-builds it with leanrt's big-number counters and checks that every big
-number a round makes is freed exactly once. Size argument: the number of
-rounds. -/
+the suite (outputs compared with native) and by alloc-check.sh
+(RtNatStress.alloc), which checks that its allocations grow no faster than
+native's and that its peak memory stays near native's as the rounds grow:
+a big number that a round leaves unreleased adds to the peak. Arguments:
+the number of rounds, then optionally the bits of the round's base number
+(default 64; alloc-check.sh uses thousands of bits, so that one number
+left unreleased per round shows in the peak). -/
 
 
 structure Cell where
@@ -33,10 +36,10 @@ def T.total : T → Int
   | .leaf => 0
   | .node l k v r => l.total + (k : Int) + v + r.total
 
-def big (i : Nat) : Nat := 2 ^ (64 + i % 70) + i
+def big (bits i : Nat) : Nat := 2 ^ (bits + i % 70) + i
 
-@[noinline] def round (i : Nat) (acc : Nat) : IO Nat := do
-  let b := big i
+@[noinline] def round (bits i : Nat) (acc : Nat) : IO Nat := do
+  let b := big bits i
   let c : Cell := { a := b, b := -(b : Int) * 3, c := b * b }
   let shared := (c, c)
   let mut arr : Array Nat := #[b, b + 1, i]
@@ -92,7 +95,8 @@ def big (i : Nat) : Nat := 2 ^ (64 + i % 70) + i
 
 def main (args : List String) : IO Unit := do
   let n := (args.head?.bind String.toNat?).getD 1000
+  let bits := ((args.drop 1).head?.bind String.toNat?).getD 64
   let mut acc := 0
   for i in [0:n] do
-    acc ← round i acc
+    acc ← round bits i acc
   IO.println s!"rounds {n} checksum {acc}"

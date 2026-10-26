@@ -14,15 +14,13 @@ structure CliOptions where
   disabled : Array String := #[]
   enabled : Array String := #[]
   listOpts : Bool := false
-  /-- The representation of `Nat` and `Int` (`--int-backend`; NatEncoding;
-  the default is `rcgmp`, until 2026-10-25 it was `leanrt`). -/
-  intBackend : IntBackend := .rcgmp
 
 def usage : String :=
   "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|opt|rr] [--prelude FILE]\n" ++
   "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
-  "               [--int-backend rcgmp|leanrt (default rcgmp)]\n" ++
-  "               (--rcgmp-type-args is accepted and ignored: since 2026-10-25 rcgmp always passes Nat and Int\n" ++
+  "               (--int-backend rcgmp is accepted and ignored: Nat and Int are Reussir's built-in integers;\n" ++
+  "               --int-backend leanrt was removed on 2026-10-26, clean-integration D8;\n" ++
+  "               --rcgmp-type-args is accepted and ignored: since 2026-10-25 rcgmp always passes Nat and Int\n" ++
   "               at type arguments as owned handles, Reussir's local patch R2)\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
@@ -62,10 +60,12 @@ partial def parseArgs : List String → CliOptions → Except String CliOptions
   | "--disable-opt" :: n :: rest, o => parseArgs rest { o with disabled := o.disabled.push n }
   | "--enable-opt" :: n :: rest, o => parseArgs rest { o with enabled := o.enabled.push n }
   | "--list-opts" :: rest, o => parseArgs rest { o with listOpts := true }
-  | "--int-backend" :: b :: rest, o =>
-    match IntBackend.ofString? b with
-    | some ib => parseArgs rest { o with intBackend := ib }
-    | none => .error s!"unknown --int-backend '{b}' (supported: leanrt, rcgmp)"
+  -- `rcgmp` is accepted and ignored (see `usage`); `leanrt` was removed on
+  -- 2026-10-26 (clean-integration D8).
+  | "--int-backend" :: "rcgmp" :: rest, o => parseArgs rest o
+  | "--int-backend" :: "leanrt" :: _, _ =>
+    .error "--int-backend leanrt was removed on 2026-10-26 (clean-integration D8): Nat and Int are Reussir's built-in integers (rcgmp)"
+  | "--int-backend" :: b :: _, _ => .error s!"unknown --int-backend '{b}' (Nat and Int have one representation, rcgmp)"
   -- Accepted and ignored (see `usage`); it chose the lowering of `Nat` and
   -- `Int` at type arguments until 2026-10-25.
   | "--rcgmp-type-args" :: rest, o => parseArgs rest o
@@ -97,11 +97,6 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let prelude ← match opts.prelude with
     | some p => IO.FS.readFile p
     | none => pure ""
-  -- The blocks of the chosen representation of `Nat` and `Int` (the
-  -- prelude keeps both; NatEncoding).
-  let prelude ← match filterIntBackend prelude opts.intBackend with
-    | .ok p => pure p
-    | .error e => throwError "lean2rr: {e}"
   -- Stage 1: monomorphize from `main`, the entry point's roots and the
   -- startup items (the program's constants and `initialize` actions, and
   -- the `initialize` declarations of Lean's library, in Lean's module
@@ -109,7 +104,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- implements (the message of a refused extern, `Mono.computeExternRoute`).
   let (leanInit, items) ← startupItems opts.root
   let (rootInsts, st) ← monomorphize (programRoots opts.root leanInit items)
-    { preludeFns := ← preludeFnDeclsM prelude, intBackend := opts.intBackend }
+    { preludeFns := ← preludeFnDeclsM prelude }
   -- The startup steps, with instance names; the registry's pass that
   -- leaves out the steps of unread constants without effects, with what
   -- only they reach (`Opt/UnreadConsts`).
@@ -196,7 +191,7 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
   -- the repros of three Reussir costs (fixed upstream in Reussir #672,
   -- #670 and #674; their repros are in git history) and of the inliner's
-  -- copies (`RtJpWide` under `--int-backend rcgmp`).
+  -- copies (`RtJpWide`).
   let noAnchors := (← IO.getEnv "L2R_NO_INLINE_ANCHORS").isSome
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if noAnchors then { prog with anchored := {} } else prog
@@ -255,7 +250,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok opts =>
     -- The registry's passes, minus `--disable-opt`, plus `--enable-opt`
     -- (the names are checked first, also for `--list-opts`).
-    let cfg ← match Opt.config opts.disabled opts.enabled opts.intBackend with
+    let cfg ← match Opt.config opts.disabled opts.enabled with
       | .ok cfg => pure cfg
       | .error e =>
         IO.eprintln s!"lean2rr: {e}"

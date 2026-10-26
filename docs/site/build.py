@@ -297,8 +297,6 @@ def gen_testsets():
          "and the code calls no runtime function of its symbol"],
         ["Shim types", "<code>tests/runtime/shim-types.sh</code>", "every export of the shim",
          "each <code>@[export]</code> of <code>L2RShim</code> has the type of the <code>@[extern]</code> of the same C symbol"],
-        ["Big-number counters", "<code>tests/runtime/nat-alloc-check.sh</code>", "2 sizes",
-         "every big number made is freed exactly once; big constants made once"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "9 programs",
          "no conversion function in eight programs whose containers cross between typed and generic code; "
          "a cast between inductives whose layouts differ converts, counts its elements and prints what native prints"],

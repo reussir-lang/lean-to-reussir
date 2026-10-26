@@ -27,7 +27,7 @@
 #   build prints, and count some conversions.
 #   tests/runtime/conv-count-check.sh [SMALL]   (default 300: RtConvProbeRollback's argument)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
-# L2R_LEAN_TOOLCHAIN, L2R_INT_BACKEND).
+# L2R_LEAN_TOOLCHAIN).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -38,10 +38,6 @@ OUT=${L2R_TEST_BUILD:-$HERE/build}/conv-count-check
 mkdir -p "$OUT"
 cd "$OUT"
 status=0
-# The representation of Nat and Int as scripts/l2r.py passes it:
-# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25).
-int_be=${L2R_INT_BACKEND:-rcgmp}
-int_flags=(--int-backend "$int_be")
 
 # The translation-only programs: no conversion function in their code.
 for t in RtUniformUpdates RtUniformUpdatesJp RtUniformUpdatesMixed RtUniformUpdatesNested \
@@ -49,7 +45,7 @@ for t in RtUniformUpdates RtUniformUpdatesJp RtUniformUpdatesMixed RtUniformUpda
   cp "$HERE/$t.lean" .
   if ! { lean -o "$t.olean" "$t.lean" &&
          LEAN_PATH="$OUT" L2R_SHIM_DIR="$ROOT/lean2rr/.lake/build/lib/lean" LEAN_STACK_SIZE_KB=1048576 \
-           "$LEAN2RR" "$t" --root main --emit rr --prelude "$ROOT/runtime/prelude.rr" -o "$OUT/$t.rr" "${int_flags[@]}"; } \
+           "$LEAN2RR" "$t" --root main --emit rr --prelude "$ROOT/runtime/prelude.rr" -o "$OUT/$t.rr"; } \
        > "$t.translate.log" 2>&1; then
     echo "FAIL $t: translation failed (see $OUT/$t.translate.log)"; status=1; continue
   fi

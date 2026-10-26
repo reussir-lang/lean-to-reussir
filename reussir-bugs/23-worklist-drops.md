@@ -599,8 +599,9 @@ against it (3000 x 3 natively, 40 x 3 under Miri).
 - **A member after the last child that can reach an FFI object or a
   closure** keeps the child deferred (`mayPush` is conservative: such a
   member's hook may push), so such a chain costs a deferral and a pop
-  per level. Under lean2rr's leanrt backend a `Nat` field after the
-  recursive fields is such a member (a tagged FFI handle).
+  per level. Under lean2rr's leanrt backend (until D8, 2026-10-26) a
+  `Nat` field after the recursive fields was such a member (a tagged FFI
+  handle).
 - **TPDE mode keeps plain recursive drops.** rrepl's default level, when
   Reussir is built with TPDE, is TPDE: a tree of 10^6 levels overflows
   its stack there (upstream and the series alike; `-O none`, `default`,

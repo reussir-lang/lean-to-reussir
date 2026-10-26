@@ -14,7 +14,7 @@ translation plan §5.8 to §5.14 and §6, and the implementation notes'
 | Part | Language | Role |
 |---|---|---|
 | `runtime/prelude.rr` | Reussir | Prepended to every program (only the functions the program uses). Defines the runtime types and one function per Lean extern, named after the extern's C symbol (`lean_nat_add`). Fast paths are inline Reussir code; the rest calls `leanrt` or `lean-runtime`. |
-| `runtime/leanrt/` | Rust | Linked into every program. lean2rr's representations: strings, arrays, cells, once-cells. For `Nat` and `Int`: the cells that box a big built-in integer (the default representation, where Reussir's runtime holds the big integers), or the big numbers with GMP (`--int-backend leanrt`). The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one `unsafe` step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state. |
+| `runtime/leanrt/` | Rust | Linked into every program. lean2rr's representations: strings, arrays, cells, once-cells. For `Nat` and `Int`: the cells that box a big built-in integer (Reussir's runtime holds the big integers). The glue to lean-runtime: its rules, its IO (handles, the last-error slot), its scheduler (the task objects, the one `unsafe` step of a context switch, the current standard streams) and its event loop. One crate, so one copy of all global state. |
 | `third_party/lean-runtime` | Rust | The shared crate, a git submodule pinned by commit. Lean's runtime rules, the IO, the startup, the scheduler with its wait cores, `Std.Sync`, the event loop and the networking. The driver builds it with cargo. |
 | `lean2rr/L2RShim.lean` | Lean | lean2rr's own Lean library: the `Std.Internal.UV` externs (timers, sockets, name resolution, signals), `Std.Time.Timestamp.now`, `ShareCommon.Object.eq`/`hash`, over primitives of lean-runtime's event loop. Exported under the C symbols and compiled with the program. |
 | generated glue | Reussir | Made by lean2rr for externs over Lean-defined types: `IO.Error`, `Option`, `List`, processes, references, tasks. |
@@ -359,21 +359,22 @@ Status (2026-10-07): the submodule `third_party/lean-runtime` is pinned at
 `50840bb`. `scripts/l2r.py` builds it with cargo (the features `io`,
 `proc-title`, `startup-fds`, `sched`, `stack-overflow` and `net`) and links
 it with `leanrt` ([runtime README](repo:runtime/README.md), "The shared
-crate lean-runtime"). lean2rr keeps its hot paths: the inline
-small-`Nat`/`Int` arithmetic, the one-block big numbers with GMP (behind
-lean-runtime's big-number traits), the one-block arrays' reads, writes and
-pushes, and the current standard streams, which `IO.println` reads at each
-call. Each step passed lean2rr's full suite before its merge.
+crate lean-runtime"). lean2rr keeps its hot paths: the one-block arrays'
+reads, writes and pushes, and the current standard streams, which
+`IO.println` reads at each call. (`Nat` and `Int` were lean2rr's own
+one-word numbers then, with lean-runtime's rules for the big values; since
+2026-10-26 they are Reussir's built-in integers.) Each step passed lean2rr's full suite before its merge.
 
 ### Fast paths of the runtime library (step 10)
 
 - **`Float.toString`** (lean-runtime) computes the six decimals of a value
   below 2^53 with exact integer arithmetic.
-- **`Int` with one small operand** (lean-runtime and `leanrt`). The runtime
-  changes the big number in its own block when the block is unique. The
-  small operand does not become a big number.
-- **`Int` equality.** A small and a big `Int` are never equal, because
-  every result is normalized. This comparison does not call the runtime.
+- **`Int` with one small operand** (lean-runtime and `leanrt`, until
+  2026-10-26). The runtime changed the big number in its own block when
+  the block was unique. The small operand did not become a big number.
+- **`Int` equality** (until 2026-10-26). A small and a big `Int` were
+  never equal, because every result was normalized. This comparison did
+  not call the runtime.
 - **String equality.** Strings of different lengths are not equal. Two
   references to the same string are equal. Other strings compare their
   bytes.

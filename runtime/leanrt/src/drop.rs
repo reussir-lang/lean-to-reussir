@@ -578,8 +578,8 @@ impl<T> ReleaseElems for T {
 }
 
 /// The element kinds of lean2rr's typed arrays whose release is a leaf:
-/// a `Nat` or `Int` (a small value releases nothing, a big one frees its
-/// block; under `--int-backend rcgmp` an `Mpz`, rcgmp's release), a
+/// a `Nat` or `Int` (an `Mpz`: a small value releases nothing, a big one
+/// is rcgmp's release, which frees at most its own block), a
 /// `String` and an array of scalars (a decrement, or the free of
 /// its block). Such an array is freed at once (`free_leaves`): every
 /// element dropped in index order, then the block, without a step of the
@@ -615,8 +615,6 @@ macro_rules! leaf_elems {
 }
 
 leaf_elems!(
-    crate::nat::LNat,
-    crate::nat::LInt,
     crate::string::LStr,
     Vec<u8>,
     Vec<u16>,
@@ -626,10 +624,9 @@ leaf_elems!(
     Vec<f64>
 );
 
-// Under `--int-backend rcgmp` a typed `Array Nat`/`Array Int` holds
-// Reussir's owned handles (`reussir_rt::rcgmp::Mpz`, local Reussir patch
-// R2): a release frees at most one heap integer, which holds nothing.
-#[cfg(leanrt_rcgmp)]
+// A typed `Array Nat`/`Array Int` holds Reussir's owned handles
+// (`reussir_rt::rcgmp::Mpz`, local Reussir patch R2): a release frees at
+// most one heap integer, which holds nothing.
 leaf_elems!(reussir_rt::rcgmp::Mpz);
 
 /// A Reussir record (`Bridge<Inner>`): its `Drop` is the record's own

@@ -34,19 +34,15 @@ mod addr_map;
 pub mod alloc;
 pub mod any;
 pub mod array;
-pub mod big;
 pub mod drop;
 pub mod float;
 pub mod fs;
-pub mod gmp;
 pub mod io;
-pub mod nat;
 pub mod net;
 pub mod once;
 pub mod pending;
 pub mod persist;
 pub mod proc;
-#[cfg(leanrt_rcgmp)]
 pub mod rcgmp;
 pub mod refs;
 pub mod rt;
@@ -56,8 +52,6 @@ pub mod sync;
 pub mod sys;
 pub mod task;
 
-pub use big::LBig;
-pub use nat::{LInt, LNat};
 pub use string::LStr;
 
 /// The Lean version whose runtime the shared crate `lean_runtime` mirrors
@@ -78,11 +72,14 @@ static LAST_SHARED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// - a `reussir_rt::rc::Rc` box that leanrt made with `Rc::new`: the cell
 ///   of a thunk or task (`drop::Cell`), a runtime handle (`LHandle`,
 ///   `LPromise`: `Rc<Box<dyn Any>>`): `Rc`'s own count (`is_unique`);
+/// - a built-in `Nat` or `Int` (Reussir's owned handle, `rcgmp::Mpz`):
+///   Reussir's own query, a heap integer with another reference (an
+///   immortal literal counts as shared, as Lean's persistent objects do; an
+///   immediate never is; review HL-01: the big numbers were once never
+///   reported);
 /// - leanrt's own blocks, a string (`string::`), an array, `ByteArray` or
-///   `FloatArray` (`drop::Vec`), a big `Nat` or `Int` (`nat::`): the `u32`
-///   count leanrt keeps at the block's start; an odd `Nat` or `Int` word is
-///   a small value, a scalar natively (review HL-01: the big numbers were
-///   never reported);
+///   `FloatArray` (`drop::Vec`): the `u32` count leanrt keeps at the
+///   block's start;
 /// - any other type is never shared: scalars, and the fresh wrappers
 ///   lean2rr passes values that cannot cross the boundary in. A Reussir
 ///   record goes to `is_shared_record` instead (lean2rr calls the record
@@ -102,11 +99,7 @@ pub fn is_shared<T: 'static>(a: &T) -> bool {
     if std::mem::size_of::<T>() != std::mem::size_of::<usize>() {
         return false;
     }
-    // Under `--int-backend rcgmp`, a built-in `Nat` or `Int` (Reussir's owned
-    // handle, `Mpz`, at a texture's type argument): Reussir's own query, a
-    // heap integer with another reference (an immortal literal counts as
-    // shared, as Lean's persistent objects do; an immediate never is).
-    #[cfg(leanrt_rcgmp)]
+    // A built-in `Nat` or `Int` (`Mpz` at a texture's type argument).
     if std::any::TypeId::of::<T>() == std::any::TypeId::of::<crate::rcgmp::Mpz>() {
         return unsafe { &*(a as *const T as *const crate::rcgmp::Mpz) }.is_shared();
     }
@@ -119,7 +112,7 @@ pub fn is_shared<T: 'static>(a: &T) -> bool {
         let rc = std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<usize, reussir_rt::rc::Rc<()>>(p) });
         return !rc.is_unique();
     }
-    let own = name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::") || name.starts_with("leanrt::nat::");
+    let own = name.starts_with("leanrt::string::") || name.starts_with("leanrt::drop::");
     if !own || p & 1 != 0 {
         return false;
     }
@@ -305,24 +298,14 @@ pub extern "C" fn lean_internal_panic(p: InternalPanic) -> ! {
     xpanic::internal_panic(p.message(), &mut Native)
 }
 
-/// `lean_internal_panic(Unreachable)`: the runtime's reads at a `Nat`
-/// index or position that a proof keeps in bounds, when it is a big number
-/// (`l2r_index_of_nat`'s panic; natively `lean_unbox` of it is garbage).
+/// `lean_internal_panic(Unreachable)`: the runtime's reads at a position
+/// that a proof keeps in bounds, when it is 2^60 or more (the prelude's
+/// `l2r_string_get_fast_k` and `l2r_string_next_fast_k`; natively
+/// `lean_unbox` of a big `Nat` is garbage).
 #[cold]
 #[inline(never)]
 pub extern "C" fn unreachable_code() -> ! {
     lean_internal_panic(InternalPanic::Unreachable)
-}
-
-/// The value of the word `x` of a `Nat` index or position that a proof
-/// keeps in bounds; a big one is unreachable code (`unreachable_code`).
-#[inline(always)]
-pub fn index_word(x: u64) -> u64 {
-    if nat::is_small(x) {
-        nat::nat_of_small_word(x)
-    } else {
-        unreachable_code()
-    }
 }
 
 /// `lean_internal_panic` with a message of its own: Lean's
@@ -407,27 +390,14 @@ mod tests {
         }
     }
 
-    /// `is_shared` (`dbgTraceIfShared`): each storage type's own count; a
-    /// small number, an immediate and a scalar are never shared.
+    /// `is_shared` (`dbgTraceIfShared`): each storage type's own count; an
+    /// immediate and a scalar are never shared. (A built-in `Nat` or `Int`
+    /// asks Reussir's glue, which a program has and this test binary does
+    /// not: the runtime test RtDbgShared.)
     #[test]
     fn shared_by_storage_type() {
         use super::is_shared;
         use crate::any::{self, LAny};
-        use crate::nat::{LInt, LNat};
-        // Nat and Int: a small value is a scalar; a big one has a count.
-        assert!(!is_shared(&LNat::of_u64(5)));
-        let b = LNat::of_u64(u64::MAX);
-        assert!(!is_shared(&b));
-        let b2 = b.clone();
-        assert!(is_shared(&b) && is_shared(&b2));
-        drop(b2);
-        assert!(!is_shared(&b));
-        let i = LInt::of_i64(i64::MIN);
-        let i2 = i.clone();
-        assert!(is_shared(&i));
-        drop(i2);
-        assert!(!is_shared(&i));
-        assert!(!is_shared(&LInt::of_i64(-3)));
         // Strings and arrays (`ByteArray` here).
         let s = crate::string::from_bytes(b"abc");
         assert!(!is_shared(&s));

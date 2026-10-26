@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Translation-level checks of `--int-backend rcgmp` (`lean2rr --emit rr`,
-# no Reussir build).
+# Translation-level checks of `Nat` and `Int` as Reussir's built-in integers
+# (rcgmp; `lean2rr --emit rr`, no Reussir build). (Until 2026-10-26 it also
+# checked that the leanrt representation had none of these shapes.)
 # `boxed-consts` under rcgmp, on tests/runtime/RtNatBoxedConsts (`Nat`
 # and `Int` constants at the edges of the box's immediates, stored in
 # lists): only the constants whose box is a cell (`2^63 : Nat`; `2^31`,
 # `3000000000`, `2^32 - 1`, `2^62` and `-2^62 - 1 : Int`) get a once-cell
 # `l2r_boxed_N`; the others are boxed in line (`constIsImmediate`; review of
-# step D: `k5 : Nat := 5` had one). Under leanrt none has one (boxing a
-# `Nat` or `Int` never allocates there).
+# step D: `k5 : Nat := 5` had one).
 # Also the reads at an index word (lean2rr's `bindReadIndex`) on
 # tests/runtime/RtNatIdxWord, with its .opts (`typed-arrays` and
 # `compact-arrays` off): under rcgmp each of the ten `_w` reads of the prelude is
@@ -15,9 +15,8 @@
 # fget/get!, `String.Pos.Raw` get, get', next', atEnd), each call's index
 # is the variable of the `let ixN : u64 = l2r_nat_index(...)` on the line
 # before it, and the generated code calls none of the reads at a `Nat`
-# that have a twin (RtNatIdxWord passes run.sh under rcgmp without the
-# lowering too, so only this pins it); under leanrt the .rr has no
-# `l2r_nat_index` and no `_w` read.
+# that have a twin (RtNatIdxWord passes run.sh without the lowering too, so
+# only this pins it).
 # Also the boxes of big `Nat` and `Int` values (lean2rr's `natIntBoxFns?`)
 # on tests/runtime/RtNatBoxBig: under rcgmp the generated code boxes through
 # `l2r_any_of_nat`/`l2r_any_of_int`, whose heap path is the owned
@@ -37,8 +36,7 @@
 # not occur again in the rest of the enclosing block (nested blocks
 # included), each kind has a rebinding (the read at a type in the second
 # translation), and the generated code calls no update at a `Nat` (`fset`,
-# `fswap`, `ByteArray` `fset`: they have twins at index words); under
-# leanrt the .rr has no `l2r_nat_of_index` and no update at a word. The
+# `fswap`, `ByteArray` `fset`: they have twins at index words). The
 # outputs are the same either way (RtNatIdxRebind passes run.sh without
 # the rebinding), so only this pins it.
 #   tests/runtime/int-backend-check.sh
@@ -73,19 +71,12 @@ else
   # 2^31 - 1 (int32), 2^32, 2^62 - 1, -2^31 - 1, -3000000000 and -2^62
   # ([2^32, 2^62) and [-2^62, -2^31)).
   want="l_kB___l2r_0_ l_kBn___l2r_0_ l_kI31p___l2r_0_ l_kM___l2r_0_ l_kN64___l2r_0_ l_kU32___l2r_0_ "
-  if ! translate "$OUT/rcgmp.rr" --int-backend rcgmp; then
-    echo "FAIL $P: --int-backend rcgmp did not translate $P (see $OUT/rcgmp.rr.log)"; status=1
+  if ! translate "$OUT/rcgmp.rr"; then
+    echo "FAIL $P: did not translate $P (see $OUT/rcgmp.rr.log)"; status=1
   elif [ "$(boxed "$OUT/rcgmp.rr")" != "$want" ]; then
-    echo "FAIL $P --int-backend rcgmp: boxed once: $(boxed "$OUT/rcgmp.rr")(expected $want)"; status=1
+    echo "FAIL $P: boxed once: $(boxed "$OUT/rcgmp.rr")(expected $want)"; status=1
   else
-    echo "ok   $P --int-backend rcgmp: once-cells only for the constants whose box is a cell"
-  fi
-  if ! translate "$OUT/leanrt.rr" --int-backend leanrt; then
-    echo "FAIL $P: --int-backend leanrt did not translate $P (see $OUT/leanrt.rr.log)"; status=1
-  elif grep -q 'l2r_boxed_' "$OUT/leanrt.rr"; then
-    echo "FAIL $P --int-backend leanrt: a boxed constant (expected none)"; status=1
-  else
-    echo "ok   $P --int-backend leanrt: no boxed constant"
+    echo "ok   $P: once-cells only for the constants whose box is a cell"
   fi
 fi
 # The reads at an index word. idxword OUT.rr BACKEND: the shape of
@@ -104,10 +95,7 @@ twins = ["lean_array_fget_w", "lean_array_get_w", "lean_array_fget_as_w", "lean_
          "lean_string_utf8_get_fast_w", "lean_string_utf8_next_fast_w", "lean_string_utf8_at_end_w"]
 call = re.compile(r"\b(" + "|".join(twins) + r")\b(<[^()]*>)?\(")
 errs = []
-if backend == "leanrt":
-    if "l2r_nat_index" in text or call.search(text):
-        errs.append("l2r_nat_index or a _w read in the .rr")
-else:
+if True:
     # The reads at a Nat that have a twin (lean2rr's wordReadSym?, and the
     # reads at a type of the array reads).
     nat = re.compile(r"\b(lean_array_(fget|get)(_borrowed)?(_as)?<|lean_byte_array_(fget|get)\(|"
@@ -145,17 +133,14 @@ for o in $(tr ', \n' '   ' < "$HERE/$P.opts"); do opts+=(--disable-opt "$o"); do
 if ! (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1; then
   echo "FAIL $P: lean failed (see $OUT/lean.log)"; status=1
 else
-  for be in rcgmp leanrt; do
-    flags=(--int-backend "$be")
-    if ! translate "$OUT/$be.rr" "${flags[@]}" "${opts[@]}"; then
-      echo "FAIL $P: --int-backend $be did not translate $P (see $OUT/$be.rr.log)"; status=1
+  for be in rcgmp; do
+    if ! translate "$OUT/$be.rr" "${opts[@]}"; then
+      echo "FAIL $P: did not translate $P (see $OUT/$be.rr.log)"; status=1
     elif ! idxword "$OUT/$be.rr" "$be" > "$OUT/$be.shape" 2>&1; then
-      echo "FAIL $P --int-backend $be: the reads at an index word, $(wc -l < "$OUT/$be.shape") problems (see $OUT/$be.shape), the first and last:"
+      echo "FAIL $P: the reads at an index word, $(wc -l < "$OUT/$be.shape") problems (see $OUT/$be.shape), the first and last:"
       awk -v n="$(wc -l < "$OUT/$be.shape")" 'NR <= 3 || NR > n - 3 { print "  " $0 }' "$OUT/$be.shape"; status=1
-    elif [ "$be" = rcgmp ]; then
-      echo "ok   $P --int-backend rcgmp: $(cat "$OUT/$be.shape"), no read at a Nat with a twin"
     else
-      echo "ok   $P --int-backend leanrt: no l2r_nat_index and no _w read"
+      echo "ok   $P: $(cat "$OUT/$be.shape"), no read at a Nat with a twin"
     fi
   done
 fi
@@ -168,13 +153,13 @@ mkdir -p "$OUT"
 cp "$HERE/$P.lean" "$OUT/"
 if ! (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1; then
   echo "FAIL $P: lean failed (see $OUT/lean.log)"; status=1
-elif ! translate "$OUT/rcgmp.rr" --int-backend rcgmp; then
-  echo "FAIL $P: --int-backend rcgmp did not translate $P (see $OUT/rcgmp.rr.log)"; status=1
+elif ! translate "$OUT/rcgmp.rr"; then
+  echo "FAIL $P: did not translate $P (see $OUT/rcgmp.rr.log)"; status=1
 elif ! calls "$OUT/rcgmp.rr" l2r_any_of_nat || ! calls "$OUT/rcgmp.rr" l2r_any_of_int \
     || ! grep -q 'l2r_any_of_big<Nat>(' "$OUT/rcgmp.rr" || ! grep -q 'l2r_any_of_big<Int>(' "$OUT/rcgmp.rr"; then
   echo "FAIL $P: expected boxes through l2r_any_of_nat/_int and their owned l2r_any_of_big<Nat>/<Int> (see $OUT/rcgmp.rr)"; status=1
 else
-  echo "ok   $P --int-backend rcgmp: big values boxed through the owned l2r_any_of_big"
+  echo "ok   $P: big values boxed through the owned l2r_any_of_big"
 fi
 # The index after a proved access. rebind OUT.rr BACKEND KINDS: the shape
 # of RtNatIdxRebind's generated code; KINDS, the accesses (comma-separated)
@@ -192,10 +177,7 @@ bounded = ["lean_array_fget_w", "lean_array_fget_as_w", "lean_byte_array_fget_w"
            "lean_array_fset_w", "lean_byte_array_fset_w", "lean_array_fswap_w"]
 updates = ["lean_array_fset_w", "lean_byte_array_fset_w", "lean_array_fswap_w"]
 errs = []
-if backend == "leanrt":
-    if "l2r_nat_of_index" in text or re.search(r"\b(" + "|".join(updates) + r")\b", text):
-        errs.append("l2r_nat_of_index or an update at an index word in the .rr")
-else:
+if True:
     lines = gen.split("\n")
     for l in lines:
         if re.search(r"\b(lean_array_fset<|lean_array_fswap<|lean_byte_array_fset\()", l):
@@ -266,18 +248,15 @@ if ! (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1; then
 else
   # NAME BACKEND KINDS FLAGS...: the default passes, and `compact-arrays` off.
   for run in "rcgmp rcgmp lean_array_fget_w,lean_byte_array_fget_w,lean_array_fset_w,lean_byte_array_fset_w,lean_array_fswap_w" \
-             "rcgmp-boxed rcgmp lean_array_fget_as_w,lean_array_fswap_w --disable-opt compact-arrays" \
-             "leanrt leanrt -"; do
+             "rcgmp-boxed rcgmp lean_array_fget_as_w,lean_array_fswap_w --disable-opt compact-arrays"; do
     read -r name be kinds flags <<< "$run"
-    if ! translate "$OUT/$name.rr" --int-backend "$be" $flags; then
+    if ! translate "$OUT/$name.rr" $flags; then
       echo "FAIL $P: $name did not translate $P (see $OUT/$name.rr.log)"; status=1
     elif ! rebind "$OUT/$name.rr" "$be" "$kinds" > "$OUT/$name.shape" 2>&1; then
       echo "FAIL $P $name: the indices after a proved access, $(wc -l < "$OUT/$name.shape") problems (see $OUT/$name.shape), the first and last:"
       awk -v n="$(wc -l < "$OUT/$name.shape")" 'NR <= 3 || NR > n - 3 { print "  " $0 }' "$OUT/$name.shape"; status=1
-    elif [ "$be" = rcgmp ]; then
-      echo "ok   $P $name: $(cat "$OUT/$name.shape"), no update at a Nat"
     else
-      echo "ok   $P $name: no l2r_nat_of_index and no update at a word"
+      echo "ok   $P $name: $(cat "$OUT/$name.shape"), no update at a Nat"
     fi
   done
 fi

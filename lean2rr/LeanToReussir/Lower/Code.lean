@@ -111,18 +111,14 @@ immediate: its code returns a `UInt8`/`UInt16`/`UInt32` literal or a
 `UInt64`/`USize` literal below 2^63, possibly through other such constants
 (up to `fuel` deep); or it is a `Nat` or `Int` constant whose value
 (`constNumValue?`) the box holds as an immediate (`natBoxIsImmediate`,
-`intBoxIsImmediate`: under `--int-backend rcgmp` the box of any other
-value is a new cell, `boxAllocates`, so `boxed-consts` boxes such a
-constant once). Under `leanrt` boxing a `Nat` or `Int` never allocates,
-so the answer would change nothing there: such a constant is not
-evaluated (`constNumValue?` is not memoised). -/
+`intBoxIsImmediate`: the box of any other value is a new cell,
+`boxAllocates`, so `boxed-consts` boxes such a constant once). -/
 partial def constIsImmediate (f : Name) (fuel : Nat := 8) : LowerM Bool := do
   let some { params := #[], value := .code body, type, .. } := (← read).decls.find? f | return false
   if type.isConstOf ``Nat || type.isConstOf ``Int then
-    if (← read).intBackend != .rcgmp then return false
     let some v ← constNumValue? f fuel | return false
     if type.isConstOf ``Nat then return v ≥ 0 && natBoxIsImmediate v.toNat
-    return intBoxIsImmediate (← read).intBackend v
+    return intBoxIsImmediate v
   let rec go (c : Code .pure) (vals : Std.HashMap FVarId (LetValue .pure)) : LowerM Bool := do
     match c with
     | .let d k => go k (vals.insert d.fvarId d.value)
@@ -151,7 +147,7 @@ def closedLetValue (v : LetValue .pure) (e : RR.Expr) : LowerM (Option RR.Expr) 
     match (← read).decls.find? f with
     | some { params := #[], value := .code _, .. } =>
       -- A constant whose value is a literal that boxes as an immediate
-      -- (`def k : UInt64 := 77`; under rcgmp `def k : Nat := 5`): boxed
+      -- (`def k : UInt64 := 77`, `def k : Nat := 5`): boxed
       -- in line, which LLVM folds, not read from a once-cell.
       if ← constIsImmediate f then return none
       return some e
@@ -202,7 +198,7 @@ def tailCallEntry (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) : LowerM
     if keep[i]?.getD true then vals := vals.push (← lowerArg ctx args[i]! (← lowerType ps[i]!))
   return some (← enter vals)
 
-/-! ## Indices after a proved access (`rebindIndex`, `--int-backend rcgmp`)
+/-! ## Indices after a proved access (`rebindIndex`)
 
 An access at a `Nat` index that a proof keeps below the size
 (`boundedIndexSyms`: `a[i]'h`, `ByteArray.get`, `a.set i x h`,
@@ -226,7 +222,7 @@ small constant to it gives one: `i + 1` has no tag test and no overflow
 path, a later access at it no tag test, and a copy of it no count. The
 `Nat` itself would keep the access's big path, which rejoins after the
 access (a `Nat` in [2^61, 2^63) is a heap value whose word is valid), so
-every later use tested its tag again. Under leanrt nothing changes. -/
+every later use tested its tag again. -/
 
 /-- Whether `e` evaluates, whenever it completes, a call of a
 `boundedWordAccesses` access with the word `k` among its arguments: the
@@ -247,11 +243,10 @@ partial def evalsBoundedAccess (k : String) : RR.Expr → Bool
   | _ => false
 
 /-- The variables (Reussir names, `vars`) whose index words the let-run
-wants from `bindReadIndex` for `let d` followed by `k`: under rcgmp, for a
-call of a `boundedIndexSyms` extern, its `Nat` arguments that `k` uses. -/
+wants from `bindReadIndex` for `let d` followed by `k`: for a call of a
+`boundedIndexSyms` extern, its `Nat` arguments that `k` uses. -/
 def indexWordsWanted (d : LetDecl .pure) (k : Code .pure) (vars : Std.HashMap FVarId (String × RR.Ty)) :
     LowerM (Std.HashSet String) := do
-  unless (← read).intBackend == .rcgmp do return {}
   let .const f _ args _ := d.value | return {}
   -- An instance of a polymorphic extern is named by its key (`calleeOf`).
   let orig := ((← read).keys.find? f).map (·.decl) |>.getD f

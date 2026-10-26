@@ -64,9 +64,6 @@ structure MonoConfig where
   (`preludeFnDecls`): which symbols lean2rr's runtime implements
   (`computeExternRoute`'s hint). -/
   preludeFns : Std.HashSet String := {}
-  /-- The representation of `Nat` and `Int` (`--int-backend`): which
-  literals allocate (`constComputes`, `natLitFree`). -/
-  intBackend : IntBackend := .rcgmp
 
 /-- The functions a prelude declares: the names of its lines that start
 with `fn NAME` or `pub fn NAME`, outside the Rust code of its textures
@@ -1024,16 +1021,15 @@ def tyArgMarker : Expr := .const `L2R.tyArg []
 more than build a dictionary of functions? That is: call a function
 (`instance : Inhabited Grid := ⟨mkGrid 300⟩`), or allocate data: a
 constructor of a type that is not a class, with a relevant field (a list
-or a record literal, a `Thunk.mk`), a string literal, a number literal that
-is not free (`natLitFree`: past the small ones under `leanrt`; none under
-`rcgmp`, whose literals are read-only data). A class's own constructor (the dictionary and its parent
-dictionaries), a closure, a constructor without relevant fields (`[]`,
-`none`) and a small number are values. Natively such a constant is
-evaluated once, at startup, and a callee that receives it reads its
-fields; in a callee specialized on it, `simp` copies the body to the
-projections (`inlineProjInst?`), to run at every call: a call runs again, a
-literal is rebuilt, a thunk is made and forced again (round 7 RV7F-02,
-RV7F-04). Only a dictionary of functions gains from being copied: its
+or a record literal, a `Thunk.mk`), a string literal. A class's own
+constructor (the dictionary and its parent dictionaries), a closure, a
+constructor without relevant fields (`[]`, `none`) and a number literal
+(Reussir's literals are read-only data, NatEncoding) are values. Natively
+such a constant is evaluated once, at startup, and a callee that receives
+it reads its fields; in a callee specialized on it, `simp` copies the body
+to the projections (`inlineProjInst?`), to run at every call: a call runs
+again, a literal is rebuilt, a thunk is made and forced again (round 7
+RV7F-02, RV7F-04). Only a dictionary of functions gains from being copied: its
 methods become direct calls. `fuel` bounds the constants followed. -/
 partial def constComputes (c : Name) (fuel : Nat := 8) : MonoM Bool := do
   if fuel == 0 then return true
@@ -1048,7 +1044,6 @@ where
       let computes ← match d.value with
         | .erased | .proj .. => pure false
         | .lit (.str _) => pure true
-        | .lit (.nat n) => pure !(natLitFree (← get).config.intBackend n)
         | .lit _ => pure false
         | .fvar _ args => pure !args.isEmpty
         | .const f _ args _ =>

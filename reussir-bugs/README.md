@@ -187,8 +187,8 @@ changes only the commit of mlir-rcgmp that the build fetches
 | [8](08-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias, never freed) as the donor | no longer | a field put back into a rebuilt node is boxed again | none | still reproduces (checked) |
 | [2](02-native-drop-order.md) | missing feature (partly fixed upstream) | drop glue does not free in native Lean's order: upstream frees first field first; with entry 23, a Worklist record's other members at its visit and its dead children last first | yes: the release order of resources when user code drops a record; accepted by the owner | leanrt keeps its pending releases on entry 23's stack, which gives native order inside every drain | none since Phase 2 (02-a to 02-e left the series) | the stack depth is fixed (#677 to #679, another design, first field first); the order is not |
 | [7](07-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address | yes: the one-word `Box` needs it | none | [07-a](patches/07-a-tagged-top-bits.patch) | not fixed |
-| [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the one-word `Nat` and `Int` need it | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed (upstream's built-in `Nat` and `Int`, #776, are another way to one word; lean2rr does not use them) |
-| [20](20-rcgmp-integration.md) | missing feature (one patch also fixes a bug) | Reussir's built-in `Nat` and `Int` (rcgmp) lack what lean2rr's `Nat` and `Int` on rcgmp need: intrinsics for Lean's division modes and the power-of-two remainder, an owned handle at polyffi type arguments (without it a leak and uses after free, a bug), retain and release glue that inlines into textures, a query for sharing, and a parse of big literals that is not cubic | yes, under `--int-backend rcgmp` (step D) | none | [20-a](patches/20-a-bigint-lean-division.patch), [20-b](patches/20-b-mpz-polyffi-handle.patch), [20-c](patches/20-c-mpz-inline-glue.patch), [20-d](patches/20-d-mpz-is-shared.patch), [20-e](patches/20-e-hex-bigint-literals.patch) | not upstream; Reussir's maintainer takes them from here; prepared as pull request candidates, not opened |
+| [10](10-tagged-ffi-objects.md) | missing feature | an opaque FFI handle must be a pointer to a counted box: it cannot be an immediate | yes: the box `LAny` needs it (and until D8 the one-word `Nat` and `Int`) | none | [10-a](patches/10-a-tagged-ffi-objects.patch) | not fixed (lean2rr's `Nat` and `Int` are upstream's built-in integers, #776, since D8; the box still needs tagged handles) |
+| [20](20-rcgmp-integration.md) | missing feature (one patch also fixes a bug) | Reussir's built-in `Nat` and `Int` (rcgmp) lack what lean2rr's `Nat` and `Int` on rcgmp need: intrinsics for Lean's division modes and the power-of-two remainder, an owned handle at polyffi type arguments (without it a leak and uses after free, a bug), retain and release glue that inlines into textures, a query for sharing, and a parse of big literals that is not cubic | yes: lean2rr's `Nat` and `Int` are Reussir's built-in integers (step D; the only representation since D8) | none | [20-a](patches/20-a-bigint-lean-division.patch), [20-b](patches/20-b-mpz-polyffi-handle.patch), [20-c](patches/20-c-mpz-inline-glue.patch), [20-d](patches/20-d-mpz-is-shared.patch), [20-e](patches/20-e-hex-bigint-literals.patch) | not upstream; Reussir's maintainer takes them from here; prepared as pull request candidates, not opened |
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44; checked) |
 
 **Counts.** 20 entries (numbers 1 to 24; numbers 5, 9, 11 and 22 are
@@ -273,11 +273,11 @@ Phase 2 (its glue pushed onto the old shared stack), `l2r-base9` and
 `l2r-base9-shared` (`RtAltTreeFree`'s bounds are native's, which needs
 the links); leanrt's pending stack, built on entry
 23's, does not compile without 23-k to 23-m; its prelude needs 10-a (it
-declares `Nat` and `Int` `tagged`). lean2rr's `--int-backend rcgmp`
-(step D, on dev since `1e57ed53`) needs 20-a and 20-b (its `check_rcgmp`
-checks for them) and uses 20-c to 20-e and 21-a. rcgmp is lean2rr's
-default representation since 2026-10-25, so a default build needs them;
-`--int-backend leanrt` (`L2R_INT_BACKEND=leanrt`) does not. 21-a and
+declares the box `LAny` `tagged`). lean2rr's `Nat` and `Int` are Reussir's
+built-in integers (step D, on dev since `1e57ed53`; the only
+representation since D8, 2026-10-26), so every build needs 20-a and 20-b
+(`check_rcgmp` checks for them) and uses 20-c to 20-e and 21-a; until
+D8, `--int-backend leanrt` needed none of them. 21-a and
 23-p are optimizations: nothing requires them, and `scripts/l2r.py`
 does not check for them. The driver also passes `--relocation-mode pic`, the workaround
 for entry 5 (retired): since `ea240b19` this is rrc's default for
@@ -448,7 +448,7 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   the bug fixes (20-b; 23-e, which fixes entry 24 on the way; the earlier
   one, 05-a, is upstream as #758), the features lean2rr needs (07-a,
   10-a, and entry 20's patches for step D), 21-a, an optimization with a
-  large gain under `--int-backend rcgmp` (6 to 10% of the instructions of
+  large gain on Reussir's built-in integers (6 to 10% of the instructions of
   L12, L17 and Z01c), and entry 23's worklist drops, which bound the
   memory of deep frees (652 MB to 68 MB on `RtClosureChainFree`), with
   23-k to 23-m, which let lean2rr's runtime share entry 23's stack. A fix
@@ -951,9 +951,10 @@ Not bugs, but each one costs lean2rr measurably:
   Traversals that keep unchanged nodes pay the same on fields (about 1.5x
   native on an `Expr.replace`-style DAG traversal). Reported upstream as
   issue #762 (open at `0378b744`).
-- **A one-word `Nat`** (done locally: [issue 10](10-tagged-ffi-objects.md),
-  patch 10-a, tagged opaque handles; `Nat` and `Int` are one tagged word,
-  as natively).
+- **A one-word `Nat`** (done: lean2rr's `Nat` and `Int` are Reussir's
+  built-in integers since D8, 2026-10-26; before, local patch 10-a,
+  [issue 10](10-tagged-ffi-objects.md), made them one tagged word, as
+  natively; the box `LAny` still uses tagged handles).
 - **`[value]` types across the FFI.** Arrays of enumerations or `[value]`
   records need runtime-side representations or wrappers.
 - **Guaranteed tail calls.** Mutual tail calls are sibling calls only when

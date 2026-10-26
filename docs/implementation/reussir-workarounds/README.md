@@ -17,9 +17,9 @@ the exceptions are the patches that lean2rr requires (for missing
 features, and entry 23's worklist drops for the memory of deep frees):
 23-a to 23-o, and 07-a (`scripts/l2r.py` checks for 23-f, 23-k, 23-m,
 23-n, 23-o and 07-a; leanrt's pending stack needs 23-k to 23-m to
-compile), 10-a (the prelude needs it) and, under
-`--int-backend rcgmp` (the default), 20-a and 20-b (`check_rcgmp` checks
-for them); see the table below.
+compile), 10-a (the prelude needs it) and 20-a and 20-b (`Nat` and `Int`
+are Reussir's built-in integers; `check_rcgmp` checks for them); see the
+table below.
 
 - [correctness-bugs.md](correctness-bugs.md): workarounds for bugs that
   affected the program rather than its build time (wrong values, rrc
@@ -110,13 +110,13 @@ either way.
 | [6](../../../reussir-bugs/06-trampoline-inline.md) | missed optimization | read textures kept small (the view protocol, [ownership.md](../ownership.md#reads-give-their-reference-up-first-for-a-view)); the reads of a box and of a `Nat` or `Int` element (at its type, or from a typed array) stay calls at a cold call site, which `tests/runtime/ffi-inline-check.sh` allows in `RtReadsDeep` only | none (06-a and 06-b parked: the gain is too small) | n/a |
 | [7](../../../reussir-bugs/07-tagged-top-bits.md) | missing feature | none: the one-word `Box` keeps its payload's type number in the top 16 bits | 07-a | n/a: `scripts/l2r.py` requires it |
 | [8](../../../reussir-bugs/08-alias-release-donor.md) | missed optimization | avoided: a field put back into a rebuilt node is boxed again from its unboxed value ([records.md](../representations/records.md#a-field-is-read-at-its-binders-type-once)); passing the field's own box (commit 3f0cb30, reverted) left a dead release of the unboxed value that token reuse preferred to the matched cell (`RtProbeBump`) | none (missed optimization) | n/a |
-| [10](../../../reussir-bugs/10-tagged-ffi-objects.md) | missing feature | none: `Nat` and `Int` are tagged handles ([nat-int.md](../representations/nat-int.md)) | 10-a | n/a: the prelude declares `Nat` and `Int` `tagged` |
+| [10](../../../reussir-bugs/10-tagged-ffi-objects.md) | missing feature | none: the box `LAny` is a tagged handle ([box-and-uniform.md](../representations/box-and-uniform.md); until D8 also `Nat` and `Int`, [nat-int.md](../representations/nat-int.md)) | 10-a | n/a: the prelude declares `LAny` `tagged` |
 | [15](../../../reussir-bugs/15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7, so free arena memory goes back to the OS at once ([startup/entry.md](../startup/entry.md#free-arena-memory-goes-back-to-the-os-at-once-mimalloc-v218-to-v227)) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | n/a: with a fixed mimalloc the workaround turns itself off; delete it then |
 | [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | every generated tuple (a join point's, J2; a `flatten-structs` result) has its fields in decreasing alignment, as records have (`memberOrder`, `field-order`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [18](../../../reussir-bugs/18-tail-padding-return.md) | missed optimization | the tuple of a `flatten-structs` result keeps a `bool`, `u8`, `u16` or `u32` in a `u64` member and has no member for a unit value, so it has no tail padding (`tupleMemberTy`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [19](../../../reussir-bugs/19-retcon-direct-arms.md) | bug (rrc's memory, reussir#759) | none needed: with 23-f rrc makes no retcon destructors (on `l2r-base7`, which had no 23-f, rrc ran out of memory on `RtSyncSelect` without 19-a) | none (19-a parked) | n/a |
-| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (`--int-backend rcgmp`, on dev since `1e57ed53`, 2026-10-25) uses the interface the patches add | 20-a to 20-e | n/a: step D needs 20-a and 20-b (`check_rcgmp` there), so lean2rr's default backend, rcgmp since 2026-10-25, needs them; `--int-backend leanrt` needs none |
-| [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: under `--int-backend rcgmp` the pairs stay without the patch | 21-a | n/a: an optimization; nothing requires it |
+| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a to 20-e | n/a: every build needs 20-a and 20-b (`check_rcgmp`); until D8, `--int-backend leanrt` needed none |
+| [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: the pairs stay without the patch | 21-a | n/a: an optimization; nothing requires it |
 | [23](../../../reussir-bugs/23-worklist-drops.md) | cost (memory and run time of frees) | none: lean2rr's builds use the patches (`RtDeepTreeFree`, `RtClosureChainFree` and their alloc-check bounds show the cost without them), and leanrt's pending stack is built on 23-a's stack | 23-a to 23-p | n/a: `scripts/l2r.py` requires 23-f, 23-k, 23-m, 23-n and 23-o |
 
 Issues 12 to 14, 16 and 24 (three bugs of Reussir's runtime and

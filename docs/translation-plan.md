@@ -517,8 +517,8 @@ computes itself uses the same conversion.
 - `Nat` constructors and `cases` → `Nat.add x 1`, and `if n == 0 … else
   let m := n - 1`.
 - `Int` `cases` → a sign test plus `natAbs`.
-- (lean2rr's copy, under `--int-backend rcgmp` with the optimization
-  `int-match`: a `cases` on a `Nat` or `Int` stays, and the lowering makes
+- (lean2rr's copy, with the optimization `int-match`: a `cases` on a
+  `Nat` or `Int` stays, and the lowering makes
   it a Reussir `match` on the built-in integer, §5.1.)
 - `cases` on builtin runtime types (`Array`, `String`, `ByteArray`,
   `Float`, `Thunk`, `Task`, `UIntN`) → accessor externs. (lean2rr's copy
@@ -718,8 +718,8 @@ Stage 4 sees only mono types:
 | `Float`, `Float32` | `f64`, `f32` | |
 | `Bool` | `bool` | |
 | `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
-| `Nat` | `Nat`, Reussir's built-in integer (`--int-backend rcgmp`, the default since 2026-10-25): one word, an immediate for a value in [-2^61, 2^61), else a pointer to a counted heap integer (GMP); with `--int-backend leanrt` (the default until 2026-10-25), a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "Reussir's built-in integers" and "One-word `Nat` and `Int`" below |
-| `Int` | `Int`, the same; with `--int-backend leanrt` small values are in the `int32` range (`lean_box((unsigned)(int)i)`) | |
+| `Nat` | `Nat`, Reussir's built-in integer: one word, an immediate for a value in [-2^61, 2^61), else a pointer to a counted heap integer (GMP) | one word, as natively; see "Reussir's built-in integers" below |
+| `Int` | `Int`, the same | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
 | `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation for every `α` without a storage kind: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
 | `Array S`, `S` a scalar | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | optimization `compact-arrays`: per storage kind, when a whole-program check finds that no array of the kind meets an array of boxes; otherwise `RVec<Box>` (`docs/implementation/representations/compact-arrays.md`) |
@@ -728,50 +728,34 @@ Stage 4 sees only mono types:
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> Box), busy, done(Box), … }`, one for thunks and one for tasks, whatever `α` is | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
-**One-word `Nat` and `Int` (`--int-backend leanrt`).** The
-representation of `--int-backend leanrt`, the default until 2026-10-25
-(rcgmp, below, is the default since). A `Nat` is one machine word, with Lean's
-own encoding: an odd word `lean_box(n) = 2n+1` is the small value `n`
-(n < 2^63, `LEAN_MAX_SMALL_NAT`), an even word is a pointer to a
-reference-counted big number (n ≥ 2^63, `leanrt::nat`). Every value has
-exactly one form, so two small words are equal exactly when their values
-are, and every small value is below every big one. An `Int` is the same,
-also in Lean's encoding: a value `i` in the `int32` range is
-`lean_box((unsigned)(int)i)` (its 32 bits, zero-extended, so a `Nat` below
-2^31 and the `Int` of the same value have the same word), any other value
-a big number. A big number is lean2rr's own: one block holding the 32-bit
-count Reussir counts, 4 reserved bytes, the signed size (GMP's convention:
-the limbs in use, negated for a negative `Int`), the capacity, and then
-the limbs. Its operations are GMP's: `mpn` functions on the limbs, writing
-into an operand's block when it is unique and has room (a carry out of a
-result computed in place grows the block; a result that leaves most of a
-block unused shrinks it) or into a fresh block, and `mpz` functions on
-read-only views for the rare ones (`pow`, `gcd`, parsing, printing). Native Lean's
-`lean_mpz_object` is a header and an `mpz_t` whose limbs GMP allocates
-separately: one block saves an allocation, a free and a dependent load
-per big number, and a two-limb number takes 32 bytes instead of 56. The
-small words are exactly Lean's, so C code written against `lean.h` could
-receive and return them unchanged; a big number would be converted at
-that boundary (calling a program's own C code is not supported for now,
-§10).
-
-*Reussir's built-in integers (`--int-backend rcgmp`, the default since
-2026-10-25).* With `--int-backend rcgmp` a `Nat` and an `Int` are Reussir's own
+**Reussir's built-in integers.** A `Nat` and an `Int` are Reussir's own
 `core::num::Nat`/`Int` (rcgmp: an immediate for a value in [-2^61, 2^61),
-else a counted heap integer). The prelude keeps both representations in
-marked blocks that define the same functions, and lean2rr keeps the
-chosen backend's. The lowering emits Reussir's literal of any size (a
-value outside the immediates is a read-only object of the program's
-data), boxes and unboxes through the prelude's non-generic
+else a counted heap integer, GMP's). Reussir counts them: a copy of a heap
+integer increments its count, and an immediate has no count. The prelude's
+Nat and Int sections compose Lean's rules (lean-runtime's `sem::nat`,
+`sem::int`) of Reussir's operators and its `core::intrinsic::bigint`
+functions, so most operations are one Reussir operation:
+
+```
+fn lean_nat_add(a : Nat, b : Nat) -> Nat { a + b }
+fn lean_nat_sub(a : Nat, b : Nat) -> Nat { a - b }      // truncating on `Nat`
+fn lean_nat_dec_lt(a : Nat, b : Nat) -> bool { a < b }
+```
+
+The lowering emits Reussir's literal of any size (a value outside the
+immediates is a read-only object of the program's data), boxes and
+unboxes through the prelude's non-generic
 `l2r_any_of_nat`/`l2r_any_as_nat` (a box keeps Lean's immediates: a `Nat`
-below 2^63, an `Int` in the `int32` range), and
-passes them at the type arguments of the runtime's generic FFI functions
-as owned handles (Reussir's local patch R2): a once-cell, a polymorphic
-extern's value, a typed array or cell holds the handle itself. (Until
-2026-10-25 a lowering for measurements, which did not use R2, kept them
-out of type arguments.)
-lean2rr's cost model (which values are small, which literals cost
-nothing) follows the backend. A case split on a `Nat` or `Int` is a
+below 2^63, an `Int` in the `int32` range; a bigger value is a cell that
+holds the heap integer), and passes them at the type arguments of the
+runtime's generic FFI functions as owned handles (Reussir's local patch
+R2): a once-cell, a polymorphic extern's value, a typed array or cell
+holds the handle itself. So `Nat` and `Int` are ordinary counted handles
+to lean2rr: records, constructors and closures hold them as one word.
+(Until 2026-10-25 a lowering for measurements, which did not use R2, kept
+them out of type arguments.) lean2rr's cost model (which values are
+small, which literals cost nothing) follows rcgmp's immediates
+(`NatEncoding.lean`). A case split on a `Nat` or `Int` is a
 Reussir `match` (optimization `int-match`): Stage 2 keeps Lean's `cases`
 (`toMono` would test `n == 0` and compute `n - 1`), and the lowering
 gives `Nat.zero` the literal arm `0` and `Nat.succ p` the arm
@@ -781,63 +765,20 @@ and a chain of tests of one `Nat` or `Int` against literals (Lean's
 `match n with | 0 => … | 5 => … | _ => …`) into one `match`. Details:
 `docs/implementation/representations/nat-int.md`.
 
-The difficulty is that Reussir, not lean2rr, inserts the reference
-counting: copying a handle increments the count at its address, dropping
-it calls the type's drop code. A small `Nat` has no address. Three ways
-were weighed (2026-10):
-
-1. *An opaque runtime type with user hooks.* Reussir's opaque `#[ffi]`
-   records (`LStr`, `RVec`) already call a Rust drop hook on release, but
-   increment the count inline, at the address. A clone hook would need a
-   new symbol per type and a call on every copy (or reliance on LLVM
-   inlining it).
-2. *A small Reussir feature: tagged opaque handles.* The opaque record is
-   declared `#[ffi(rust = "::leanrt::nat::LNat", tagged)]`; Reussir then
-   increments the count only when the handle's low bit is clear, and calls
-   the drop hook only then (the hook is Rust's `Drop` of `LNat`, which
-   frees the big number). Real handles point to a 4-byte-aligned count, so
-   the low bit is free. Nothing else in Reussir reads through an opaque
-   handle (opaque values never donate their cells for reuse, are never
-   deferred by the drop glue, and are only passed to Rust code, which knows
-   the encoding). The patch (Reussir patch 10-a) carries the flag from the
-   attribute to the type (`!reussir.ffi_object<…, tagged = true>`) and adds
-   the two guards in the LLVM lowering of `rc.inc`/`rc.dec`.
-3. *lean2rr alone.* Reussir's only immediates are field-less constructors,
-   encoded as pointers to per-tag dummy cells, not arbitrary numbers. A
-   `u64` field would escape Reussir's counting altogether: lean2rr would
-   have to insert every increment and decrement of `Nat` values itself,
-   including inside the drop code Reussir generates for records, closures
-   and enums that hold them, which it cannot reach.
-
-Option 2 was chosen: it is the smallest change (one flag, two guarded
-lowerings), keeps Reussir's counting and in-place reuse for everything
-else, and gives exactly Lean's representation, with the copy of a small
-value costing one bit test and no call. Option 1 is the same mechanism
-with a call where the bit test suffices; option 3 is not possible.
-
-`Nat` and `Int` are then ordinary handles to lean2rr: they cross the FFI
-boundary, and records, constructors, closures and `Box` hold them as one
-word. The
-prelude's functions work on the words: `l2r_nat_raw(n)` turns a `Nat`
-into its word, which then owns the handle's reference, and each function
-does that once per argument, so the small path has no reference counting
-at all:
-
-```
-fn lean_nat_add(a : Nat, b : Nat) -> Nat {
-    let x = l2r_nat_raw(a);                 // 2m+1, or a big number's pointer
-    let y = l2r_nat_raw(b);
-    let s = x + (y - 1);                    // 2(m+n)+1 when both are small
-    if (s & x & 1) == 1 {                   // both small (s odd: same parity)
-        if s >= x { l2r_nat_of_raw(s) } else { l2r_nat_add_raw(x, y) }   // no carry: small
-    } else { l2r_nat_add_raw(x, y) }        // leanrt::nat, GMP; consumes both words
-}
-```
-
-The rule for words: a small word owns nothing; a big word must reach
-exactly one owner on every path (back into a handle, a `_raw` slow path,
-which consumes its words, or `l2r_nat_drop_raw`). The slow paths take
-every combination of small and big words and return normalized handles.
+*History: one-word `Nat` and `Int` (until 2026-10-26).* Until
+clean-integration D8 lean2rr also had its own representation, leanrt's
+(`--int-backend leanrt`, the default until 2026-10-25): one word in Lean's
+encoding (`lean_box(n) = 2n+1` for n < 2^63, an `Int` in the `int32` range
+as `lean_box((unsigned)(int)i)`), else a pointer to leanrt's one-block big
+number, computed with GMP's `mpn` functions. Reussir counted these words
+as *tagged* opaque handles: local Reussir patch 10-a increments and
+releases the count only when the handle's low bit is clear. Two other ways
+were weighed: a clone hook per opaque type (a call on every copy, where a
+bit test suffices), and a `u64` field that Reussir does not count (lean2rr
+would have had to insert every count itself, also in the drop code Reussir
+generates, which it cannot reach). `Box` (`LAny`) still uses tagged
+handles. D8 removed the representation
+(`docs/implementation/representations/nat-int.md`, its history entry).
 
 A type with computed fields (`Lean.Name`) is represented by its
 implementation inductive `T._impl`, whose constructors also store the
@@ -1343,11 +1284,11 @@ application appears.
   add bindings of its own: representation conversions, placeholders, and
   the bodies of duplicated join points (one copy per path).
 - Literals:
-  - `Nat` literals below 2^63 become `l2r_nat_small(k)` (the word
-    `2k+1`); bigger ones are parsed by the runtime from their decimal
-    digits, kept in the string literal table (`l2r_nat_of_decimal_lstr`,
-    `natLiteral`). One flat call: a nested arithmetic expression per limb
-    overflowed rrc's stack for literals of thousands of digits.
+  - A `Nat` literal of any size becomes Reussir's literal
+    (`{ let nl4 : Nat = 18446744073709551616; nl4 }`, `natLiteral`): rcgmp
+    makes a value outside the immediates a read-only object of the
+    program's data, so a literal costs no allocation and no parse at run
+    time.
   - `UIntN` literals become typed Reussir literals.
   - String literals become `l2r_str_lit(id)`: a runtime function generated
     with the program, which builds the string from a table of Rust byte
@@ -1526,7 +1467,7 @@ mono example of §3 becomes:
 ```rust
 let y7 = match head {                                  // cases head : Prod Nat P
     Prod_Nat_P { fst, snd } =>
-        if leanrt::nat_dec_lt(3, fst) {
+        if lean_nat_dec_lt(3, fst) {
             let f = leanrt::uint8_to_float(snd.a); leanrt::float_add(snd.c, f)
         } else { leanrt::float_of_scientific(0, true, 1) }
 };
@@ -1619,7 +1560,7 @@ would add more than 4000 operations to it (Σ (calls - 1) × size, for those
 of more than 32 operations), the ones that add the most are kept out of
 the inliner (§5.3, "Kept out of rrc's MLIR inliner"): after an 800-arm
 `match` on a `Nat`
-(`int-match` under `--int-backend rcgmp`), three join points of about 160
+(`int-match`), three join points of about 160
 operations, each called about 266 times from the arms, made one LLVM
 function of about a million blocks, and the build took 740 s instead of
 5 s (tests/runtime/RtJpWide).
@@ -2860,13 +2801,14 @@ processes, `Std.Internal.UV.System`, the startup descriptors,
 `sched`: Lean's task manager on one thread, promises, `Std.Sync`, the event
 loop with `Std.Internal.UV`'s timers and signals, Lean's stack-overflow
 report) and the networking (`net`: sockets, name resolution, interfaces;
-`runtime/README.md`, "The shared crate lean-runtime"). `leanrt` and the prelude hold lean2rr's representations and
-hot paths (the inline small-`Nat`/`Int` arithmetic, the one-block big
-numbers with GMP's kernels behind lean-runtime's `BigNat`/`BigInt`
-traits, the one-block arrays' reads, writes and pushes) and convert
-lean2rr's values to lean-runtime's views and back. The runtime provides
-what Reussir lacks:
-- `Nat`/`Int`: a small value, or a GMP bignum (`leanrt::big`);
+`runtime/README.md`, "The shared crate lean-runtime"). `leanrt` and the
+prelude hold lean2rr's representations and hot paths (the one-block
+arrays' reads, writes and pushes; the `Nat` and `Int` operations composed
+of Reussir's built-in integers, §5.1) and convert lean2rr's values to
+lean-runtime's views and back. The runtime provides what Reussir lacks:
+- for `Nat`/`Int`, Reussir's built-in integers (rcgmp), only the parts
+  rcgmp has not: the box cells of heap integers, the decimal text of big
+  values and lean-runtime's limits (`leanrt::rcgmp`);
 - Lean's `String` operations over UTF-8 bytes (one block with the character count, §5.1);
 - `Array`/`ByteArray`/`FloatArray` operations over the copy-on-write one-block vector;
 - `Float` and `Float32` math: lean-runtime's `semantics::libm`, glibc's
@@ -3011,7 +2953,8 @@ Probe results (Reussir at the pinned commit):
   FFI parameters (an array `get` currently takes ownership and releases);
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
   `no_inline` is a side effect); tagged
-  opaque handles (one-word `Nat`/`Int`, §5.1: local patch 10-a,
+  opaque handles (the box `LAny`, and until D8 the one-word `Nat`/`Int`,
+  §5.1: local patch 10-a,
   reussir-bugs/10-tagged-ffi-objects.md); a host hook where a drop that
   user code starts begins and ends, for Lean's order at the top of such a
   free too (§10, *Order of releases in one free*;
@@ -3245,7 +3188,7 @@ Each item says what differs and when.
   times the rrc time and memory without the anchors), and so are the
   functions whose copies would make one function too large (§5.3; rrc's
   inliner copies a callee of up to 256 operations into every call, and
-  `RtJpWide` under `--int-backend rcgmp` built in 740 s, now 5 s). The
+  `RtJpWide` built in 740 s, now 5 s). The
   towers of the adversarial rounds then build in 15 s to 2.5 minutes and at
   most 3 GB, the whole build (a single `StateT` tower used at `IO`: 21 s,
   0.4 GB, where it did not build in 30 minutes; five towers in one program:
@@ -3872,9 +3815,8 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   without the power (when the power is made in the same declaration as
   the `%`, as in `BitVec.ofNat`), so for a `w` above `MAX_BITS` it gives
   `x` (which has fewer bits), and for a `w` of 2^32 or more no message,
-  where natively the power ends the process. Tests `RtInternalPanic`, `RtLiftedLimits`; for
-  the truncation, the unit test `nat::tests::truncate_bits` (`w` of 2^32,
-  2^63 and 2^64 + 1).
+  where natively the power ends the process. Tests `RtInternalPanic`,
+  `RtLiftedLimits`; for the truncation, `RtNatModPow2`.
 - *LB-12, `Nat.shiftLeft` by 2^32 or more*: natively `INTERNAL PANIC:
   Nat.shiftl exponent is too big` for a nonzero value; lean2rr computes the
   shift while the result fits `MAX_BITS`, with native's message above it
@@ -3891,16 +3833,21 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   passed saturated). Test `RtLiftedLimits`.
 - *LB-05, a result too big for GMP*: natively a `Nat` of more than
   `INT_MAX` limbs makes GMP raise SIGFPE (status 136, no message, buffered
-  output lost), e.g. `(2^62)^(2^32 - 1)`. Every rule whose result size is
-  known first (`Nat` add, mul, pow, shiftLeft; `Int` add, sub, mul,
-  negSucc) ends at once with `INTERNAL PANIC: out of memory`, exit 1, above
-  `MAX_BITS` = (2^31 - 6) × 64 bits (GMP's cap less `mpz_pow_ui`'s margin
-  of 5 limbs; `leanrt::big::MAX_BITS`), or with native's exponent message
-  when the exponent or shift is 2^32 or more. Below `MAX_BITS`, memory that
-  runs out ends where it is allocated: a block of `leanrt::big` with
-  `INTERNAL PANIC: out of memory` (natively GMP's allocator prints its
-  message and aborts, 134; the one-block numbers' known difference), GMP's
-  own limbs in `pow` as natively. Test `RtLiftedLimits`.
+  output lost), e.g. `(2^62)^(2^32 - 1)`. lean2rr's `Nat.pow` and
+  `Nat.shiftLeft` end at once with `INTERNAL PANIC: out of memory`, exit 1,
+  above `MAX_BITS` = (2^31 - 6) × 64 bits (GMP's cap less `mpz_pow_ui`'s
+  margin of 5 limbs; `leanrt::rcgmp::MAX_BITS`), or with native's exponent
+  message when the exponent or shift is 2^32 or more. A larger sum or
+  product (`Nat` add, mul; `Int` add, sub, mul, negSucc) is computed by
+  Reussir's integers, which have no `INT_MAX` limit (their sizes are
+  `size_t`, GMP's `mpn` functions do the work), or the process ends where
+  its memory runs out: Reussir's `Panic: allocation failed` for an
+  integer, GMP's `GNU MP: Cannot allocate memory` for GMP's scratch, each
+  an abort (134), never a wrong result. Reaching `MAX_BITS` by a sum or
+  product needs an operand of 2^36 bits (about 8.6 GB). (Until
+  clean-integration D8, 2026-10-26, leanrt's own numbers refused every
+  such rule above `MAX_BITS`, as lean-runtime's rules do.) Test
+  `RtLiftedLimits`.
 - *LB-37, a capacity that cannot be reserved*
   ([LB-37](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-37-a-capacity-that-cannot-be-reserved-ends-mkempty-and-emptywithcapacity)):
   natively `Array.mkEmpty c`, `Array.emptyWithCapacity c`,

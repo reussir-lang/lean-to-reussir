@@ -101,9 +101,9 @@ each concept has one term.</p>
 <dt>immediate</dt>
 <dd>A constructor without fields of a shared enum: a tagged pointer to a static cell, never allocated.</dd>
 <dt>tagged handle</dt>
-<dd>An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. The box <code>LAny</code> is a tagged handle. With <code>--int-backend leanrt</code>, <code>Nat</code> and <code>Int</code> are tagged handles too.</dd>
+<dd>An opaque Reussir handle that may be a number instead of a pointer. Reussir counts it only when its low bit is 0. The box <code>LAny</code> is a tagged handle.</dd>
 <dt>built-in integer</dt>
-<dd>Reussir's own <code>Nat</code> and <code>Int</code> (rcgmp): one word, a small value in the word or a pointer to a counted big integer. The default representation of Lean's <code>Nat</code> and <code>Int</code> since 2026-10-25 (<code>--int-backend rcgmp</code>).</dd>
+<dd>Reussir's own <code>Nat</code> and <code>Int</code> (rcgmp): one word, a small value in the word or a pointer to a counted big integer. lean2rr's representation of Lean's <code>Nat</code> and <code>Int</code>.</dd>
 <dt>box (<code>LAny</code>)</dt>
 <dd>The uniform type: one word, as Lean's <code>lean_object*</code>. An odd word is an immediate (a small scalar, a small <code>Nat</code>, an enumeration's index, <code>box(0)</code>). An even word points to a counted object and holds the object's type number in its top 16 bits. It stores a value whose type is not statically known, and every field, array element and cell value of a parameter's type. Code that needs the concrete type checks the word.</dd>
 <dt>type number</dt>

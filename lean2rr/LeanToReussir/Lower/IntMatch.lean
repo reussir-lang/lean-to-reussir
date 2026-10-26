@@ -3,11 +3,11 @@ import Lean
 /-!
 # Stage 4: matches on Reussir's built-in integers
 
-Under `--int-backend rcgmp` (optimization `int-match`, Opt/IntMatch) a
-case split on a `Nat` or `Int` is one Reussir `match` on the built-in
-integer, which Reussir compiles to one `rcgmp.match` over integer
-intervals. This file finds the arms of that `match` in the mono code; the
-lowering (`lowerIntMatch`, Lower/Code) lowers them. The arms come from:
+With the optimization `int-match` (Opt/IntMatch) a case split on a `Nat`
+or `Int` is one Reussir `match` on the built-in integer, which Reussir
+compiles to one `rcgmp.match` over integer intervals. This file finds the
+arms of that `match` in the mono code; the lowering (`lowerIntMatch`,
+Lower/Code) lowers them. The arms come from:
 
 * a `cases` on a `Nat` (Stage 2 keeps it, `toMonoK`'s `keepIntCases`):
   `Nat.zero` is the literal arm `0`, `Nat.succ p` the arm `Nat::Succ(p)`,

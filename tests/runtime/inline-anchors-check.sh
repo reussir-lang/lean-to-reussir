@@ -4,23 +4,20 @@
 # g, the callees that rrc can inline (a lower bound of their size at most
 # 256; their size, counting what rrc may inline into them first, over 32)
 # add Σ (calls in g - 1) x size; while that is over 4000, the callee that
-# adds the most is anchored. Translation only (`lean2rr --emit rr`, no Reussir build), under
-# both representations of `Nat` and `Int`:
-# - RtJpWide with `--int-backend rcgmp`: its 800-arm
+# adds the most is anchored. Translation only (`lean2rr --emit rr`, no Reussir build):
+# - RtJpWide: its 800-arm
 #   `match` is one function (`int-match`) whose arms call three outlined join
 #   points (J3) about 266 times each: those three `jp_` functions are
-#   `#[transform_anchor]`, and no other `jp_` is;
-# - RtJpWide with `--int-backend leanrt`: the same three join points (200 or more calls
-#   each), but the `match` is a chain of tests that `Outline` cuts into
-#   functions of a few arms, so no function calls one of them more than a
-#   few times: none is anchored;
-# - RtJpAnchors under both: `tiny`'s small join point (250 or more calls)
+#   `#[transform_anchor]`, and no other `jp_` is (until 2026-10-26 the
+#   leanrt representation of `Nat` made that `match` a chain of tests, cut by
+#   `Outline` into functions of a few arms, and anchored none);
+# - RtJpAnchors: `tiny`'s small join point (250 or more calls)
 #   and `few`'s larger one (2 to 6 calls, more than 40 lines) are
-#   outlined and not anchored, and the rule anchors no function; under
-#   rcgmp `tiny`'s join point (one function calls it 300 times) is listed
+#   outlined and not anchored, and the rule anchors no function;
+#   `tiny`'s join point (one function calls it 300 times) is listed
 #   as a small function left to the inliner over the budget (so the
 #   exemption of small functions is what keeps it inlinable);
-# - RtCopyAnchors under both: of `p0`, `p1`, `p2` (each alone under the
+# - RtCopyAnchors: of `p0`, `p1`, `p2` (each alone under the
 #   budget in `sum3`, together over it) exactly two are anchored; `wrap`
 #   (own size at most 32, mid-size with `big` inlined into it) is anchored
 #   and `big` is not; `build` (which calls itself) is anchored; `mid`
@@ -148,25 +145,20 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
   (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1 \
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
   before=$fails
-  for be in rcgmp leanrt; do
-    # Each representation named (rcgmp is lean2rr's default since
-    # 2026-10-25).
-    flags=(--int-backend $be)
+  for be in rcgmp; do
     R=$OUT/$be.rr
-    if ! translate "$R" "${flags[@]}"; then fail "$be did not translate (see $R.log)"; continue; fi
+    if ! translate "$R"; then fail "$be did not translate (see $R.log)"; continue; fi
     want=0
     case $P in
       RtJpWide)
-        if [ $be = rcgmp ]; then wide "$R" anchored; want=3; else wide "$R" free; fi ;;
+        wide "$R" anchored; want=3 ;;
       RtJpAnchors)
         list=$(jps "$R")
         awk '$4 >= 250' <<< "$list" | grep -q . || fail "$be: no join point with 250 or more calls (tiny's)"
         awk '$4 >= 2 && $4 <= 6 && $3 > 40' <<< "$list" | grep -q . || fail "$be: no join point of more than 40 lines with 2 to 6 calls (few's)"
         awk '$2 == 1 { print "  anchored: " $0 }' <<< "$list" | grep . && fail "$be: a join point is anchored"
-        if [ $be = rcgmp ]; then
-          anchors "$R" small | awk '$1 ~ /^jp_/ && $4 >= 250 && ($4 - 1) * $2 > 4000' | grep -q . \
-            || fail "$be: tiny's join point is not listed as small and over the budget (the exemption is not exercised)"
-        fi ;;
+        anchors "$R" small | awk '$1 ~ /^jp_/ && $4 >= 250 && ($4 - 1) * $2 > 4000' | grep -q . \
+          || fail "$be: tiny's join point is not listed as small and over the budget (the exemption is not exercised)" ;;
       RtCopyAnchors)
         cases "$R" $be; want=6 ;;
     esac
@@ -176,7 +168,7 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
   if [ $P = RtJpWide ]; then
     # Self-check: without anchors the check of the .rr must fail.
     R=$OUT/noanchors.rr
-    if ! L2R_NO_INLINE_ANCHORS=1 translate "$R" --int-backend rcgmp; then
+    if ! L2R_NO_INLINE_ANCHORS=1 translate "$R"; then
       fail "L2R_NO_INLINE_ANCHORS: did not translate (see $R.log)"
     else
       saved_status=$status saved_fails=$fails

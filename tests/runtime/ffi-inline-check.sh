@@ -61,8 +61,8 @@ kinds, allow = sys.argv[2].split(","), set(sys.argv[3:])
 names = set()
 if "reads" in kinds:
     names |= {"l2r_array_give", "l2r_view_size", "l2r_view_take", "l2r_view_end",
-              "l2r_array_get", "l2r_array_get_word", "l2r_consume",
-              "l2r_view_take_as", "l2r_any_take_as", "l2r_array_get_as", "l2r_array_get_word_as"}
+              "l2r_array_get", "l2r_consume",
+              "l2r_view_take_as", "l2r_any_take_as", "l2r_array_get_as"}
     names |= {f"lean_{a}_{op}" for a in ("array", "byte_array", "float_array")
               for op in ("fget", "fget_borrowed", "uget", "uget_borrowed", "get", "get_borrowed")}
     # The reads of an element at a type (an immediate without a copy of its

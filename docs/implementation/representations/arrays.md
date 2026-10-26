@@ -137,7 +137,8 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   a size class there bigger, a capacity of the size asked for would still
   lie inside the block (room left unused).
 - **Where:** `runtime/leanrt/src/alloc.rs`: `good_size`; its callers
-  `big.rs` (`block_bytes`), `array.rs` and `string.rs` (`grow`).
+  `array.rs` and `string.rs` (`grow`) (and leanrt's big numbers until
+  clean-integration D8, `big.rs`: `block_bytes`).
 - **Remove only if:** mimalloc's small size classes stop being every
   multiple of 8 (the unit test fails then; the capacity stays safe, only
   smaller than the block).

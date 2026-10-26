@@ -124,7 +124,7 @@ Paths are relative to the repository root.
   `l2r_mk_empty_with_capacity`, `l2r_replicate_len`, `l2r_internal_panic`;
   `runtime/leanrt/src/array.rs`: `check_alloc`, `check_capacity`,
   `check_alloc_slow`, `capacity_slow`, `with_capacity_checked`, `replicate`;
-  `runtime/leanrt/src/nat.rs`: `nat_replicate_len`.
+  `runtime/leanrt/src/rcgmp.rs`: `replicate_len` (a size of 2^63 or more).
 - **Remove only if:** never (the messages are observable).
 
 ### `ByteArray.copySlice` takes its offsets saturated (LB-06 lifted)
@@ -139,7 +139,7 @@ Paths are relative to the repository root.
   a value there, which both translators compute (LB-06, plan §10). Test
   `RtLiftedLimits` (`copySlice`), lean-runtime's `array/copyslice.*` rows.
 - **Where:** `runtime/prelude.rr`: `lean_byte_array_copy_slice`,
-  `l2r_nat_sat`; `runtime/leanrt/src/nat.rs`: `nat_sat_u64`;
+  `l2r_nat_sat` (rcgmp's `trunci_overflow` to `u64`);
   `runtime/leanrt/src/array.rs`: `copy_slice`.
 - **Remove only if:** never.
 
@@ -784,14 +784,15 @@ Paths are relative to the repository root.
   values with few significant digits; the text is unchanged. The `Int`
   rules call a word method (`add_i64`, `i64_sub`, `mul_i64`, `tdiv_i64`,
   ...) when one operand is a word and the other big; leanrt's `GInt`
-  overrides all eleven with its in-place limb code (`big::add_limb`,
-  `mul_limb`, `div_limb`), so the word needs no block (see
-  [../representations/nat-int.md](../representations/nat-int.md#the-slow-paths-are-lean-runtimes-rules-on-lean2rrs-numbers)).
+  overrode all eleven with its in-place limb code (`big::add_limb`,
+  `mul_limb`, `div_limb`), so the word needed no block. (leanrt's own
+  numbers, their overrides and the `Int` equality below went with
+  clean-integration D8: [nat-int.md's history entry](../representations/nat-int.md#history-leanrts-own-representation-until-2026-10-26).)
   The same step changes four things of leanrt and the prelude: no
   `mi_good_size` call up to 64 bytes
   ([../representations/arrays.md](../representations/arrays.md#a-blocks-capacity-is-mimallocs-size-class-without-a-call-up-to-64-bytes)),
-  the equality of a small and a big `Int` without a call
-  ([../representations/nat-int.md](../representations/nat-int.md#int-equality-of-a-small-and-a-big-word-needs-no-call)),
+  the equality of a small and a big `Int` without a call (leanrt's
+  numbers, until D8),
   the block test of string equality
   ([../representations/strings.md](../representations/strings.md#string-equality-tests-the-same-block-first))
   and the release of a record an array set replaces
@@ -811,8 +812,8 @@ Paths are relative to the repository root.
   11, next section)
   ([../ownership.md](../ownership.md#a-set-releases-a-replaced-record-with-its-decrement-in-line)).
 - **Tests:** leanrt's unit test `big::tests::word_methods_match_defaults`
-  (each override against the trait's default, big operands at the word
-  ranges' edges and zero, unique and shared); the runtime suite's `Int`,
+  (until D8: each override against the trait's default, big operands at
+  the word ranges' edges and zero, unique and shared); the runtime suite's `Int`,
   `Nat`, `Float`, `String` and array tests; `tests/runtime/rows-check.sh`
   (lean-runtime's `Int` and `Float` rows through lean2rr); the new tests
   `RtIntSmallBigEq`, `RtArraySets`, `RtArrayRecordFreeOrder`,
@@ -820,8 +821,8 @@ Paths are relative to the repository root.
 - **Where:** lean-runtime's `src/semantics/float.rs` (`to_string`,
   `fixed6`), `src/semantics/bignum.rs` (the word methods) and
   `src/semantics/int.rs` (`ring_op!`, `div_slow`); leanrt's
-  `runtime/leanrt/src/big.rs` (`impl BigInt for GInt`, `add_limb`,
-  `div_limb`).
+  `runtime/leanrt/src/big.rs` until D8 (`impl BigInt for GInt`,
+  `add_limb`, `div_limb`).
 - **Remove only if:** never (speed only); the overrides must give the
   defaults' values (the unit test).
 
@@ -871,8 +872,8 @@ Paths are relative to the repository root.
 - **What:** lean-runtime pinned at `2910ef7` (main: perf-3, 2910ef7:
   `to_string_fast_bytes`, the word-at-a-time `utf8_strlen`). With it,
   three changes of leanrt: a big `Int` in the `i64` range is computed as
-  a word
-  ([../representations/nat-int.md](../representations/nat-int.md#a-big-int-in-the-i64-range-is-computed-as-a-word)),
+  a word (leanrt's numbers, until D8:
+  [nat-int.md's history entry](../representations/nat-int.md#history-leanrts-own-representation-until-2026-10-26)),
   a substring of an ASCII string takes its count from its length, and
   `Float.toString` copies the rule's bytes
   ([../representations/strings.md](../representations/strings.md#a-substring-of-an-ascii-string-takes-its-count-from-its-length)).
@@ -893,15 +894,15 @@ Paths are relative to the repository root.
   `_mi_page_ptr_unalign`. Which page it is changes from run to run: up to
   8% of monadic-interp's instructions, 5.5% of unionfind's, 2.5% of
   liasolver's.
-- **Tests:** leanrt's unit tests `nat::tests::narrowed_operands`,
+- **Tests:** leanrt's unit tests `nat::tests::narrowed_operands` (until D8),
   `float::tests::to_string_is_the_rules_text` and the extended
   `string::tests::counts_follow_every_update`; lean-runtime's
   `semantics::string::tests::utf8_strlen_counts_every_length_and_position`
   and its float tests on `to_string_fast_bytes`; the new runtime tests
   `RtIntWordBand` and `RtStringExtractCount`; `RtInt`,
   `RtIntSmallBigEq`, `RtFloat`, `RtFloatLits`.
-- **Where:** leanrt's `runtime/leanrt/src/nat.rs`, `string.rs` and
-  `float.rs`; lean-runtime's `src/semantics/string.rs` and
+- **Where:** leanrt's `runtime/leanrt/src/nat.rs` (until D8), `string.rs`
+  and `float.rs`; lean-runtime's `src/semantics/string.rs` and
   `src/semantics/float.rs`.
 - **Remove only if:** never (speed only).
 

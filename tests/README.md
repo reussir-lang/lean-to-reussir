@@ -87,7 +87,7 @@ python3 tests/oracle.py bench --cmd 'out/{exe} {size}' [--cases A B] [--size ben
 ```
 
 The native builds (`oracle.py build`, `tests/runtime/run.sh`,
-`tests/env/run.sh`, `tests/runtime/nat-alloc-check.sh`,
+`tests/env/run.sh`,
 `tests/runtime/conv-count-check.sh`, `tests/runtime/alloc-check.sh`,
 `tests/runtime/paynothing-check.sh`, `tests/runtime/determinism-check.sh`,
 `tests/runtime/int-backend-check.sh`, `tests/runtime/int-match-check.sh`,
@@ -224,10 +224,9 @@ which must finish (`stats-polyrec`).
 `tests/runtime/run.sh` builds each `tests/runtime/Rt*.lean` natively and
 through lean2rr and compares stdout, stderr and the exit code (its header
 lists the per-test `.args`, `.stdin`, `.pipe`, `.opts`, `.enable-opts`,
-`.int-backend`, `.xfail`, `.ffi.c`, `.refused`, `.l2r-log` and
+`.xfail`, `.ffi.c`, `.refused`, `.l2r-log` and
 `.l2r-debug` files: `.opts` turns optimizations off for the test,
-`.int-backend` builds it with one representation of `Nat` and `Int`
-whatever the run's `L2R_INT_BACKEND`, `.enable-opts` turns on one that is
+`.enable-opts` turns on one that is
 off by default (`unread-fields`), `.ffi.c` is C code for the native build
 only, `.refused` an expected refusal by lean2rr, `.l2r-log` lines
 expected in lean2rr's build output, `.l2r-debug` the same with lean2rr
@@ -271,15 +270,12 @@ builder does not take the builder with it (`createDir "."` reports the
 error natively; before the fix, an internal panic).
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
-debug assertions on (so leanrt's invariant checks run, such as no big
-`Int` in the small range), once for each representation of `Nat` and
-`Int`: as `--int-backend leanrt` builds leanrt, and as `--int-backend
-rcgmp` builds it (`--cfg leanrt_rcgmp`, linked with the Reussir
-checkout's rcgmp runtime: `leanrt::rcgmp`'s tests, a big `Nat` or `Int`
-in a box's cell, shared and unique, and `low_bits`, run too).
-`L2R_INT_BACKEND=leanrt` or `rcgmp` runs only that one (before
-2026-10-25, when leanrt was the default, an unset `L2R_INT_BACKEND` ran
-the leanrt build only).
+debug assertions on (so leanrt's invariant checks run), in one build, as
+scripts/l2r.py builds leanrt, linked with the Reussir checkout's rcgmp
+runtime (`leanrt::rcgmp`'s tests run too: a big `Nat` or `Int` in a box's
+cell, shared and unique). Until 2026-10-26 it also ran a build for
+leanrt's own representation of `Nat` and `Int` (removed by
+clean-integration D8); `L2R_INT_BACKEND=leanrt` is refused.
 `tests/runtime/any-probe.sh` probes the one-word box `LAny` (every `Box`)
 with a hand-written Reussir program (`tests/runtime/any-probe/`)
 appended to a translated host program and linked with an allocation
@@ -425,7 +421,7 @@ results, so each runs at two sizes.
 - `tests/runtime/alloc-check.sh [NAME...]` builds each runtime test that has
   a `NAME.alloc` file natively and through lean2rr with the counter, runs
   both at the two sizes of each line of `NAME.alloc` (`SMALL ARGS | LARGE
-  ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB]`), and checks that the
+  ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB] [| live OFFSET]`), and checks that the
   outputs equal native's, and that lean2rr's allocations, and the bytes it
   allocates, grow from the small run to the large one at most FACTOR times
   as much as native's, plus OFFSET (64 × OFFSET bytes): `L_large − L_small
@@ -434,8 +430,13 @@ results, so each runs at two sizes.
   exponential where native is linear fails at sizes a few times apart. The
   bytes catch the copies of a whole array (one allocation of n elements),
   which the count alone misses (C03R-01, BA-13). `rss` also bounds the peak
-  memory of the large run. The sizes keep every run under a second on
-  today's lean2rr, quadratic or not.
+  memory of the large run. `live` bounds the change, between the two runs,
+  of lean2rr's heap integers alive at exit (the counter's `alloccount:
+  rcgmp live L`, of rcgmp's allocation hooks): a big number never
+  released, or released twice, changes it with the size (`RtNatStress`,
+  `RtNatConst`: `live 0`; until clean-integration D8,
+  `nat-alloc-check.sh` read leanrt's own counters). The sizes keep every
+  run under a second on today's lean2rr, quadratic or not.
 - A `NAME.xfail` whose first line starts with `alloc-check:` marks only the
   allocation check as known to fail: `run.sh` then still expects the
   test's output to equal native's. `alloc-check.sh` reports `XFAIL` for
@@ -474,9 +475,8 @@ results, so each runs at two sizes.
   without values of unknown type (the classic programs rbtree, cfold,
   qsort, deriv and unionfind at their `small` size, and RtJpSlots and
   RtLazyFields) against their baselines in `tests/runtime/paynothing/`
-  (`NAME.fp` under rcgmp, the default representation of `Nat` and `Int`
-  since 2026-10-25, and `NAME.leanrt.fp` under `L2R_INT_BACKEND=leanrt`,
-  the baselines written before that date): the
+  (`NAME.fp`; until clean-integration D8 also `NAME.leanrt.fp`, the
+  baselines of leanrt's own `Nat` and `Int`): the
   pay-nothing counts of the generated code (conversion helpers and their
   uses, values put into a `Box`, the program's pointer payload types of
   `Box`, the values taken out of a `Box` at a program type) must not
@@ -901,32 +901,24 @@ e4a1e5f (boxed arrays) every output equals native's.
 | RtCArrMatchBytes | `match b with \| ⟨arr⟩` on a `ByteArray` and a `FloatArray`: the data read, updated, mapped and rebuilt, `.data` of a byte array that stays in use, and both fields of a structure taken apart in a loop (`flatten-structs`): every kind stays compact (`RtCArrMatchBytes.l2r-debug`; on dev 0b6ef980 `u8` and `f64` were off) | — |
 | RtCArrMatchBytesMap | `match b with \| ⟨arr⟩ => ⟨arr.map (· + 1)⟩` on a `ByteArray`, the program's only `Array UInt8`: the map runs in place over the bytes and every kind stays compact (`RtCArrMatchBytesMap.l2r-debug`; on dev 0b6ef980 the bytes were copied into boxes and back, and `u8` was off, also for an unrelated `Array Bool`) | — |
 
-### `--int-backend rcgmp`: Reussir's built-in integers
+### Reussir's built-in integers (rcgmp)
 
 `tests/runtime/run.sh …` builds the tests with `Nat` and `Int` as
-Reussir's built-in integers (lean2rr's `--int-backend rcgmp`, the default
-since 2026-10-25: `L2R_INT_BACKEND` unset, empty or `rcgmp`;
+Reussir's built-in integers (rcgmp), their one representation since
+clean-integration D8 (2026-10-26; the default since 2026-10-25;
 scripts/l2r.py needs a Reussir with its rcgmp feature and the local
-patches it checks). `L2R_INT_BACKEND=leanrt tests/runtime/run.sh …`
-builds them with leanrt's one-word `Nat` and `Int`, the default until
-2026-10-25. The check scripts follow `L2R_INT_BACKEND` the same way (those
-that call lean2rr directly pass what scripts/l2r.py passes), except those
-that test one representation or both by name: `nat-alloc-check.sh`
-always builds with leanrt (its counters count leanrt's big numbers),
-`int-backend-check.sh`, `int-match-check.sh` and
-`inline-anchors-check.sh` name the representation of each translation,
-and `leanrt-unit.sh` runs both crate builds unless `L2R_INT_BACKEND`
-names one. A combined gate runs the suite and the checks under each
-representation.
-An item `int:leanrt` or
+patches it checks). `L2R_INT_BACKEND` unset, empty or `rcgmp` is
+accepted; `leanrt`, leanrt's one-word `Nat` and `Int` until D8, is
+refused by scripts/l2r.py, run.sh and leanrt-unit.sh. Until D8 the
+check scripts followed `L2R_INT_BACKEND`, a combined gate ran the suite
+and the checks under each representation, an item `int:leanrt` or
 `int:rcgmp` in the `[OPT,…] ` prefix of a line of a `.l2r-log` or
-`.l2r-debug` file checks the line only under that representation; a
-test's `NAME.int-backend` fixes its representation. The expected typed
-array and typed cell kinds (`RtTArr*`, `RtTRef*`) are the same under
-both (under rcgmp Reussir's owned handles at type arguments, local patch
-R2). Every test means the same
-under both representations. Tests for the switch (each passes under
-both):
+`.l2r-debug` file checked the line only under that representation (now an
+`int:` item fails the test) and a test's `NAME.int-backend` fixed its
+representation. The expected typed array and typed cell kinds
+(`RtTArr*`, `RtTRef*`) hold Reussir's owned handles at type arguments
+(local patch R2). Tests for the switch (each passed under both
+representations):
 
 | test | what |
 |---|---|
@@ -935,65 +927,61 @@ both):
 | RtNatLitHuge | a `Nat` literal of 20000 digits, as a constant read in a loop and as a literal in a function's code |
 | RtNatGenericFfi | `Nat` and `Int` where the runtime holds them through its generic functions: computed constants (once-cells), `dbgTraceIfShared` at `Nat`, arrays of `Nat`, `Int` and `Array Nat`, references, thunks and tasks |
 | RtNatGenericBig | a big literal's closed term and a typed `Array Nat` read after other allocations (review R1-01 of step D: on upstream Reussir, which renders a `Nat` at a type argument as a raw handle and releases it after the call, the sums were silently wrong; Reussir's patch R2 renders an owned handle) |
-| RtNatBoxedConsts | `Nat` and `Int` constants at the edges of the box's immediates (`Nat` 2^63; `Int` 2^31 - 1, ±2^31, -2^31 - 1, 3000000000, 2^32 - 1, 2^32, 2^62 - 1, ±2^62, -2^62 - 1; computed by `Int.pow`, `Int.neg`, `Int.sub`) stored in lists: under rcgmp `boxed-consts` boxes only those whose box is a cell once (review of step D: `k5 : Nat := 5` had a once-cell; `int-backend-check.sh` checks the once-cells) |
-| RtNatTestBit | `Nat.testBit` on small and big values at indices below, at and past the value's bit length, up to 2^70, also as a function value (`m.testBit` and `Nat.testBit` passed to functions that are not inlined, which call the instance's own code), and a bit matrix set with `\|\|\|` and read back; under rcgmp `prelude-int-ops` computes it with `l2r_nat_test_bit` (rcgmp's `testbiti`), under leanrt with Lean's definition (`RtNatTestBit.l2r-debug`) |
-| RtFloatOfNatInt | `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` on values computed at run time (not folded by `float-lits`): the immediates' edges, 2^53 ± 1, ties to even at 2^53, 2^54, 2^64, 2^100 and 2^200 (one decided by a bit far below the halfway point), the largest finite double and `(2^54 - 1) * 2^970`, which goes up to an infinity, far past it, and their negatives, by direct calls and through function values; under rcgmp `prelude-int-ops` computes them with `sitofp` (`l2r_float_of_nat`/`_int`), under leanrt with Lean's `Float.ofScientific` (`RtFloatOfNatInt.l2r-debug`) |
-| RtNatMatch | case splits on `Nat`, under rcgmp `match`es on the built-in integer (`int-match`): `0`/`n+1`, nested splits fused (`0`, `1`, `n+2`; `0`, `1`, `2`, `n+3`), chains of literal tests (literals from 2^61 on among them) ending in a default or in `n+1`, the scrutinee named in each kind of arm, used after the split, a test whose result is used twice, tail recursion, Ackermann; immediates, rcgmp's immediate edges and heap values |
+| RtNatBoxedConsts | `Nat` and `Int` constants at the edges of the box's immediates (`Nat` 2^63; `Int` 2^31 - 1, ±2^31, -2^31 - 1, 3000000000, 2^32 - 1, 2^32, 2^62 - 1, ±2^62, -2^62 - 1; computed by `Int.pow`, `Int.neg`, `Int.sub`) stored in lists: `boxed-consts` boxes only those whose box is a cell once (review of step D: `k5 : Nat := 5` had a once-cell; `int-backend-check.sh` checks the once-cells) |
+| RtNatTestBit | `Nat.testBit` on small and big values at indices below, at and past the value's bit length, up to 2^70, also as a function value (`m.testBit` and `Nat.testBit` passed to functions that are not inlined, which call the instance's own code), and a bit matrix set with `\|\|\|` and read back; `prelude-int-ops` computes it with `l2r_nat_test_bit` (rcgmp's `testbiti`; `RtNatTestBit.l2r-debug`) |
+| RtFloatOfNatInt | `Float.ofNat`/`Nat.toFloat` and `Float.ofInt`/`Int.toFloat` on values computed at run time (not folded by `float-lits`): the immediates' edges, 2^53 ± 1, ties to even at 2^53, 2^54, 2^64, 2^100 and 2^200 (one decided by a bit far below the halfway point), the largest finite double and `(2^54 - 1) * 2^970`, which goes up to an infinity, far past it, and their negatives, by direct calls and through function values; `prelude-int-ops` computes them with `sitofp` (`l2r_float_of_nat`/`_int`; `RtFloatOfNatInt.l2r-debug`) |
+| RtNatMatch | case splits on `Nat`, `match`es on the built-in integer (`int-match`): `0`/`n+1`, nested splits fused (`0`, `1`, `n+2`; `0`, `1`, `2`, `n+3`), chains of literal tests (literals from 2^61 on among them) ending in a default or in `n+1`, the scrutinee named in each kind of arm, used after the split, a test whose result is used twice, tail recursion, Ackermann; immediates, rcgmp's immediate edges and heap values |
 | RtIntMatch | case splits on `Int` (`ofNat`/`negSucc`, the fields' splits fused: `0`, `ofNat (n+1)`, `-1`, `negSucc (m+1)`), the scrutinee named in each arm, `Int.repr`, `toNat`, `natAbs`, a sign split in a loop; small values of both signs, ±2^61 and neighbours, ±2^63, ±2^64, ±10^30 |
 | RtIntMatchNoExtract | `Int` literal matches with `compiler.extract_closed false`, so a negative literal is computed in place (`Int.neg (Int.ofNat 6)`) and an arm returns the literal it was tested against; literal tests before the `Int` split with nested fields; ±2^70 (review of 762c2ac6: an arm kept the literal's `let` but not the `let`s it reads, and lean2rr stopped with an internal error) |
-| RtBoxBigReuse | big `Nat` and `Int` values boxed, taken apart and boxed again in a loop (three boxes of a big `Nat` in a list, two of them of one value, and two of a big `Int` in a list made by a function that is not inlined: an `Option Int` would be a flat value, without a box): under rcgmp the box takes the owned rcgmp handle (`l2r_any_of_big<Nat>`, `l2r_any_of_big<Int>`); `RtBoxBigReuse.alloc` bounds the peak memory at 100000 iterations by native's plus 4000 KB (native's is flat), which a box that kept one reference too many exceeds far (a leaked reference per box, injected: 43.7 MB against an allowed 12.1 MB) |
-| RtNatBoxBig | `Nat` and `Int` values in boxes (the elements of `List` and `Option`, the fields of a pair), small and far past the box's immediates (2^63 and up, ±2^62 and up, 10^30): under rcgmp a big value's box is a leanrt cell that takes the owned handle (`l2r_any_of_nat`/`_int`, then `l2r_any_of_big<Nat>`/`<Int>`); `int-backend-check.sh` checks the translation |
-| RtNatPosEdges | string positions and indices at 2^60, 2^61, 2^62, 2^63 and 2^64 and around, through `String.Pos.Raw` `next`, `prev`, `get`, `get?`, `atEnd`, `isValid`, `extract` and `Array`/`ByteArray` `[i]?`/`getD`, and the sizes of `String`, `Array`, `ByteArray`, `FloatArray`: under rcgmp the prelude makes sizes and small positions a `Nat` through a mask to 61 bits (`l2r_nat_size`), which past the end (`next` gives the position plus one) would cut 2^61 to 0, and truncates indices to `i64` |
-| RtNatIdxWord | reads at a `Nat` index or position from arrays of boxes (`.opts`: `typed-arrays` and `compact-arrays` off) at small indices and at 2^61, 2^62, 2^63, 2^64, 2^70: `a[i]`, `a[i]!` (panic and default), `a[i]?` of `Nat`, `UInt8`, `UInt32`, `Bool` (read at a type, `boxWordRead?`), `Option Nat`, `List UInt8`; `ByteArray` `get`/`get!`; `String.Pos.Raw` `get`, `get'`, `next'`, `atEnd`: under rcgmp lean2rr computes the index word first (`l2r_nat_index`) and calls the prelude's `_w` reads (`lean_array_fget_as_w`, `lean_array_get_as_w` at a type) |
-| RtNatIdxRebind | the index of an access that a proof keeps in range, used again after it: `a[i]` with a proof, `ByteArray.get`, `a.set i x h`, `ByteArray.set`, `a.swap i j` (also through `Vector` and `Array.qsort`), in loops up to the size of arrays of 0 to 1000 elements, an insertion sort, a binary search, a search that returns its index, `set`/`swap` at one index twice, `set` of the index at itself, a reversal by `Vector.swap`, a shared array's `set`, and arithmetic on the index after the access past the immediates or as a big index of `get!`, `get?`, `set!`, `swapIfInBounds` (near 2^61, 2^63, 2^64): under rcgmp lean2rr uses the access's index word as a `Nat` (`l2r_nat_of_index`) in place of the index after the access (`rebindIndex`), and the updates take index words (`lean_array_fset_w`, `lean_byte_array_fset_w`, `lean_array_fswap_w`) |
+| RtBoxBigReuse | big `Nat` and `Int` values boxed, taken apart and boxed again in a loop (three boxes of a big `Nat` in a list, two of them of one value, and two of a big `Int` in a list made by a function that is not inlined: an `Option Int` would be a flat value, without a box): the box takes the owned rcgmp handle (`l2r_any_of_big<Nat>`, `l2r_any_of_big<Int>`); `RtBoxBigReuse.alloc` bounds the peak memory at 100000 iterations by native's plus 4000 KB (native's is flat), which a box that kept one reference too many exceeds far (a leaked reference per box, injected: 43.7 MB against an allowed 12.1 MB) |
+| RtNatBoxBig | `Nat` and `Int` values in boxes (the elements of `List` and `Option`, the fields of a pair), small and far past the box's immediates (2^63 and up, ±2^62 and up, 10^30): a big value's box is a leanrt cell that takes the owned handle (`l2r_any_of_nat`/`_int`, then `l2r_any_of_big<Nat>`/`<Int>`); `int-backend-check.sh` checks the translation |
+| RtNatPosEdges | string positions and indices at 2^60, 2^61, 2^62, 2^63 and 2^64 and around, through `String.Pos.Raw` `next`, `prev`, `get`, `get?`, `atEnd`, `isValid`, `extract` and `Array`/`ByteArray` `[i]?`/`getD`, and the sizes of `String`, `Array`, `ByteArray`, `FloatArray`: the prelude makes sizes and small positions a `Nat` through a mask to 61 bits (`l2r_nat_size`), which past the end (`next` gives the position plus one) would cut 2^61 to 0, and truncates indices to `i64` |
+| RtNatIdxWord | reads at a `Nat` index or position from arrays of boxes (`.opts`: `typed-arrays` and `compact-arrays` off) at small indices and at 2^61, 2^62, 2^63, 2^64, 2^70: `a[i]`, `a[i]!` (panic and default), `a[i]?` of `Nat`, `UInt8`, `UInt32`, `Bool` (read at a type, `boxWordRead?`), `Option Nat`, `List UInt8`; `ByteArray` `get`/`get!`; `String.Pos.Raw` `get`, `get'`, `next'`, `atEnd`: lean2rr computes the index word first (`l2r_nat_index`) and calls the prelude's `_w` reads (`lean_array_fget_as_w`, `lean_array_get_as_w` at a type) |
+| RtNatIdxRebind | the index of an access that a proof keeps in range, used again after it: `a[i]` with a proof, `ByteArray.get`, `a.set i x h`, `ByteArray.set`, `a.swap i j` (also through `Vector` and `Array.qsort`), in loops up to the size of arrays of 0 to 1000 elements, an insertion sort, a binary search, a search that returns its index, `set`/`swap` at one index twice, `set` of the index at itself, a reversal by `Vector.swap`, a shared array's `set`, and arithmetic on the index after the access past the immediates or as a big index of `get!`, `get?`, `set!`, `swapIfInBounds` (near 2^61, 2^63, 2^64): lean2rr uses the access's index word as a `Nat` (`l2r_nat_of_index`) in place of the index after the access (`rebindIndex`), and the updates take index words (`lean_array_fset_w`, `lean_byte_array_fset_w`, `lean_array_fswap_w`) |
 
-`tests/runtime/int-backend-check.sh` checks the translation of
-`--int-backend rcgmp` (no Reussir build). It checks `boxed-consts` on
-`RtNatBoxedConsts`: under rcgmp only the `Nat` and `Int` constants whose box
-is a cell get a once-cell (`l2r_boxed_N`), under leanrt none. And the reads
-at an index word on `RtNatIdxWord` (with its `.opts`): under rcgmp the
+`tests/runtime/int-backend-check.sh` checks the translation of `Nat` and
+`Int` as Reussir's built-in integers (no Reussir build; until
+clean-integration D8 also the leanrt side's). It checks `boxed-consts` on
+`RtNatBoxedConsts`: only the `Nat` and `Int` constants whose box
+is a cell get a once-cell (`l2r_boxed_N`). And the reads
+at an index word on `RtNatIdxWord` (with its `.opts`): the
 generated code calls each of the prelude's ten
 `_w` reads, each with the index word of the `let ixN : u64 =
 l2r_nat_index(...)` on the line before it, and none of the reads at a
 `Nat` that have a twin (`lean_array_fget<`, `lean_byte_array_get(`,
-`lean_string_utf8_get(`, `lean_string_utf8_at_end(`, ...); under leanrt
-the `.rr` has no `l2r_nat_index` and no `_w` read. RtNatIdxWord's output
+`lean_string_utf8_get(`, `lean_string_utf8_at_end(`, ...). RtNatIdxWord's output
 is the same without the lowering, so run.sh alone does not pin it. And the boxes of big values on `RtNatBoxBig`: the generated code boxes through `l2r_any_of_nat`/`_int`, whose heap path in the `.rr` is the owned `l2r_any_of_big<Nat>`/`<Int>`. (Until 2026-10-25 it also checked guard mode, a lowering for measurements that kept `Nat` and `Int` out of type arguments: it ran on a Reussir with patch R2, which it did not use, and had a check of its own.)
 And the index after a proved access on `RtNatIdxRebind`, translated with
-the default passes and with `compact-arrays` off: under rcgmp each `let ibN
+the default passes and with `compact-arrays` off: each `let ibN
 : Nat = l2r_nat_of_index(ixM);` comes right after the access at `ixM`
 (`Array` fget, `ByteArray` fget, `Array` fset, `ByteArray` fset, `Array`
 fswap, and with `compact-arrays` off the read at a type, each kind at least
 once), the variable whose word `ixM` is does not occur again in the rest of
 the enclosing block (nested blocks included), and the generated code calls
-no `fset`, `fswap` or `ByteArray` `fset` at a `Nat`; under leanrt the `.rr`
-has no `l2r_nat_of_index` and no update at a word. RtNatIdxRebind's output
+no `fset`, `fswap` or `ByteArray` `fset` at a `Nat`. RtNatIdxRebind's output
 is the same without the rebinding.
 
 `tests/runtime/int-match-check.sh` checks the shapes of `int-match`
-(translation only, no Reussir): under rcgmp `RtNatMatch`'s and
+(translation only, no Reussir): `RtNatMatch`'s and
 `RtIntMatch`'s splits are `match`es (`sumTo`, `fib`, a chain of eight
 literal arms, a copy of the scrutinee where an `n+1` arm names it, the
 fused `Int` splits) and no test or `Nat.sub` is left in them; with
-`--disable-opt int-match` no `match` on a `Nat` or `Int` is left; under
-leanrt the pass changes nothing.
+`--disable-opt int-match` no `match` on a `Nat` or `Int` is left.
 
 `tests/runtime/inline-anchors-check.sh` checks the functions that the
 required practice `inline-anchors` keeps out of rrc's inliner for their
-copies (translation only, no Reussir; under both representations): at
+copies (translation only, no Reussir): at
 each function, while the copies of its callees that rrc can inline (a
 lower bound of their size, without their recursive callees, at most 256;
 their size, with what rrc may inline into them first, over 32) add more
 than 4000, Σ (calls - 1) × size, the callee that adds the most is kept
-out. Under rcgmp, `RtJpWide`'s 800-arm `match` is one function whose
+out. `RtJpWide`'s 800-arm `match` is one function whose
 arms call three outlined join points about 266 times each: those three
-are `#[transform_anchor]`, no other join point is. Under leanrt `Outline`
-cuts that `match` (a chain of tests) into functions of a few arms, and
-none is. `RtJpAnchors` (a join point of 23 operations called from 300
-arms, and a larger one called from 4) has none under either; under rcgmp
-the small one is over the budget, so the exemption of small functions is
+are `#[transform_anchor]`, no other join point is. `RtJpAnchors` (a join
+point of 23 operations called from 300 arms, and a larger one called
+from 4) has none; the small one is over the budget, so the exemption of small functions is
 what keeps it inlinable. `RtCopyAnchors` (64-arm `match`es on an
-enumeration) has six under both: two of three functions whose copies are
+enumeration) has six: two of three functions whose copies are
 each under the budget but together over it, a wrapper of 5 operations
 that is mid-size once `big` is inlined into it, a function that calls
 itself, a function under 256 on its own but over it with the recursive
@@ -1002,7 +990,7 @@ function in a cycle of three (`fa` → `fb` → `fc` → `fa`) that `fb` calls
 from every arm. The check reads lean2rr's `L2R_DEBUG` lines, fails when a program
 lacks the shapes it looks at, and checks itself: `RtJpWide` with
 `L2R_NO_INLINE_ANCHORS` (no anchors) must fail it. The build time it
-guards against: `RtJpWide` under rcgmp took 740 s to build with the
+guards against: `RtJpWide` took 740 s to build with the
 three join points inlined into every arm, and 5 s without.
 
 ### Typed arrays: the `RtTArr*` corpus
@@ -1024,7 +1012,7 @@ that go off).
 | RtTArrMixed | typed and boxed kinds in one program: `Array Pt` and `Array (Array Pt)` typed, `Array Shape` through an existential package (off), a field `Array (Array Float)`, a subarray, an `Array Pt` in a generic box and in a list of options, copies updated afterwards | — |
 | RtTArrRelease | elements that can hold something whose release the program can observe stay boxed: records holding a file handle (shared between elements), a closure and a task, updated by `set!` and `pop` and dropped; an `Array String` beside them stays typed (`RtTArrRelease.l2r-debug`: the kinds and the reasons) | — |
 | RtTArrMapCaptureNames | a map whose lambda captures two arrays named `src` and `dst` (re-review probe SD2) beside maps whose kinds end up boxed: the revert finds the split's own parameters, not the captured ones (matched by those names, it dropped the wrong argument: an internal panic) | — |
-| RtBoxLeafArrays | typed arrays in boxes (the heads of lists): `Array Nat`, `Array Int`, `Array String`, `Array (Array UInt8)` and an `Array` of a record, dropped by user code, freed by a reference's `set` and by `Array.set!`; `tests/runtime/box-leaf-check.sh` checks the translation: the first four are leaf payloads (`LEAF_BIT`), the array of records is not, under leanrt and under `--int-backend rcgmp --rcgmp-type-args` | — |
+| RtBoxLeafArrays | typed arrays in boxes (the heads of lists): `Array Nat`, `Array Int`, `Array String`, `Array (Array UInt8)` and an `Array` of a record, dropped by user code, freed by a reference's `set` and by `Array.set!`; `tests/runtime/box-leaf-check.sh` checks the translation: the first four are leaf payloads (`LEAF_BIT`), the array of records is not | — |
 | RtTArrMapInPlace | rounds of `Array.map` between two pointer kinds (`String → Nat → String`, review probe D) whose kinds end up boxed: the split of the first `map` is entered in place again (`RtTArrMapInPlace.alloc`: bytes grow as natively; with the split, 96 bytes per element against native's 8) | passes |
 
 The lines of these `.l2r-debug` files start with

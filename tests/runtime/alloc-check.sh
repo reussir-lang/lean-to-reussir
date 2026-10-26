@@ -21,7 +21,14 @@
 #   where native is linear fails at sizes a few times apart;
 # - optionally (`rss FACTOR OFFSET_KB`), lean2rr's peak memory in the large
 #   run (maximum RSS, /usr/bin/time) is at most FACTOR times native's plus
-#   OFFSET_KB.
+#   OFFSET_KB;
+# - optionally (`live OFFSET`), the heap integers of Reussir's (big `Nat`s
+#   and `Int`s) alive at lean2rr's exit differ by at most OFFSET between the
+#   small run and the large one (the counter's `rcgmp live` line, which
+#   counts the integers made less those freed): a big number that is never
+#   released, or released twice, makes the count grow, or shrink, with the
+#   size, while the program's constants stay alive at both (natively a big
+#   number is GMP's, not counted apart).
 # Native's counts are the largest of ALLOC_CHECK_NATIVE_RUNS runs at each
 # size (default 3; the first run's output is the one compared). Native Lean
 # starts libuv's event-loop thread while its runtime initializes, and that
@@ -44,7 +51,7 @@
 #   tests/runtime/alloc-check.sh [NAME...]   (default: every NAME.alloc)
 #
 # NAME.alloc: comment lines (#) and one line per measured case,
-#   SMALL ARGS | LARGE ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB]
+#   SMALL ARGS | LARGE ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB] [| live OFFSET]
 # e.g. `300 | 1200 | 4 2000`: the program's arguments at the two sizes (a
 # few times apart; each run must take at most a few seconds on today's
 # lean2rr, also where it is quadratic), then the bound (each FACTOR an
@@ -137,10 +144,18 @@ for t in "${TESTS[@]}"; do
       while IFS= read -r line || [ -n "$line" ]; do
         case $line in "#"*|"") continue ;; esac
         k=$((k + 1))
-        IFS='|' read -r small large bound rss <<< "$line"
-        read -r factor offset <<< "$bound"
-        small=$(echo $small); large=$(echo $large)
-        res=""
+        IFS='|' read -r -a fields <<< "$line"
+        small=$(echo ${fields[0]}); large=$(echo ${fields[1]})
+        read -r factor offset <<< "${fields[2]}"
+        res=""; rss=""; live=""
+        for f in "${fields[@]:3}"; do
+          read -r kind val _ <<< "$f"
+          case $kind in
+            rss) rss=$f ;;
+            live) live=$val ;;
+            *) res="$res unknown bound '$f' in $t.alloc;" ;;
+          esac
+        done
         for size in small large; do
           a=${!size}
           for b in native l2r; do run_one "$d" "$b" "$a" "$k.$size.$b"; done
@@ -174,7 +189,8 @@ for t in "${TESTS[@]}"; do
           dn=$((n2 - n1)); dl=$((l2 - l1)); allowed=$(($(factor_times "$factor" $((dn > 0 ? dn : 0))) + offset))
           dnb=$((nb2 - nb1)); dlb=$((lb2 - lb1)); allowedb=$(($(factor_times "$factor" $((dnb > 0 ? dnb : 0))) + 64 * offset))
           nr=$(tail -1 "$d/$k.large.native.rss"); lr=$(tail -1 "$d/$k.large.l2r.rss")
-          echo "  $t [$small -> $large]: allocations native +$dn, lean2rr +$dl (allowed +$allowed); bytes native +$dnb, lean2rr +$dlb (allowed +$allowedb); peak KB native $nr, lean2rr $lr"
+          lv1=$(alloccount_live "$d/$k.small.l2r.err"); lv2=$(alloccount_live "$d/$k.large.l2r.err")
+          echo "  $t [$small -> $large]: allocations native +$dn, lean2rr +$dl (allowed +$allowed); bytes native +$dnb, lean2rr +$dlb (allowed +$allowedb); peak KB native $nr, lean2rr $lr; heap integers alive at exit $lv1 -> $lv2"
           if [ "$dl" -gt "$allowed" ]; then
             res="$res allocations grow faster than native's ([$small -> $large]: +$dl, native +$dn, allowed $factor x +$dn + $offset);"
           fi
@@ -185,6 +201,12 @@ for t in "${TESTS[@]}"; do
             read -r _ rf ro <<< "$rss"
             if [ "$lr" -gt $(($(factor_times "$rf" "$nr") + ro)) ]; then
               res="$res peak memory $lr KB at '$large', native $nr KB (allowed $rf x $nr + $ro);"
+            fi
+          fi
+          if [ -n "$live" ]; then
+            dlv=$((lv2 - lv1))
+            if [ "${dlv#-}" -gt "$live" ]; then
+              res="$res heap integers alive at exit change with the size ([$small -> $large]: $lv1 -> $lv2, allowed a change of $live);"
             fi
           fi
         fi

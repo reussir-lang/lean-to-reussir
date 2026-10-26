@@ -1,0 +1,6 @@
+# Big numbers through every container and slow path (until D8, nat-alloc-check.sh's counters: every big number a round
+# makes is freed exactly once). The heap integers alive at exit do not change with the rounds (0 at both sizes today).
+# A leaked box of a big number (its cell's release skipped in leanrt's release_kind: a fault injected) leaves one per
+# round, 1000 -> 4000 at these sizes, which neither the allocation counts nor the peak show (6.7 MB, native 8.2 MB).
+# Natively the rounds make 25 times as many allocations (GMP's limbs through malloc).
+1000 | 4000 | 1 2000 | rss 1 4000 | live 0

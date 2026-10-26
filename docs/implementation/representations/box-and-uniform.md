@@ -58,14 +58,12 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   - a `[value]` struct: its one field, boxed at the field's type; a field
     that is a `Box` (`ST.Out σ α`) is the box itself (below);
   - `Nat`, `Int`, `String`, `Array α`, `ByteArray`, `FloatArray`:
-    leanrt's kinds 1, 2, 3, 6, 7, 8 (`l2r_any_of<T>`; under
-    `--int-backend leanrt` a small `Nat`/`Int` is its own word; under
-    `--int-backend rcgmp`, the default since 2026-10-25, a `Nat`/`Int` keeps kind
-    1/2 and Lean's immediates through the prelude's non-generic
+    leanrt's kinds 1, 2, 3, 6, 7, 8 (`l2r_any_of<T>`; a `Nat`/`Int` keeps
+    kind 1/2 and Lean's immediates through the prelude's non-generic
     `l2r_any_of_nat`/`_int`, `l2r_any_as_nat`/`_int` and
     `l2r_any_raw_take_nat`/`_int`, `natIntBoxFns?`, a bigger value being a
     leanrt cell that takes the owned rcgmp reference, `l2r_any_of_big<T>`:
-    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
+    [nat-int.md](nat-int.md#the-lowering));
     a compact array (`compact-arrays`,
     [compact-arrays.md](compact-arrays.md)) by its storage: `RVec<u8>` 7
     (as `ByteArray`), `RVec<f64>` 8 (as `FloatArray`), `RVec<u16>` 9,
@@ -284,26 +282,25 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   `RtProbeBump` and `RtArrayAppendFloat` (alloc-check).
 - **Remove only if:** never (the round trips come back).
 
-### An array element read at once at an immediate type, `Nat` or `Int` takes no copy of its box
+### An array element read at once at an immediate type takes no copy of its box
 
 - **What:** An unboxing at a type a box holds only as an immediate
-  (`UInt8/16/32`, `Char`, `Bool`, an enumeration) or at `Nat` or `Int`,
-  whose box is an array read at `Box` (`lean_array_fget`, `get!`'s
+  (`UInt8/16/32`, `Char`, `Bool`, an enumeration), whose box is an array
+  read at `Box` (`lean_array_fget`, `get!`'s
   `lean_array_get`, `uget`, their `_borrowed` forms, maybe in
   `bindReadIndex`'s block), calls the read's `_as<T>` variant instead
   (`boxWordRead?`): `l2r_view_take_as<T>` looks at the element in place and
   tests bit 0 once; an immediate is read without a copy of the box (no
-  reference count step), a big `Nat` or `Int` is copied as before. At an
-  immediate type the result is the box's word, which `l2r_any_word_as_<k>`
-  (or `l2r_any_word_imm` for an enumeration) reads, any pointer being a
-  mismatch, as for `l2r_any_as_<k>`; `get!`'s default out of bounds is
-  taken at `T` (`l2r_any_take_as`). Only without `slow` (a program that
-  casts reads other payloads through the generated function, which needs
-  the box), and not at `Nat` or `Int` under `--int-backend rcgmp` (the
-  `_as<T>` reads end in the generic `l2r_any_as<T>`, which cannot tell a
-  small value at `T := Nat`; such a box is read by the prelude's
-  `l2r_any_as_nat`/`_int`, `natIntBoxFns?`). `boxUnboxed?` folds the boxing of such a read back into the
-  read of the box.
+  reference count step). The result is the box's word, which
+  `l2r_any_word_as_<k>` (or `l2r_any_word_imm` for an enumeration) reads,
+  any pointer being a mismatch, as for `l2r_any_as_<k>`; `get!`'s default
+  out of bounds is taken at `T` (`l2r_any_take_as`). Only without `slow` (a
+  program that casts reads other payloads through the generated function,
+  which needs the box), and not at `Nat` or `Int` (the `_as<T>` reads take
+  only `u64`; such a box is read by the prelude's `l2r_any_as_nat`/`_int`,
+  `natIntBoxFns?`; until D8 the leanrt representation read them this way
+  too). `boxUnboxed?` folds the boxing of such a read back into the read of
+  the box.
 - **Why:** The read copied the element (`LAny::clone`: a test of bit 0,
   an increment for a pointer) and the unboxing tested bit 0 again (review
   perf-r1 item 7). The same read of a field (a match binder or a
@@ -311,17 +308,14 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   copies a field a use takes, and no texture can borrow it (Reussir has no
   borrowed reads across its FFI boundary).
 - **Where:** `LowerBase.lean`: `boxWordReads`, `boxWordRead?`,
-  `boxWordReadBack?`, `boxUnbox` (`.scalar`, `.enumIdx`, `.leanrt` 1 and 2),
+  `boxWordReadBack?`, `boxUnbox` (`.scalar`, `.enumIdx`),
   `boxUnboxed?`; `runtime/prelude.rr`: `l2r_view_take_as`,
-  `l2r_any_take_as`, `l2r_array_get_as`, `l2r_array_get_word_as`,
-  `lean_array_fget_as` and the other `_as` reads, `l2r_any_word_imm`,
-  `l2r_any_word_as_<k>`; `tests/runtime/ffi-inline-check.sh` lists the
-  `_as` reads among those that must stay inlined at cold call sites. At
-  `RtReadsDeep`'s cold sites LLVM keeps 3 `l2r_view_take_as` calls (the
-  reads at `Nat` and `Int`; a big number's copy is out of line, `big`),
-  as it keeps 4 `l2r_view_take` calls there: on deptypes 5234d3b with the
-  anybox Reussir it kept 7 `l2r_view_take` calls, so the check failed
-  before. Test `RtArrayReadImm`.
+  `l2r_any_take_as`, `l2r_array_get_as`, `lean_array_fget_as` and the
+  other `_as` reads, `l2r_any_word_imm`, `l2r_any_word_as_<k>`;
+  `tests/runtime/ffi-inline-check.sh` lists the `_as` reads among those
+  that must stay inlined at cold call sites (at `RtReadsDeep`'s cold sites
+  it allows and counts the calls that LLVM keeps out of line). Test
+  `RtArrayReadImm`.
 - **Remove only if:** never (each read copies the box again).
 
 ### Unboxing functions are generated last, until the payloads are stable
