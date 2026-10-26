@@ -3,6 +3,16 @@
 Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
 `lean2rr/LeanToReussir/` for lean2rr's files.
 
+lean2rr has two representations of `Nat` and `Int`, chosen by
+`--int-backend` (scripts: `L2R_INT_BACKEND`): `rcgmp`, Reussir's built-in
+integers, the default since 2026-10-25 (the sections headed
+"`--int-backend rcgmp`"), and `leanrt`, Lean's own one-word encoding with
+leanrt's big numbers, the default until 2026-10-25 (the other sections
+describe it, or what both representations share). `--int-backend leanrt`
+still selects leanrt everywhere (lean2rr, scripts/l2r.py, the test
+scripts); its code goes in a later, separate step (clean-integration plan,
+D8).
+
 ### `Nat` and `Int` are one word each, in Lean's own encoding
 
 - **What:** A `Nat` or `Int` is one machine word. An odd word is a small
@@ -110,7 +120,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   is extracted) keeps Lean's rule, which does not depend on lean2rr's
   representation.
 
-### `--int-backend rcgmp`: Reussir's built-in integers (in progress)
+### `--int-backend rcgmp`: Reussir's built-in integers (the default)
 
 - **What:** With `--int-backend rcgmp` (clean-integration step D; scripts:
   `L2R_INT_BACKEND=rcgmp`), a `Nat` and an `Int` are Reussir's built-in
@@ -249,23 +259,38 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `runtime/leanrt/src/rcgmp.rs`, `any.rs` (`of_mpz`, `mpz_of`,
   `release_kind`, `generic_mpz_box`); `scripts/l2r.py` (`INT_BACKEND`,
   `core_interface`, `check_rcgmp`);
-  `tests/runtime/leanrt-unit.sh` (`L2R_INT_BACKEND=rcgmp`).
-- **Remove only if:** the rcgmp backend becomes the default (then the
-  leanrt blocks, `big.rs`, `gmp.rs` and `nat.rs` go) or is dropped.
+  `tests/runtime/leanrt-unit.sh` (its rcgmp build).
+- **Remove only if:** the rcgmp backend is dropped. It is the default
+  since 2026-10-25 (combined gate 25 green under both representations;
+  timing run 14: per-case geomean rcgmp/leanrt 0.990). The leanrt blocks,
+  `big.rs`, `gmp.rs` and `nat.rs` go only when the leanrt representation
+  is retired (clean-integration plan, D8), not with the change of the
+  default.
 
-### `--int-backend rcgmp`: the lowering (in progress)
+### `--int-backend rcgmp`: the lowering
 
 - **What:** lean2rr's side of the switch (clean-integration step D; plan
-  STEP-D-LOWERING rows 3 to 14, 18, 19). The default, `--int-backend
-  leanrt`, translates every program to the same `.rr` as before (the
-  prelude after its leanrt blocks are kept).
-  - **Options.** `--int-backend leanrt|rcgmp` (`Main.lean`; scripts:
+  STEP-D-LOWERING rows 3 to 14, 18, 19). `--int-backend leanrt` (the
+  default until 2026-10-25) translates every program to the same `.rr` as
+  before step D (the prelude after its leanrt blocks are kept).
+  - **Options.** `--int-backend rcgmp|leanrt` (`Main.lean`; scripts:
     `L2R_INT_BACKEND`) and `--rcgmp-type-args` (Reussir's local patch R2
     is there: a `Nat` or `Int` at a type argument of a generic FFI function
     is an owned handle). Both are in `PassConfig` (`intBackend`,
     `rcgmpTypeArgs`), set before the optional passes are installed, in
     `MonoConfig.intBackend` and in `LowerCtx` (`intBackend`,
     `natIntTypeArgs`: true under leanrt or with `--rcgmp-type-args`).
+  - **Defaults.** Since 2026-10-25 `rcgmp` is the default of
+    `--int-backend` (`CliOptions`, `PassConfig`, `MonoConfig`, `LowerCtx`,
+    `Opt.config`) and of `L2R_INT_BACKEND` (scripts/l2r.py, run.sh and the
+    check scripts: unset or empty is `rcgmp`); before, it was `leanrt`.
+    scripts/l2r.py always passes `--int-backend`, and under rcgmp also
+    `--rcgmp-type-args` (unless `L2R_RCGMP_TYPE_ARGS=0`). lean2rr's own
+    `--rcgmp-type-args` stays off unless given, so `lean2rr` called
+    without options lowers in the guard mode below, which needs no patch
+    R2. The check scripts that call lean2rr directly pass what
+    scripts/l2r.py passes (`int_flags`); those that test one
+    representation name it.
   - **Prelude blocks.** `filterIntBackend` (`NatEncoding.lean`) keeps the
     chosen backend's blocks and drops the marker lines, right after the
     prelude is read (`Main.pipeline`), so Stage 1's list of prelude
@@ -412,8 +437,9 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/`, and
   `RtNatGenericBig`, `RtNatIdxWord`, `tests/runtime/int-backend-check.sh`; run.sh's
   `int:NAME` items of an expectation line's `[OPT,…]` prefix and
   `NAME.int-backend`.
-- **Remove only if:** the rcgmp backend becomes the default (then the
-  leanrt paths go) or is dropped. With an owned handle at type arguments
+- **Remove only if:** the rcgmp backend is dropped; the leanrt paths go
+  when the leanrt representation is retired (clean-integration plan, D8;
+  rcgmp is the default since 2026-10-25). With an owned handle at type arguments
   (`--rcgmp-type-args`: Reussir's local patch R2, which scripts/l2r.py
   requires for rcgmp) typed arrays, typed cells and once-cells hold `Nat`
   and `Int` directly and the check is off; the guard and the check (rows

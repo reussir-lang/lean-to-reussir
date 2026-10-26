@@ -347,8 +347,10 @@ rest.
 
 | Lean (mono) | Reussir | Notes |
 |---|---|---|
-| `Nat` | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 10-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
-| `Int` | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
+| `Nat` (default, `--int-backend rcgmp`) | Reussir's built-in `core::num::Nat` (rcgmp), one word | an immediate for a value below 2^61, else a counted heap integer of Reussir's runtime (GMP); in a box Lean's words, a big value a leanrt cell holding the `Mpz` (`leanrt::rcgmp`) |
+| `Int` (default) | `core::num::Int`, likewise | an immediate in [-2^61, 2^61) |
+| `Nat` (`--int-backend leanrt`, the default until 2026-10-25) | `Nat` = `leanrt::nat::LNat`, one word, declared `tagged` (Reussir patch 10-a) | odd: the small value `(n << 1) \| 1`, n < 2^63; even: an owned `LBig` pointer (below) |
+| `Int` (`--int-backend leanrt`) | `Int` = `leanrt::nat::LInt`, likewise | odd: `lean_box((unsigned)(int)i)` for i in the `int32` range; even: an owned `LBig` pointer |
 | big numbers | `LBig`, one `mi_malloc` block: count `u32`, flags `u32`, signed size `i32` (limbs in use, negative for a negative value), capacity `u32`, then the limbs | GMP `mpn` operations on the limbs, in a unique operand's block with room (grown by a carry, shrunk when a result leaves most of it unused) or a fresh one; `mpz` operations on read-only views for `pow`, `gcd`, parsing and printing; normalized (only values outside the small ranges); only behind a `Nat`/`Int` word |
 | `String` | `LStr` = `leanrt::string::LStr`, a pointer to one block: count, byte size, capacity, character count (32 bytes, as Lean's header), bytes | valid UTF-8, no terminator, and the character count (Lean's `m_length`, kept by every operation: `String.length` is O(1)); copy-on-write; grows by `realloc` (below); equality compares the lengths, then the blocks (two references to one block are equal at once, as `lean_string_eq`), then the bytes |
 | `Array α` | `RVec<LAny>` = `leanrt::drop::Vec<LAny>`, a pointer to one block: count `u32` (padded), size, capacity (24 bytes), then the elements | the elements are boxes (`LAny`, one word each) for every `α` without a storage kind, and for every `α` when the program's check turns its kind off; copy-on-write, grows by `realloc`; freed without recursion (below) |
@@ -409,7 +411,12 @@ inside the texture (`leanrt::index_word`). The rules and the measurements:
 docs/implementation/ownership.md, "Reads give their reference up first,
 for a view".
 
-**`Nat`/`Int`.** One word each, with Lean's exact encoding
+**`Nat`/`Int`.** Under the default representation since 2026-10-25,
+`--int-backend rcgmp`, they are Reussir's built-in integers, and leanrt
+only boxes a big one (`leanrt::rcgmp`, built with `--cfg leanrt_rcgmp`;
+docs/implementation/representations/nat-int.md, "`--int-backend rcgmp`:
+Reussir's built-in integers"). Under `--int-backend leanrt` (the default
+until 2026-10-25), the rest of this paragraph: one word each, with Lean's exact encoding
 (`leanrt::nat`): an odd word is a small value, `lean_box(n)` for a `Nat`
 below 2^63 and `lean_box((unsigned)(int)i)` for an `Int` in the `int32`
 range; an even word is an owned reference to a big number, one block
@@ -439,7 +446,8 @@ one). `LInt::of_big` is the one place where a big `Int` handle is made;
 builds with debug assertions check there, and where a slow path reads a
 big `Int` (`int_view`), that it is outside the small range. A build with `L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs"`
 counts the big numbers made and freed and prints the counts at exit
-(`tests/runtime/nat-alloc-check.sh`).
+(`tests/runtime/nat-alloc-check.sh`, which builds with
+`L2R_INT_BACKEND=leanrt` for them).
 
 **Runtime-owned objects.** `LStr` and the arrays (`RVec`,
 `LRef`: `leanrt::drop::Vec`) are `leanrt` types: a `#[repr(transparent)]`
@@ -1446,7 +1454,8 @@ name only). The Rust unit tests of `leanrt`
 (bignums, one-word `Nat`/`Int` at the boundaries, tagged arrays, string
 layout and counts, the last-error slot over lean-runtime's decoding) run
 with
-`tests/runtime/leanrt-unit.sh`; `tests/runtime/rows-check.sh` checks
+`tests/runtime/leanrt-unit.sh` (for both representations of `Nat` and
+`Int` unless `L2R_INT_BACKEND` names one); `tests/runtime/rows-check.sh` checks
 lean-runtime's rows through a lean2rr build of its row oracle (an `LB-nn`
 row, a Lean bug or limit lean2rr does not reproduce, against the
 definition's result).

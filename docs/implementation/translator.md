@@ -106,12 +106,15 @@ relative to `lean2rr/` unless they start with `scripts/`.
   need `Box` (its re-typing takes a `◾` argument as a placeholder, as
   Stage 3 does: `◾` arguments alone do not give a parameter a type);
   `--no-check` turns off Lean's checker between Stage 2's
-  passes. `--int-backend leanrt|rcgmp` chooses the representation of
-  `Nat` and `Int` (default `leanrt`; `rcgmp` is Reussir's built-in
-  integers, in progress), and `--rcgmp-type-args` says that Reussir passes
-  them as owned handles at type arguments of generic FFI functions
-  (Reussir's local patch R2):
-  [representations/nat-int.md](representations/nat-int.md#--int-backend-rcgmp-the-lowering-in-progress).
+  passes. `--int-backend rcgmp|leanrt` chooses the representation of
+  `Nat` and `Int` (default `rcgmp`, Reussir's built-in integers, since
+  2026-10-25; until then `leanrt`, Lean's one-word encoding, which
+  `--int-backend leanrt` still selects), and `--rcgmp-type-args` says that
+  Reussir passes them as owned handles at type arguments of generic FFI
+  functions (Reussir's local patch R2; off unless given, so plain
+  `lean2rr` lowers rcgmp in its guard mode; scripts/l2r.py passes it under
+  rcgmp):
+  [representations/nat-int.md](representations/nat-int.md#--int-backend-rcgmp-the-lowering).
   Environment switches: `L2R_NO_OUTLINE` and
   `L2R_NO_INLINE_ANCHORS` turn off two build-time workarounds (for the
   repros of three Reussir costs, fixed upstream in #672, #670 and #674,

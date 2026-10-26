@@ -11,7 +11,8 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 **Kind:** missed optimization. **Status:** patched (21-a), applied in
 `./reussir`'s series since 2026-10-25 (commit `8e9a6293`, `l2r-stepd`
 plus 21-a). No workaround in lean2rr. It shows only under
-`--int-backend rcgmp`: with lean2rr's default backend, `leanrt`, `Nat`
+`--int-backend rcgmp` (lean2rr's default since 2026-10-25): with the
+leanrt backend (`--int-backend leanrt`, the default until then), `Nat`
 and `Int` are tagged FFI handles (10-a), whose retains are `rc.inc`
 and already cancel.
 
@@ -114,7 +115,7 @@ Measured on `l2r-stepd` without and with 21-a:
 | Z01c (lean-zip, compress) | 22,910,292,491 | 21,524,991,521 | -6.0% |
 
 On lean2rr's planned base for Phase 2 (upstream's drop design), the same
-patch gave -9.2%, -8.9% and -6.3%. Under lean2rr's default backend L12
+patch gave -9.2%, -8.9% and -6.3%. Under lean2rr's leanrt backend (then the default) L12
 and L17 compile to the same instructions with and without the patch
 (disassembly compared, on that base).
 
@@ -210,7 +211,7 @@ fail without 21-a), and `reussir-ut` passes 82 of 82.
 An independent review (local notes, `rccancel-review/`) found the rule
 sound. Every pair that the patch cancels in lean2rr's L12, L17 and Z01c
 and in the new tests (2494 pairs) has the intended shape, and Reussir's
-output for lean2rr's default backend did not change. Its three findings
+output for lean2rr's leanrt backend (then the default) did not change. Its three findings
 are in the patch: runtime inputs for the end-to-end tests (their
 records first folded to constants, so ASan saw no counts), the
 operations that the scan now crosses named in the commit message with a

@@ -9,6 +9,34 @@ are listed in [`../../tests/README.md`](../../tests/README.md)
 suite are `tests/runtime/RtRepr*.lean` and `tests/runtime/RtDep*.lean`.
 Paths are relative to the repository root.
 
+### The checks build with the default representation, or name one
+
+- **What:** `scripts/l2r.py`, `tests/runtime/run.sh` and the check
+  scripts read `L2R_INT_BACKEND`; unset or empty is `rcgmp`, the default
+  since 2026-10-25 (before, `leanrt`). The scripts that call lean2rr
+  directly (`determinism-check.sh`, `prelude-liveness-check.sh`,
+  `conv-count-check.sh`, `paynothing-check.sh`, `any-probe.sh`) pass what
+  scripts/l2r.py passes (`int_flags`): `--int-backend`, and under rcgmp
+  `--rcgmp-type-args` unless `L2R_RCGMP_TYPE_ARGS=0`. The scripts that
+  test one representation, or both, name it: `nat-alloc-check.sh`
+  always builds with `L2R_INT_BACKEND=leanrt`; `int-backend-check.sh`,
+  `int-match-check.sh` and `inline-anchors-check.sh` give each
+  translation its `--int-backend`; `leanrt-unit.sh` builds and runs the
+  crate's tests for both representations unless `L2R_INT_BACKEND` names
+  one.
+- **Why:** lean2rr's own `--rcgmp-type-args` is off unless given (its
+  guard mode needs no Reussir patch R2), so a direct call with only
+  `--int-backend rcgmp` checks another lowering than the builds use.
+  `nat-alloc-check.sh` counts leanrt's big numbers, which only the leanrt
+  representation makes. `int-match-check.sh` and `inline-anchors-check.sh`
+  translated their leanrt side without `--int-backend`: with the new
+  default that side would have been rcgmp. The crate's unit tests run
+  under each representation because leanrt serves both (its own big
+  numbers for leanrt, the box cells of big integers for rcgmp).
+- **Where:** the scripts above; `scripts/l2r.py` (`INT_BACKEND`).
+- **Remove only if:** the leanrt representation is retired (then the
+  pins to leanrt and the leanrt sides go).
+
 ### Allocations are counted by wrapping mimalloc at link time
 
 - **What:** `tests/runtime/alloccount/alloccount.c` defines `__wrap_` versions
@@ -199,7 +227,8 @@ Paths are relative to the repository root.
 
 ### Pay-nothing baselines
 
-- **What:** `tests/runtime/paynothing/NAME.fp` records, for programs
+- **What:** `tests/runtime/paynothing/NAME.fp` (`NAME.leanrt.fp` under
+  `--int-backend leanrt`) records, for programs
   without values of unknown type, the pay-nothing counts of
   `rr-fingerprint.py show` (conversion helpers and uses, box constructions,
   the program's pointer payload types of `Box`, and the values taken out
@@ -209,7 +238,12 @@ Paths are relative to the repository root.
   fixed size (lean2rr's, with native's beside them), and every item's
   canonical hash. `paynothing-check.sh` fails when a count or the
   allocations (1% plus 100) or bytes (1% plus 10000) grow, and lists the
-  changed items; `--update` rewrites the baselines.
+  changed items; `--update` rewrites the baselines of the run's
+  representation. Each representation of `Nat` and `Int` has its own
+  baselines since rcgmp became the default (2026-10-25): their counts
+  differ (RtLazyFields: 112 box sites under rcgmp, 206 under leanrt), so
+  one set would fail the other representation or hide its growth, and
+  their item hashes differ wherever a `Nat` or `Int` is used.
 - **Why:** a redesign of the layouts must not make programs that never
   cross layouts slower (review DRP-10: "no new conversion, no new clone,
   no extra allocations", rather than byte-identical output, since a

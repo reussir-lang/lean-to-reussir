@@ -24,8 +24,8 @@
 # texture at a box, and the order of observable releases (o1, o4, o5:
 # native Lean's orders, from any-probe/Order.lean built natively).
 #   tests/runtime/any-probe.sh
-# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN
-# (as run.sh).
+# Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD, L2R_LEAN_TOOLCHAIN,
+# L2R_INT_BACKEND, L2R_RCGMP_TYPE_ARGS (as run.sh).
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -38,10 +38,14 @@ cp "$HERE/any-probe/AnyHost.lean" .
 lean -o AnyHost.olean AnyHost.lean
 # The whole prelude (`--disable-opt prelude-liveness`): the probe calls
 # prelude functions that the host does not use.
-# (L2R_INT_BACKEND: lean2rr's --int-backend, as scripts/l2r.py passes it.)
+# The representation of Nat and Int as scripts/l2r.py passes it:
+# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25),
+# under rcgmp with --rcgmp-type-args unless L2R_RCGMP_TYPE_ARGS=0.
+int_be=${L2R_INT_BACKEND:-rcgmp}
+int_flags=(--int-backend "$int_be")
+if [ "$int_be" = rcgmp ] && [ "${L2R_RCGMP_TYPE_ARGS:-1}" != 0 ]; then int_flags+=(--rcgmp-type-args); fi
 LEAN_PATH=. L2R_SHIM_DIR=${L2R_SHIM_DIR:-$(dirname "$LEAN2RR")/../lib/lean} "$LEAN2RR" AnyHost --root main --emit rr \
-  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness \
-  ${L2R_INT_BACKEND:+--int-backend "$L2R_INT_BACKEND"}
+  --prelude "$ROOT/runtime/prelude.rr" -o host.rr --disable-opt prelude-liveness "${int_flags[@]}"
 python3 - "$HERE/any-probe/probe.rr" <<'PY'
 import sys
 s = open('host.rr').read()

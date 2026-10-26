@@ -66,7 +66,7 @@ structure MonoConfig where
   preludeFns : Std.HashSet String := {}
   /-- The representation of `Nat` and `Int` (`--int-backend`): which
   literals allocate (`constComputes`, `natLitFree`). -/
-  intBackend : IntBackend := .leanrt
+  intBackend : IntBackend := .rcgmp
 
 /-- The functions a prelude declares: the names of its lines that start
 with `fn NAME` or `pub fn NAME`, outside the Rust code of its textures

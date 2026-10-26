@@ -271,10 +271,14 @@ error natively; before the fix, an internal panic).
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run, such as no big
-`Int` in the small range). With `L2R_INT_BACKEND=rcgmp` it builds leanrt
-as `--int-backend rcgmp` does (`--cfg leanrt_rcgmp`) and links the
-Reussir checkout's rcgmp runtime: `leanrt::rcgmp`'s tests (a big `Nat` or
-`Int` in a box's cell, shared and unique; `low_bits`) run too.
+`Int` in the small range), once for each representation of `Nat` and
+`Int`: as `--int-backend leanrt` builds leanrt, and as `--int-backend
+rcgmp` builds it (`--cfg leanrt_rcgmp`, linked with the Reussir
+checkout's rcgmp runtime: `leanrt::rcgmp`'s tests, a big `Nat` or `Int`
+in a box's cell, shared and unique, and `low_bits`, run too).
+`L2R_INT_BACKEND=leanrt` or `rcgmp` runs only that one (before
+2026-10-25, when leanrt was the default, an unset `L2R_INT_BACKEND` ran
+the leanrt build only).
 `tests/runtime/any-probe.sh` probes the one-word box `LAny` (every `Box`)
 with a hand-written Reussir program (`tests/runtime/any-probe/`)
 appended to a translated host program and linked with an allocation
@@ -468,7 +472,10 @@ results, so each runs at two sizes.
 - `tests/runtime/paynothing-check.sh [--update] [NAME...]`: programs
   without values of unknown type (the classic programs rbtree, cfold,
   qsort, deriv and unionfind at their `small` size, and RtJpSlots and
-  RtLazyFields) against their baselines in `tests/runtime/paynothing/`: the
+  RtLazyFields) against their baselines in `tests/runtime/paynothing/`
+  (`NAME.fp` under rcgmp, the default representation of `Nat` and `Int`
+  since 2026-10-25, and `NAME.leanrt.fp` under `L2R_INT_BACKEND=leanrt`,
+  the baselines written before that date): the
   pay-nothing counts of the generated code (conversion helpers and their
   uses, values put into a `Box`, the program's pointer payload types of
   `Box`, the values taken out of a `Box` at a program type) must not
@@ -889,10 +896,23 @@ e4a1e5f (boxed arrays) every output equals native's.
 
 ### `--int-backend rcgmp`: Reussir's built-in integers
 
-`L2R_INT_BACKEND=rcgmp tests/runtime/run.sh …` builds the tests with
-`Nat` and `Int` as Reussir's built-in integers (lean2rr's
-`--int-backend rcgmp`; scripts/l2r.py needs a Reussir with its rcgmp
-feature and the local patches it checks). An item `int:leanrt` or
+`tests/runtime/run.sh …` builds the tests with `Nat` and `Int` as
+Reussir's built-in integers (lean2rr's `--int-backend rcgmp`, the default
+since 2026-10-25: `L2R_INT_BACKEND` unset, empty or `rcgmp`;
+scripts/l2r.py needs a Reussir with its rcgmp feature and the local
+patches it checks, and passes `--rcgmp-type-args` unless
+`L2R_RCGMP_TYPE_ARGS=0`). `L2R_INT_BACKEND=leanrt tests/runtime/run.sh …`
+builds them with leanrt's one-word `Nat` and `Int`, the default until
+2026-10-25. The check scripts follow `L2R_INT_BACKEND` the same way (those
+that call lean2rr directly pass what scripts/l2r.py passes), except those
+that test one representation or both by name: `nat-alloc-check.sh`
+always builds with leanrt (its counters count leanrt's big numbers),
+`int-backend-check.sh`, `int-match-check.sh` and
+`inline-anchors-check.sh` name the representation of each translation,
+and `leanrt-unit.sh` runs both crate builds unless `L2R_INT_BACKEND`
+names one. A combined gate runs the suite and the checks under each
+representation.
+An item `int:leanrt` or
 `int:rcgmp` in the `[OPT,…] ` prefix of a line of a `.l2r-log` or
 `.l2r-debug` file checks the line only under that representation; a
 test's `NAME.int-backend` fixes its representation. The expected typed

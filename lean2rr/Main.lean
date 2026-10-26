@@ -14,8 +14,9 @@ structure CliOptions where
   disabled : Array String := #[]
   enabled : Array String := #[]
   listOpts : Bool := false
-  /-- The representation of `Nat` and `Int` (`--int-backend`; NatEncoding). -/
-  intBackend : IntBackend := .leanrt
+  /-- The representation of `Nat` and `Int` (`--int-backend`; NatEncoding;
+  the default is `rcgmp`, until 2026-10-25 it was `leanrt`). -/
+  intBackend : IntBackend := .rcgmp
   /-- Whether Reussir passes a `Nat` or `Int` as a type argument of a
   generic FFI function as an owned handle (`--rcgmp-type-args`, Reussir's
   local patch R2): only then may `rcgmp` instantiate one at them
@@ -25,7 +26,7 @@ structure CliOptions where
 def usage : String :=
   "usage: lean2rr <Module> [--root NAME] [--stats] [--emit base|inst|mono|externs|retyped|opt|rr] [--prelude FILE]\n" ++
   "               [--no-check] [--disable-opt NAME]... [--enable-opt NAME]... [-o FILE]\n" ++
-  "               [--int-backend leanrt|rcgmp] [--rcgmp-type-args]\n" ++
+  "               [--int-backend rcgmp|leanrt (default rcgmp)] [--rcgmp-type-args]\n" ++
   "       lean2rr --list-opts\n" ++
   "  Modules are found via LEAN_PATH; run inside `lake env` for Lake projects. A module name\n" ++
   "  may contain non-identifier characters (`rbtree-zipper`) or be written `«rbtree-zipper»`."

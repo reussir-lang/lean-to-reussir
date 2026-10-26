@@ -4,11 +4,12 @@
 `--int-backend` chooses how a `Nat` and an `Int` are represented
 (docs/implementation/representations/nat-int.md):
 
-- `leanrt` (the default): one word, Lean's own encoding (the prelude's
-  `struct Nat`, `struct Int`; `leanrt::nat`): a small value is an
-  immediate word, any other value a big number on the heap;
-- `rcgmp`: Reussir's built-in integers (`core::num::Nat`/`Int`, rcgmp): an
-  immediate (a value in [-2^61, 2^61)) or a counted heap integer.
+- `rcgmp` (the default since 2026-10-25): Reussir's built-in integers
+  (`core::num::Nat`/`Int`, rcgmp): an immediate (a value in
+  [-2^61, 2^61)) or a counted heap integer;
+- `leanrt` (the default until 2026-10-25): one word, Lean's own encoding
+  (the prelude's `struct Nat`, `struct Int`; `leanrt::nat`): a small value
+  is an immediate word, any other value a big number on the heap.
 
 Only the prelude's Nat and Int sections and leanrt know the words
 themselves (the encoding helpers `l2r_nat_small`, `l2r_nat_word_is_small`,
@@ -42,9 +43,9 @@ namespace LeanToReussir
 
 /-- The representation of `Nat` and `Int` (`--int-backend`). -/
 inductive IntBackend where
-  /-- leanrt's one-word encoding (the default). -/
+  /-- leanrt's one-word encoding (the default until 2026-10-25). -/
   | leanrt
-  /-- Reussir's built-in integers (rcgmp). -/
+  /-- Reussir's built-in integers (rcgmp; the default since 2026-10-25). -/
   | rcgmp
   deriving BEq, Inhabited, Repr
 

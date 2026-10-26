@@ -33,7 +33,7 @@ structure PassConfig where
   set before the optional passes are installed: their cost models read it
   (`cheap-consts`, `mod-pow2`), and so does the lowering
   (`LowerCtx.intBackend`). -/
-  intBackend : IntBackend := .leanrt
+  intBackend : IntBackend := .rcgmp
   /-- `--rcgmp-type-args`: Reussir passes a `Nat` or `Int` at a type
   argument of a generic FFI function as an owned handle (Reussir's local
   patch R2), so `rcgmp` may instantiate one at them

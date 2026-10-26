@@ -136,7 +136,7 @@ representation `intBackend` of `Nat` and `Int` (with `rcgmpTypeArgs`,
 `--rcgmp-type-args`), which the passes' installs read. An unknown name,
 the name of a required part, or a name both turned off and on is an
 error. -/
-def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := .leanrt)
+def config (disabled enabled : Array String := #[]) (intBackend : IntBackend := .rcgmp)
     (rcgmpTypeArgs : Bool := false) : Except String PassConfig := do
   for n in disabled ++ enabled do
     if let some r := required.find? (·.name == n) then

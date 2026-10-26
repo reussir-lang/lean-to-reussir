@@ -71,7 +71,7 @@
 #               cells: …`); an item `int:leanrt` or `int:rcgmp` among them
 #               checks the line only when the test is built with that
 #               representation of Nat and Int (L2R_INT_BACKEND, default
-#               leanrt, or NAME.int-backend): a fact that only one
+#               rcgmp, or NAME.int-backend): a fact that only one
 #               representation prints (`[int:rcgmp] lean2rr: …`); another
 #               `int:NAME` fails the test
 #
@@ -85,8 +85,9 @@
 # L2R_LEAN_RUNTIME_FEATURES (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
 # to turn off / on, passed on by scripts/l2r.py; `lean2rr --list-opts`);
-# L2R_INT_BACKEND (`leanrt` or `rcgmp`, the representation of Nat and Int,
-# passed on by scripts/l2r.py; unset: lean2rr's default, leanrt);
+# L2R_INT_BACKEND (`rcgmp` or `leanrt`, the representation of Nat and Int,
+# passed on by scripts/l2r.py; unset or empty: rcgmp, the default since
+# 2026-10-25, before that leanrt);
 # L2R_TEST_BUILD (build directory, default tests/runtime/build);
 # L2R_LEAN_TOOLCHAIN (the Lean toolchain of the native builds, default the
 # one lean2rr/lean-toolchain pins; scripts/toolchain.sh).
@@ -156,7 +157,7 @@ for t in "${TESTS[@]}"; do
       done
     done
   fi
-  backend=${L2R_INT_BACKEND:-leanrt}
+  backend=${L2R_INT_BACKEND:-rcgmp}
   [ -f "$HERE/$t.int-backend" ] && backend=$(tr -d ' \n' < "$HERE/$t.int-backend")
   ffi=(); [ -f "$HERE/$t.ffi.c" ] && ffi=("$HERE/$t.ffi.c")
   # (`env` sets it for the lean2rr build only: lean2rr tests whether it is set.)

@@ -56,8 +56,9 @@ The patches apply in this order, after the other 8 patches of the series
   [issue 10](10-tagged-ffi-objects.md)). Step D adds a second backend,
   `--int-backend rcgmp`, in which `Nat` and `Int` are Reussir's built-in
   integers: the arithmetic inlines on immediates, and the runtime's
-  containers hold the same handle. The default backend, `leanrt`, does
-  not need the five patches.
+  containers hold the same handle. rcgmp is lean2rr's default backend
+  since 2026-10-25; the leanrt backend (`--int-backend leanrt`, the
+  default until then) does not need the five patches.
 
 ## 20-a (R1): bigint intrinsics for Lean's division modes and `floormod2expi`
 

@@ -27,7 +27,7 @@ drop (below), the program runs 493 M instructions instead of 602 M
     `natInt`: Reussir would pass a raw rcgmp handle at the array
     functions' type argument and release it after the call; an `Array Nat`
     then holds boxes and an `Array (Array Nat)` is of kind `A(box)`;
-    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering-in-progress));
+    [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
   - `LStr`: `String`;
   - `I:<name>`: an inductive that the lowering makes a shared record or
     enum (rule 1 gives `List Nat` and `List String` the one type

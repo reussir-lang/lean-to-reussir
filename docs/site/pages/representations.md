@@ -21,8 +21,8 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 
 | Lean | lean2rr build | Notes |
 |---|---|---|
-| `Nat` | `Nat`: one word, a *tagged handle* | small value `n` (below 2^63) is the word `2n+1`; a big value is a pointer to a big-number block |
-| `Int` | `Int`: one word, the same scheme | small in the `int32` range |
+| `Nat` | `Nat`: one word, Reussir's built-in integer | a value in [-2^61, 2^61) is in the word; a bigger value is a pointer to a counted big integer. With `--int-backend leanrt`: a *tagged handle*, a small value `n` (below 2^63) is the word `2n+1` ([numbers](#numbers)) |
+| `Int` | `Int`: one word, Reussir's built-in integer | the same scheme. With `--int-backend leanrt`: small in the `int32` range |
 | `UInt8/16/32/64`, `USize` | `u8/u16/u32/u64`, `u64` | 64-bit targets only |
 | `Int8…Int64`, `ISize` | the unsigned words | signed operations on the bit pattern, as `lean.h` |
 | `Float`, `Float32` | `f64`, `f32` | |
@@ -42,6 +42,44 @@ heap cell. A *`[value]`* type is stored inline and is never allocated.
 | a type not statically known (`lcAny`) | `LAny`, the box: one word | [the box](#the-box-lany); [dependent types](dependent-types.html) |
 
 ## Numbers
+
+`Nat` and `Int` have two representations. The option `--int-backend`
+selects one (the scripts read `L2R_INT_BACKEND`):
+
+- `rcgmp`, the default since 2026-10-25: Reussir's built-in integers.
+- `leanrt`, the default until 2026-10-25: Lean's own one-word encoding,
+  with lean2rr's runtime for the big values.
+
+Both representations give the same results. The prelude keeps the code of
+the two representations in marked blocks, and lean2rr keeps only the
+blocks of the selected one. Each function has the same name and signature
+in the two blocks, so the generated code calls the same functions.
+
+### Reussir's built-in integers (`rcgmp`)
+
+A `Nat` or `Int` is one word. A value in [-2^61, 2^61) is stored in the
+word itself. Any other value is a pointer to a counted big integer of
+Reussir's runtime, which uses GMP. Reussir does the reference counting.
+An operation on two small values is inline code, and LLVM can fold it.
+Only a big operand or an overflow calls the runtime. The prelude composes
+Lean's rules (for example `n - m = 0` when `m > n`, and `n / 0 = 0`) from
+Reussir's operators.
+
+- **Case splits.** A case split on a `Nat` or `Int` (`0` and `n+1`,
+  `ofNat` and `negSucc`, a chain of tests against literals) becomes one
+  Reussir `match` on the integer (pass `int-match`).
+- **Literals.** A literal of any size is a constant of the program, with
+  no cell to fill at startup.
+- **Boxes.** In a box, a `Nat` or `Int` keeps Lean's words: a `Nat`
+  below 2^63 is the word `2n+1`. A bigger value is a runtime cell that
+  holds the integer.
+- **Indices.** A read at a `Nat` index (an array, a byte array, a string
+  position) first makes the index a 64-bit word, and then reads at that
+  word.
+
+### Lean's one-word encoding (`leanrt`)
+
+Status: planned: the removal of this representation.
 
 {{svg:natword}}
 
@@ -70,9 +108,6 @@ words, for speed. The runtime has its own copy of the helpers. The
 translator knows only which values are small (a `Nat` below 2^63, an
 `Int` in the `int32` range). A different representation of numbers
 changes only these places.
-
-Status: in progress: `--int-backend rcgmp`, where `Nat` and `Int` are
-Reussir's built-in integers. The default stays `leanrt`.
 
 {{svg:bigblock}}
 

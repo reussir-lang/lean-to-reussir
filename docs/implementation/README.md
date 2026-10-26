@@ -73,7 +73,8 @@ into it. Reussir issues (bugs, costs and the other kinds) link to
 11. [translator.md](translator.md): lean2rr itself: loading the program,
     its stack and limits, its switches.
 12. [testing.md](testing.md): the test tooling that checks costs and the
-    translation itself: the allocation counter, its limits and
+    translation itself: the representation of `Nat` and `Int` the checks
+    build with, the allocation counter, its limits and
     `alloc-check.sh`, the `.xfail` of the allocation check alone, canonical
     fingerprints of the generated code, the determinism check, pay-nothing
     baselines; the dependent-type corpus (sharing checked by memory, timing

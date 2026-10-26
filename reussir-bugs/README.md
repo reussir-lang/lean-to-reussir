@@ -240,7 +240,9 @@ upstream fails there; its prelude needs 10-a (it declares `Nat` and
 `Int` `tagged`). lean2rr's step D, `--int-backend rcgmp` (on dev since
 `1e57ed53`, 2026-10-25; gate22 passed under both representations), needs
 20-a and 20-b (its `check_rcgmp` checks for them) and uses 20-c to 20-e
-and 21-a; the default backend, `leanrt`, does not need them. 21-a is an
+and 21-a. rcgmp is lean2rr's default representation since 2026-10-25, so
+a default build needs them; `--int-backend leanrt` (`L2R_INT_BACKEND=leanrt`,
+the default until then) does not. 21-a is an
 optimization: nothing requires it, and `scripts/l2r.py` does not check
 for it. The driver also passes `--relocation-mode pic`, the workaround
 for entry 5 (retired): since `ea240b19` this is rrc's default for

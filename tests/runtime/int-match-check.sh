@@ -17,7 +17,9 @@
 #   5, -7, read from closed terms) are one match;
 # - with `--disable-opt int-match` too: no match on a `Nat` or `Int`
 #   (no `Nat::Succ(`, `Int::OfNat(`, `Int::NegSucc(` pattern);
-# - under leanrt the .rr is the same with and without the optimization.
+# - under leanrt (`--int-backend leanrt`, named: rcgmp is lean2rr's default
+#   since 2026-10-25) the .rr is the same with and without the
+#   optimization.
 #   tests/runtime/int-match-check.sh
 # Environment: as determinism-check.sh (L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN).
@@ -77,7 +79,8 @@ for P in RtNatMatch RtIntMatch; do
   elif grep -nE 'Nat::Succ\(|Int::(OfNat|NegSucc)\(' "$OUT/off.rr" > "$OUT/off.hits"; then
     fail "--disable-opt int-match left a match on Nat or Int (see $OUT/off.hits)"
   fi
-  if ! translate "$OUT/leanrt.rr" || ! translate "$OUT/leanrt-off.rr" --disable-opt int-match; then
+  if ! translate "$OUT/leanrt.rr" --int-backend leanrt \
+     || ! translate "$OUT/leanrt-off.rr" --int-backend leanrt --disable-opt int-match; then
     fail "leanrt did not translate (see $OUT/leanrt*.rr.log)"
   elif ! cmp -s "$OUT/leanrt.rr" "$OUT/leanrt-off.rr"; then
     fail "under leanrt int-match changed the .rr"

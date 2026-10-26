@@ -2,8 +2,8 @@
 # Programs without values of unknown type pay nothing for lean2rr's handling
 # of them: for each program below (classic programs and runtime tests that
 # have no conversion between layouts; the baselines are in
-# tests/runtime/paynothing/NAME.fp), compares lean2rr's output for it with
-# its baseline:
+# tests/runtime/paynothing/NAME.fp, and NAME.leanrt.fp for `--int-backend
+# leanrt`), compares lean2rr's output for it with its baseline:
 # - the pay-nothing counts of its generated code (tests/runtime/
 #   rr-fingerprint.py `show`: conversion helpers and their uses, values put
 #   into an `L2RBox`, the constructors of `L2RBox`, values taken out of one
@@ -21,12 +21,15 @@
 #   PAYNOTHING_STRICT=1 any changed or dropped item fails the check.
 #   tests/runtime/paynothing-check.sh [--update] [NAME...]
 # --update writes the baselines from this run (after a change that is meant
-# to change them; say why in the commit). A NAME is a classic program
+# to change them; say why in the commit). Each representation of Nat and
+# Int has its own baselines: NAME.fp for rcgmp, the default since
+# 2026-10-25, and NAME.leanrt.fp for leanrt (the counts differ: RtLazyFields
+# has 112 box sites under rcgmp and 206 under leanrt). A NAME is a classic program
 # (tests/classic/NAME.lean, run at its `small` size of cases.json) or a
 # runtime test (tests/runtime/NAME.lean, run with NAME.args).
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME, L2R_DISABLE_OPTS / L2R_ENABLE_OPTS,
-# L2R_RRC_FLAGS); PAYNOTHING_STRICT.
+# L2R_INT_BACKEND, L2R_RCGMP_TYPE_ARGS, L2R_RRC_FLAGS); PAYNOTHING_STRICT.
 set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
@@ -48,6 +51,15 @@ IFS=, read -r -a dis <<< "${L2R_DISABLE_OPTS:-}"
 for o in ${dis[@]+"${dis[@]}"}; do [ -n "$o" ] && opts+=(--disable-opt "$o"); done
 IFS=, read -r -a ena <<< "${L2R_ENABLE_OPTS:-}"
 for o in ${ena[@]+"${ena[@]}"}; do [ -n "$o" ] && opts+=(--enable-opt "$o"); done
+# The representation of Nat and Int as scripts/l2r.py passes it:
+# L2R_INT_BACKEND (unset or empty: rcgmp, the default since 2026-10-25),
+# under rcgmp with --rcgmp-type-args unless L2R_RCGMP_TYPE_ARGS=0.
+int_be=${L2R_INT_BACKEND:-rcgmp}
+int_flags=(--int-backend "$int_be")
+if [ "$int_be" = rcgmp ] && [ "${L2R_RCGMP_TYPE_ARGS:-1}" != 0 ]; then int_flags+=(--rcgmp-type-args); fi
+opts+=("${int_flags[@]}")
+# The baseline file's suffix for the representation (NAME.fp, NAME.leanrt.fp).
+sfx=.fp; [ "$int_be" = leanrt ] && sfx=.leanrt.fp
 
 # count FILE KEY: the value of `KEY N` in a fingerprint (empty if none)
 count() { sed -nE "s/^$2 ([0-9]+)$/\1/p" "$1" | head -1; }
@@ -90,7 +102,7 @@ for p in "${PROGRAMS[@]}"; do
   fi
   {
     echo "# Pay-nothing baseline of $p ($( [ "$src" = "$HERE/$p.lean" ] && echo "tests/runtime" || echo "tests/classic")/$p.lean), arguments '$args'."
-    echo "# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison."
+    echo "# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend $int_be; native allocations for comparison."
     echo "allocs $la"
     echo "bytes $lb"
     echo "native-allocs $na"
@@ -98,25 +110,25 @@ for p in "${PROGRAMS[@]}"; do
     $FP show "$d/$p.rr"
   } > "$d/$p.fp"
   if [ -n "$update" ]; then
-    cp "$d/$p.fp" "$BASE/$p.fp"
+    cp "$d/$p.fp" "$BASE/$p$sfx"
     echo "updated $p: allocations $la (native $na), bytes $lb (native $nb), $(count "$d/$p.fp" conversion-sites) conversion sites, $(count "$d/$p.fp" box-sites) box sites"
     [ -z "$why" ] || { echo "FAIL $p:$why"; status=1; }
     continue
   fi
-  if [ ! -f "$BASE/$p.fp" ]; then
-    echo "FAIL $p: no baseline $BASE/$p.fp (write it with --update)"; status=1; continue
+  if [ ! -f "$BASE/$p$sfx" ]; then
+    echo "FAIL $p: no baseline $BASE/$p$sfx (write it with --update)"; status=1; continue
   fi
   for k in conversion-fns conversion-sites box-sites box-variants unbox-sites; do
-    old=$(count "$BASE/$p.fp" "$k"); new=$(count "$d/$p.fp" "$k")
+    old=$(count "$BASE/$p$sfx" "$k"); new=$(count "$d/$p.fp" "$k")
     # (A baseline older than a count has none: nothing to compare.)
     [ -n "$old" ] || continue
     if [ "$new" -gt "$old" ]; then why="$why $k grew from $old to $new;"; fi
   done
-  oa=$(count "$BASE/$p.fp" allocs); ob=$(count "$BASE/$p.fp" bytes)
+  oa=$(count "$BASE/$p$sfx" allocs); ob=$(count "$BASE/$p$sfx" bytes)
   [ "$la" -gt $((oa + oa / 100 + 100)) ] && why="$why allocations grew from $oa to $la;"
   [ "$lb" -gt $((ob + ob / 100 + 10000)) ] && why="$why bytes allocated grew from $ob to $lb;"
   [ "$la" -lt $((oa - oa / 100 - 100)) ] && note="$note allocations fell from $oa to $la (update the baseline);"
-  $FP check "$BASE/$p.fp" "$d/$p.rr" > "$d/items.txt" 2>&1
+  $FP check "$BASE/$p$sfx" "$d/$p.rr" > "$d/items.txt" 2>&1
   sum=$(grep '^summary:' "$d/items.txt" || echo "summary: (rr-fingerprint.py failed, see $d/items.txt)")
   if [ -n "${PAYNOTHING_STRICT:-}" ] && grep -qE '^(changed|dropped) ' "$d/items.txt"; then
     why="$why generated items changed (${sum#summary: }; see $d/items.txt);"

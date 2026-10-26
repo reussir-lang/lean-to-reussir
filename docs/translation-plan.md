@@ -718,8 +718,8 @@ Stage 4 sees only mono types:
 | `Float`, `Float32` | `f64`, `f32` | |
 | `Bool` | `bool` | |
 | `Unit`/`PUnit`, `lcVoid`, `◾` | `L2RUnit` | Reussir's `unit` is result-only, so unit-like values are a one-variant `[value]` enum from the prelude. The IO world is an `L2RUnit` value. |
-| `Nat` | `Nat`, a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "One-word `Nat` and `Int`" below |
-| `Int` | `Int`, the same with small values in the `int32` range (`lean_box((unsigned)(int)i)`) | |
+| `Nat` | `Nat`, Reussir's built-in integer (`--int-backend rcgmp`, the default since 2026-10-25): one word, an immediate for a value in [-2^61, 2^61), else a pointer to a counted heap integer (GMP); with `--int-backend leanrt` (the default until 2026-10-25), a *tagged* opaque handle: one word, `2n+1` for n < 2^63, else a pointer to a counted runtime bignum (GMP) | as natively; see "Reussir's built-in integers" and "One-word `Nat` and `Int`" below |
+| `Int` | `Int`, the same; with `--int-backend leanrt` small values are in the `int32` range (`lean_box((unsigned)(int)i)`) | |
 | `String` | `LStr`, an opaque copy-on-write handle to one block like Lean's string object: a 32-byte header (count, byte size, capacity, character count) and the UTF-8 bytes | literals: §5.4 |
 | `Array α` | `RVec<Box>`, the runtime's copy-on-write vector: one block, a 24-byte header (count, size, capacity) and the elements | in place when unique. One representation for every `α` without a storage kind: an element goes in by boxing and comes out by unboxing (natively one `lean_object*` per element) |
 | `Array S`, `S` a scalar | `RVec<u8>` (`UInt8`, `Bool`, an enumeration of at most 256 constructors), `RVec<u16>`, `RVec<u32>` (`UInt32`, `Char`), `RVec<u64>` (`UInt64`, `USize`), `RVec<f32>`, `RVec<f64>` (`Float`) | optimization `compact-arrays`: per storage kind, when a whole-program check finds that no array of the kind meets an array of boxes; otherwise `RVec<Box>` (`docs/implementation/representations/compact-arrays.md`) |
@@ -728,7 +728,9 @@ Stage 4 sees only mono types:
 | `Thunk α`, `Task α` | `LCell<S>`, a shared mutable runtime cell holding a generated state `S { pending(L2RUnit -> Box), busy, done(Box), … }`, one for thunks and one for tasks, whatever `α` is | memoized thunks, deferred tasks (§5.14) |
 | `Option α`, `Except ε α`, `EST.Out ε σ α`, … | generated types (next paragraph) | |
 
-**One-word `Nat` and `Int`.** A `Nat` is one machine word, with Lean's
+**One-word `Nat` and `Int` (`--int-backend leanrt`).** The
+representation of `--int-backend leanrt`, the default until 2026-10-25
+(rcgmp, below, is the default since). A `Nat` is one machine word, with Lean's
 own encoding: an odd word `lean_box(n) = 2n+1` is the small value `n`
 (n < 2^63, `LEAN_MAX_SMALL_NAT`), an even word is a pointer to a
 reference-counted big number (n ≥ 2^63, `leanrt::nat`). Every value has
@@ -753,8 +755,8 @@ receive and return them unchanged; a big number would be converted at
 that boundary (calling a program's own C code is not supported for now,
 §10).
 
-*Reussir's built-in integers (`--int-backend rcgmp`, in progress).* With
-`--int-backend rcgmp` a `Nat` and an `Int` are Reussir's own
+*Reussir's built-in integers (`--int-backend rcgmp`, the default since
+2026-10-25).* With `--int-backend rcgmp` a `Nat` and an `Int` are Reussir's own
 `core::num::Nat`/`Int` (rcgmp: an immediate for a value in [-2^61, 2^61),
 else a counted heap integer). The prelude keeps both representations in
 marked blocks that define the same functions, and lean2rr keeps the

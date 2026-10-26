@@ -10,6 +10,11 @@
 # - RtNatConst: `made` must not grow with the size (a big constant used in a
 #   loop is made once, not at every use).
 # Both must print what the native build prints.
+# The builds are always `--int-backend leanrt` (L2R_INT_BACKEND=leanrt,
+# whatever the run's): the counters count leanrt's own big numbers, which
+# only the leanrt representation makes (under rcgmp, the default since
+# 2026-10-25, a big `Nat` or `Int` is Reussir's built-in integer, which
+# these counters do not see).
 #   tests/runtime/nat-alloc-check.sh [SMALL LARGE]   (default 300 3000)
 # Environment: as run.sh (L2R_REUSSIR, L2R_LEAN2RR, L2R_TEST_BUILD,
 # L2R_LEAN_TOOLCHAIN, L2R_LEAN_RUNTIME).
@@ -46,7 +51,7 @@ for t in RtNatStress RtNatConst; do
   lean -o "$t.olean" "$t.lean"
   lean "$t.lean" -c "$t.c"
   leanc "$t.c" -o "$t-native" -O3 2> /dev/null || leanc "$t.c" -o "$t-native"
-  L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs" python3 "$ROOT/scripts/l2r.py" "$t" \
+  L2R_INT_BACKEND=leanrt L2R_LEANRT_RUSTFLAGS="--cfg leanrt_count_bigs" python3 "$ROOT/scripts/l2r.py" "$t" \
     -o "$OUT/$t-counted" --lean-path "$OUT" > "$t.build.log" 2>&1 || { cat "$t.build.log"; exit 1; }
   counts "$t" "$SMALL"; m1=$MADE; l1=$LIVE
   counts "$t" "$LARGE"; m2=$MADE; l2=$LIVE

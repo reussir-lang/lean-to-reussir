@@ -10,7 +10,7 @@
 #   `match` is one function (`int-match`) whose arms call three outlined join
 #   points (J3) about 266 times each: those three `jp_` functions are
 #   `#[transform_anchor]`, and no other `jp_` is;
-# - RtJpWide under leanrt: the same three join points (200 or more calls
+# - RtJpWide with `--int-backend leanrt`: the same three join points (200 or more calls
 #   each), but the `match` is a chain of tests that `Outline` cuts into
 #   functions of a few arms, so no function calls one of them more than a
 #   few times: none is anchored;
@@ -149,7 +149,9 @@ for P in RtJpWide RtJpAnchors RtCopyAnchors; do
     || { fail "lean failed (see $OUT/lean.log)"; continue; }
   before=$fails
   for be in rcgmp leanrt; do
-    flags=(); [ $be = rcgmp ] && flags=(--int-backend rcgmp --rcgmp-type-args)
+    # Each representation named (rcgmp is lean2rr's default since
+    # 2026-10-25), rcgmp in scripts/l2r.py's mode (--rcgmp-type-args).
+    flags=(--int-backend $be); [ $be = rcgmp ] && flags+=(--rcgmp-type-args)
     R=$OUT/$be.rr
     if ! translate "$R" "${flags[@]}"; then fail "$be did not translate (see $R.log)"; continue; fi
     want=0

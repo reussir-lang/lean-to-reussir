@@ -34,8 +34,8 @@ L2R_LEAN_RUNTIME (another
 lean-runtime checkout, e.g. a branch under review; default: the submodule
 third_party/lean-runtime, whose checked-out commit must be the pinned one),
 L2R_LEAN_RUNTIME_FEATURES (comma-separated lean-runtime features to add, to
-try a branch), L2R_INT_BACKEND (`leanrt` or `rcgmp`: the representation of
-`Nat` and `Int`, lean2rr's `--int-backend`; unset: lean2rr's default),
+try a branch), L2R_INT_BACKEND (`rcgmp` or `leanrt`: the representation of
+`Nat` and `Int`, lean2rr's `--int-backend`; unset or empty: `rcgmp`),
 L2R_RCGMP_TYPE_ARGS (`0`: under rcgmp, without lean2rr's
 `--rcgmp-type-args`, which is on by default there),
 L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
@@ -128,15 +128,17 @@ def rustc_wrapper(rlib, lr):
 LEANRT_FLAGS = os.environ.get("L2R_LEANRT_RUSTFLAGS", "").split()
 
 # The representation of `Nat` and `Int` (L2R_INT_BACKEND, clean-integration
-# step D): `leanrt` (the default: leanrt's own words and GMP numbers) or
-# `rcgmp` (Reussir's built-in integers; needs a Reussir built with rcgmp).
-# When the variable is set, lean2rr gets `--int-backend` (it keeps the
-# prelude's blocks of that backend), and under `rcgmp` leanrt is built with
-# `--cfg leanrt_rcgmp` (its own build directory, `leanrt_out`), which makes
-# the boxes of a big `Nat` or `Int` cells of rcgmp references.
-INT_BACKEND = os.environ.get("L2R_INT_BACKEND")
-if INT_BACKEND not in (None, "leanrt", "rcgmp"):
-    sys.exit(f"l2r: L2R_INT_BACKEND={INT_BACKEND}: expected leanrt or rcgmp")
+# step D): `rcgmp` (the default since 2026-10-25: Reussir's built-in
+# integers; needs a Reussir built with rcgmp) or `leanrt` (the default until
+# 2026-10-25: leanrt's own words and GMP numbers). lean2rr always gets
+# `--int-backend` (it keeps the prelude's blocks of that backend), also when
+# the variable is unset, so the build does not depend on lean2rr's own
+# default; under `rcgmp` leanrt is built with `--cfg leanrt_rcgmp` (its own
+# build directory, `leanrt_out`), which makes the boxes of a big `Nat` or
+# `Int` cells of rcgmp references.
+INT_BACKEND = os.environ.get("L2R_INT_BACKEND") or "rcgmp"
+if INT_BACKEND not in ("leanrt", "rcgmp"):
+    sys.exit(f"l2r: L2R_INT_BACKEND={INT_BACKEND}: expected rcgmp or leanrt")
 if INT_BACKEND == "rcgmp":
     LEANRT_FLAGS += ["--cfg", "leanrt_rcgmp"]
 # Under rcgmp, `Nat` and `Int` may be type arguments of the runtime's generic
@@ -620,7 +622,7 @@ def main():
         enabled = args.enable_opt + env_names("L2R_ENABLE_OPTS")
         run([str(LEAN2RR), module, "--root", args.root, "--emit", "rr",
              "--prelude", str(PRELUDE), "-o", str(rr)]
-            + (["--int-backend", INT_BACKEND] if INT_BACKEND else [])
+            + ["--int-backend", INT_BACKEND]
             + (["--rcgmp-type-args"] if RCGMP_TYPE_ARGS else [])
             + [a for n in disabled for a in ("--disable-opt", n)]
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)

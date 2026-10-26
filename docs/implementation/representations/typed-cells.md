@@ -29,7 +29,7 @@ box's payload number) after the take.
     under `--int-backend rcgmp` without `--rcgmp-type-args`: `cellKind?`'s
     `natInt`; `l2r_rc_set_ref<T, R>` passes the old value to the texture
     `l2r_release_value_then<T, R>`, where Reussir would give it a raw rcgmp
-    handle; [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering-in-progress));
+    handle; [nat-int.md](nat-int.md#--int-backend-rcgmp-the-lowering));
   - `I:<name>`: an inductive that the lowering makes a shared record or
     enum (`sharedInductive?`, the function typed arrays use: rule 1 gives
     `List Nat` and `List String` the one type `T_List`);

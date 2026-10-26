@@ -13,7 +13,12 @@ makes automatically on every program, the "guard" column: what soundness
 requires, and for some passes bounds on code size or translation work, or
 the shapes where the pass applies at all. Plan
 [§1](../translation-plan.md#code-structure-and-passes) ("Code structure
-and passes").
+and passes"). Some passes depend on the representation of `Nat` and `Int`
+(`--int-backend`: `rcgmp`, the default since 2026-10-25, or `leanrt`, the
+default until then): `prelude-int-ops` and `int-match` act only under
+rcgmp, and the cost models of `cheap-consts`, `mod-pow2` and
+`boxed-consts` read it
+([nat-int](representations/nat-int.md#--int-backend-rcgmp-the-lowering)).
 
 ## The passes, in installation order
 
@@ -308,7 +313,7 @@ and passes").
   which LLVM folds, where a once-cell read is a load, a test and a copy;
   under rcgmp also `def k : Nat := 5` and `def k : Int := -7`, a `Nat` or
   `Int` constant computed from literals whose box is an immediate, see
-  [nat-int](representations/nat-int.md#--int-backend-rcgmp-the-lowering-in-progress))
+  [nat-int](representations/nat-int.md#--int-backend-rcgmp-the-lowering))
   or a `UInt64`/`USize` literal from 2^63; `lowerCode` records the
   variables bound to one (`closedLetValue`, `LowerState.closedLets`). Not
   in the body of a declaration without parameters (`inConstBody`, set by

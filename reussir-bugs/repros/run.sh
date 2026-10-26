@@ -160,7 +160,11 @@ lean_build() {
     cp "$src" "$WORK/lean/$mod.lean"
     (cd "$WORK/lean" && lean -o "$mod.olean" "$mod.lean") > "$out.log" 2>&1 || { RC=1; return; }
     rm -f "$out.stats"
-    (cd "$WORK/run" && RRC_STATS=$out.stats L2R_REUSSIR=$WRAP L2R_LEAN2RR=$LEAN2RR \
+    # The leanrt representation of `Nat` and `Int` (lean2rr's default until
+    # 2026-10-25): the repros do not depend on it, and it needs none of
+    # entry 20's patches (rcgmp, the default since, needs 20-a and 20-b and
+    # the checkout's core library, which $WRAP does not link).
+    (cd "$WORK/run" && RRC_STATS=$out.stats L2R_REUSSIR=$WRAP L2R_LEAN2RR=$LEAN2RR L2R_INT_BACKEND=leanrt \
         python3 "$ROOT/scripts/l2r.py" "$mod" -o "$out" --lean-path "$WORK/lean" "$@") >> "$out.log" 2>&1
     RC=$?
     read -r RSECS RKB < <(tail -1 "$out.stats" 2>/dev/null) || true

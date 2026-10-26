@@ -28,6 +28,12 @@ translation, with the lines of the file in its message.
 
 {{svg:runsh}}
 
+**Representations of numbers.** `run.sh` and the checks build with the
+default representation of `Nat` and `Int`, Reussir's built-in integers.
+`L2R_INT_BACKEND=leanrt` selects lean2rr's one-word encoding. A full
+test run builds the suite under each representation. Some checks always
+use one representation, or both, because they test it.
+
 ## The test sets
 
 {{gen:testsets}}

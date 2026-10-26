@@ -191,7 +191,7 @@ structure LowerCtx where
   built-in integers, boxed by the prelude's `l2r_any_of_nat`/`_int` and
   unboxed by `l2r_any_as_nat`/`_int` and `l2r_any_raw_take_nat`/`_int`
   (`boxValue`, `boxUnboxWith`, `boxTake`). -/
-  intBackend : IntBackend := .leanrt
+  intBackend : IntBackend := .rcgmp
   /-- Whether a `Nat` or `Int` may be a type argument of a generic FFI
   function of the prelude, or the element of an `RVec`, `LRef` or `LCell`
   (`isFfiTypeArgTy`): always under `leanrt` (a counted word); under
