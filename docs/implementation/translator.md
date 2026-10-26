@@ -133,8 +133,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
   the output does not change (`LeanToReussir/Timings.lean`: `timingMark`),
   `L2R_DEBUG` prints whether the
   program can cast and why, each declaration Stage 1 could not
-  recompile from source, with the error, what the optimization
-  `unread-fields` kept, and the functions that `inline-anchors` keeps out
+  recompile from source, with the error, what the optimizations
+  `unread-fields` and `unreached-decls` kept, and the functions that `inline-anchors` keeps out
   of rrc's inliner for their copies; with that optimization on,
   `L2R_UNREAD_FIELDS_WHY` prints, for each extern of the `Lean` package
   that kept code reaches, the chain of declarations and reasons that
@@ -281,3 +281,22 @@ relative to `lean2rr/` unless they start with `scripts/`.
   strongly connected components), never by a search along every path:
   that is exponential in a dense mutual block (`RtErasedDenseMutual` for
   `mayHoldFn`, `RtResDenseMutual` for `mayHoldResource`).
+
+### Stage 3 and the lowering see only the declarations the roots reach
+
+- **What:** After Stage 2 the optimization `unreached-decls` (on by
+  default) drops the declarations with code that no code reaches from
+  `main`, the error printer, the startup steps and the `IO.Error`
+  builders, so Stage 3, the passes over mono code, the program analyses
+  and the lowering never see them; `L2R_TIMINGS`' line `prune passes`
+  counts what is left
+  ([optional-passes.md](optional-passes.md#declarations-that-nothing-reaches-are-left-out-unreached-decls)).
+- **Why:** Translation time (2026-10-26): about a fifth of Stage 2's
+  declarations with code are left over by Lean's passes; the program
+  that imports `Cslib.Init` and prints one line translated in 83.9 s,
+  now 73.3 s (4.42 → 4.33 GB). Each step after Stage 2 costs per
+  declaration, and so did the late functions (persist walks and helpers
+  for the variants that only the dropped code registered: 7.6 → 0.9 s).
+- **Where:** `Opt/UnreachedDecls.lean`; `Main.lean`: `pipeline`.
+- **Remove only if:** the steps after Stage 2 cost nothing for a
+  declaration nothing reaches.

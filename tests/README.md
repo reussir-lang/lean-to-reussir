@@ -269,6 +269,19 @@ the program's own recursion (structural, `partial`) stay; its
 builder does not take the builder with it (`createDir "."` reports the
 error natively; before the fix, an internal panic).
 
+`RtUnreachedDecls` checks the optimization `unreached-decls` (on by
+default): after Stage 2 the declarations that no code reaches from `main`,
+the error printer, the startup steps and the `IO.Error` builders are not
+translated, while each part that only a startup step, an instance, a
+function value or the lowering reaches stays: a function only an
+initializer calls (it prints at startup), a function an `initialize`
+action registers as a value in a reference (`main` applies it), a
+constant only an instance reads, functions used only as values in a
+constant, and the `IO.Error` builder of `createDir`'s error, which no code
+names. Each prints, so a part left out shows as a missing line or a failed
+build; its `.l2r-debug` checks that the pass ran and that its guard did
+not turn it off.
+
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run), in one build, as
 scripts/l2r.py builds leanrt, linked with the Reussir checkout's rcgmp
@@ -955,7 +968,14 @@ representations):
 `Int` as Reussir's built-in integers (no Reussir build; until
 clean-integration D8 also the leanrt side's). It checks `boxed-consts` on
 `RtNatBoxedConsts`: only the `Nat` and `Int` constants whose box
-is a cell get a once-cell (`l2r_boxed_N`). And the reads
+is a cell get a once-cell (`l2r_boxed_N`). And the work of that choice on
+`tests/runtime/IntConstSquares.lean` (not a runtime test: native Lean
+runs out of memory at its startup), a chain of `Int` constants that square
+3 36 times in all, the last one in a box: lean2rr translates it within
+120 s under an 8 GB address-space limit (`ulimit -v`; lean2rr reserves
+about 4 GB at startup) and boxes `c6` once, because `constNumValue?` gives
+up at the first value from 2^64 (before, lean2rr computed 3^(2^36) and ran
+out of memory). And the reads
 at an index word on `RtNatIdxWord` (with its `.opts`): the
 generated code calls each of the prelude's ten
 `_w` reads, each with the index word of the `let ixN : u64 =

@@ -1,10 +1,10 @@
 # Pay-nothing baseline of Cfold (tests/classic/Cfold.lean), arguments '15'.
-# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
+# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 91898
 bytes 2000040
 native-allocs 103150
 native-bytes 2307122
-items 142
+items 141
 functions 108
 conversion-fns 0
 conversion-sites 0
@@ -27,7 +27,6 @@ item T_Option_# c02eeb71e816
 item T_Prod_# 01aa68650331
 item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
-item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item Tuple# 4b88ca5e79fc
 item Tuple# 984a3fe98f9e
@@ -54,7 +53,7 @@ item l2r_any_rel_# 602486c8caa2
 item l2r_any_rel_# 60670e3a6fe9
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
-item l2r_any_releases f10a833197da
+item l2r_any_releases ef5fb2724ffe
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
 item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe

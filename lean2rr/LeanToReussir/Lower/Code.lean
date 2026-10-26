@@ -67,10 +67,23 @@ def dropUnusedConvs (lets : ArmLets) (convs : Std.HashSet String) (body : RR.Blo
 parameters), if its code computes it from literals: a `Nat` literal (Lean
 folds `Nat` arithmetic on literals), `Int.ofNat` or `Int.negSucc` of one,
 `Int.neg`, `Int.add`, `Int.sub`, `Int.mul` and `Int.pow` (an exponent of at
-most 64, a base below 2^64 in magnitude) of such values, and reads of other
-such constants (up to `fuel` deep). Lean does not fold `Int` arithmetic:
-`-7 : Int` is `Int.neg` of the closed term `Int.ofNat 7`, and `2 ^ 40 :
-Int` is `Int.pow`. -/
+most 64) of such values, and reads of other such constants (up to `fuel`
+deep). Lean does not fold `Int` arithmetic: `-7 : Int` is `Int.neg` of the
+closed term `Int.ofNat 7`, and `2 ^ 40 : Int` is `Int.pow`.
+
+Every value on the way is below 2^64 in magnitude: at the first literal,
+result or value of another constant that is not, the answer is none. So
+the work stays small. Without the limit, constants that square the one
+before several times each (`def c1 : Int := let a := c0 * c0; let b := a *
+a; ...`) made lean2rr compute numbers of 2^30 bits and more and run out of
+memory (native Lean runs out of memory when it computes such a constant at
+startup; test input `IntConstSquares`, int-backend-check.sh). The only
+use, `constIsImmediate`, asks whether a box holds the value as an
+immediate, which needs it below 2^63 in magnitude, and none is always safe
+there: the constant's box is then a cell, made once (`boxed-consts`). A
+constant whose value is from 2^64 is a cell either way. Only a constant
+whose value is small but whose code goes through a value from 2^64 gets a
+cell where its box could be an immediate. -/
 partial def constNumValue? (f : Name) (fuel : Nat := 8) : LowerM (Option Int) := do
   let some { params := #[], value := .code body, .. } := (← read).decls.find? f | return none
   let keys := (← read).keys
@@ -98,10 +111,12 @@ partial def constNumValue? (f : Name) (fuel : Nat := 8) : LowerM (Option Int) :=
           | ``Int.add => some (x + y)
           | ``Int.sub => some (x - y)
           | ``Int.mul => some (x * y)
-          | ``Int.pow => if 0 ≤ y && y ≤ 64 && x.natAbs < 2 ^ 64 then some (x ^ y.toNat) else none
+          | ``Int.pow => if 0 ≤ y && y ≤ 64 then some (x ^ y.toNat) else none
           | _ => none
         | _ => pure none
-      go k (match v? with | some v => vals.insert d.fvarId v | none => vals)
+      match v? with
+      | some v => if v.natAbs < 2 ^ 64 then go k (vals.insert d.fvarId v) else return none
+      | none => go k vals
     | .return x => return vals[x]?
     | _ => return none
   go body {}

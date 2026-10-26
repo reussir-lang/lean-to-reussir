@@ -26,6 +26,7 @@ built-in integers
 |---|---|---|---|
 | `unread-fields` (off by default) | before Stage 3, a value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator; data, such as a `ToExpr` instance's `toTypeExpr`) becomes `◾`, with the unused parameters of declarations and join points; what only those reached is left out, and the `Lean` package's `initialize` constants that kept code no longer reads do not run | a field counts as read when kept code projects it or uses its binder in a match, and every field of a type that an extern takes by its declared parameter types (not a type variable), of `IO.FS.Stream`, the IO results, tasks, thunks, references and promises; a `let` that may have an effect stays; never a field of a type the runtime represents itself (`builtinTypeNames`); nothing in a program that can cast (`programCasts`, on the code kept); in a program whose kept code creates tasks, only a value that cannot hold a task (nor can a closure's captured values); in one whose kept code makes resources, no value that may hold one | below |
 | `unread-consts` | after Stage 1, a constant that no kept code reads and whose evaluation cannot show is not a startup step, and what only such constants reach is not translated | quiet: no function value applied, no extern but the pure total ones (`pureExterns`), no recursion but Lean's checked library recursion (never `partial`, never the program's own), no `unsafe` code of the program but Lean's computed-field implementations, no task, thunk, reference or promise in its type, no instance whose declaration rests on a claim Lean did not check: `sorry` or an axiom other than `propext`, `Quot.sound`, `Classical.choice` (also in a `@[csimp]` theorem or a `partial` definition's code), or an `@[implemented_by]` of the program (`axiomTaints`); unread: no reference from the code that `main`, the error printer and the other steps reach; the `IO.Error` builders and the instances made without a reference in code stay; plan §10 for resource exhaustion | [startup/order.md](startup/order.md#an-unread-constant-whose-evaluation-cannot-show-is-left-out-unread-consts) |
+| `unreached-decls` | after Stage 2, before Stage 3, a declaration with code that no code reaches from the roots is not translated: Stage 3, the passes over mono code and the lowering skip it (what Lean's passes leave behind: a callee inlined at every call, a function specialized at every use, the closed terms of code that went) | roots: `main`, the error printer, every startup step's declaration (the initializer of each `initialize` constant included, so the startup runs the same steps) and the `IO.Error` builders that the lowering calls by name; an edge for every constant that a `let` names (a call, a partial application or a function value, the read of a constant, an instance); extern declarations stay; off when two declarations have one name; a name that the lowering meets with no declaration but a non-extern one in Lean's mono extension stops it with an internal error | below |
 | `field-order` | record fields, and the fields of every generated tuple (a join point's, J2; a `flatten-structs` result), by decreasing alignment, no padding | none needed: every access goes through the constructor layout or the tuple's order (`tupleType`) | [records](representations/records.md#fields-are-ordered-by-decreasing-alignment) |
 | `value-structs` | a structure with one relevant field is a `[value]` struct | not when the field's type is being translated (no type contains itself by value) | [records](representations/records.md#one-field-structures-are-value-structs) |
 | `typed-arrays` | an `Array` of a one-word counted type (a shared record or enum, `Nat`, `Int`, `String`, an array) is `RVec<T>` of the element's own type; the `map` loops and the `Array lcAny` parameters of `compact-arrays` are typed at such element types too | the whole-program check of `compact-arrays` (which it needs; installed before it, whose hooks read its switch) turns a pointer kind off as it turns a storage kind off, and also when an element type can reach a value whose release the program can observe (a closure, a box, a handle, a task, a thunk, a reference: `releaseUnsafe?`), since leanrt releases typed elements in another order than native when they are shared | [typed arrays](representations/typed-arrays.md) |
@@ -195,6 +196,142 @@ built-in integers
   off in a run that turns it on for all).
 - **Remove only if:** the runtime has the `Lean` package's C++ functions
   (then the callbacks translate as they are), or the pass is unwanted.
+
+### Declarations that nothing reaches are left out (`unreached-decls`)
+
+- **What:** After Stage 2, before Stage 3 (`PassConfig.prunePasses`,
+  called from `Main.pipeline`; after `unread-fields` when that is on), the
+  declarations with code that the roots do not reach are dropped, and
+  Stage 3, the passes over mono code and the lowering never see them.
+  - Roots: the declarations the entry point calls (`main`, the error
+    printer `IO.Error.toString`); every startup step's declaration (the
+    program's constants and `initialize` actions, the initializers of
+    `Init` and `Std`, and the initializer of each `initialize` constant of
+    the `Lean` package that the program uses: Stage 1 adds a step for each
+    one that the code it reached reads); the `IO.Error` builders that
+    Stage 1 made (the lowering calls them by name for the errors of
+    fallible IO externs, `LowerCtx.ioErrorBuilders`, also where no code
+    names them; test `RtUnreadConstsIoErr`).
+  - Edges: every constant that a `let` names in a kept declaration's code,
+    in its join points and local functions too: a full call, a partial
+    application or a declaration used as a function value, the read of a
+    constant, a type-class instance (after Stage 1 every instance is a
+    named constant). Stage 1 already followed `implemented_by`, the Lean
+    bodies of externs and the reads of `initialize` constants (each a
+    startup step).
+  - Extern declarations (no code) all stay: they cost no translation, and
+    the whole-program checks that read them (`typed-cells` reads the
+    instances of the reference primitives) see the same ones.
+  - The initializer of every `initialize` constant stays a root, also when
+    kept code no longer reads the constant, so the startup chain runs the
+    same steps as without the pass (only `unread-fields` leaves out such
+    a step, when kept code does not read the constant).
+  - Guard: two declarations with code of one name turn the pass off (the
+    walk by name would follow only one): every declaration stays. No
+    construct of the code can hide a reference: `Code .pure` and
+    `LetValue .pure` cannot hold the impure phase's constructors (their
+    proofs need `.impure`). `L2R_DEBUG` prints
+    `lean2rr: unreached-decls: K of N declarations kept (… with code), D
+    dropped`, or why it is off.
+- **Why:** translation time and memory (2026-10-26). Lean's passes leave
+  declarations that no code names: a callee that `simp` inlined at every
+  call, the general instance of a function specialized at every use
+  (`List.foldl` at `main`), the closed terms of code that a later pass
+  removed. Without the pass each one went through Stage 3, the passes over
+  mono code, the program analyses and the lowering, and `conv-liveness`
+  dropped its functions at the end. The pass drops about a fifth of the
+  declarations with code: 13,829 of 69,730 for a program that imports
+  `Cslib.Init` and prints one line (translation only), 2,967 of 15,192
+  for the Cedar benchmark (Z06t), 192 of 1,339 for lean-zip's compressor
+  (Z01c), 98 of 364 for the classic `Hashmap` (L18). Translation of the
+  `Cslib.Init` program (single runs on an idle machine, `L2R_TIMINGS`,
+  two cores): 83.9 s to 73.3 s wall, peak 4.42 GB to 4.33 GB; Stage 3
+  15.2 to 14.1 s, the passes over mono code 7.1 to 6.3 s, the program
+  analyses 13.0 to 12.4 s, the lowering of declarations 20.3 to 18.7 s,
+  the late functions 7.6 to 0.9 s (persist walks and helpers for what only
+  dropped code registered). Z06t 16.6 to 16.0 s; Z01c and L18 the same
+  (2.4 s, 0.4 s). With `unread-fields` on (the benchmark builds),
+  `unread-fields` has already dropped every declaration that no kept `let`
+  names, and this pass drops nothing: the `.rr` is byte-identical.
+  The rest is not dropped here: of the declarations the `Cslib.Init`
+  program keeps, most (38,138 counted at the lowering) are reachable only
+  through function values that no kept code applies, callbacks that the
+  `Lean` package's initializers store for the elaborator. The startup
+  runs those initializers, so their code is reached; `conv-liveness` then
+  drops the callbacks' code from the types of the generated code, which
+  Stage 3 and the lowering make. Before Stage 3 those types are not known,
+  so this pass counts every function value as a reference.
+- **Soundness:** in mono LCNF a declaration refers to another one only
+  through a `let` value `.const` (types, projections, `cases` and
+  arguments name types and constructors). The lowering emits a call of a
+  declaration only where its code is such a reference (`calleeOf`), at the
+  entry point and in the startup chain (roots), and for the `IO.Error`
+  builders (roots); the target of a function value runs from an
+  application function whose arms come from the partial applications in
+  lowered code. The passes after Stage 3 make declarations and references
+  from the declarations they get (`flatten-structs`, the typed `map`
+  loops) or refer to prelude functions and extern instances
+  (`prelude-int-ops`, `mod-pow2`, `utf8-size-add`, Stage 3's extern
+  instances). A reference to a declaration the pass dropped stops the
+  lowering with an internal error (`calleeOf`: "unknown callee … a
+  declaration with code that the translated program does not have"),
+  never builds another program. Stage 2 records every declaration it
+  compiles in Lean's mono extension (`saveMono`, `ExtractClosedK`), the
+  dropped ones too, and `calleeOf` takes a name found only there for an
+  extern called by its own name; since the review of the pass it does so
+  only for an extern declaration (every Lean name that `toMonoK` emits,
+  19 of them, has one). Before, a dropped name was lowered as a call of
+  a missing extern `l2r_extern_l_…`: the program was refused for an
+  extern of Lean's library it does not have, or, with
+  `L2R_ALLOW_MISSING_EXTERNS`, rrc stopped at the unknown function
+  (review of the pass, C1, by fault injection). The pass
+  changes no kept declaration, and the dropped ones never run, so the
+  program computes the same results. The `.rr` is not byte-identical:
+  - lean2rr's one counter, the payload numbers of `Box`, the once-cell
+    slots (and the stream cells' base slot), the indices of nullary
+    function-value variants and the string literal table follow what the
+    lowering met first, and the dropped code no longer comes first;
+  - what only dropped code made goes: generated types, payload types of
+    `Box` with their releases, variants of function-value enums (and then
+    the catch-all arm of an application function, which only an unbuilt
+    variant needed), string literals;
+  - choices made from the whole program no longer count the dropped
+    code: in 3 of the 727 runtime tests and classic programs only dropped
+    code used the standard streams as values, so the program has no
+    stream cells and `l2r_stderr_put` writes to descriptor 2 (the current
+    stderr, since no kept code can set it), as in any program without
+    such a use; in Z06t, `flatten-structs` no longer splits the result of
+    `Rat.ofInt` (18 of its 19 calls were in dropped code; the kept one
+    uses the result whole) and splits the results of two loops of `main`
+    otherwise, and a closed term whose other reader was dropped is
+    evaluated in its one reader (`closed-chains`); `merge-fns` merges
+    functions that only arms for unbuilt variants told apart, and which
+    copy comes first can change. The same holds for `programCasts`,
+    `programCreatesTasks`, compact and typed arrays and typed cells,
+    which did not change in these programs;
+  - a program refused only because dropped code reached an extern that
+    lean2rr cannot serve translates: the externs listed are those that
+    reachable code calls (the 9 refusals of the runtime tests are
+    unchanged, word for word).
+  Checked (2026-10-26): every runtime test and classic program (718
+  translated, 9 refused) against dev 0c8f1419 with
+  `tests/runtime/rr-fingerprint.py compare` and the differences sorted
+  into the kinds above (a scratch classifier: an item whose canonical
+  lines are the old ones reordered or fewer, a dropped type, function or
+  `extern` line, then the rest by hand): no kept function changed except
+  by those; the same for the four programs above (for the two big ones
+  also with `merge-fns` off, to see past its choice of first copy); with
+  the pass off (`--disable-opt unreached-decls`) every `.rr` is
+  byte-identical to dev's.
+- **Where:** `Opt/UnreachedDecls.lean` (`run`, `unknownConstruct?`);
+  `Opt/Registry.lean`; `PassConfig.lean`: `prunePasses`; `Main.lean`:
+  `pipeline`. Test `RtUnreachedDecls` (an initializer's callee with an
+  effect, a function registered by an `initialize` action as a value, a
+  constant read only by an instance, functions used only as values in a
+  constant, an `IO.Error` builder no code names; its `.l2r-debug` checks
+  that the pass ran).
+- **Remove only if:** Stage 3 and the lowering cost nothing for a
+  declaration that nothing reaches.
 
 ### Functions equal up to names are merged (`merge-fns`)
 
@@ -419,9 +556,11 @@ built-in integers
   every use instead of read from a once-cell. Every `Nat`/`Int` it builds
   must be free: any literal is (a read-only object of the program's
   data), and the pass tracks the known values of the `Nat`/`Int`
-  variables it binds and accepts a computed `Nat.succ`, `Int.ofNat` or
+  variables it binds and accepts a computed `Int.ofNat` or
   `Int.negSucc` only within rcgmp's immediates, [-2^61, 2^61)
-  (`NatEncoding.lean`: `natIsSmall`, `intIsSmall`). (Until D8 the leanrt
+  (`NatEncoding.lean`: `intIsSmall`; the mono code has no `Nat.succ` or
+  `Nat.zero` application: `toMonoK` turns them into `Nat.add k 1` and the
+  literal 0). (Until D8 the leanrt
   representation's limits were its small ranges: a `Nat` literal or
   `Nat.succ` below 2^63, an `Int.ofNat`/`Int.negSucc` in the `int32`
   range.)

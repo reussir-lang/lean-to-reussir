@@ -1,10 +1,10 @@
 # Pay-nothing baseline of Rbtree (tests/classic/Rbtree.lean), arguments '100000'.
-# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
+# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 100023
 bytes 4005560
 native-allocs 2490318
 native-bytes 99581202
-items 139
+items 138
 functions 105
 conversion-fns 0
 conversion-sites 0
@@ -27,7 +27,6 @@ item T_List_# b11c7204e775
 item T_Option_# c02eeb71e816
 item T_Prod_# 01aa68650331
 item T_ST_Out_# d89b44c55864
-item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item T_Tree_# ca905445e993
 item T_color_# a09f46348e79

@@ -28,6 +28,7 @@ import LeanToReussir.Opt.TypedCells
 import LeanToReussir.Opt.UnreadFields
 import LeanToReussir.Opt.PreludeLiveness
 import LeanToReussir.Opt.UnreadConsts
+import LeanToReussir.Opt.UnreachedDecls
 import LeanToReussir.Opt.IntMatch
 
 /-!
@@ -88,6 +89,7 @@ def optimizations : Array OptPass := #[
   -- rule that every optional pass is on by default.
   ⟨"unread-fields", false, "a value that a constructor stores in a field no kept code reads (a callback an initializer registers for Lean's elaborator, data such as a ToExpr instance's toTypeExpr) left out, with what only it reaches, before Stage 3 (the owner's exception to the rule that every optional pass is on by default)", UnreadFields.install⟩,
   ⟨"unread-consts", true, "a constant that no kept code reads and whose evaluation cannot show (no recursion but the checked recursion of Lean's toolchain, no function value applied, no extern but pure total ones, none of the program's unsafe code but Lean's computed-field implementations; plan §10 for resource exhaustion) is not evaluated at startup, and what only it reaches is not translated; the IO.Error builder instances that Stage 1 made stay, because the lowering refers to them by name (Opt/UnreadConsts)", UnreadConsts.install⟩,
+  ⟨"unreached-decls", true, "a declaration with code that no code reaches after Stage 2 from main, the error printer, every startup step (each `initialize` constant's initializer included, so the startup runs the same steps) and the IO.Error builders that the lowering calls by name is not translated: Stage 3, the passes over mono code and the lowering skip it (callees Lean's passes inlined everywhere, functions they specialized at all their uses, the code their closed terms came from); a function value counts as a reference; extern declarations stay; off when two declarations have one name (Opt/UnreachedDecls)", UnreachedDecls.install⟩,
   ⟨"field-order", true, "record fields in decreasing alignment, so records have no padding (declaration order otherwise)", FieldOrder.install⟩,
   ⟨"value-structs", true, "a structure with one relevant field (ST.Out of every BaseIO call) is a [value] struct, not a heap record", ValueStructs.install⟩,
   -- Before `compact-arrays`, whose hooks read its switch.

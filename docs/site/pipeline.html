@@ -235,7 +235,11 @@ its mono type.</p>
 <code>floatLetIn</code>, <code>reduceArity</code>, <code>commonJoinPointArgs</code>, <code>lambdaLifting</code>,
 <code>elimDeadBranches</code>, <code>cse</code>, <code>extractClosed</code>. After Lean's passes, lean2rr
 puts the parameters of each join point in the order of their first use in
-its body, so that an unrelated definition does not reorder them.</p>
+its body, so that an unrelated definition does not reorder them. Then
+lean2rr drops the declarations that no code reaches from the roots
+(<a href="passes.html#declarations-that-nothing-reaches-unreached-decls"><code>unreached-decls</code></a>):
+Lean's passes leave them behind (a callee inlined at every call, a function
+specialized for every use).</p>
 <p><code>toMono</code> also does semantic lowering for lean2rr: <code>Decidable</code> becomes
 <code>Bool</code>, <code>Nat</code> constructors become <code>Nat.add x 1</code> and tests on 0, single-field
 structures become their field (<code>Char</code> → <code>UInt32</code>, <code>Fin n</code> → <code>Nat</code>), and

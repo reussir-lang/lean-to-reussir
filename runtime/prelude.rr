@@ -1815,8 +1815,10 @@ fn lean_array_uget_borrowed<T>(v : RVec<T>, i : u64) -> T { l2r_array_get(v, i) 
 // One test: the flag of the truncation to `i64` is set exactly from 2^63 (a
 // `Nat` is never negative); through `l2r_nat_raw` the value's bit 63 was
 // tested twice (`fswap`, `fset`: X07, run 14). The lowering now calls the
-// `_w` twins of `fset`, `fswap` and `ByteArray` `fset`; this
-// serves `FloatArray.set` and `String.extract`'s fast path.
+// `_w` twins of `fset`, `fswap` and `ByteArray` `fset`; this serves
+// `FloatArray.set` (`lean_float_array_fset`). `lean_array_fset`,
+// `lean_array_fswap` and `lean_byte_array_fset` keep it, but the lowering
+// calls their `_w` twins (`bindReadIndex`).
 fn l2r_index_of_nat(i : Nat) -> u64 {
     let (ks, w) : (i64, bool) = core::intrinsic::bigint::trunci_overflow(i);
     if w { l2r_unreachable<u64>() } else { ks as u64 }
@@ -1957,8 +1959,7 @@ fn lean_array_get_as<T>(dflt : LAny, v : RVec<LAny>, i : Nat) -> T {
 }
 // `fget` and `get!` at a type at an index word (`l2r_nat_index`): as
 // `lean_array_fget_as` and `lean_array_get_as`; lean2rr's `boxWordRead?`
-// of `lean_array_fget_w` and `lean_array_get_w`, which it calls only under
-// rcgmp.
+// of `lean_array_fget_w` and `lean_array_get_w`.
 fn lean_array_fget_as_w<T>(v : RVec<LAny>, k : u64) -> T {
     let p = l2r_array_give<LAny>(v);
     let n = l2r_view_size(p);
@@ -3422,8 +3423,8 @@ fn l2r_fs_create_tempdir() -> LStr [{ leanrt::fs::create_temp_dir() }];
 // the `env` array as parallel arrays of names, values and whether the value
 // is `some` (set) or `none` (unset). Returns the pid (fallible: last-error
 // protocol, errors without a file name); the child's `stdin`/`stdout`/
-// `stderr` fields are then `l2r_proc_end(0/1/2)` (a handle for piped
-// streams, a closed handle otherwise). A `Child` needs its pid and whether
+// `stderr` fields are then, for a piped stream, `l2r_proc_end(0/1/2)` boxed
+// (else a boxed unit: Lower/Process.lean). A `Child` needs its pid and whether
 // it was spawned with `setsid` for `wait`/`tryWait`/`kill`/`pid`.
 #[ffi(import)]
 fn l2r_proc_spawn(cmd : LStr, args : RVec<LAny>, cwd : LStr, has_cwd : bool, env_names : RVec<LStr>, env_values : RVec<LStr>, env_set : RVec<bool>, modes : u32, inherit_env : bool, setsid : bool) -> u32 [{

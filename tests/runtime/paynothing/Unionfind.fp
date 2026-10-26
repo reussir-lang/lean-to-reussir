@@ -1,10 +1,10 @@
 # Pay-nothing baseline of Unionfind (tests/classic/Unionfind.lean), arguments '70000'.
-# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
+# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 175033
 bytes 6301288
-native-allocs 2956318
-native-bytes 61730561
-items 170
+native-allocs 2956306
+native-bytes 61730385
+items 169
 functions 127
 conversion-fns 0
 conversion-sites 0
@@ -27,7 +27,6 @@ item T_Option_# c02eeb71e816
 item T_Prod_# 01aa68650331
 item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
-item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item T_nodeData_# 88ed8d1098d1
 item Tuple# 2fa248ce8bce
@@ -65,7 +64,7 @@ item l2r_any_rel_# b58924afab00
 item l2r_any_rel_# ba9e8792d986
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
-item l2r_any_releases 1b483286679c
+item l2r_any_releases 01a32cef4a5c
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
 item l2r_box_«T_IO_Error_#~9355e6117fd3» d8238479b9fe

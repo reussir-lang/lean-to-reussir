@@ -165,10 +165,13 @@ partial def intMatchInfo (decls : NameMap (Decl .pure)) (c : Code .pure) (info :
   | .return y => use info y
   | .unreach _ => info
 
-/-- Whether `let` `d` binds a literal or computes one (`litValue?`): it
-reads no other value, has no effect and allocates nothing that stays
-(Reussir's integer literals are immediates or read-only objects), so it
-may move into the arms that use it, or go where none does. -/
+/-- Whether `let` `d` binds a literal (`.lit _`: of a number, also of a
+string or another scalar) or computes a number from literals (`litValue?`):
+it reads no other value and has no effect, so it may move into the arms
+that use it, or go where none does (a run makes it at most once either
+way). A number allocates nothing that stays (Reussir's integer literals
+are immediates or read-only objects). A string literal is pure: made in
+the arm that uses it, or not made, it gives the same results. -/
 def IntMatchInfo.litLet (info : IntMatchInfo) (d : LetDecl .pure) : Bool :=
   match d.value with
   | .lit _ => true

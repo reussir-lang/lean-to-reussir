@@ -22,7 +22,8 @@ Each item gets a hash of a canonical form of its text that does not change
 when only the program's numbering changes. lean2rr numbers many names with
 one counter for the whole program (`fresh`, LowerBase.lean): types
 (`T_List_15`, `L2RRef245`, `L2RConvK827`, `Tuple12`, `L2RTask7`), helper
-functions (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`), constructors of
+functions (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`, `l2r_boxed_593`,
+`l2r_cellzero_12`), constructors of
 some types (a state machine's `j123`), the payload numbers of `Box` (the
 prelude's `LAny`: 16 and up, `0x8000` + 16 and up for a leaf type, in the
 order the program boxes them) and every local name (`x815`, `kj909`); and
@@ -38,7 +39,10 @@ form:
   fields: `b[Nat]#0`;
 - replaces each numbered type, numbered helper and Lean instance, where it
   is used or defined, also inside a longer name (`l2r_conv_T_T_763_T_T_776`,
-  `L2RFn_F4nLStr...13nT_EST_Out_792`, dropping the length prefix `13n`), by
+  `L2RFn_F4nLStr...13nT_EST_Out_792`, dropping the length prefix `13n`; a
+  name spelled with length prefixes is read by them, so `T_Prod_610` is the
+  type in `L2RFn_F10nT_Prod_6104nbool`, and the `64` of a last component
+  `3nu64` is no number of lean2rr's), by
   a label: its name with the number replaced by `#`, and a hash of its own
   canonical definition, refined over four rounds (so `List Nat` and
   `List String` get different labels, and a type keeps its label while its
@@ -105,9 +109,10 @@ IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 LOCAL = re.compile(r"^([a-z]+)(\d+)$")
 PRIMS = {f"{p}{n}" for p in "ui" for n in (8, 16, 32, 64, 128)} | {"f32", "f64"}
 # Helper functions named with lean2rr's counter (`fresh "l2r_zero_"`,
-# `fresh "l2r_vconv_"`, `fresh "jp_"`), and their companions
-# (`l2r_zero_N_init`, `l2r_vconv_N_go`).
-FRESH_FN = re.compile(r"^(l2r_zero_|l2r_vconv_|jp_)(\d+)(_[A-Za-z0-9_]*)?$")
+# `fresh "l2r_vconv_"`, `fresh "jp_"`, `fresh "l2r_boxed_"`,
+# `fresh "l2r_cellzero_"`), and their companions (`l2r_zero_N_init`,
+# `l2r_vconv_N_go`, `l2r_boxed_N_init`).
+FRESH_FN = re.compile(r"^(l2r_zero_|l2r_vconv_|jp_|l2r_boxed_|l2r_cellzero_)(\d+)(_[A-Za-z0-9_]*)?$")
 # The number of a Lean declaration's instance (`freshInstName`, Mono.lean:
 # `decl._l2r.k`, mangled `decl___l2r_k_`).
 INST = re.compile(r"___l2r_\d+_")
@@ -144,7 +149,30 @@ NUM_BIND = re.compile(r"\blet ([a-z]+\d+) : u64 = l2r_any_raw_num\(")
 FN_NUM_BIND = re.compile(r"\blet (fn\d+) : u64 = fv\d+ >> fs\d+;")
 MATCH = re.compile(r"\bmatch ([a-z]+\d+)\s*\{")
 NUM_ARM = re.compile(r"\s*(\d+)\s*=>")
+# A length prefix, as the names of function types and their helpers spell
+# each component (`L2RFn_F10nT_Prod_6104nbool`: `T_Prod_610`, then `bool`).
+LEN_PREFIX = re.compile(r"(\d+)n")
+LEN_TYPE = re.compile(r"\d+n[A-Z]")
 ROUNDS = 4
+
+
+def ends_in_component(name):
+    """Whether `name` ends with a length-prefixed component (`3nu64` in
+    `L2RFn_F12nT_Person_2043nu64`): its last digits are then part of a
+    name, not lean2rr's counter."""
+    i, n, at_component = 0, len(name), False
+    while i < n:
+        m = LEN_PREFIX.match(name, i)
+        if m and (at_component or i == 0 or not name[i - 1].isdigit()):
+            j = m.end() + int(m.group(1))
+            if j == n:
+                return True
+            if j < n:
+                i, at_component = j, True
+                continue
+        at_component = False
+        i += 1
+    return False
 
 
 def h(s):
@@ -270,7 +298,7 @@ class Program:
         self.stem = {}
         for name in types:
             m = re.search(r"\d+$", name)
-            if m and not any(name[i:] in types for i in range(1, len(name))):
+            if m and not any(name[i:] in types for i in range(1, len(name))) and not ends_in_component(name):
                 self.stem[name] = name[: m.start()] + "#"
         fresh_types = sorted(self.stem, key=len, reverse=True)
         for kind, name, _ in self.items:
@@ -283,6 +311,7 @@ class Program:
                 self.stem[name] = INST.sub("___l2r_#_", name)
         self.embedded = (re.compile(r"(?:\d+n)?(" + "|".join(map(re.escape, fresh_types)) + r")(?!\d)")
                          if fresh_types else None)
+        self.fresh_types = set(fresh_types)
         defs = {name: (kind, text) for kind, name, text in self.items}
         # The payload numbers of the box and their types.
         self.payload_ty = {}
@@ -317,12 +346,40 @@ class Program:
         return out
 
     def sub_name(self, tok):
-        """`tok` with the numbered names in it replaced by their labels."""
+        """`tok` with the numbered names in it replaced by their labels. A
+        numbered type after a length prefix is the type of that length
+        (`10nT_Prod_610` in `L2RFn_F10nT_Prod_6104nbool`, where the next
+        component's prefix `4n` follows the number); elsewhere, the longest
+        numbered type not followed by a digit."""
         if tok in self.label:
             return self.label[tok]
         if self.embedded is None or not any(c.isdigit() for c in tok):
             return tok
-        return self.embedded.sub(lambda m: "«" + self.label[m.group(1)] + "»", tok)
+        if not LEN_TYPE.search(tok):
+            return self.embedded.sub(lambda m: "«" + self.label[m.group(1)] + "»", tok)
+        out, i, n, at_component = [], 0, len(tok), False
+        while i < n:
+            m = LEN_PREFIX.match(tok, i)
+            if m and (at_component or i == 0 or not tok[i - 1].isdigit()):
+                j = m.end() + int(m.group(1))
+                t = tok[m.end():j]
+                if t in self.fresh_types:
+                    out.append("«" + self.label[t] + "»")
+                    i, at_component = j, True
+                    continue
+                if j <= n and not self.embedded.search(t):
+                    out.append(tok[i:j])
+                    i, at_component = j, True
+                    continue
+            at_component = False
+            m = self.embedded.match(tok, i)
+            if m:
+                out.append("«" + self.label[m.group(1)] + "»")
+                i = m.end()
+                continue
+            out.append(tok[i])
+            i += 1
+        return "".join(out)
 
     def sub_tokens(self, text):
         return IDENT.sub(lambda m: self.sub_name(m.group(0)), text)

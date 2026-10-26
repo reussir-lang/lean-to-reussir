@@ -164,6 +164,35 @@ code reads stays a startup step at its place.
   changes no output and no order. Only resource exhaustion at startup can
   differ ([Known differences](differences.html#startup-and-evaluation)).
 
+### Declarations that nothing reaches (`unreached-decls`)
+
+Lean's passes in Stage 2 leave declarations that no code names: a callee
+that `simp` inlined at every call, the general instance of a function that
+the specializer copied for every use, the closed terms of code that a later
+pass removed. After Stage 2, lean2rr keeps only the declarations that the
+roots reach, and Stage 3, the passes over mono code and the lowering skip
+the others.
+
+- **Roots.** `main`, the error printer, the declaration of every startup
+  step (also the initializer of each `initialize` constant of the `Lean`
+  package that the program uses, so the startup runs the same steps), and
+  the `IO.Error` builders, which the lowering calls by name.
+- **Edges.** Each constant that a `let` names: a call, a partial
+  application or a function value, the read of a constant, an instance.
+- **Extern declarations** all stay. They cost nothing to translate.
+- **Guard.** Two declarations of one name turn it off. A name that only a
+  dropped declaration has stops the lowering with an internal error.
+- **Effect.** About a fifth of the declarations go: 13,829 of 69,730 for
+  a program that imports `Cslib.Init` and prints one line, whose
+  translation takes 73 s instead of 84 s. The callbacks that the `Lean`
+  package's initializers store stay: the startup runs those initializers,
+  and only `conv-liveness`, which knows the types of the generated code,
+  sees that no code calls the callbacks.
+- **Soundness.** In mono code a declaration names another one only in a
+  `let`. The lowering calls a declaration only where code names it, in the
+  startup chain and at the entry point, and for the `IO.Error` builders.
+  The kept declarations do not change, and the dropped ones never run.
+
 ### Helpers for live code only (`conv-liveness`)
 
 At the end of Stage 4, lean2rr generates helpers that match: an unboxing

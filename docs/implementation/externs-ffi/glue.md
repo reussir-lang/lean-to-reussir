@@ -115,7 +115,11 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
     looks the variable up once (lean-runtime's `io::env::get_env`, into a
     buffer that leanrt keeps for the run). It returns the value, or the
     shared empty string (no allocation) when there is none, and records
-    which in a flag that `l2r_getenv_found` reads.
+    which in a flag that `l2r_getenv_found` reads. The flag is a result
+    slot of leanrt, one for the program, as a child's stream ends after
+    `l2r_proc_spawn` and `output`'s texts (fs.rs and proc.rs, `Global`):
+    it is read right after the lookup, with nothing in between that could
+    switch contexts.
 
   Natively, `toList` makes one cons cell per character, and `get?` makes
   no allocation. lean2rr now makes the same allocations (test

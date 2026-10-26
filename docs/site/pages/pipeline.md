@@ -152,7 +152,11 @@ Main mono passes (Lean's): `simp` (inlining, constant folding, dead code),
 `floatLetIn`, `reduceArity`, `commonJoinPointArgs`, `lambdaLifting`,
 `elimDeadBranches`, `cse`, `extractClosed`. After Lean's passes, lean2rr
 puts the parameters of each join point in the order of their first use in
-its body, so that an unrelated definition does not reorder them.
+its body, so that an unrelated definition does not reorder them. Then
+lean2rr drops the declarations that no code reaches from the roots
+([`unreached-decls`](passes.html#declarations-that-nothing-reaches-unreached-decls)):
+Lean's passes leave them behind (a callee inlined at every call, a function
+specialized for every use).
 
 `toMono` also does semantic lowering for lean2rr: `Decidable` becomes
 `Bool`, `Nat` constructors become `Nat.add x 1` and tests on 0, single-field

@@ -161,11 +161,17 @@ Paths are relative to the repository root.
   a `.rr` file (after `// ---- generated types ----`) into items and hashes
   a canonical text of each: local names renamed per item in order of use;
   numbered types (`T_List_15`, `L2RRef245`, `Tuple12`, `L2RConvK827`),
-  numbered helpers (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`) and Lean
+  numbered helpers (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`,
+  `l2r_boxed_593`, `l2r_cellzero_12`) and Lean
   instances (`l_f___l2r_1_`) replaced, where they are defined or used (also
   inside longer names, without the length prefix `13n` of a function
   type's name), by a label of the name without its number and a hash of
-  the canonical definition, refined over four rounds; numbered
+  the canonical definition, refined over four rounds; a name spelled with
+  length prefixes is read by them (`T_Prod_610` in
+  `L2RFn_F10nT_Prod_6104nbool`, where the next component's prefix `4n`
+  follows the number; the `64` of a last component `3nu64` is not a
+  number of lean2rr's, so `L2RFn_F12nT_Person_2043nu64` is no numbered
+  type); numbered
   constructors (a state machine's `j123`) named by their fields and rank;
   string literal indices replaced by the literals, once cells by their
   rank in the item; the payload numbers of `Box` (the last argument of a
@@ -183,8 +189,17 @@ Paths are relative to the repository root.
   (`freshInstName`): a definition added anywhere shifts names in code it
   does not touch, so a plain diff cannot tell a real change from a
   renumbering.
+  Until 2026-10-26 a numbered type followed by a digit (the next
+  component's length prefix) kept its number, and a function-value enum
+  whose last component is `u64`, `u32`, `u8` or `f64` counted as a
+  numbered type named with the raw numbers of its components: such names
+  changed in every item that used them when the numbering shifted, and
+  `l2r_boxed_N` and `l2r_cellzero_N` were not recognized
+  (`unreached-decls`, which shifts the numbering of most programs, showed
+  it).
 - **Where:** `tests/runtime/rr-fingerprint.py` (`FRESH_FN`, `INST`,
-  `Program`); new numbered name families need a pattern there.
+  `LEN_PREFIX`, `ends_in_component`, `Program.sub_name`, `Program`); new
+  numbered name families need a pattern there.
 - **Remove only if:** lean2rr emits canonical names itself (a sorted,
   canonically named output was asked for by the redesign's reviews).
 

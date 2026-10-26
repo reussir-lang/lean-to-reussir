@@ -8,6 +8,14 @@
 # `3000000000`, `2^32 - 1`, `2^62` and `-2^62 - 1 : Int`) get a once-cell
 # `l2r_boxed_N`; the others are boxed in line (`constIsImmediate`; review of
 # step D: `k5 : Nat := 5` had one).
+# Also the work of `constIsImmediate` on tests/runtime/IntConstSquares (not
+# a runtime test: native Lean runs out of memory at its startup), a chain of
+# `Int` constants that square a number 36 times in all, one of them in a
+# box: `constNumValue?` gives up at the first value from 2^64, so lean2rr
+# translates it within 120 s under an 8 GB address-space limit (`ulimit -v`;
+# lean2rr reserves about 4 GB of address space at startup), and the box of
+# `c6` is made once (a cell). Without the limit lean2rr computed 3^(2^36)
+# and ran out of memory.
 # Also the reads at an index word (lean2rr's `bindReadIndex`) on
 # tests/runtime/RtNatIdxWord, with its .opts (`typed-arrays` and
 # `compact-arrays` off): each of the ten `_w` reads of the prelude is
@@ -89,6 +97,29 @@ else
     echo "FAIL $P: boxed once: $(boxed "$OUT/$P.rr")(expected $want)"; status=1
   else
     echo "ok   $P: once-cells only for the constants whose box is a cell"
+  fi
+fi
+# The constants that square a number many times: translated under an
+# address-space limit and a timeout, `c6` boxed once.
+P=IntConstSquares
+OUT=$BASE/$P
+mkdir -p "$OUT"
+cp "$HERE/$P.lean" "$OUT/"
+if ! (cd "$OUT" && lean -o "$P.olean" "$P.lean") > "$OUT/lean.log" 2>&1; then
+  echo "FAIL $P: lean failed (see $OUT/lean.log)"; status=1
+else
+  (ulimit -v 8000000 && cd "$OUT" && LEAN_PATH="$OUT" L2R_SHIM_DIR="$ROOT/lean2rr/.lake/build/lib/lean" \
+     LEAN_STACK_SIZE_KB=1048576 timeout 120 "$LEAN2RR" "$P" --emit rr --prelude "$ROOT/runtime/prelude.rr" \
+     -o "$OUT/$P.rr") > "$OUT/$P.rr.log" 2>&1
+  rc=$?
+  if [ $rc -eq 124 ]; then
+    echo "FAIL $P: the translation took more than 120 s (see $OUT/$P.rr.log)"; status=1
+  elif [ $rc -ne 0 ]; then
+    echo "FAIL $P: did not translate $P under an 8 GB address-space limit, exit $rc (see $OUT/$P.rr.log)"; status=1
+  elif ! grep -A3 '^fn l2r_boxed_[0-9]*_init' "$OUT/$P.rr" | grep -q '\bl_c6___l2r_0_()'; then
+    echo "FAIL $P: no l2r_boxed_N_init reads c6 (see $OUT/$P.rr)"; status=1
+  else
+    echo "ok   $P: translated under an 8 GB address-space limit, c6 boxed once"
   fi
 fi
 # The reads at an index word. idxword OUT.rr: the shape of RtNatIdxWord's

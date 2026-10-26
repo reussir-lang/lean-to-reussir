@@ -61,7 +61,13 @@ def calleeOf (f : Name) : LowerM Callee := do
       noteRefusedExtern orig
       return .extern orig (key.map (·.typeArgs) |>.getD #[]) ps r
   -- A monomorphic extern kept under its own name: take Lean's persisted mono signature.
+  -- Only an extern: Stage 2 records every declaration it compiles in Lean's
+  -- mono extension (`saveMono`, `ExtractClosedK`), also those that a pass
+  -- leaves out later (`unreached-decls`, `unread-fields`); a name with code
+  -- that the program does not have is an internal error, not an extern.
   if let some d ← getMonoDecl? f then
+    unless d.value matches .extern _ do
+      throwError "lean2rr: unknown callee {f}: a declaration with code that the translated program does not have (internal error: a pass left it out while code still names it)"
     noteRefusedExtern f
     let (ps, r) := splitFnType d.type d.params.size
     return .extern f #[] ps r

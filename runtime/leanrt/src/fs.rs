@@ -41,6 +41,20 @@ use std::mem::MaybeUninit;
 
 pub type LHandle = Rc<Box<dyn Any>>;
 
+/// A slot of the run, one for the program (Lean code runs on one thread at
+/// a time).
+/// The last-error slot `LAST` is swapped per context (`swap_last`).
+/// `TEMP_PATH` and `ENV_FOUND` are result slots, as proc.rs's `ENDS` and
+/// `OUTPUT`: a primitive stores a second result there and the glue that
+/// called it reads it at once (`l2r_proc_end` after `l2r_proc_spawn`,
+/// `l2r_proc_output_str` after `l2r_proc_output`, the temporary file's path
+/// after its creation, `l2r_getenv_found` after
+/// `l2r_getenv`). One slot serves every context: this holds because nothing
+/// between the store and the reads can switch contexts (after its store the
+/// primitive only releases its arguments, strings, arrays of strings and a
+/// `Bool` array, and the glue reads before anything else runs). An effect
+/// point there, or a release that can run Lean code, would let another
+/// context read this one's result.
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
@@ -529,7 +543,8 @@ pub fn set_current_dir(p: &[u8]) {
     record(lio::fs::set_current_dir(p));
 }
 
-/// The path of the file the last `create_temp_file` created.
+/// The path of the file the last `create_temp_file` created (a result slot:
+/// see `Global`).
 static TEMP_PATH: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
 
 /// `IO.FS.createTempFile`: the handle; its path is then `temp_file_path()`.
@@ -558,7 +573,8 @@ pub fn create_temp_dir() -> LStr {
 /// it, and the next lookup reuses its room (natively `getenv` returns a
 /// pointer into the environment, and `mk_string` makes the only copy).
 static ENV_VALUE: Global<Vec<u8>> = Global(UnsafeCell::new(Vec::new()));
-/// Whether the last `getenv` found a value (`getenv_found`).
+/// Whether the last `getenv` found a value (`getenv_found`; a result slot:
+/// see `Global`).
 static ENV_FOUND: Global<bool> = Global(UnsafeCell::new(false));
 
 /// `IO.getEnv name` (lean-runtime's `io::env::get_env`), one lookup: the

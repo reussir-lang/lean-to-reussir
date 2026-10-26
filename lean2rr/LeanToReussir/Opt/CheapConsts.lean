@@ -11,8 +11,8 @@ from small literals, constructors and total scalar conversions, reading the
 once-cell costs more than computing the value, so it is recomputed at every
 use instead (translation plan §5.12). Every `Nat` or `Int` such a constant
 builds must cost no allocation (NatEncoding): a literal (any is free, a
-read-only object), and a computed value that is small (`natIsSmall`,
-`intIsSmall`: in [-2^61, 2^61)). The limit on computed values comes from
+read-only object), and a computed `Int` that is small (`intIsSmall`: in
+[-2^61, 2^61)). The limit on computed values comes from
 leanrt's representation (until D8), where a bigger one was a heap number
 made at every use (RV8N-01). Reussir folds arithmetic on literals (`+`,
 `-`, negation) into a literal, so a bigger value computed from literals
@@ -37,11 +37,11 @@ def isUnboxedTy (t : RR.Ty) : LowerM Bool := do
 
 /-- A constant whose code only builds unboxed values from free literals
 and constructors (`Int.ofNat 0`, an enumeration value), every `Nat` and
-`Int` among them free: a literal (any is free), a computed
-`Nat.succ`, `Int.ofNat` or `Int.negSucc` that is small (`natIsSmall`,
-`intIsSmall`; a bigger `Nat`/`Int` is a heap big number). It cannot
-panic, trace or allocate, so it is recomputed at every use: cheaper than
-reading a once-cell (native Lean emits such constants as static data).
+`Int` among them free: a literal (any is free), a computed `Int.ofNat`
+or `Int.negSucc` that is small (`intIsSmall`; a bigger `Int` is a heap
+big number). It cannot panic, trace or allocate, so it is recomputed at
+every use: cheaper than reading a once-cell (native Lean emits such
+constants as static data).
 `known` holds the values of the `Nat`/`Int` variables bound so far when
 they are known (a value from another such constant is free but
 unknown). -/
@@ -76,20 +76,18 @@ partial def isCheapConst (c : Code .pure) (fuel : Nat := 8) (known : Std.HashMap
   | _ => return false
 where
   /-- A constructor application that builds a small value (its value when
-  it is a `Nat` or `Int`): `Nat.succ k`, `Int.ofNat k` and `Int.negSucc k`
-  small (`natIsSmall`, `intIsSmall`), for a known `k`; any other
-  constructor (an enumeration value, `Nat.zero`). -/
+  it is an `Int`): `Int.ofNat k` and `Int.negSucc k` small (`intIsSmall`),
+  for a known `k`; any other constructor (an enumeration value). The mono
+  code has no `Nat.succ` or `Nat.zero` application: `toMonoK`
+  (TypedToMono, in place of Lean's `toMono`) turns `Nat.succ k` into
+  `Nat.add k 1` and `Nat.zero` into the literal 0, and Lean's mono passes
+  after it make literals, never these constructors. -/
   smallCtor (f : Name) (args : Array (Lean.Compiler.LCNF.Arg .pure))
       (known : Std.HashMap FVarId Int) : Option (Option Int) :=
     let arg : Option Int := match args[0]? with
       | some (Lean.Compiler.LCNF.Arg.fvar x) => known[x]?
       | _ => none
-    if f == ``Nat.zero then some (some 0)
-    else if f == ``Nat.succ then
-      match arg with
-      | some k => if natIsSmall (k + 1).toNat then some (some (k + 1)) else none
-      | none => none
-    else if f == ``Int.ofNat then
+    if f == ``Int.ofNat then
       match arg with
       | some k => if intIsSmall k then some (some k) else none
       | none => none

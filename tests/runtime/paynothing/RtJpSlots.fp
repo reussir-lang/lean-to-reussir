@@ -1,10 +1,10 @@
 # Pay-nothing baseline of RtJpSlots (tests/runtime/RtJpSlots.lean), arguments ''.
-# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
+# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
 allocs 109617
 bytes 2284240
 native-allocs 229964
 native-bytes 4374515
-items 212
+items 211
 functions 148
 conversion-fns 0
 conversion-sites 0
@@ -34,7 +34,6 @@ item T_Ordering_# f6abd6abc0bf
 item T_Prod_# 01aa68650331
 item T_ST_Out_# d89b44c55864
 item T_StdGen_# 066265cc92ad
-item T_Std_IterStep_# 2e6b3397c95a
 item T_String_Slice_# 74f079416627
 item T_Tally_# 323356c6c92f
 item T_W_# e9ab9b769a5e
@@ -92,7 +91,7 @@ item l2r_any_rel_# c50983f8aa6e
 item l2r_any_rel_# d6cc8da4ddcc
 item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# e7f60d5b8ad4
-item l2r_any_releases f776e813c160
+item l2r_any_releases 913bd1aeb212
 item l2r_ap1_F3nNat3nNat 37285d0cb45b
 item l2r_ap1_F3nu324nbool bcd732154723
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd

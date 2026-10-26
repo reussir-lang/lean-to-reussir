@@ -3,8 +3,8 @@
 //! Lean's `process.cpp` does (through `posix_spawn`, with the forked child's
 //! steps reproduced: see that module).
 //!
-//! lean2rr's `Child` is a structure of its three stream fields (an `LHandle`
-//! for a piped stream) and two hidden fields, the pid and the `setsid` flag
+//! lean2rr's `Child` is a structure of its three stream fields (a boxed
+//! `LHandle` for a piped stream, else a boxed unit) and two hidden fields, the pid and the `setsid` flag
 //! (lean2rr/LeanToReussir/Lower/Process.lean). lean-runtime's process object
 //! (`ChildProcess`: the pid, the flag, and the state of a child it models
 //! when no stand-in process can be started) is kept here by pid, for
@@ -21,10 +21,24 @@ use lean_runtime::io::{Handle, StoppingSink};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 
+/// A slot of the run, one for the program (Lean code runs on one thread at
+/// a time).
+/// `ENDS` and `OUTPUT` are result slots, as fs.rs's `TEMP_PATH` and
+/// `ENV_FOUND`: a primitive stores a second result there and the glue that
+/// called it reads it at once (`l2r_proc_end` after `l2r_proc_spawn`,
+/// `l2r_proc_output_str` after `l2r_proc_output`, the temporary file's path
+/// after its creation, `l2r_getenv_found` after
+/// `l2r_getenv`). One slot serves every context: this holds because nothing
+/// between the store and the reads can switch contexts (after its store the
+/// primitive only releases its arguments, strings, arrays of strings and a
+/// `Bool` array, and the glue reads before anything else runs). An effect
+/// point there, or a release that can run Lean code, would let another
+/// context read this one's result.
 struct Global<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for Global<T> {}
 
-/// The parent's ends of the last spawned child's piped streams.
+/// The parent's ends of the last spawned child's piped streams (a result
+/// slot: see `Global`).
 static ENDS: Global<[Option<Handle>; 3]> = Global(UnsafeCell::new([None, None, None]));
 
 /// The spawned children's process objects, by pid.
@@ -119,7 +133,8 @@ pub fn kill_child(pid: u32, new_session: bool) {
     record(child(pid, new_session).kill());
 }
 
-/// The standard output and standard error of the last `output`.
+/// The standard output and standard error of the last `output` (a result
+/// slot: see `Global`).
 static OUTPUT: Global<(Vec<u8>, Vec<u8>)> = Global(UnsafeCell::new((Vec::new(), Vec::new())));
 
 /// `IO.Process.output args input?` (lean-runtime's `io::process::output`):

@@ -1,7 +1,7 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
-# Written by tests/runtime/paynothing-check.sh --update, Nat and Int as --int-backend rcgmp; native allocations for comparison.
-allocs 50259
-bytes 2213912
+# Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
+allocs 50260
+bytes 2214120
 native-allocs 64913
 native-bytes 2546211
 items 288
@@ -94,7 +94,7 @@ item l2r_any_rel_# ba250db4e619
 item l2r_any_rel_# c22eb239ffb3
 item l2r_any_rel_# de582e5680bb
 item l2r_any_rel_# e7f60d5b8ad4
-item l2r_any_releases 9af6b15bb94b
+item l2r_any_releases f6a9ce8c8683
 item l2r_ap1_F3nu324nbool bcd732154723
 item l2r_ap1_F7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 982388568fdd
 item l2r_ap2_F4nLStrF7nL2RUnit«T_EST_Out_#~9fdb2bbcd367» 79eac63a4e00
@@ -117,7 +117,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body 1c1f9470516b
+item l2r_main_body 08ff061c2ae1
 item l2r_main_on_thread 4f4adafe091e
 item l2r_nullary_of_index_«T_List_#~aeda86a38d96» 94aed60e17ee
 item l2r_nullary_of_index_«T_T_#~88c57bff0e39» f990d51b2718
@@ -237,7 +237,7 @@ item l_T_toList___l2r_#_ 1190e97e79fb
 item l_U_hash___l2r_#_ 7b8363208947
 item l_U_size___l2r_#_ fe181bf1dd43
 item l_WellFounded_opaqueFix_u2083___at___00String_Slice_contains___at___00String_anyAux_spec__0_spec__0___l2r_#____redArg___l2r__flat 89f8ab007205
-item l___private_Init_Data_Array_Basic_0__Array_forIn_x27Unsafe_loop___at___00main_spec__7___l2r_#____l2r__flat c829c1f36e2d
+item l___private_Init_Data_Array_Basic_0__Array_forIn_x27Unsafe_loop___at___00main_spec__7___l2r_#____l2r__flat da0314d1cf08
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0 a75f5fc30ab6
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____closed__0_init ec216d4e8e3c
 item l___private_Init_Data_Array_Basic_0__Array_mapMUnsafe_map___at___00main_spec__6___l2r_#____l2r__split_0_ 42a48cf341b8
@@ -260,7 +260,7 @@ item l_balanceR___l2r_#_ 82ac5bf2f995
 item l_big___l2r_#_ 2055bd2864ce
 item l_instInhabitedT___l2r_#_ 7f674612a608
 item l_instInhabitedT___l2r_#__init 94fd285a8c68
-item l_main___l2r_#_ fd7ca7552fec
+item l_main___l2r_#_ 6d0de1200920
 item l_main___l2r_#____closed__0 9908f072f8dd
 item l_main___l2r_#____closed__0_init a98d77754d15
 item l_main___l2r_#____closed__1 9565d3c59173

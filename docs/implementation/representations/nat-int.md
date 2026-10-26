@@ -257,11 +257,13 @@ accepted and does nothing, `--int-backend leanrt` and
     `PassConfig`, `MonoConfig` and `LowerCtx`), and `filterIntBackend`
     kept the prelude's blocks of the chosen one. D8 removed them (the
     history entry above).
-  - **Cost model** (`NatEncoding.lean`). `natIsSmall`, `intIsSmall`
+  - **Cost model** (`NatEncoding.lean`). `intIsSmall`
     ([-2^61, 2^61), rcgmp's immediates) and `natSmallBits` (61); every
     literal is free (a read-only object of the program's data). Users:
-    `cheap-consts` (any literal is cheap; a computed `Nat.succ`,
-    `Int.ofNat`, `Int.negSucc` within the immediates), `constComputes`
+    `cheap-consts` (any literal is cheap; a computed `Int.ofNat` or
+    `Int.negSucc` within the immediates; the mono code has no `Nat.succ`
+    or `Nat.zero` application, which `toMonoK` turns into `Nat.add k 1`
+    and the literal 0), `constComputes`
     (Mono: a literal never computes), `mod-pow2` (a literal divisor `2^k`
     from `k = 61`). A wrong answer costs time, never a result.
   - **Literals.** A `Nat` literal of any size is Reussir's literal,
@@ -284,7 +286,12 @@ accepted and does nothing, `--int-backend leanrt` and
     except one whose value the box holds as an immediate
     (`constIsImmediate`: `constNumValue?` evaluates the constant's code of
     literals, `Int.ofNat`, `Int.negSucc`, `Int.neg`, `Int.add`, `Int.sub`,
-    `Int.mul`, `Int.pow`; `natBoxIsImmediate`: a `Nat` below 2^63;
+    `Int.mul`, `Int.pow`, and gives up at the first value from 2^64 in
+    magnitude, so constants that square a number many times cost no memory
+    in translation: such a constant is boxed once, as a cell (input
+    `IntConstSquares`, checked by `int-backend-check.sh` under an
+    address-space limit; native Lean runs out of memory at startup there);
+    `natBoxIsImmediate`: a `Nat` below 2^63;
     `intBoxIsImmediate`: an `Int` in the `int32` range or in [2^32, 2^62)
     or [-2^62, -2^31), the rule of the prelude's `l2r_any_of_int` and
     `l2r_int_box_wide`), which is boxed in line (review of step D:

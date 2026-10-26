@@ -19,7 +19,8 @@ program's data, one of rcgmp's immortal integers (`Lower/Values`'
 counts no number literal as an allocation). The rules ask here:
 
 - `Opt/CheapConsts`: a constant that builds only small values is
-  recomputed at every use (`natIsSmall`, `intIsSmall`);
+  recomputed at every use (`intIsSmall`; every `Nat` it builds is a
+  literal);
 - `Opt/ModPow2`: the smallest literal power of two it rewrites
   (`natSmallBits`);
 - `Lower/Code`: `constIsImmediate` (`boxed-consts` boxes a constant in line
@@ -35,11 +36,8 @@ model and the boxes).
 
 namespace LeanToReussir
 
-/-- Whether `Nat` value `n` is small, an immediate: below 2^61 (rcgmp's
-`Handle::immediateMax` is 2^61 - 1). -/
-def natIsSmall (n : Nat) : Bool := n < 2 ^ 61
-
-/-- Whether `Int` value `i` is small, an immediate: in [-2^61, 2^61). -/
+/-- Whether `Int` value `i` is small, an immediate: in [-2^61, 2^61)
+(rcgmp's `Handle::immediateMax` is 2^61 - 1). -/
 def intIsSmall (i : Int) : Bool := -(2 ^ 61 : Int) ≤ i && i < 2 ^ 61
 
 /-- Whether a box (`Box`, Lean's `lean_object *`) holds `Nat` value `n` as
