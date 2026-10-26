@@ -53,14 +53,25 @@ and several optional passes help token reuse (see
 
 {{svg:freestack}}
 
-- **Containers of the runtime** (arrays, string blocks, task and thunk cells)
-  are `leanrt` types. Their `Drop` frees the last reference through the same
-  per-thread stack that Reussir's drop glue uses. So a
-  value deep through records and containers is freed at a bounded depth.
-- **Order of releases.** File handles close (and flush) and promises resolve
-  in Lean's order: last pushed, first freed. An array set or pop frees the
-  record that it removes the same way. One difference stays: the first
-  cell of a free that user code starts at a record (plan §10).
+- **One pending stack.** Reussir and `leanrt` share one stack of pending
+  releases per thread. The first release that starts when no free runs is
+  the outermost free. It empties the stack, last pushed first, and then
+  runs the end work: promise dependents and other Lean code run only
+  after the free. A release that comes while a free runs goes on the
+  stack.
+- **Records.** Reussir frees a list in a loop. For other shapes (a tree,
+  a chain of closures) it releases the fields in field order and pushes
+  the child records that it must free. The last child goes on at once.
+- **Objects of the runtime** (arrays, boxes, string blocks, task and thunk
+  cells, file handles, promises) are `leanrt` types. `leanrt` pushes them
+  on the same stack while a free runs. So a value deep through records,
+  containers and boxes is freed at a bounded depth.
+- **Order of releases.** Inside a free, file handles close (and flush) and
+  promises resolve in Lean's order: last pushed, first freed. An array set
+  or pop frees the record that it removes the same way. Two differences
+  stay (plan §10). When user code drops a record, no free runs at its top
+  levels, so the releases go in field order there. A value that two
+  fields of one freed cell hold can come out at another place.
 - **Reference `set`.** `l2r_rc_set_ref` stores the new value first, then
   releases the old one as `lean_dec` does, and then the reference. So code
   that the release runs (the `sync` dependents of a promise it drops) sees
@@ -152,8 +163,10 @@ first resolution has an effect: the crate's `resolve` examines the promise
 and stores the value in one step, after its wait for the context's writer
 threads. Dropping the
 last reference to an unresolved promise resolves it with `none`, as
-natively. When a free releases the promise, the resolution waits until the
-free ends. **`Std.Sync`** mutexes
+natively. When a runtime free releases the promise, the resolution waits
+until the free ends. When Reussir's release of a record that user code
+drops reaches the promise, no runtime free runs, and the promise is
+resolved at once. **`Std.Sync`** mutexes
 and condition variables are lean-runtime's objects in runtime handles; a
 thread that waits blocks its context.
 
@@ -381,10 +394,13 @@ call. Each step passed lean2rr's full suite before its merge.
   through the pending stack. So a value that the array holds twice is
   released at its last index. The second pass calls the release of a
   boxed record at once when the stack would pop that record next. When
-  no free runs, no work is pending and the first pass keeps one value
+  no free runs and the first pass keeps one value
   only, the runtime frees the array and then releases that value without
   a step on the stack (not if the value is an array). The order of
-  releases does not change.
+  releases does not change. When a free runs, the runtime frees an array
+  that holds only immediates at once. It puts another array on the
+  pending stack as one cell (8 bytes), and the cell puts the array's
+  step on the stack when the free gets to it.
   A copy of an array copies the words in one block and increments only
   the pointers.
 - **Boxed `Float` and `UInt64` values.** The runtime allocates their
@@ -393,12 +409,13 @@ call. Each step passed lean2rr's full suite before its merge.
   each type that it boxes. `leanrt` keeps these functions in a table by
   type number. When the last reference to a boxed record goes, `leanrt`
   puts the record's cell on the pending stack with the function of its
-  type. There is no dispatch on the type number in the program. When the
-  first 8 bytes of the cell are its header (an enum, or a record with an
-  8-byte field), the cell links to the cell that went on the stack before
-  it. Thus a list that a free releases whole takes no stack memory for its
-  boxed elements, as in Lean. The runtime frees a record that holds only
-  scalars at once.
+  type. There is no dispatch on the type number in the program. The
+  stack does not read or write the cell. Cells that go on the stack one
+  after the other with the same function share one entry, and the stack
+  keeps a pointer (8 bytes) for each cell. Thus a list that a runtime
+  free releases whole (the old value of a reference, an element of an
+  array) takes 8 bytes of stack memory for each boxed element while it
+  waits. The runtime frees a record that holds only scalars at once.
 - **Block sizes.** Up to 64 bytes, the runtime knows mimalloc's block size
   without a call.
 
@@ -482,13 +499,13 @@ list with each test: [Known differences](differences.html#lean-bugs-we-do-not-re
 
 - **The end of a free.** A stream that a free closes can give its last
   bytes to a writer thread (above, "Input and output"). lean2rr calls the
-  crate's `after_drain` at the end of that free. When no other release of
-  the free is pending, the call comes right after the close. When other
-  releases are pending (a handle in an array, a list or a structure), the
-  call comes at the end of the drain that does them. The context waits for
-  its writer threads there, and the other contexts run, as natively the
-  close blocks the thread. At the end of a drain, the promise resolutions
-  that the drain put off run first. Each waits only for the writer threads
+  crate's `after_drain` at the end of that free. When no runtime free
+  runs, the call comes right after the close. When a runtime free closes
+  the handle (a handle in an array, or in a list or structure that such a
+  free releases), the call comes at the end of that free. The context
+  waits for its writer threads there, and the other contexts run, as
+  natively the close blocks the thread. At the end of a free, the promise
+  resolutions that the free put off run first. Each waits only for the writer threads
   of the streams that the free closed before it reached the promise. Then
   the context waits for the other writer threads. The free reaches the
   elements of an array from the last, as natively. So a promise after a

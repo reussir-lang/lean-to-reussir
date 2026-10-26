@@ -217,23 +217,19 @@ impl Drop for FileHandle {
     /// the writer thread its flush may have handed the rest of its output
     /// to ends, while the other contexts run (lean-runtime's drain-end hook
     /// `after_drain`, docs/sched.md, "The glue", item 11; review HR-01..03):
-    /// - released while a drain runs (a container's free, a record's below
-    ///   the first cell): closed when the free reaches it, in Lean's order
-    ///   (`crate::drop`); the drain's end calls the hook (`task::drained`,
-    ///   installed here);
-    /// - otherwise closed now. With nothing pending on the thread's stack of
-    ///   pending work, the free is over right after the close, and the hook
-    ///   is called there, where a switch is allowed (the drop of a handle's
-    ///   last reference is a release in generated code or in a runtime
-    ///   function's FFI body, with no runtime state borrowed; neither
-    ///   leanrt's state nor lean-runtime's holds a stream handle, so none is
-    ///   dropped inside the scheduler). With something pending (Reussir's
-    ///   drop glue releases a record's members that are not record boxes at
-    ///   once, after it has pushed the record boxes before them, and drains
-    ///   them before it returns), a switch would leave them on the thread's
-    ///   stack, where another context's drain would pop them (review
-    ///   RS14-01): the drained hook is installed instead, and the end of the
-    ///   glue's drain calls `after_drain`, with the stack empty.
+    /// - released inside a free (`crate::drop::active`: a drain of the
+    ///   thread's stack, leanrt's or Reussir's glue's: a container, a box's
+    ///   payload, a record, and what they hold): closed when the free reaches
+    ///   it, in Lean's order (`crate::drop`); the drain's end work calls the
+    ///   hook (`task::drained`, asked for here, `pending::want_end_work`);
+    /// - otherwise closed now, and the hook is called right after the close,
+    ///   where a switch is allowed: nothing is pending on the thread
+    ///   (`crate::pending`'s stack, Reussir's and leanrt's, is empty while no
+    ///   free runs), and the drop of a
+    ///   handle's last reference is a release in generated code or in a
+    ///   runtime function's FFI body, with no runtime state borrowed
+    ///   (neither leanrt's state nor lean-runtime's holds a stream handle,
+    ///   so none is dropped inside the scheduler).
     ///
     /// lean-runtime's hook waits for nothing in a no-suspend scope, while the
     /// context holds a stream lock, or while a panic unwinds (then the
@@ -241,21 +237,17 @@ impl Drop for FileHandle {
     fn drop(&mut self) {
         let Some(h) = self.h.take() else { return };
         if crate::drop::active() {
-            crate::task::hook_drained();
             let moved = Box::new(Some(h));
             crate::drop::defer(Box::into_raw(moved) as usize, close_deferred);
+            crate::pending::want_end_work();
             return;
         }
         close(Some(h));
-        if reussir_rt::drop::depth() == 0 {
-            lean_runtime::sched::after_drain();
-        } else {
-            crate::task::hook_drained();
-        }
+        lean_runtime::sched::after_drain();
     }
 }
 
-unsafe fn close_deferred(p: usize) -> bool {
+unsafe extern "C" fn close_deferred(p: usize) -> bool {
     close(*Box::from_raw(p as *mut Option<Handle>));
     true
 }

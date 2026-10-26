@@ -1,0 +1,8 @@
+# A chain whose free leaves one pending child per level, alternating two release functions (review P1 of Reussir's
+# shared drop stack, patch 23-l): each pending child is a 24-byte entry of the stack while it waits; natively the
+# to-do list is linked through the freed objects. At 500000 pairs (10^6 levels), base l2r-base9 + 23-k..m: peak
+# 88.6 MB against native's 55.1 MB, under both integer representations (allocations as native's; bytes 2.26 times
+# native's growth: the vector's doublings); dev on l2r-base8 (whose drop patches linked pending records through their
+# headers) 45.7 MB. The bounds are today's, to notice a change: when Reussir links its own deferred records through
+# their headers (the follow-up), lower them to native's.
+125000 | 500000 | 2.3 4000 | rss 1 36000

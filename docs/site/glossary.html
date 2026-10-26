@@ -148,7 +148,7 @@ each concept has one term.</p>
 <dt>wait core</dt>
 <dd>A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.</dd>
 <dt>pending stack</dt>
-<dd>The per-thread stack of cells to free. Frees use it instead of recursion.</dd>
+<dd>The runtime's per-thread stack of releases to do. A release that comes while a runtime free runs goes on it instead of recursion. The outermost free empties it, last pushed first.</dd>
 <dt>internal panic</dt>
 <dd>An error of the runtime itself that ends the program at once, as Lean's <code>lean_internal_panic</code>: <code>INTERNAL PANIC:</code> and a message on the process's stderr (for example <code>out of memory</code>), then exit status 1, or an abort (134) under <code>LEAN_ABORT_ON_PANIC</code>. A <code>panic!</code> is not one: it prints its message and the program goes on.</dd>
 </dl>

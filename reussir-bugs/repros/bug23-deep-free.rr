@@ -1,0 +1,47 @@
+// Issue 23 (cost): freeing a deep value of a Worklist type (recursive, but
+// neither Direct nor TailLoop) keeps state per level with upstream's retcon
+// destructors. bug23-deep-free.c builds one of four values of N levels with
+// the trampolines below and prints how much peak RSS grew during its free:
+// one-sided trees of two recursive fields (left-deep, right-deep), a chain
+// of a 64-arm enum whose recursive member comes first (the shape of a
+// closure enum that captures the next closure, then a value), and
+// compositions of two recursive fields.
+//
+// Build: rrc bug23-deep-free.rr -o deep.o --emit obj --relocation-mode pic
+//        -O aggressive; cc deep.o bug23-deep-free.c -lreussir_rt (with the
+//        checkout's build/target-rt/release/deps as -L and rpath).
+// Run:   ./deep 1000000 SHAPE (0 to 3, one process each; run.sh runs all)
+// Expected: no growth per level (a few MiB of allocator noise at most).
+// Upstream 00906e38 (2026-10-25), in KiB: left-deep 83972, right-deep
+// 83972, 64-arm chain 608264, compositions 86020 (about 85, 85, 622 and 88
+// bytes per level). With 23-a to 23-j (l2r-base9): 2052, 2052, 0, 0;
+// with 23-a to 23-m (l2r-base9-shared): 0, 0, 0, 0.
+
+pub struct Box { value: u64 }
+pub enum Tree { Leaf, Node(Tree, Box, Tree) }
+pub enum Chain { End, K0(Chain, Box), K1(Chain, Box), K2(Chain, Box), K3(Chain, Box), K4(Chain, Box), K5(Chain, Box), K6(Chain, Box), K7(Chain, Box), K8(Chain, Box), K9(Chain, Box), K10(Chain, Box), K11(Chain, Box), K12(Chain, Box), K13(Chain, Box), K14(Chain, Box), K15(Chain, Box), K16(Chain, Box), K17(Chain, Box), K18(Chain, Box), K19(Chain, Box), K20(Chain, Box), K21(Chain, Box), K22(Chain, Box), K23(Chain, Box), K24(Chain, Box), K25(Chain, Box), K26(Chain, Box), K27(Chain, Box), K28(Chain, Box), K29(Chain, Box), K30(Chain, Box), K31(Chain, Box), K32(Chain, Box), K33(Chain, Box), K34(Chain, Box), K35(Chain, Box), K36(Chain, Box), K37(Chain, Box), K38(Chain, Box), K39(Chain, Box), K40(Chain, Box), K41(Chain, Box), K42(Chain, Box), K43(Chain, Box), K44(Chain, Box), K45(Chain, Box), K46(Chain, Box), K47(Chain, Box), K48(Chain, Box), K49(Chain, Box), K50(Chain, Box), K51(Chain, Box), K52(Chain, Box), K53(Chain, Box), K54(Chain, Box), K55(Chain, Box), K56(Chain, Box), K57(Chain, Box), K58(Chain, Box), K59(Chain, Box), K60(Chain, Box), K61(Chain, Box), K62(Chain, Box), K63(Chain, Box) }
+pub enum Fn { Id, Comp(Fn, Fn) }
+
+pub fn leaf() -> Tree { Tree::Leaf }
+pub fn left(t: Tree, v: u64) -> Tree { Tree::Node{t, Box{value: v}, Tree::Leaf} }
+pub fn right(t: Tree, v: u64) -> Tree { Tree::Node{Tree::Leaf, Box{value: v}, t} }
+pub fn tree_consume(t: Tree) -> u64 { match t { Tree::Leaf => 0, _ => 1 } }
+pub fn end() -> Chain { Chain::End }
+pub fn first(c: Chain, v: u64) -> Chain { Chain::K0{c, Box{value: v}} }
+pub fn last(c: Chain, v: u64) -> Chain { Chain::K63{c, Box{value: v}} }
+pub fn chain_consume(c: Chain) -> u64 { match c { Chain::End => 0, _ => 1 } }
+pub fn id() -> Fn { Fn::Id }
+pub fn comp(f: Fn, g: Fn) -> Fn { Fn::Comp{f, g} }
+pub fn fn_consume(f: Fn) -> u64 { match f { Fn::Id => 0, _ => 1 } }
+
+extern "C" trampoline "wl_leaf" = leaf;
+extern "C" trampoline "wl_left" = left;
+extern "C" trampoline "wl_right" = right;
+extern "C" trampoline "wl_tree_consume" = tree_consume;
+extern "C" trampoline "wl_end" = end;
+extern "C" trampoline "wl_first" = first;
+extern "C" trampoline "wl_last" = last;
+extern "C" trampoline "wl_chain_consume" = chain_consume;
+extern "C" trampoline "wl_id" = id;
+extern "C" trampoline "wl_comp" = comp;
+extern "C" trampoline "wl_fn_consume" = fn_consume;

@@ -74,7 +74,8 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
     reference, a thunk or task cell, a handle, a promise, another array): a pointer
     with the program's payload number (`boxNum`, from 16; from `0x8000 +
     16` for a leaf type, `boxIsLeaf`: a record or enum whose fields are
-    all scalars), wrapped in an `ElemBox` when it cannot cross the FFI
+    all scalars, or a typed array of leaf elements, `boxLeafArrayElem`),
+    wrapped in an `ElemBox` when it cannot cross the FFI
     boundary. A shared enum's nullary variant is the immediate of its
     index; a function value's nullary variant keeps its type,
     `(num << 32) | index`. A type with nullary variants (such an enum, a
@@ -356,7 +357,8 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
 - **What:** For each program payload type `T` with number `n`, lean2rr
   emits `fn l2r_any_rel_<n>(x : T) -> unit { }` (Reussir drops `x` at its
   type) and the trampoline `l2r_any_rel_<n>_c`, whose C signature is
-  `void (cell)`, the type of a release on Reussir's pending stack. A
+  `void (cell)`, the type of a release on leanrt's pending stack
+  (`pending::defer_cell`). A
   texture, `l2r_any_releases`, holds a static table of
   `leanrt::any::Rel(n, l2r_any_rel_<n>_c)` and installs it in leanrt
   (`leanrt::any::install`). The trampoline `l2r_any_init_c` calls it;
@@ -393,8 +395,9 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   Numbers 1 to 15 are leanrt's kinds: 1 a big `Nat`, 2 a big `Int`, 3
   `LStr`, 4 and 5 the `f64` and large-`u64` cells, 6 `RVec<LAny>`, and 7 to
   12 the arrays of scalars (below); 13 to 15 are free. 16 and up are the
-  program's (`0x4010` up with `WIDE_BIT` for a type whose cell has a wide
-  header, `0x8010` up with `LEAF_BIT` for a leaf type: below). A `Float` and a `UInt64`/`USize` from 2^63 go into a cell
+  program's (16 to `0x7fff`; `0x8010` up with `LEAF_BIT` for a leaf
+  type: below). A
+  `Float` and a `UInt64`/`USize` from 2^63 go into a cell
   (`Rc`), as natively. The arrays of scalars:
   - 7 `NUM_BYTES`, `RVec<u8>`: `ByteArray`; a compact `Array` of `UInt8`,
     `Bool` or an enumeration of at most 256 constructors;
@@ -535,139 +538,142 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   1 it calls `any::release_last(w)` (out of line, `#[cold]`), which tests
   for a program number first (16 and up). A program payload's
   release is `RELEASES[num]` (the program's `l2r_any_rel_<num>_c`, see
-  above); its cell, the word without the number, is deferred as one
-  pending cell with `__reussir_drop_defer(cell, release)` and drained with
-  `__reussir_drop_drain()` (`drop::free_deferred`; switch step 11's rule
-  for records, `drop::free_unique`). Inside a free that only pushes the
-  cell; outside one Reussir's `drain_one` runs the release inside a new
-  drain and then what it pushed. A number with `WIDE_BIT` (`0x4000`, next
-  entry) is deferred with `__reussir_drop_defer_wide` instead
-  (`drop::free_deferred_wide`). A leaf payload (a number with `LEAF_BIT`,
+  above). Its cell, the word without the number, is deferred as one
+  pending cell (`drop::free_deferred`: `pending::defer_cell(cell,
+  release)`; switch step 11's rule for records, `drop::free_unique`).
+  Inside a drain (leanrt's or Reussir's glue's) that only pushes the
+  cell. Outside one it is the outermost free: it runs the release at
+  once, then what the release pushed (cells with one release function
+  share one entry of the stack: next entry). A leaf
+  payload (a number with `LEAF_BIT`,
   `0x8000`: lean2rr's `boxIsLeaf`, a record or enum whose fields are all
-  scalars) is released by a direct call of its release, also inside a
-  free. leanrt's own kinds go to `release_kind`. A number without a release
+  scalars, or a typed array whose elements leanrt frees at once, an `RVec`
+  of `Nat`, `Int`, `LStr` or an array of scalars: `boxLeafArrayElem`, the
+  list of leanrt's `leaf_elems!`) is released by a direct call of its
+  release, also inside a free. leanrt's own kinds go to `release_kind`. A number without a release
   installs the table if that was not done yet, else it is Lean's internal
   panic (`release_unregistered`). The array free calls a payload's release
-  directly where the stack would pop the deferred cell next
+  directly where the stack would pop the pending cell next
   (`release_last_in_step` in its step; an array that keeps one element,
   outside a free: ownership.md, "The array free calls a payload's release
   where the stack would pop it next").
 - **Why:** Only the program knows its types' release (Reussir's drop glue).
-  Through the worklist, a chain of nested boxes is freed in a loop, not by
-  recursion (the probe frees chains of 10^6 boxes on a 1 MiB stack, and
-  `RtBoxDeepChain` 10^6 nested boxes on a 1 MiB stack), and in native
-  Lean's order: inside a free, a record's observable members (a file
-  handle, a promise) are pushed and released last field first, as
-  `lean_dec`/`lean_del` frees a box's payload. A direct call of the
-  program's release outside a free runs the payload's glue in field order
+  Reussir sees a box as an opaque object and calls its drop hook
+  directly, so a chain of nested boxes is a chain of native calls. Through
+  the stack of pending drops it is freed in a loop instead (the probe frees chains of
+  10^6 boxes on a 1 MiB stack, and `RtBoxDeepChain` 10^6 nested boxes on
+  a 1 MiB stack), and in native Lean's order: inside a free, a record's
+  observable members (a file handle, a promise) are pushed and released
+  last field first, as `lean_dec`/`lean_del` frees a box's payload. A
+  direct call of the program's release outside a free runs the payload's
+  glue in field order
   instead (a box of `H2(A, B)`: `AB`, natively `BA`; a chain of boxes
   `C(1, C(2, C(3)))`: `132`, natively `321`), and runs promise dependents
   in the middle of it; the probe checks the native orders (any-probe,
-  `s_order`). A leaf holds nothing to order, frees only its own cell and
-  pushes nothing (Reussir frees a leaf record member at once in its glue
-  too, never deferred), so its direct release changes no order that a
-  program can see, inside a free or outside one. Deferred inside a free it
-  took one entry of Reussir's stack (24 bytes) per leaf while others
-  waited: Reussir's glue frees a list along its tail before the drain pops
-  anything, so a `List P` of structures of scalars dropped whole held one
-  entry per element (hunt HMEM-01: n = 4M, 382 MB against native's 258
-  MB; consumed cell by cell, 195 MB). A deferral that is not `_wide`
-  neither reads nor writes the cell. `release_last` stays `#[cold]`: the
+  `s_order`). A leaf holds nothing to order, frees its own cell and at
+  most leaves under it (a typed array of leaf elements) and pushes nothing
+  (Reussir frees a leaf record member at once in its glue too), so its
+  direct release changes no order that a
+  program can see, inside a free or outside one. Pushed inside a free it
+  took one entry of the stack (24 bytes) per leaf while others
+  waited: inside a drain (a reference set, an array element),
+  Reussir's glue frees a list along its tail before the drain pops
+  anything, so a `List P` of structures of scalars freed whole held one
+  entry per element (hunt HMEM-01, measured for a list that user code
+  dropped, when Reussir's glue still pushed onto a shared stack: n = 4M,
+  382 MB against native's 258 MB; consumed cell by cell, 195 MB). A
+  boxed typed array of leaf elements is a leaf too: its release is the
+  array's free, which frees the elements and the block at once
+  (`free_leaves`) and pushes nothing. Pushed inside a free it waited as
+  one pending cell per array: a `List (Array Nat)` of 10^6 one-element
+  arrays freed by a reference's `set` (`RtArrayPileFree`, mode `ref`)
+  requested +54.6 MB against native's +42.0 MB and peaked at 82 MB
+  against 69 MB; released directly, +42.0 MB (native's bytes) and 62 MB,
+  under both integer representations. The stack never reads or writes a
+  cell.
+  `release_last` stays `#[cold]`: the
   drops in a loop then keep their decrement in line and the call out of
   the way (without it, sieve +0.5 % instructions from the loop's layout,
   monadic-interp -0.1 %).
-- **Where:** `runtime/leanrt/src/any.rs`: `release_last` (`LEAF_BIT`,
-  `WIDE_BIT`), `release_kind`, `release_unregistered`;
-  `runtime/leanrt/src/drop.rs`: `free_deferred`, `free_deferred_wide`;
-  `LowerBase.lean`: `boxIsLeaf`, `boxNum`. Tests:
+- **Where:** `runtime/leanrt/src/any.rs`: `release_last` (`LEAF_BIT`),
+  `release_kind`, `release_unregistered`;
+  `runtime/leanrt/src/drop.rs`: `free_deferred`;
+  `runtime/leanrt/src/pending.rs`: `defer_cell`;
+  `LowerBase.lean`: `boxIsLeaf`, `boxLeafArrayElem`, `boxNum`. Tests:
   leanrt's `any::tests` (`deep_chain_frees_without_recursion`,
   `deep_chain_of_two_numbers`, `fields_in_lean_order`,
   `a_leaf_payload_is_released_directly`, `one_kept_element_without_a_step`),
   any-probe, `RtBoxDeepChain`, `RtBoxPackFreeOrder`, `RtDepDropOrderBoxed`,
-  `RtListDropWhole` (alloc-check: peak memory), the order tests of
+  `RtListDropWhole` (alloc-check: peak memory), `RtBoxLeafArrays` and
+  `tests/runtime/box-leaf-check.sh` (the leaf numbers of boxed typed
+  arrays, under both integer representations), `RtArrayPileFree`
+  (alloc-check, mode `ref`), the order tests of
   ownership.md.
 - **Remove only if:** Reussir gives opaque types a drop glue of their own
   that defers.
 
-### A payload whose cell has a wide header is deferred `_wide`: consecutive cells take no memory
+### Pending cells with one release function share one entry; the stack never touches a cell
 
-- **What:** lean2rr numbers a non-leaf payload type whose Reussir cell has
-  a wide header with `WIDE_BIT` (`boxWideBit`, `0x4000`: numbers `0x4010`
-  to `0x7fff`; the others `16` to `0x3fff`, the leaves `0x8010` up;
-  `boxNum`, `boxIsWide`). A wide header is Reussir's rule for
-  `__reussir_drop_defer_wide` (`hasWideHeader` in Reussir's
-  `lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp`):
-  the cell's first 8 bytes are the 32-bit count and then a 32-bit word that
-  is a fused tag below 2^16 or padding. That holds for
-  - a shared enum (`enum`, shape `.enum`) of at most 2^16 constructors:
-    Reussir fuses its tag into the header's second word
-    (`RecordType::hasFusedHeader`: a variant whose capability is not
-    `value`);
-  - a shared struct (`struct`, shape `.struct`, not `[value]`; the
-    reference records `L2RRef`, typed or not; an `ElemBox`) whose alignment is 8: its
-    members start at offset 8, after 4 bytes of padding (the box is
-    `{i32 count, record}`). Its alignment is 8 when a member is 8-aligned
-    (`rrAlign8`): a `u64`, `i64` or `f64`; a member Reussir stores as a
-    pointer (a shared record or enum, a function value, a Reussir `Cell`
-    or closure, an opaque runtime type such as `Nat`, `LStr`, `LAny`,
-    `RVec`: `memberStorageType` in Reussir's `lib/IR/ReussirTypes.cpp`); a
-    `[value]` struct or tuple that holds one;
-  - a function value: the shared enum `L2RFn_…` of its run-time type
-    (`fnTypeItems`), a fused enum as above. Its variants are known only
-    at the end of the translation, after its number is given, so
-    `fnTypeItems` stops with an internal error if the enum of a function
-    type numbered with `WIDE_BIT` has more than 2^16 constructors
-    (`boxWideMaxCtors`): the mark is never wrong.
-  Not marked: runtime types (`RVec`, `LCell`, `LHandle`: leanrt's or
-  Reussir's blocks, not Reussir records), a struct whose members are all
-  4-aligned or less (a leaf anyway). A thunk's or task's cell (`LCell`)
-  can never be wide: it keeps its task index in the header's second word.
-  An array as a list's head stays one step entry each (not done: needs a
-  step-linking mechanism). `release_last` defers
-  a marked payload's cell with `__reussir_drop_defer_wide`
-  (`drop::free_deferred_wide`). When the top entry of Reussir's stack is a
-  run, the cell links to the run's last cell through its header (the
-  count and the upper 16 bits of the second word: the offset and the
-  release's index), so the run grows by one cell and the stack by nothing.
-  The drain sets both back (count 1, upper bits 0, the tag kept) before it
-  calls the release, which then sees the cell as it was deferred.
-  Example: a `List (Nat × Nat)` dropped whole. Reussir's glue for
-  `T_List(LAny, T_List)` releases each head (the box of a `T_Prod(LAny,
-  LAny)`, a wide struct) and frees the cell, then goes on along the tail;
-  each head's cell links to the one before, and the drain pops them last
-  first after the walk.
-- **Why:** Before, every head took one 24-byte entry of the stack's
-  vector, which grew by doubling during the walk (hunt HMEM-01: n = 4M,
-  391 MB against native's 258 MB; consumed cell by cell, 195 MB). Native
-  Lean's to-do list links the freed objects themselves and takes no
-  memory. The order of releases is the same: a link only stores the run's
-  next cell in the cell. Outside a free the stack is empty at almost every
-  deferral, so no link forms; the wide deferral costs about 3 instructions
-  more there (monadic-interp +0.6 % instructions when every payload was
-  deferred `_wide` before the mark). After the change, at n = 4M: 195 MB
-  for the pairs and for structures of scalars (the leaf rule above), as
-  when the list is consumed cell by cell; `RtListDropWhole` at n = 10^6
-  (five head types): peak 46040 to 76756 KB against native's 55216 to
-  102332 KB (before: 99304 to 132072 KB), and the bytes requested equal
-  native's (before: 1.7 to 2.3 times, the stack's vector). Function
-  values got the mark later (HRT2-02): a `List (Nat → Nat)` dropped whole
-  peaks at 45596 KB at n = 10^6 and 162396 KB at n = 4M, against native's
-  69496 and 258016 KB (before: 89196 and 275496 KB), and lean2rr requests
-  30 MB where native requests 42 MB (before: 68 MB).
-- **Where:** `LowerBase.lean`: `boxWideBit`, `boxWideMaxCtors`,
-  `rrAlign8`, `boxIsWide`, `boxNum`; `Lower/Finish.lean`: `fnTypeItems`
-  (the check of a boxed function type's enum);
-  `runtime/leanrt/src/any.rs`: `WIDE_BIT`, `release_last`;
-  `runtime/leanrt/src/drop.rs`: `free_deferred_wide`; Reussir's
-  `reussir_rt::drop` (`__reussir_drop_defer_wide`, `State::link`,
-  `unlink`). Tests: leanrt's `any::tests::wide_cells_link_into_one_run`
-  (the depth a release sees stays 1 for wide cells, grows by one per
-  narrow cell), `fields_in_lean_order` and `deep_chain_of_two_numbers`
-  with a wide number; `RtListDropWhole` (alloc-check: peak memory of a
-  list of pairs, of options, of lists and of function values dropped
-  whole within native's plus 4 MB). An array as a list's head is not a program payload with a
-  release (`NUM_ARRAY`, `RVec` of records): its free stays a step, one
-  entry each.
-- **Remove only if:** Reussir's pending stack changes what a wide
-  deferral writes into the cell, or its layout rule (`hasWideHeader`)
-  changes; then `boxIsWide` must follow, or answer false.
+- **What:** the stack of pending drops (Reussir's `drop_stack`, which
+  leanrt uses through `pending.rs`; the runs were leanrt's own design,
+  Reussir's local patch 23-l) keeps a payload's cell only as a pointer: it never reads or writes the cell, so
+  it does not depend on Reussir's layout of the cell. Cells deferred one
+  after the other with the same release function form one run: one entry
+  (the function, the last cell, the number of cells), and the run's other
+  cells go on a second vector, one pointer (8 bytes) each. A cell with
+  another release function starts a new run (one 24-byte entry).
+  Example: an `IO.Ref (List (Nat × Nat))` whose `set` frees the old list.
+  The set's release is a drain. Reussir's glue for
+  `T_List(LAny, T_List)` releases each head (the box of a
+  `T_Prod(LAny, LAny)`) and frees the cell, then goes on along the tail in
+  a loop. Each head's box pushes its cell onto the run on top (the same
+  release function: the program's `l2r_any_rel_<num>_c` of `T_Prod`), and
+  the drain pops the cells last first after the walk. A list that user
+  code drops by itself pushes nothing: each head is a free of its own
+  (ownership.md, "Runtime objects free through leanrt's pending stack").
+  Two pointers to one function can differ (a generic function
+  instantiated twice; Miri gives them different addresses): a cell then
+  starts a run of its own, which costs an entry, never correctness.
+  `release_last` reads the function from the table of releases
+  (`RELEASES`), so one payload type gives one pointer.
+- **Why:** The owner's direction (2026-10-19): no reliance on Reussir's
+  cell internals. Before, the stack linked the cells of a payload type
+  whose Reussir cell has a wide header (the count, then 4 bytes of padding
+  or a fused tag below 2^16: a shared enum of at most 2^16 constructors, a
+  shared struct aligned to 8 such as the reference records `L2RRef`, typed
+  or not, a function value's enum) through those 8 bytes, as native
+  Lean's `lean_del` links its to-do list through the objects. lean2rr
+  marked such a type's number with `WIDE_BIT` (`0x4000`); the mark went
+  with the links (`release_last` tests only `LEAF_BIT`), and the other
+  payload types are numbered 16 to `0x7fff`. That rule followed Reussir's layout
+  (`RecordType::hasFusedHeader`, the padding of a struct aligned to 8),
+  and a wrong mark would have corrupted a cell. The cost now: 8 bytes per
+  pending cell, only inside a drain.
+  `RtListDropWhole`'s modes `ref` (a reference set to `[]`) and `arr` (an
+  array element replaced) at n = 10^6: peak 68056 KB, native 69428 and
+  69456 KB (with the links: 53712 and 53716 KB). The bytes requested grow
+  1.35 times native's from n = 250000 to 10^6 (the vector's doublings,
+  8 MiB plus 4 MiB), so these two lines of `RtListDropWhole.alloc` have
+  the factor 1.4; the six modes where user code drops the list keep the
+  factor 1. Without runs (one 24-byte entry per cell, before the links;
+  hunt HMEM-01): n = 4M, 391 MB against native's 258 MB.
+- **Where:** `runtime/leanrt/src/pending.rs`: `defer_cell`; reussir-rt's
+  `drop_stack.rs` (Reussir's local patch 23-l): `State::try_defer`,
+  `State::joins`, the cells vector (`Parts`);
+  `runtime/leanrt/src/any.rs`: `release_last`;
+  `runtime/leanrt/src/drop.rs`: `free_deferred`; `LowerBase.lean`:
+  `boxNum`. Tests: leanrt's
+  `any::tests::cells_with_one_release_form_one_run` (the depth a release
+  sees stays 1 for one function and grows by one per run for two in
+  turn); the `pending` unit tests (`a_run_has_one_release_function`,
+  `cells_in_separate_boxes`, also under Miri with strict provenance, and
+  `a_million_cells`, whose cells are never written); `RtListDropWhole`
+  (alloc-check: peak memory within native's plus 4 MB). An array as a
+  list's head inside a free is a pending cell too: an array of boxes
+  (`NUM_ARRAY`) through `free_vec`'s cell (`push_step_vec`; one that holds
+  only immediates is freed at once, `counts_nothing`), a boxed
+  typed array of records through its payload's release and then
+  `free_vec`'s cell; consecutive ones share one entry, one pointer each
+  (`RtArrayPileFree`, mode `list`: 62 MB at 10^6, native 69 MB). A boxed
+  typed array of leaf elements is a leaf payload, released at once.
+- **Remove only if:** never.

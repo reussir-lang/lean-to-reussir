@@ -1,7 +1,7 @@
-From 85f37c239f8d0eca9100a6d8239b3a82c6292988 Mon Sep 17 00:00:00 2001
+From 6620a1d42ac11e4b9e1565111ac4c6bb504976f9 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
-Subject: [PATCH 07/13] l2r-local: issue 38: tagged FFI objects: clear the top
+Subject: [PATCH 02/21] l2r-local: issue 38: tagged FFI objects: clear the top
  16 bits before the inline count access
 
 A `tagged` opaque handle (`#[ffi(rust = "path", tagged)]`, patch 0050) is
@@ -67,7 +67,7 @@ index 33fe7f6c..06437d8f 100644
    let parameters = (ins "::mlir::StringAttr":$ffiName,
        "::mlir::FlatSymbolRefAttr":$cleanupHook,
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 468632f4..54c9c64a 100644
+index 48fe2248..4153705b 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -306,6 +306,26 @@ bool isTaggedFFIObject(RcType rcType) {
@@ -97,7 +97,7 @@ index 468632f4..54c9c64a 100644
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1744,6 +1764,12 @@ struct ReussirRcIncConversionPattern
+@@ -1696,6 +1716,12 @@ struct ReussirRcIncConversionPattern
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
        refcntPtr = adaptor.getRcPtr();
@@ -199,6 +199,3 @@ index 275984dc..2c97ff74 100644
    // CHECK: load i32, ptr %0
    // CHECK: store i32
    func.func @inc_plain(%b: !plain) {
--- 
-2.43.0
-

@@ -5,10 +5,9 @@ whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
 numbers). lean2rr's builds use a later base, upstream `00906e38` with
-the series (`./reussir` head `8e9a6293`, `l2r-stepd` plus 21-a); the
+the series (`./reussir` branch `l2r-base9-shared`, `6111586c`); the
 workarounds stay until each is removed.
-The last entry, the drain-end hook, is a local addition for an open issue
-(9). Issues 1 (a missed optimization) and 2 (a missing feature), which
+Issues 1 (a missed optimization) and 2 (a missing feature), which
 are not bugs, are in [limitations.md](limitations.md). The open issue
 files are in [`reussir-bugs/`](../../../reussir-bugs/README.md).
 Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
@@ -37,7 +36,7 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   the representative would lose another arm's bytes. Reussir has it
   since `7954a367` (so lean2rr's base `00906e38` has it), and
   `scripts/l2r.py` stops on a Reussir checkout without lean2rr's series
-  (patch 02-a's switch, which plain upstream and the old base lack).
+  (patch 23-f, which plain upstream and the bases before Phase 2 lack).
   Checked on `l2r-base3` (2026-10-19) with a minimal program: a
   `[value]` enum of six arms of different sizes (`f64`, `bool`, `u8`,
   `u16`, padding, a counted pointer, a nested
@@ -143,21 +142,3 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 - **Where:** [../representations/strings.md](../representations/strings.md#-is-escaped-in-the-string-literal-table).
 - **Remove only if:** removable after the move to Reussir 7954a367; the
   escape is free and may stay.
-
-### The drain-end hook (local patch 09-a)
-
-- **What:** The runtime stores a callback in Reussir's
-  `__reussir_drop_drained`, which local patch 09-a makes every outermost
-  drain that released something call when it ends. lean2rr requires the
-  patch since switch step 6: `scripts/l2r.py` stops with an error when the
-  Reussir checkout lacks it (`check_reussir_patches`), and leanrt names the
-  symbol (`task::hook_drained`), so it would not link either. The
-  patch is [`reussir-bugs/patches/09-a-drain-end-hook.patch`](../../../reussir-bugs/patches/09-a-drain-end-hook.patch),
-  described in [issue 9](../../../reussir-bugs/09-drain-end-hook.md).
-- **Why:** Not a bug: Reussir has no hook at the end of a free, and the
-  `sync` dependents of promises dropped inside a free must run when it is
-  over (round 7 RV7C-01). A missing feature: issue 9.
-- **Where:** [../tasks/dependents.md](../tasks/dependents.md#dependents-of-a-promise-dropped-inside-a-free-run-when-the-free-is-over).
-- **Remove only if:** n/a (the patch is applied to `l2r-local` since
-  2026-10-03; the fallback for builds without it went in switch step 6,
-  when lean-runtime's deferred resolutions came to need every drain's end).

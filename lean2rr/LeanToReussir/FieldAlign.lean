@@ -19,7 +19,8 @@ the model does not know it. `types` gives the declaration of a generated or
 prelude type by name (an `.enum` or `.struct` item; for a shared one only
 the kind matters). Pointer-sized: what Reussir stores as a pointer or one
 tagged word (a shared record or enum, a function value, a closure, an
-opaque runtime type: `rrAlign8` in LowerBase lists them). A `[value]`
+opaque runtime type: `memberStorageType` in Reussir's
+`lib/IR/ReussirTypes.cpp`). A `[value]`
 struct or enum is laid out in place: the largest alignment of its members
 and, for an enum, of its tag (8 bits up to 256 variants, then 16, then 32:
 Reussir's `getTagType`). So `struct [value] W(u8)` has alignment 1. -/

@@ -4,10 +4,10 @@ list or an array in an `IO.Ref`), `main` waits on a Std.Sync object (or a
 promise) that a promise's `sync` dependent releases. Natively the
 dependent has run during the free, so the wait does not block: the
 condition variable was notified, the mutex unlocked, the promise
-resolved. (Promises freed by Reussir's record glue are resolved, their
-dependents walked, at the end of the free's drain, before such a wait
-starts: lean-runtime's `run_deferred`, from Reussir's drain-end hook,
-`task::hook_drained` and `drained`.) -/
+resolved. (Promises freed inside the free are resolved, their dependents
+walked, at the end of the free's drain, before such a wait starts:
+lean-runtime's `run_deferred`, from leanrt's drain end, the end work that
+`pending::want_end_work` asks for, `task::drained`.) -/
 
 -- Three promises in a list in a ref; the dependent of the last cell's
 -- promise runs `act`.

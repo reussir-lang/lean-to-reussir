@@ -1,0 +1,342 @@
+From 563c1b958927792b5fb513371ec2c9d2767295a1 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:48:42 -0400
+Subject: [PATCH 15/21] l2r-local: entry 23-g: tests: deep worklist drops, and
+ the release order
+
+Sixth step: tests of what the switch to worklist drops (23-a..23-f)
+promises.
+
+- frontend/worklist_drop_depth.rr (+ .c): on a 256 KiB stack, frees
+  10^6-level one-sided trees of two recursive fields (left- and
+  right-deep), a chain of a 64-arm enum whose recursive member comes
+  first (the shape of a closure enum capturing a closure, then a value),
+  and compositions of two recursive fields; peak RSS must grow by less
+  than 16 MiB during each drop. On l2r-base7 (retcon drops) the
+  left-deep tree alone grew it by 84 MiB; with worklist drops none of the
+  four grows it by more than a few MiB of allocator noise. At -O
+  aggressive and -O none.
+- sanitizer/e2e/worklist_drop_depth.rr: the same frees at 10^5 levels
+  under ASan (every cell freed once, nothing leaked), both nullary
+  encodings.
+- runtime/drop_member_order.mlir now runs with worklist-drops, and its
+  driver expects the worklist order: a cell's members in field order at
+  its visit, the next cell's box after them, so the chains' handles come
+  from the root down (the retcon order released a cell's prefix before
+  and its suffix after the whole rest of the chain). New cases: a
+  complete binary tree of 7 cells with one handle each (dead children are
+  released last first: root, right subtree, left subtree); a cell under a
+  dead parent whose left child, right child or both are shared with the
+  driver (only decremented, released at the end); and a cell with a
+  child held inline after its other children (an `OrderInl [value]`
+  record), as a root and as a dead child: the inline child, deferred
+  last, comes first. The test no longer covers the retcon order, which
+  no pipeline uses any more; that is accepted until retcon is deleted.
+---
+ .../frontend/worklist_drop_depth.c            | 70 +++++++++++++++++++
+ .../frontend/worklist_drop_depth.rr           | 47 +++++++++++++
+ .../runtime/Inputs/drop_member_order.c        | 52 ++++++++++++--
+ .../runtime/drop_member_order.mlir            | 51 ++++++++++++--
+ .../sanitizer/e2e/worklist_drop_depth.rr      | 11 +++
+ 5 files changed, 220 insertions(+), 11 deletions(-)
+ create mode 100644 tests/integration/frontend/worklist_drop_depth.c
+ create mode 100644 tests/integration/frontend/worklist_drop_depth.rr
+ create mode 100644 tests/integration/sanitizer/e2e/worklist_drop_depth.rr
+
+diff --git a/tests/integration/frontend/worklist_drop_depth.c b/tests/integration/frontend/worklist_drop_depth.c
+new file mode 100644
+index 00000000..9ddc8f56
+--- /dev/null
++++ b/tests/integration/frontend/worklist_drop_depth.c
+@@ -0,0 +1,70 @@
++#include <assert.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#ifndef _WIN32
++#include <sys/resource.h>
++#endif
++extern void *wl_leaf(void);
++extern void *wl_left(void *, uint64_t);
++extern void *wl_right(void *, uint64_t);
++extern uint64_t wl_tree_consume(void *);
++extern void *wl_end(void);
++extern void *wl_first(void *, uint64_t);
++extern void *wl_last(void *, uint64_t);
++extern uint64_t wl_chain_consume(void *);
++extern void *wl_id(void);
++extern void *wl_comp(void *, void *);
++extern uint64_t wl_fn_consume(void *);
++
++static int check_rss;
++
++static long peak_kib(void) {
++#ifndef _WIN32
++  struct rusage usage;
++  assert(!getrusage(RUSAGE_SELF, &usage));
++  return usage.ru_maxrss;
++#else
++  return 0;
++#endif
++}
++
++// Drops `value` with `consume` and checks how much the peak grew meanwhile.
++static void drop(const char *name, uint64_t (*consume)(void *), void *value) {
++  long before = peak_kib();
++  assert(consume(value) == 1);
++  long grown = peak_kib() - before;
++  if (check_rss && grown >= 16 * 1024) {
++    fprintf(stderr, "%s: peak RSS grew by %ld KiB\n", name, grown);
++    abort();
++  }
++}
++
++int main(int argc, char **argv) {
++#ifndef _WIN32
++  struct rlimit limit;
++  assert(!getrlimit(RLIMIT_STACK, &limit));
++  limit.rlim_cur = 256 * 1024;
++  assert(!setrlimit(RLIMIT_STACK, &limit));
++#endif
++  uint64_t depth = argc > 1 ? strtoull(argv[1], 0, 10) : 100000;
++  check_rss = argc > 2 && !strcmp(argv[2], "rss");
++  void *tree = wl_leaf();
++  for (uint64_t i = 0; i < depth; ++i)
++    tree = wl_left(tree, i);
++  drop("left-deep tree", wl_tree_consume, tree);
++  tree = wl_leaf();
++  for (uint64_t i = 0; i < depth; ++i)
++    tree = wl_right(tree, i);
++  drop("right-deep tree", wl_tree_consume, tree);
++  void *chain = wl_end();
++  for (uint64_t i = 0; i < depth; ++i)
++    chain = i % 2 ? wl_first(chain, i) : wl_last(chain, i);
++  drop("64-arm chain", wl_chain_consume, chain);
++  void *fn = wl_id();
++  for (uint64_t i = 0; i < depth; ++i)
++    fn = i % 2 ? wl_comp(fn, wl_id()) : wl_comp(wl_id(), fn);
++  drop("compositions", wl_fn_consume, fn);
++  return 0;
++}
+diff --git a/tests/integration/frontend/worklist_drop_depth.rr b/tests/integration/frontend/worklist_drop_depth.rr
+new file mode 100644
+index 00000000..76043232
+--- /dev/null
++++ b/tests/integration/frontend/worklist_drop_depth.rr
+@@ -0,0 +1,47 @@
++// Worklist drops keep no state per level of the dropped value: a box whose
++// count reaches zero is deferred onto the thread's drop stack, and the
++// outermost drop pops the dead boxes, last first. The driver frees, on a
++// 256 KiB stack, one-sided trees of two recursive fields (left- and
++// right-deep), a chain of a 64-arm enum whose recursive member comes first
++// (as in a closure enum that captures a closure, then a value), and
++// compositions of two recursive fields, each 10^6 levels deep, and checks
++// that peak RSS grows by less than 16 MiB during each drop (one-sided
++// retcon frames took 85 bytes per level, the enum chain 622).
++// sanitizer/e2e/worklist_drop_depth.rr runs the same frees (10^5 levels)
++// under ASan.
++
++// RUN: %rrc %s -o %t.o --relocation-mode pic -Oaggressive
++// RUN: %cc %t.o %S/worklist_drop_depth.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe 1000000 rss
++// RUN: %rrc %s -o %t.none.o --relocation-mode pic -Onone
++// RUN: %cc %t.none.o %S/worklist_drop_depth.c -o %t.none.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.none.exe 1000000 rss
++
++pub struct Box { value: u64 }
++pub enum Tree { Leaf, Node(Tree, Box, Tree) }
++pub enum Chain { End, K0(Chain, Box), K1(Chain, Box), K2(Chain, Box), K3(Chain, Box), K4(Chain, Box), K5(Chain, Box), K6(Chain, Box), K7(Chain, Box), K8(Chain, Box), K9(Chain, Box), K10(Chain, Box), K11(Chain, Box), K12(Chain, Box), K13(Chain, Box), K14(Chain, Box), K15(Chain, Box), K16(Chain, Box), K17(Chain, Box), K18(Chain, Box), K19(Chain, Box), K20(Chain, Box), K21(Chain, Box), K22(Chain, Box), K23(Chain, Box), K24(Chain, Box), K25(Chain, Box), K26(Chain, Box), K27(Chain, Box), K28(Chain, Box), K29(Chain, Box), K30(Chain, Box), K31(Chain, Box), K32(Chain, Box), K33(Chain, Box), K34(Chain, Box), K35(Chain, Box), K36(Chain, Box), K37(Chain, Box), K38(Chain, Box), K39(Chain, Box), K40(Chain, Box), K41(Chain, Box), K42(Chain, Box), K43(Chain, Box), K44(Chain, Box), K45(Chain, Box), K46(Chain, Box), K47(Chain, Box), K48(Chain, Box), K49(Chain, Box), K50(Chain, Box), K51(Chain, Box), K52(Chain, Box), K53(Chain, Box), K54(Chain, Box), K55(Chain, Box), K56(Chain, Box), K57(Chain, Box), K58(Chain, Box), K59(Chain, Box), K60(Chain, Box), K61(Chain, Box), K62(Chain, Box), K63(Chain, Box) }
++pub enum Fn { Id, Comp(Fn, Fn) }
++
++pub fn leaf() -> Tree { Tree::Leaf }
++pub fn left(t: Tree, v: u64) -> Tree { Tree::Node{t, Box{value: v}, Tree::Leaf} }
++pub fn right(t: Tree, v: u64) -> Tree { Tree::Node{Tree::Leaf, Box{value: v}, t} }
++pub fn tree_consume(t: Tree) -> u64 { match t { Tree::Leaf => 0, _ => 1 } }
++pub fn end() -> Chain { Chain::End }
++pub fn first(c: Chain, v: u64) -> Chain { Chain::K0{c, Box{value: v}} }
++pub fn last(c: Chain, v: u64) -> Chain { Chain::K63{c, Box{value: v}} }
++pub fn chain_consume(c: Chain) -> u64 { match c { Chain::End => 0, _ => 1 } }
++pub fn id() -> Fn { Fn::Id }
++pub fn comp(f: Fn, g: Fn) -> Fn { Fn::Comp{f, g} }
++pub fn fn_consume(f: Fn) -> u64 { match f { Fn::Id => 0, _ => 1 } }
++
++extern "C" trampoline "wl_leaf" = leaf;
++extern "C" trampoline "wl_left" = left;
++extern "C" trampoline "wl_right" = right;
++extern "C" trampoline "wl_tree_consume" = tree_consume;
++extern "C" trampoline "wl_end" = end;
++extern "C" trampoline "wl_first" = first;
++extern "C" trampoline "wl_last" = last;
++extern "C" trampoline "wl_chain_consume" = chain_consume;
++extern "C" trampoline "wl_id" = id;
++extern "C" trampoline "wl_comp" = comp;
++extern "C" trampoline "wl_fn_consume" = fn_consume;
+diff --git a/tests/integration/runtime/Inputs/drop_member_order.c b/tests/integration/runtime/Inputs/drop_member_order.c
+index 618acacc..65acfb7b 100644
+--- a/tests/integration/runtime/Inputs/drop_member_order.c
++++ b/tests/integration/runtime/Inputs/drop_member_order.c
+@@ -11,15 +11,22 @@ extern void *order_nullable_cons(void *, uint64_t);
+ extern uint64_t order_consume(void *);
+ extern uint64_t order_value_consume(void *);
+ extern uint64_t order_nullable_consume(void *);
++extern void *order_pair_cons(void *, void *, uint64_t);
++extern uint64_t order_pair_consume(void *);
++extern void *order_pair_share(void *);
++extern void *order_tri_cons(void *, void *, void *, uint64_t);
++extern uint64_t order_tri_consume(void *);
+ 
+ static const uint64_t depth = 100000;
+ static uint64_t seen;
+-static unsigned mixed;
++static unsigned mixed, tree;
+ 
++// Cells are released from the root (the last built, id depth - 1) down; a
++// mixed cell releases its "before" handle (2 id), then its "after" handle.
++// In the tree, the handles are numbered in the order of their release.
+ void observe_drop(uint64_t id) {
+-  uint64_t expected = seen;
+-  if (mixed)
+-    expected = seen < depth ? 2 * (depth - seen - 1) : 2 * (seen - depth) + 1;
++  uint64_t cell = depth - 1 - (mixed ? seen / 2 : seen);
++  uint64_t expected = tree ? seen : mixed ? 2 * cell + seen % 2 : cell;
+   assert(id == expected);
+   ++seen;
+ }
+@@ -57,4 +64,41 @@ int main(void) {
+     assert(consumers[kind](chain) == 0);
+     assert(seen == depth * (mixed ? 2 : 1));
+   }
++  // root 0; right child 1 (its children 2 right, 3 left); left child 4
++  // (its children 5 right, 6 left).
++  tree = 1;
++  mixed = 0;
++  seen = 0;
++  void *left = order_pair_cons(order_pair_cons(0, 0, 6), order_pair_cons(0, 0, 5), 4);
++  void *right = order_pair_cons(order_pair_cons(0, 0, 3), order_pair_cons(0, 0, 2), 1);
++  assert(order_pair_consume(order_pair_cons(left, right, 0)) == 0);
++  assert(seen == 7);
++  // Under a dead parent 0, a cell 1 whose left child (shape 0), right child
++  // (1) or both (2) stay alive, shared with the driver, released last.
++  for (unsigned shape = 0; shape < 3; ++shape) {
++    seen = 0;
++    void *x = order_pair_cons(0, 0, shape == 2 ? 2 : 3);
++    void *y = shape == 2 ? order_pair_cons(0, 0, 3) : 0;
++    void *l = shape == 1 ? order_pair_cons(0, 0, 2) : order_pair_share(x);
++    void *r = shape == 0 ? order_pair_cons(0, 0, 2) : order_pair_share(shape == 1 ? x : y);
++    assert(order_pair_consume(order_pair_cons(0, order_pair_cons(l, r, 1), 0)) == 0);
++    assert(seen == (shape == 2 ? 2 : 3));
++    order_pair_consume(x);
++    if (y)
++      order_pair_consume(y);
++    assert(seen == 4);
++  }
++  // OrderTri{l: 3, handle 0, r: 2, inline: 1}: its handle, then the inline
++  // child (last deferred), then r, then l; as a root and as the dead right
++  // child of OrderTri 0 (whose handle comes first).
++  for (unsigned deferred = 0; deferred < 2; ++deferred) {
++    seen = 0;
++    uint64_t base = deferred;
++    void *t = order_tri_cons(order_tri_cons(0, 0, 0, base + 3), order_tri_cons(0, 0, 0, base + 2),
++                             order_tri_cons(0, 0, 0, base + 1), base);
++    if (deferred)
++      t = order_tri_cons(0, t, 0, 0);
++    assert(order_tri_consume(t) == 0);
++    assert(seen == 4 + deferred);
++  }
+ }
+diff --git a/tests/integration/runtime/drop_member_order.mlir b/tests/integration/runtime/drop_member_order.mlir
+index b819b09b..8b0490ff 100644
+--- a/tests/integration/runtime/drop_member_order.mlir
++++ b/tests/integration/runtime/drop_member_order.mlir
+@@ -1,4 +1,4 @@
+-// RUN: %reussir-opt %s --reussir-token-instantiation --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true retcon-drops=true' --reussir-token-reuse --reussir-convert-to-std --canonicalize --convert-scf-to-cf --reussir-convert-to-llvm --reconcile-unrealized-casts --verify-each | %reussir-translate --reussir-to-llvmir -o %t.ll
++// RUN: %reussir-opt %s --reussir-token-instantiation --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true' --reussir-token-reuse --reussir-convert-to-std --canonicalize --convert-scf-to-cf --reussir-convert-to-llvm --reconcile-unrealized-casts --verify-each | %reussir-translate --reussir-to-llvmir -o %t.ll
+ // RUN: %reussir-llvm-opt %t.ll -passes='reussir-retcon-drop,verify' -o %t.lowered.ll
+ // RUN: %llc %t.lowered.ll -O0 -relocation-model=pic -filetype=obj -o %t.o
+ // RUN: %cc %t.o %S/Inputs/drop_member_order.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
+@@ -8,12 +8,17 @@
+ // RUN: %cc %t.opt.o %S/Inputs/drop_member_order.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
+ // RUN: %t.opt.exe
+ //
+-// Transitive drop glue preserves field order across recursive suspension.
+-// Managed suffixes run after the entire child, including suffixes inline in
+-// a [value] record or nullable. A prefix runs before the child. The driver
+-// observes foreign cleanup on 100,000-cell chains with a 256 KiB stack.
+-// This covers the tail-selection hazard from lean2rr issue 13-d without
+-// importing its pending stack's different, last-pushed-first member policy.
++// Worklist drops release a cell's members in field order when the cell is
++// visited, except the box of the next cell, which is deferred and released
++// after them: the handles come from the root down, each cell's in field
++// order, including handles inline in a [value] record or a nullable. (The
++// retcon cleanup this replaced finished the whole child before a managed
++// suffix, which needs state per level.) The driver observes foreign cleanup
++// on 100,000-cell chains with a 256 KiB stack. In a tree, the dead children
++// of a cell are released last first: the root's handle, then its right
++// subtree, then its left one; a shared child is only decremented; a child
++// held inline after the others ([value] OrderInl) comes first. A cell
++// released as a deferred child orders its subtrees as a dropped root does.
+ 
+ !handle = !reussir.rc<!reussir.ffi_object<"Observed", @drop_handle>>
+ !chain_ = !reussir.record<compound "OrderChain" incomplete>
+@@ -24,6 +29,11 @@
+ !value = !reussir.record<compound "ValueChain" {!reussir.nullable<!reussir.rc<!value_>>, !inline}>
+ !nullable_ = !reussir.record<compound "NullableChain" incomplete>
+ !nullable = !reussir.record<compound "NullableChain" {!reussir.nullable<!reussir.rc<!nullable_>>, !reussir.nullable<!handle>}>
++!pair_ = !reussir.record<compound "OrderPair" incomplete>
++!pair = !reussir.record<compound "OrderPair" {!reussir.nullable<!reussir.rc<!pair_>>, !handle, !reussir.nullable<!reussir.rc<!pair_>>}>
++!tri_ = !reussir.record<compound "OrderTri" incomplete>
++!tinl = !reussir.record<compound "OrderInl" [value] {!reussir.nullable<!reussir.rc<!tri_>>}>
++!tri = !reussir.record<compound "OrderTri" {!reussir.nullable<!reussir.rc<!tri_>>, !handle, !reussir.nullable<!reussir.rc<!tri_>>, !tinl}>
+ 
+ module attributes {llvm.data_layout = "e-p:64:64-i64:64-n8:16:32:64-S128"} {
+   func.func private @make_handle(i64) -> !handle
+@@ -70,4 +80,31 @@ module attributes {llvm.data_layout = "e-p:64:64-i64:64-n8:16:32:64-S128"} {
+     %zero = arith.constant 0 : i64
+     return %zero : i64
+   }
++  func.func @order_pair_cons(%left: !reussir.nullable<!reussir.rc<!pair>>, %right: !reussir.nullable<!reussir.rc<!pair>>, %id: i64) -> !reussir.rc<!pair> {
++    %handle = func.call @make_handle(%id) : (i64) -> !handle
++    %payload = reussir.record.compound(%left, %handle, %right : !reussir.nullable<!reussir.rc<!pair>>, !handle, !reussir.nullable<!reussir.rc<!pair>>) : !pair
++    %result = reussir.rc.create value(%payload : !pair) : !reussir.rc<!pair>
++    return %result : !reussir.rc<!pair>
++  }
++  func.func @order_pair_consume(%pair: !reussir.rc<!pair>) -> i64 {
++    reussir.rc.dec(%pair : !reussir.rc<!pair>)
++    %zero = arith.constant 0 : i64
++    return %zero : i64
++  }
++  func.func @order_pair_share(%pair: !reussir.rc<!pair>) -> !reussir.rc<!pair> {
++    reussir.rc.inc(%pair : !reussir.rc<!pair>)
++    return %pair : !reussir.rc<!pair>
++  }
++  func.func @order_tri_cons(%l: !reussir.nullable<!reussir.rc<!tri>>, %r: !reussir.nullable<!reussir.rc<!tri>>, %x: !reussir.nullable<!reussir.rc<!tri>>, %id: i64) -> !reussir.rc<!tri> {
++    %h = func.call @make_handle(%id) : (i64) -> !handle
++    %inl = reussir.record.compound(%x : !reussir.nullable<!reussir.rc<!tri>>) : !tinl
++    %payload = reussir.record.compound(%l, %h, %r, %inl : !reussir.nullable<!reussir.rc<!tri>>, !handle, !reussir.nullable<!reussir.rc<!tri>>, !tinl) : !tri
++    %result = reussir.rc.create value(%payload : !tri) : !reussir.rc<!tri>
++    return %result : !reussir.rc<!tri>
++  }
++  func.func @order_tri_consume(%tri: !reussir.rc<!tri>) -> i64 {
++    reussir.rc.dec(%tri : !reussir.rc<!tri>)
++    %zero = arith.constant 0 : i64
++    return %zero : i64
++  }
+ }
+diff --git a/tests/integration/sanitizer/e2e/worklist_drop_depth.rr b/tests/integration/sanitizer/e2e/worklist_drop_depth.rr
+new file mode 100644
+index 00000000..9791ced3
+--- /dev/null
++++ b/tests/integration/sanitizer/e2e/worklist_drop_depth.rr
+@@ -0,0 +1,11 @@
++// REQUIRES: asan
++// UNSUPPORTED: windows
++// Every cell of frontend/worklist_drop_depth.rr's deep values is freed once.
++// RUN: %rrc %S/../../frontend/worklist_drop_depth.rr -o %t.ll -t llvm-ir --relocation-mode pic -Onone --sanitizer address --nullary-variant-encoding arch-independent
++// RUN: %cc %asan_flags -c -x ir %t.ll -o %t.o
++// RUN: %cc %asan_flags %t.o %S/../../frontend/worklist_drop_depth.c %reussir_rt_asan -o %t.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.exe 100000
++// RUN: %rrc %S/../../frontend/worklist_drop_depth.rr -o %t.opt.ll -t llvm-ir --relocation-mode pic -Oaggressive --sanitizer address --nullary-variant-encoding boxed
++// RUN: %cc %asan_flags -c -x ir %t.opt.ll -o %t.opt.o
++// RUN: %cc %asan_flags %t.opt.o %S/../../frontend/worklist_drop_depth.c %reussir_rt_asan -o %t.opt.exe %rpath_flag %rpath_san_flag %extra_sys_libs
++// RUN: %asan_env %t.opt.exe 100000

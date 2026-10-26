@@ -1,0 +1,18 @@
+# Review RB-03 of the destructor port: N one-element arrays freed in one free, n = 250000 and 10^6. In the runtime's
+# frees (`ref`, `arr`, `tree`) Reussir's glue releases the whole list or tree within one pop of the pending stack;
+# each array waited there as a 24-byte step entry (tree at 10^6: 111 MB against native's 69 MB; ref and arr already
+# 105 MB before the destructor port). An array of immediates is now freed at once. Since typed arrays the arrays of
+# `list`, `ref` and `arr` are boxed `RVec<Nat>`s (the heads of a `List`), program payloads: inside a free each waited as
+# one pending cell (`ref` at 10^6: +54.6 MB requested, peak 82 MB); a boxed typed array of leaf elements is now a leaf
+# payload, released directly (lean2rr's `boxLeafArrayElem`). Peak memory at 10^6 within native's plus 4000 KB;
+# allocations and bytes as native's.
+list 250000 | list 1000000 | 1 2000 | rss 1 4000
+ref 250000 | ref 1000000 | 1 2000 | rss 1 4000
+arr 250000 | arr 1000000 | 1 2000 | rss 1 4000
+tree 250000 | tree 1000000 | 1 2000 | rss 1 4000
+treeu 250000 | treeu 1000000 | 1 2000 | rss 1 4000
+# treeb: arrays that hold a counted value (`some i`) wait as one pointer each (8 bytes) in one run of the pending
+# stack (24 bytes each as steps). At 10^6 the run's vector and the blocks its doublings left request 1.21 times
+# native's bytes (+72.6 MB against +60.0 MB; allocations as native's) and peak at 104908 KB against native's 85892 KB
+# (1.22 times); hence factor 1.25 and rss 1.3, which steps of 24 bytes would exceed.
+treeb 250000 | treeb 1000000 | 1.25 2000 | rss 1.3 4000

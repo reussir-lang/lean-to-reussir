@@ -1,0 +1,370 @@
+From 14df94cca2b82c7ae37d8f0d5e6f4da7fc6c65d7 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:26:21 -0400
+Subject: [PATCH 10/21] l2r-local: entry 23-b: ir: rc.defer and drop.run,
+ lowered to the drop stack
+
+Second step of the in-place worklist for RecordDropKind::Worklist drops
+(23-a added the runtime stack). Two ops let drop glue use the stack;
+nothing emits them yet.
+
+- `reussir.rc.defer @release(%box)`: hands a box whose last reference
+  the caller owns (count observed as one, not decremented) to the
+  thread's stack; the drain later calls `@release(%box)`, which releases
+  the content and frees the box. Outside a drain the release runs at
+  once (23-a's `defer`).
+- `reussir.drop.run @walk(%ref)`: calls `@walk(%ref)` with the thread
+  draining, then (outermost only) runs what it deferred. A nested one (in
+  a release or a foreign hook the drain runs) returns before the value's
+  dead members are released; the running drain releases them.
+
+Both name their callee by symbol; the verifier requires a function that
+takes exactly the operand's type and returns nothing, and a shared box
+for rc.defer (rigid and flex boxes are not counted). The basic-ops lowering turns
+them into `__reussir_drop_defer(box, @release)` and
+`__reussir_drop_run(ref, @walk)` (new DropStackLowering.cpp), declaring
+the two runtime functions only in modules that use them, `nounwind`
+only, since the callbacks run arbitrary drop glue.
+
+Tests: conversion/drop_stack_ops.mlir (round trip and lowering),
+conversion/drop_stack_invalid.mlir (verifier, rigid and flex boxes
+included).
+---
+ include/Reussir/Conversion/BasicOpsLowering.h |  3 +
+ include/Reussir/IR/ReussirOps.td              | 47 ++++++++++++
+ .../BasicOpsLowering/BasicOpsLowering.cpp     |  2 +
+ .../BasicOpsLowering/CMakeLists.txt           |  1 +
+ .../BasicOpsLowering/DropStackLowering.cpp    | 76 +++++++++++++++++++
+ lib/IR/ReussirOps.cpp                         | 30 ++++++++
+ .../conversion/drop_stack_invalid.mlir        | 51 +++++++++++++
+ .../conversion/drop_stack_ops.mlir            | 35 +++++++++
+ 8 files changed, 245 insertions(+)
+ create mode 100644 lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
+ create mode 100644 tests/integration/conversion/drop_stack_invalid.mlir
+ create mode 100644 tests/integration/conversion/drop_stack_ops.mlir
+
+diff --git a/include/Reussir/Conversion/BasicOpsLowering.h b/include/Reussir/Conversion/BasicOpsLowering.h
+index 994bb8ca..7b2ffc56 100644
+--- a/include/Reussir/Conversion/BasicOpsLowering.h
++++ b/include/Reussir/Conversion/BasicOpsLowering.h
+@@ -45,6 +45,9 @@ void populateRetconDropLoweringPatterns(mlir::LLVMTypeConverter &converter,
+ mlir::LogicalResult lowerRetconDropFunctions(mlir::ModuleOp module,
+                                            const mlir::LLVMTypeConverter &converter);
+ 
++void populateDropStackLoweringPatterns(mlir::LLVMTypeConverter &converter,
++                                       mlir::RewritePatternSet &patterns);
++
+ void registerReussirBasicOpsLoweringInterface(mlir::DialectRegistry &registry);
+ 
+ void lowerFusedDBGAttributeInLocations(mlir::ModuleOp moduleOp);
+diff --git a/include/Reussir/IR/ReussirOps.td b/include/Reussir/IR/ReussirOps.td
+index bbfc946c..2da78217 100644
+--- a/include/Reussir/IR/ReussirOps.td
++++ b/include/Reussir/IR/ReussirOps.td
+@@ -1897,6 +1897,53 @@ def ReussirDtorSuspendOp : ReussirOp<"dtor.suspend", [
+   let assemblyFormat = "$callee `(` $object `:` type($object) `)` attr-dict";
+ }
+ 
++def ReussirRcDeferOp : ReussirOp<"rc.defer", [
++    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
++  let summary = "Defer the release of a dead box to the thread's drop stack";
++  let description = [{
++    `reussir.rc.defer @release(%box)` hands a shared box whose last
++    reference the caller owns (its count was observed to be one, and is not
++    decremented) to the current thread's stack of pending drops. The drain
++    that runs the stack later calls `@release(%box)`, which must release the
++    box's content and free the box. Drop glue defers while the thread drains
++    (inside a walk that `reussir.drop.run` called, or inside a release the
++    drain called); outside a drain the release runs at once.
++
++    Example:
++    ```mlir
++    reussir.rc.defer @tree.release(%child : !reussir.rc<!tree>)
++    ```
++  }];
++  let arguments = (ins FlatSymbolRefAttr:$release, ReussirRcType:$box);
++  let assemblyFormat =
++      "$release `(` $box `:` qualified(type($box)) `)` attr-dict";
++}
++
++def ReussirDropRunOp : ReussirOp<"drop.run", [
++    DeclareOpInterfaceMethods<SymbolUserOpInterface>]> {
++  let summary = "Run drop glue whose releases defer to the thread's drop stack";
++  let description = [{
++    `reussir.drop.run @walk(%ref)` calls `@walk(%ref)` with the current
++    thread draining its stack of pending drops, so that the boxes the walk
++    releases can be deferred with `reussir.rc.defer` instead of released by
++    recursion. The outermost `drop.run` of a thread then pops the pending
++    releases, last deferred first, including those they defer in turn, until
++    none is left. A nested one (in a release or a foreign hook that the drain
++    runs) only calls the walk and returns before the value's dead members
++    are released; they are released by the running drain. So the native
++    stack stays bounded however deep the dropped value is, for the box edges
++    the type graph shows.
++
++    Example:
++    ```mlir
++    reussir.drop.run @tree.walk(%ref : !reussir.ref<!tree>)
++    ```
++  }];
++  let arguments = (ins FlatSymbolRefAttr:$walk, ReussirRefType:$object);
++  let assemblyFormat =
++      "$walk `(` $object `:` qualified(type($object)) `)` attr-dict";
++}
++
+ def ReussirRefAcquireOp
+     : ReussirReferenceOp<"acquire", [MemoryEffects<[MemRead, MemWrite]>]> {
+   let summary = "Acquire ownership of a reference";
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index 4153705b..0b40a326 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -4373,6 +4373,7 @@ struct ReussirConvertToLLVMPatternInterface
+     populateBasicOpsLoweringToLLVMConversionPatterns(typeConverter, patterns,
+                                                     symbolTables);
+     target.addIllegalDialect("ifrt");
++    target.addIllegalOp<ReussirRcDeferOp, ReussirDropRunOp>();
+     target.addIllegalOp<
+         ReussirPJRTJitCallOp, ReussirPJRTAfterOp, ReussirIFRTBytecodeOp,
+         ReussirPanicOp, ReussirExpectOp, ReussirCctxEmptyOp,
+@@ -4580,6 +4581,7 @@ void populateBasicOpsLoweringToLLVMConversionPatterns(
+       converter, patterns.getContext(), symbolTables);
+   populateTargetArrayLoweringPatterns(converter, patterns);
+   populateRetconDropLoweringPatterns(converter, patterns);
++  populateDropStackLoweringPatterns(converter, patterns);
+   populatePjrtLoweringPatterns(converter, patterns);
+   patterns.add<
+       ReussirExpectConversionPattern, ReussirCctxEmptyConversionPattern,
+diff --git a/lib/Conversion/BasicOpsLowering/CMakeLists.txt b/lib/Conversion/BasicOpsLowering/CMakeLists.txt
+index aa1521ef..670effe3 100644
+--- a/lib/Conversion/BasicOpsLowering/CMakeLists.txt
++++ b/lib/Conversion/BasicOpsLowering/CMakeLists.txt
+@@ -2,6 +2,7 @@ add_mlir_conversion_library(MLIRReussirBasicOpsLowering
+   BasicOpsLowering.cpp
+   TargetArrayLowering.cpp
+   RetconDropLowering.cpp
++  DropStackLowering.cpp
+   PjrtLowering.cpp
+   CABISignatureConversion.cpp
+   DbgInfoConversion.cpp
+diff --git a/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp b/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
+new file mode 100644
+index 00000000..0a91ced2
+--- /dev/null
++++ b/lib/Conversion/BasicOpsLowering/DropStackLowering.cpp
+@@ -0,0 +1,76 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++//
++// `reussir.rc.defer` and `reussir.drop.run` become calls of the runtime's
++// per-thread drop stack (crates/reussir-rt/src/drop_stack.rs):
++// `__reussir_drop_defer(box, release)` and `__reussir_drop_run(ref, walk)`,
++// the function operand passed by address. The runtime calls it back with
++// the C ABI `void(ptr)`, which is the lowered type of every such callee.
++//
++//===----------------------------------------------------------------------===//
++
++#include "Reussir/Conversion/BasicOpsLowering.h"
++#include "Reussir/IR/ReussirOps.h"
++#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
++
++namespace reussir {
++namespace {
++using namespace mlir;
++
++// Declares `name(ptr, ptr)` once per module. The callback may run any drop
++// glue, so the declaration claims only `nounwind`.
++LLVM::LLVMFuncOp dropStackFunction(Operation *op, StringRef name) {
++  auto module = op->getParentOfType<ModuleOp>();
++  if (auto existing = module.lookupSymbol<LLVM::LLVMFuncOp>(name))
++    return existing;
++  OpBuilder builder(module.getBodyRegion());
++  auto ptr = LLVM::LLVMPointerType::get(module.getContext());
++  auto type = LLVM::LLVMFunctionType::get(
++      LLVM::LLVMVoidType::get(module.getContext()), {ptr, ptr});
++  auto function =
++      LLVM::LLVMFuncOp::create(builder, module.getLoc(), name, type);
++  function->setAttr("passthrough", builder.getStrArrayAttr({"nounwind"}));
++  return function;
++}
++
++template <typename Op>
++struct DropStackCallPattern : ConvertOpToLLVMPattern<Op> {
++  StringRef runtime;
++  DropStackCallPattern(LLVMTypeConverter &converter, StringRef runtime)
++      : ConvertOpToLLVMPattern<Op>(converter), runtime(runtime) {}
++
++  LogicalResult
++  matchAndRewrite(Op op, typename Op::Adaptor adaptor,
++                  ConversionPatternRewriter &rewriter) const override {
++    auto callee = dropStackFunction(op, runtime);
++    auto ptr = LLVM::LLVMPointerType::get(op.getContext());
++    auto [symbol, object] = [&] {
++      if constexpr (std::is_same_v<Op, ReussirRcDeferOp>)
++        return std::pair{op.getReleaseAttr(), adaptor.getBox()};
++      else
++        return std::pair{op.getWalkAttr(), adaptor.getObject()};
++    }();
++    Value address =
++        LLVM::AddressOfOp::create(rewriter, op.getLoc(), ptr, symbol);
++    rewriter.replaceOpWithNewOp<LLVM::CallOp>(op, callee,
++                                              ValueRange{object, address});
++    return success();
++  }
++};
++} // namespace
++
++void populateDropStackLoweringPatterns(mlir::LLVMTypeConverter &converter,
++                                       mlir::RewritePatternSet &patterns) {
++  patterns.add<DropStackCallPattern<ReussirRcDeferOp>>(converter,
++                                                       "__reussir_drop_defer");
++  patterns.add<DropStackCallPattern<ReussirDropRunOp>>(converter,
++                                                       "__reussir_drop_run");
++}
++} // namespace reussir
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index b68b2a07..a657b064 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -4218,6 +4218,36 @@ ReussirDtorSuspendOp::verifySymbolUses(mlir::SymbolTableCollection &symbols) {
+   return mlir::success();
+ }
+ 
++// The callee of `rc.defer` / `drop.run`: a function taking exactly the
++// operand's type and returning nothing.
++static mlir::LogicalResult
++verifyDropCallee(mlir::Operation *op, mlir::FlatSymbolRefAttr name,
++                 mlir::Type operand, mlir::SymbolTableCollection &symbols) {
++  auto callee =
++      symbols.lookupNearestSymbolFrom<mlir::FunctionOpInterface>(op, name);
++  if (!callee)
++    return op->emitOpError("requires a function named ") << name;
++  if (!llvm::equal(callee.getArgumentTypes(), mlir::TypeRange{operand}) ||
++      !callee.getResultTypes().empty())
++    return op->emitOpError(
++        "callee must take the operand's type and return nothing");
++  return mlir::success();
++}
++
++mlir::LogicalResult
++ReussirRcDeferOp::verifySymbolUses(mlir::SymbolTableCollection &symbols) {
++  if (getBox().getType().getCapability() != Capability::shared)
++    return emitOpError("can only defer a shared (counted) box");
++  return verifyDropCallee(*this, getReleaseAttr(), getBox().getType(),
++                          symbols);
++}
++
++mlir::LogicalResult
++ReussirDropRunOp::verifySymbolUses(mlir::SymbolTableCollection &symbols) {
++  return verifyDropCallee(*this, getWalkAttr(), getObject().getType(),
++                          symbols);
++}
++
+ mlir::func::FuncOp
+ createDtorIfNotExists(mlir::ModuleOp moduleOp, RecordType type,
+                       mlir::OpBuilder &builder, AtomicKind kind,
+diff --git a/tests/integration/conversion/drop_stack_invalid.mlir b/tests/integration/conversion/drop_stack_invalid.mlir
+new file mode 100644
+index 00000000..c04dac7e
+--- /dev/null
++++ b/tests/integration/conversion/drop_stack_invalid.mlir
+@@ -0,0 +1,51 @@
++// RUN: %reussir-opt %s --split-input-file --verify-diagnostics
++
++!node_ = !reussir.record<compound "BadNode" incomplete>
++!node = !reussir.record<compound "BadNode" {i64, !node_}>
++func.func @defer(%box: !reussir.rc<!node>) {
++  // expected-error @+1 {{requires a function named @missing}}
++  reussir.rc.defer @missing(%box : !reussir.rc<!node>)
++  return
++}
++
++// -----
++
++!node_ = !reussir.record<compound "BadNode" incomplete>
++!node = !reussir.record<compound "BadNode" {i64, !node_}>
++func.func private @walk(!reussir.rc<!node>)
++func.func @run(%ref: !reussir.ref<!node>) {
++  // expected-error @+1 {{callee must take the operand's type and return nothing}}
++  reussir.drop.run @walk(%ref : !reussir.ref<!node>)
++  return
++}
++
++// -----
++
++!node_ = !reussir.record<compound "BadNode" incomplete>
++!node = !reussir.record<compound "BadNode" {i64, !node_}>
++func.func private @release(!reussir.rc<!node>) -> i64
++func.func @defer(%box: !reussir.rc<!node>) {
++  // expected-error @+1 {{callee must take the operand's type and return nothing}}
++  reussir.rc.defer @release(%box : !reussir.rc<!node>)
++  return
++}
++
++// -----
++
++!node = !reussir.record<compound "RigidNode" {i64}>
++func.func private @release(!reussir.rc<!node rigid>)
++func.func @defer(%box: !reussir.rc<!node rigid>) {
++  // expected-error @+1 {{can only defer a shared (counted) box}}
++  reussir.rc.defer @release(%box : !reussir.rc<!node rigid>)
++  return
++}
++
++// -----
++
++!node = !reussir.record<compound "FlexNode" {i64}>
++func.func private @release(!reussir.rc<!node flex>)
++func.func @defer(%box: !reussir.rc<!node flex>) {
++  // expected-error @+1 {{can only defer a shared (counted) box}}
++  reussir.rc.defer @release(%box : !reussir.rc<!node flex>)
++  return
++}
+diff --git a/tests/integration/conversion/drop_stack_ops.mlir b/tests/integration/conversion/drop_stack_ops.mlir
+new file mode 100644
+index 00000000..c39e4b45
+--- /dev/null
++++ b/tests/integration/conversion/drop_stack_ops.mlir
+@@ -0,0 +1,35 @@
++// RUN: %reussir-opt %s | %reussir-opt | %FileCheck %s --check-prefix=ROUNDTRIP
++// RUN: %reussir-opt %s --reussir-convert-to-llvm --verify-each | %FileCheck %s
++
++// `rc.defer` and `drop.run` become calls of the runtime's drop stack, the
++// callee passed by address (the runtime calls it back as `void(ptr)`).
++
++!node_ = !reussir.record<compound "DeferNode" incomplete>
++!node = !reussir.record<compound "DeferNode" {i64, !node_}>
++
++module attributes {llvm.data_layout = "e-p:64:64-i64:64-n8:16:32:64-S128"} {
++  // CHECK-DAG: llvm.func @__reussir_drop_defer(!llvm.ptr, !llvm.ptr) attributes {passthrough = ["nounwind"]}
++  // CHECK-DAG: llvm.func @__reussir_drop_run(!llvm.ptr, !llvm.ptr) attributes {passthrough = ["nounwind"]}
++  func.func private @node_release(!reussir.rc<!node>)
++  func.func private @node_walk(!reussir.ref<!node>)
++
++  // ROUNDTRIP-LABEL: func.func @defer
++  // ROUNDTRIP: reussir.rc.defer @node_release(%{{.*}} : !reussir.rc<
++  // CHECK-LABEL: llvm.func @defer
++  // CHECK: %[[FN:.*]] = llvm.mlir.addressof @node_release : !llvm.ptr
++  // CHECK: llvm.call @__reussir_drop_defer(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
++  func.func @defer(%box: !reussir.rc<!node>) {
++    reussir.rc.defer @node_release(%box : !reussir.rc<!node>)
++    return
++  }
++
++  // ROUNDTRIP-LABEL: func.func @run
++  // ROUNDTRIP: reussir.drop.run @node_walk(%{{.*}} : !reussir.ref<
++  // CHECK-LABEL: llvm.func @run
++  // CHECK: %[[FN:.*]] = llvm.mlir.addressof @node_walk : !llvm.ptr
++  // CHECK: llvm.call @__reussir_drop_run(%{{.*}}, %[[FN]]) : (!llvm.ptr, !llvm.ptr) -> ()
++  func.func @run(%ref: !reussir.ref<!node>) {
++    reussir.drop.run @node_walk(%ref : !reussir.ref<!node>)
++    return
++  }
++}

@@ -1,0 +1,82 @@
+From 752ef7ce83b96c2675ce59ab6dbdb41c0e01b538 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:33:35 -0400
+Subject: [PATCH 11/21] l2r-local: entry 23-c: tail drop: the box free as a
+ helper
+
+Preparation for worklist drops (23-d), whose release functions free a
+box after its content the way TailDrop's loop does. TailDropEmitter's
+freeOwner becomes the free function emitBoxFree (declared in TailDrop.h):
+reinterpret the box as a token (dynamic for a box with a dynamic array
+payload or an unpinned header-fused variant, else the box's exact size)
+and free it. No change in what TailDrop emits.
+---
+ .../AcquireDropExpansion/TailDrop.cpp         | 33 +++++++++++--------
+ .../AcquireDropExpansion/TailDrop.h           |  3 ++
+ 2 files changed, 22 insertions(+), 14 deletions(-)
+
+diff --git a/lib/Conversion/AcquireDropExpansion/TailDrop.cpp b/lib/Conversion/AcquireDropExpansion/TailDrop.cpp
+index 93b7fc26..699adddf 100644
+--- a/lib/Conversion/AcquireDropExpansion/TailDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/TailDrop.cpp
+@@ -64,20 +64,7 @@ class TailDropEmitter {
+     call->setAttr(kMustTailCallAttr, builder.getUnitAttr());
+   }
+   void freeOwner(mlir::Value owner) {
+-    auto rc = llvm::cast<RcType>(owner.getType());
+-    auto box = rc.getInnerBoxType();
+-    mlir::DataLayout layout(module);
+-    auto align = layout.getTypeABIAlignment(box);
+-    auto record = llvm::dyn_cast<RecordType>(rc.getElementType());
+-    TokenType tokenType =
+-        box.hasDynamicArrayPayload() ||
+-                (record && record.isVariant() && box.isHeaderFused() &&
+-                 !record.getFixed())
+-            ? TokenType::getDynamic(builder.getContext(), align)
+-            : TokenType::get(builder.getContext(), align,
+-                             layout.getTypeSize(box).getFixedValue());
+-    auto token = ReussirRcReinterpretOp::create(builder, loc, tokenType, owner);
+-    ReussirTokenFreeOp::create(builder, loc, token.getReinterpreted());
++    emitBoxFree(owner, loc, module, builder);
+   }
+   void emitPayload(mlir::Value ref, mlir::Value owner) {
+     auto refType = llvm::cast<RefType>(ref.getType());
+@@ -242,6 +229,24 @@ public:
+ };
+ } // namespace
+ 
++void emitBoxFree(mlir::Value owner, mlir::Location loc, mlir::ModuleOp module,
++                 mlir::OpBuilder &builder) {
++  auto rc = llvm::cast<RcType>(owner.getType());
++  auto box = rc.getInnerBoxType();
++  mlir::DataLayout layout(module);
++  auto align = layout.getTypeABIAlignment(box);
++  auto record = llvm::dyn_cast<RecordType>(rc.getElementType());
++  TokenType tokenType =
++      box.hasDynamicArrayPayload() ||
++              (record && record.isVariant() && box.isHeaderFused() &&
++               !record.getFixed())
++          ? TokenType::getDynamic(builder.getContext(), align)
++          : TokenType::get(builder.getContext(), align,
++                           layout.getTypeSize(box).getFixedValue());
++  auto token = ReussirRcReinterpretOp::create(builder, loc, tokenType, owner);
++  ReussirTokenFreeOp::create(builder, loc, token.getReinterpreted());
++}
++
+ bool emitTailDropRelease(mlir::Value rc, mlir::Location loc,
+                          mlir::ModuleOp module, mlir::PatternRewriter &rewriter,
+                          mlir::SymbolTableCollection *symbols) {
+diff --git a/lib/Conversion/AcquireDropExpansion/TailDrop.h b/lib/Conversion/AcquireDropExpansion/TailDrop.h
+index 96d61ca2..c5ce7c14 100644
+--- a/lib/Conversion/AcquireDropExpansion/TailDrop.h
++++ b/lib/Conversion/AcquireDropExpansion/TailDrop.h
+@@ -12,6 +12,9 @@
+ #include "Reussir/IR/ReussirOps.h"
+ 
+ namespace reussir {
++// Frees the box of `owner`, whose content is already released.
++void emitBoxFree(mlir::Value owner, mlir::Location loc, mlir::ModuleOp module,
++                 mlir::OpBuilder &builder);
+ bool emitTailDropRelease(mlir::Value rc, mlir::Location loc,
+                          mlir::ModuleOp module, mlir::PatternRewriter &rewriter,
+                          mlir::SymbolTableCollection *symbols);

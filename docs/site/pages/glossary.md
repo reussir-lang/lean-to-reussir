@@ -170,7 +170,7 @@ wait core
 :   A wait protocol of lean-runtime's scheduler: the wait for a thunk or a constant that another context computes, the reference rule of a program that creates tasks, and the resolution of a promise put off to the end of a free.
 
 pending stack
-:   The per-thread stack of cells to free. Frees use it instead of recursion.
+:   The runtime's per-thread stack of releases to do. A release that comes while a runtime free runs goes on it instead of recursion. The outermost free empties it, last pushed first.
 
 internal panic
 :   An error of the runtime itself that ends the program at once, as Lean's `lean_internal_panic`: `INTERNAL PANIC: ` and a message on the process's stderr (for example `out of memory`), then exit status 1, or an abort (134) under `LEAN_ABORT_ON_PANIC`. A `panic!` is not one: it prints its message and the program goes on.

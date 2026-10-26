@@ -38,7 +38,7 @@ same standard output, standard error and exit code.
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (690 programs, `tests/runtime`) | at its last full run (gate27 = dev 419a74d4 + run 14's rcgmp prelude reads, the owned big-number boxes, guard mode removed, and the index after a proved access, 2026-10-25, Reussir upstream 00906e38 + 14 patches with entries 20 and 21, lean-runtime 50840bb), with the default rcgmp representation of Nat and Int 688 of 690 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), and with `L2R_INT_BACKEND=leanrt` the same 688 of 690 and the same 2; the classic corpus 36 of 36 (18 programs at two sizes) with all optional passes on and with all 26 default-on passes off, 18 of 18 with `unread-fields` on, and 36 of 36 under leanrt; every check passes (18) under each representation; the raytracer's images equal native's under each representation. At gate26 (dev 1886d7bf + the default flip to rcgmp), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int25 (dev 8ee78dc0 + the rcgmp index and size reads, leanrt then the default), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int24 (dev 2c4083d9 + the inline-anchors guard, Reussir 00906e38 + 13 patches), 683 of 685 identical under each representation and 2 expected failures. At the combined gate on int22 (dev 27ea78da + step D, 2026-10-25), 680 of 682 identical under each representation and 2 expected failures. At the combined gate on int21 (2026-10-25, Reussir upstream 00906e38 + 8 patches), 669 of 671 identical and 2 expected failures. At the combined gate on int20 (2026-10-25, Reussir l2r-base5 on 0378b744), 667 of 670 identical and 3 expected failures. At the combined gate on dev 0810b9ec with Reussir l2r-base5 (2026-10-24), 658 of 660 identical and 2 expected failures, and the same results on Reussir l2r-base3 (13de3101, 2026-10-21). At the combined gate on dev 42e8e15b (2026-10-10, Reussir upstream 943f2195 + 35 patches), 632 of 634 identical and the same 2 expected failures. At the gate of switch step 10 ( branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
+| Runtime test suite (703 programs, `tests/runtime`) | at its last full run (gate28 = dev 0091855a + Phase 2: leanrt's drop port on Reussir's shared drop stack, 2026-10-25, Reussir l2r-base9-shared: upstream 00906e38 + 21 patches with entries 20, 21 and 23, lean-runtime 50840bb), with the default rcgmp representation of Nat and Int 699 of 701 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), and with `L2R_INT_BACKEND=leanrt` the same 699 of 701 and the same 2; the classic corpus 36 of 36 (18 programs at two sizes) with all optional passes on and with all 26 default-on passes off, 18 of 18 with `unread-fields` on, and 36 of 36 under leanrt; every check passes (18) under each representation; the raytracer's images equal native's under each representation; the two tests added after it (RtPromiseDepDrainShapes, RtDropOrderMix) pass under each representation. At gate27 (dev 419a74d4 + run 14's rcgmp reads, owned boxes, guard mode removed, the index after a proved access; Reussir 00906e38 + 14 patches), 688 of 690 identical under each representation and 2 expected failures. At gate26 (dev 1886d7bf + the default flip to rcgmp), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int25 (dev 8ee78dc0 + the rcgmp index and size reads, leanrt then the default), 685 of 687 identical under each representation and 2 expected failures. At the combined gate on int24 (dev 2c4083d9 + the inline-anchors guard, Reussir 00906e38 + 13 patches), 683 of 685 identical under each representation and 2 expected failures. At the combined gate on int22 (dev 27ea78da + step D, 2026-10-25), 680 of 682 identical under each representation and 2 expected failures. At the combined gate on int21 (2026-10-25, Reussir upstream 00906e38 + 8 patches), 669 of 671 identical and 2 expected failures. At the combined gate on int20 (2026-10-25, Reussir l2r-base5 on 0378b744), 667 of 670 identical and 3 expected failures. At the combined gate on dev 0810b9ec with Reussir l2r-base5 (2026-10-24), 658 of 660 identical and 2 expected failures, and the same results on Reussir l2r-base3 (13de3101, 2026-10-21). At the combined gate on dev 42e8e15b (2026-10-10, Reussir upstream 943f2195 + 35 patches), 632 of 634 identical and the same 2 expected failures. At the gate of switch step 10 ( branch `lean-runtime-step10` at 0410be6 on dev d39294a, lean-runtime e5e502e, 2026-10-06), 336 of 337 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`); the classic corpus 54 of 54 with all optional passes on and with all off; the Reussir benchmark suite 18 of 18. At the gate of `perf-const-reads` (e7bc212 on dev 9a2ddf6, lean-runtime 83f7127, 2026-10-06), 331 of 332 identical to native Lean 4.34.0 and 1 expected failure (`RtLeanUnsupported`). At the gate of switch step 8 (branch `lean-runtime-step8` at 8e5c5eb on dev d3032e4, lean-runtime e34cd61, 2026-10-05), 326 of 327 identical to native Lean 4.34.0 (`RtNetEffectPoll` counted after one re-run: in the gate's run its native build printed `accepted during the loop: false`, a timing flake of native's that its re-runs did not repeat; lean2rr's output was the expected one), nine of them through expectation files: eight where lean2rr does not reproduce a Lean runtime bug (`RtReadAfterWrite`, `RtStdioStdoutRead`, `RtErrorNoFileName`, `RtProcessNullFd`, `RtProcessNullOpenFails`, `RtStartupFdExhausted`, `RtRefSetDuringModify`, `RtRefSwapDuringModify`; plan §10, "Runtime: Lean bugs we do not reproduce"), and `RtCseFnResult` (its trace prints once natively and twice through lean2rr, which Lean allows: plan §10, "Merging after erasure"); 1 expected failure: `RtLeanUnsupported` (an expected refusal until the runtime has the `Lean` package's C++ functions); five tests (`RtExternRefused`, `RtExternOpaqueRepr`, `RtExternOpaqueRedecl`, `RtExternPrivate`, `RtCastExtern`) check that lean2rr refuses an extern it cannot serve; `RtLiftedLimits` and `RtInternalPanic` compare each side with its own expectation files where lean2rr lifts a limit of Lean's runtime (plan §10, LB-04 to LB-12). lean-runtime's own program cases through lean2rr's builds: of its IO areas (io, process, streams, temp, uvsys, time) 90 of 90 at lean-runtime 9d27ce0 (switch step 5); of its task areas (tasks, sync, refs, taskio, uvloop, net) 163 of 163 at lean-runtime ed1e8af (switch step 6), a subset of 26 of them (references shared with tasks, promises) 26 of 26 at 528fcbb (switch step 6), at 471f458 (switch step 7) a subset of 39 (those 26, the other `sync` cases, `tasks/poll_threshold_mutex`, and the startup and title cases `io/initializing`, `io/startup_*`, `uvsys/process_title`, `uvsys/title_*`) 39 of 39, and at e34cd61 (switch step 8) a subset of 94 (those 39, 31 panic, exit and stream cases such as `panics/replicate_overflow`, `process/output_*oom*`, `tasks/get_in_sync_task*`, `tasks/promise_in_initialize*`, `io/exit_*`, `streams/stream_redirect`, and the 27 `net` cases) 94 of 94 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | Applications (`tests/apps`: lean4-raytracer, two modules, built with Lake) | the image file, stdout, stderr and exit code identical to native at all three settings (60×40 pixels on the main thread and in one task; 200×133 pixels, 4 samples per pixel, depth 30, on the main thread), dev e1e5dde, 2026-10-07 |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
@@ -364,9 +364,14 @@ the switch: its task primitives call lean-runtime.
 ### Memory
 
 Reference counting and in-place reuse are done by Reussir. Freeing a deep
-structure (a long list, a deep tree, nested arrays) uses a stack of
-pending work instead of recursion, as Lean does, so it never overflows the
-stack; resources inside (file handles) are closed in Lean's order. Memory
+structure (a long list, a deep tree, nested arrays) never overflows the
+stack: Reussir frees records in a loop or with a stack of pending drops
+per thread (local patches 23-a to 23-m: memory that does not grow with
+the depth, like Lean's to-do list), and the runtime frees its own
+objects through the same stack, as Lean does. Resources inside (file
+handles) are closed in Lean's order inside a free that starts at a
+runtime object, and in field order at the top of a free that user code
+starts (plan §10). Memory
 use is usually at or below native (Reussir's records and reuse are
 tighter). Strings and arrays are single blocks with Lean's own header
 sizes (six million three-element `Array Nat` rows: 328 MB, native
@@ -560,8 +565,9 @@ for well under a second, so their ratios are rough):
 | hash-map-heavily-shared | 116.25 | 124.63 | 1.07 | 0.88 |
 
 Where lean2rr is not faster, the known causes are: freeing through the
-pending-work stack that bounded-depth frees need (deriv, monadic-interp;
-local patch 02-c made it cheaper), and Reussir having no borrowed
+pending-work stack that bounded-depth frees needed (deriv, monadic-interp;
+measured on the earlier Reussir base, whose drop glue pushed record
+members on that stack), and Reussir having no borrowed
 parameters, so code that walks shared data (looking up a hash bucket
 shared between map versions) writes reference counts that native Lean
 only reads (hash-map-heavily-shared).
@@ -614,14 +620,26 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `00906e38` (2026-10-25) plus the 14 patches
-of the series: head `8e9a6293` of the checkout in `./reussir` (branch
-`l2r-stepd` plus 21-a; tree `10b34f74`). The series has 14 patches since
-2026-10-25: that day step D's 5 patches (issue 20) were added after the
-other 8, and then 21-a (issue 21, an optimization of code with rcgmp
-integers) after them. Branch `l2r-stepd` (head `e3b96e03`) is the stack
-of the 13 before 21-a, and branch `l2r-base5` (head `c4a5df4b`) the
-stack of the 8 before step D's, which an earlier combined gate used.
+Its base is upstream Reussir `00906e38` (2026-10-25) plus the 21 patches
+of the series: branch `l2r-base9-shared` of the checkout in `./reussir`
+(head `6111586c`, tree `8b8dd1cb`): 10-a, 07-a, step D's 5 patches
+(issue 20), 21-a (issue 21) and the 13 patches of issue 23 (worklist
+drops, and their stack shared with lean2rr's runtime). It has none of
+the old drop patches: Reussir frees records with upstream's glue, except
+the recursive records that are neither a loop nor non-recursive, which
+issue 23's patches free through a stack of pending drops per thread
+instead of upstream's coroutines; lean2rr's runtime keeps its pending
+releases on that stack (23-k to 23-m). Branch `l2r-base9` (head
+`fc9c1d20`) is the same series without those three. The bases before
+Phase 2 had 6 more patches: five for native release order through a
+pending stack shared with lean2rr's runtime (02-a to 02-e), and a
+drain-end hook (09-a); the runtime's own pending stack replaced them. The last of
+those bases was branch `l2r-base8` (head `8e9a6293`, `l2r-stepd` plus
+21-a): upstream `00906e38` plus 14 patches, step D's 5 after the 8 of
+branch `l2r-base5` (head `c4a5df4b`), then 21-a; branch `l2r-stepd`
+(head `e3b96e03`) is its first 13. Phase 2's first base, `l2r-base7`
+(head `bfe3d32d`), used upstream's coroutine drops and needed patch
+19-a (issue 19); with issue 23's patches 19-a is parked.
 Since `0378b744`, Reussir's build needs GMP 6.2 or later, a CMake that
 knows `cxx_std_26` for Clang (CMake 4.4.4 works; 3.28 does not) and the
 libstdc++ 14 headers, for its built-in rcgmp integers
@@ -641,14 +659,18 @@ upstream `7954a367` (2026-10-19) plus the same 9 patches, which applied
 to `0378b744` with no conflict; that move fixed no issue. Before that it
 was branch `l2r-base2` (head `b2e4a47e`), Reussir `943f2195` plus the 35
 patches of the old series; the old patch files are in git history and in
-that branch. [`../reussir-bugs/`](../reussir-bugs/README.md) describes
+those branches. [`../reussir-bugs/`](../reussir-bugs/README.md) describes
 the state at `00906e38`: upstream `7954a367` fixed 30 of the old issues
 in full (most of them lean2rr's own fixes, sent as pull requests #651 to
 #663 or adapted by Reussir's author from lean2rr's patches), so their
 files are gone, and the 16 issues that stayed open got new numbers (1 to
-16; `ea240b19` later fixed issue 5). The series there,
+16; `ea240b19` later fixed issue 5). The drain-end hook (9) and the cost
+of a one-cell free on Reussir's old stack (11) no longer concern
+lean2rr, since the old drop patches went; their numbers are retired, as
+is 22 (a local patch for retcon destructors, never published, superseded
+by issue 23). The series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-14 patches on `00906e38`, in that order; each patch file is named after
+21 patches on `00906e38`, in that order; each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct
@@ -673,34 +695,50 @@ output, and their patches are optimizations or features, not fixes.
   in the record's drop, as it does for an rc member (under
   `--int-backend rcgmp`: L12 -9.6% instructions, L17 -7.8%, Z01c -6.0%).
   Nothing requires it.
-- **Missing features, not bugs, implemented locally (8 patches):**
-  freeing long or deep structures in native Lean's order, through a stack
-  of pending work that lean2rr's runtime shares (2, five patches; the
-  runtime needs them; upstream now frees in bounded stack its own way,
-  first field first); a hook at the end of a drain that lean2rr's runtime
-  uses for promises released inside a free (9, required since switch
-  step 6); opaque handles that may be a tagged number instead of a pointer
-  (10), so that `Nat` and `Int` are one word with no allocation for small
-  values (lean2rr's prelude needs it); and foreign data in the top 16 bits
-  of such a handle (7, for the one-word `Box`).
-- **Documented only:** two costs whose removal would be a redesign: the
-  inline expansion of copies of `[value]` records shared in a DAG (3) and
-  the size of `--emit mlir` dumps (4); three missed optimizations: token
-  reuse picking a cell that never frees (1, its patch parked), no inline
-  attribute on texture trampolines (6, patches parked) and a reuse token
-  taken from a release that never frees (8); the cost of freeing one cell
-  through the pending stack (11, patch parked); four bugs that do not
-  reach lean2rr (12 to 14, and 16: rrc's 1 GiB driver stack under an
-  address-space limit, its fix parked); and a mimalloc bug that leanrt
-  works around (15).
+- **The memory of deep frees (issue 23, 13 patches; a cost, not a
+  bug):** upstream frees the records of a recursive type that is neither
+  a loop nor non-recursive with coroutines that keep one frame per level
+  of the value being freed (85 to 622 bytes per level; a chain of 10^6
+  closures peaked at 652 MB, native Lean at 102 MB). The patches free
+  them through a stack of pending drops per thread, as Lean's to-do
+  list: no memory per level for a one-sided chain (68 MB there), and
+  fewer instructions per freed cell. Three of them (23-k to 23-m) let
+  lean2rr's runtime keep its pending releases on that stack (end work
+  after the outermost drain, runs of cells, steps), so that one drain
+  frees records and runtime objects in Lean's order and no Lean code
+  runs inside a drain. `scripts/l2r.py` requires them. One of them
+  (23-e) also fixes a leak with TPDE's drop options (issue 24, a bug
+  lean2rr does not reach).
+- **Missing features, not bugs, implemented locally (2 patches):**
+  opaque handles that may be a tagged number instead of a pointer (10),
+  so that `Nat` and `Int` are one word with no allocation for small
+  values (lean2rr's prelude needs it); and foreign data in the top 16
+  bits of such a handle (7, for the one-word `Box`).
+- **Documented only:** native Lean's release order (2, a missing
+  feature: upstream frees in bounded stack its own way, first field
+  first, with no hook for a host; lean2rr's runtime keeps its own
+  pending stack, and a free that user code starts at a record goes in
+  field order, plan §10); two costs whose removal would be a redesign:
+  the inline expansion of copies of `[value]` records shared in a DAG (3)
+  and the size of `--emit mlir` dumps (4); three missed optimizations:
+  token reuse picking a cell that never frees (1, its patch parked), no
+  inline attribute on texture trampolines (6, patches parked) and a
+  reuse token taken from a release that never frees (8); five bugs that
+  do not reach lean2rr (12 to 14; 16: rrc's 1 GiB driver stack under an
+  address-space limit, its fix parked; 19: the drop expansion's code
+  exponential in type nesting with upstream's coroutine drops, which
+  issue 23's patches replace, its fix parked); and a mimalloc bug that
+  leanrt works around (15).
 
 Every Reussir problem met so far is documented with a reproducer, in
 [`../reussir-bugs/`](../reussir-bugs/README.md) while it is open (the
 fixed ones in git history). lean2rr keeps its workarounds, so that it
 also works with a Reussir without the patches that fix or improve them
-(except for the features it requires: its runtime needs patch 02-b, its
-prelude 10-a, and `scripts/l2r.py` requires 02-a, 09-a, 07-a and 02-e:
-`REQUIRED_REUSSIR_PATCHES`); the workarounds for the issues fixed
+(except for the patches it requires: its prelude needs 10-a,
+`scripts/l2r.py` requires 23-f, 23-k, 23-m and 07-a
+(`REQUIRED_REUSSIR_PATCHES`),
+and `--int-backend rcgmp`, the default, requires 20-a and 20-b
+(`check_rcgmp`)); the workarounds for the issues fixed
 upstream are listed as removable after the move (now) in
 [`implementation/reussir-workarounds/`](implementation/reussir-workarounds/README.md).
 Two parts of Reussir that its author offered (LLVM coroutine bindings,

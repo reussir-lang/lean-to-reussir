@@ -1,0 +1,8 @@
+# Deep, one-sided binary trees freed whole (Phase 2 on l2r-base7: upstream Reussir frees a type with two recursive
+# fields with its destructor executor, which keeps a frame per level: at 10^6 nodes every mode peaked at 111 MB, native
+# 39 MB, dev with the old drop patches 37 MB). Peak memory at 10^6 within native's plus 4000 KB; allocations and bytes
+# as native's.
+tl 250000 | tl 1000000 | 1 2000 | rss 1 4000
+tr 250000 | tr 1000000 | 1 2000 | rss 1 4000
+tlu 250000 | tlu 1000000 | 1 2000 | rss 1 4000
+tru 250000 | tru 1000000 | 1 2000 | rss 1 4000

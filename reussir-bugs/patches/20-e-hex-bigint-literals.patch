@@ -1,7 +1,7 @@
-From e3b96e0367b9b4c22a9a8cc139cfa04cb008e2ac Mon Sep 17 00:00:00 2001
+From 28fdf5053df1389f7e6951df31a474d191c968e5 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:37:26 -0400
-Subject: [PATCH 13/13] l2r-local: step D (R3): big integer constants and match
+Subject: [PATCH 07/21] l2r-local: step D (R3): big integer constants and match
  keys reach MLIR in hex (LLVM's decimal parse is cubic)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -288,6 +288,3 @@ index 00000000..d6593892
 +// RUN: timeout 120 %rrc %t.rr --package-name bigint --extern core=%t.core.rri -o %t.o --relocation-mode pic
 +// RUN: %cc %t.o %S/bigint_huge_literal.c -o %t.exe -L%library_path -lreussir_rt %rcgmp_runtime %rpath_flag %extra_sys_libs
 +// RUN: %t.exe
--- 
-2.43.0
-

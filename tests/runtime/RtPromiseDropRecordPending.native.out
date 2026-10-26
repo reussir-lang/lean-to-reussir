@@ -1,0 +1,6 @@
+consume 1
+p start
+3
+p end
+q
+main after

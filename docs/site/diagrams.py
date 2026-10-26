@@ -537,21 +537,25 @@ def scheduler():
 
 
 def free_stack():
-    s = SVG("free", 940, 205, "Freeing without recursion",
-            "Native Lean frees iteratively. Here the runtime's containers and "
-            "Reussir's drop glue share one stack of "
-            "pending work per thread, popped last first.")
-    s.box(10, 50, 170, 70, ["last reference", "released", "(count was 1)"], "b-l2r")
-    s.arrow(180, 85, 230, 85)
-    s.box(235, 30, 260, 110, ["the cell's release function", "releases its members:",
-                              "a member whose count ends", "goes on the pending stack", "(no recursion)"], "b-rr")
-    s.arrow(495, 85, 545, 85)
-    s.box(550, 30, 170, 110, ["pending stack", "(per thread)", "last pushed,", "first popped"], "b-rt")
-    s.arrow(720, 85, 770, 85)
-    s.box(775, 50, 155, 70, ["outermost free", "pops until empty"], "b-rt")
-    s.text(10, 170, "Order: an array's elements decremented in index order, then freed from the last; a record "
-           "from its last field, as Lean's lean_dec", "ts")
-    s.text(10, 188, "(one difference: the first cell of a free that user code starts at a record).", "ts")
+    s = SVG("free", 940, 240, "Freeing without recursion",
+            "Native Lean frees iteratively. Here Reussir and the runtime share one stack "
+            "of pending releases per thread, popped last first: Reussir pushes the "
+            "child records it must free, the runtime its own objects.")
+    s.box(10, 50, 165, 80, ["last reference", "released", "(count was 1)"], "b-l2r")
+    s.arrow(175, 90, 205, 90)
+    s.box(210, 30, 230, 120, ["Reussir's release", "a record: fields in", "field order; a list in a",
+                              "loop, child records of", "other shapes pushed"], "b-rr")
+    s.arrow(440, 90, 470, 90)
+    s.box(475, 30, 200, 120, ["runtime object", "array, box, cell,", "handle, promise:",
+                              "a free runs?", "yes: push; no: start one"], "b-rt")
+    s.arrow(675, 90, 705, 90)
+    s.box(710, 30, 220, 120, ["pending stack", "(per thread, shared)", "the outermost free pops",
+                              "last pushed first, then", "runs the end work"], "b-rt")
+    s.text(10, 182, "Inside a free, the order is Lean's: an array from its last element (after a pass in "
+           "index order),", "ts")
+    s.text(10, 200, "a record from its last field. A record that user code drops goes in field order at every "
+           "record level;", "ts")
+    s.text(10, 218, "a value that two fields of one freed cell hold can come out at another place (plan §10).", "ts")
     return s.render()
 
 

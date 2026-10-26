@@ -1,0 +1,336 @@
+From 9b6f2915bfa276b01b763a908ffa2a3f9b82f765 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sat, 24 Oct 2026 23:42:25 -0400
+Subject: [PATCH 3/8] l2r-local: entry 19: retcon destructors' direct arms in
+ one function per type (reussir#759 option a+)
+
+A drop of a variant whose destructor is retcon (RecordDropKind::Worklist)
+and that has a direct arm was expanded in place at every drop site: each
+direct arm's member drops inline, and through them the same expansion of
+every nested type of the same kind, with no outlining and no size limit.
+One site held the whole unfolded tree of direct-arm drops, so code size was
+exponential in type nesting (5 nested types: rrc above 12 GiB; lean2rr's
+closure enums with 150+ arms: above 10 GiB) and quadratic in the number of
+arms of one type (reussir-lang/reussir#759, option (a+) there, which the
+maintainer chose; kept as a local patch).
+
+The direct-arm path is now emitted once per type, as `<dtor>.direct`: a
+plain (non-coroutine) linkonce_odr function that dispatches on the tag,
+drops a direct arm in place (one level: a nested type's drop is a call to
+its own `.direct` or destructor) and calls the retcon destructor for every
+other arm.
+
+- A drop site outside a retcon destructor calls `<dtor>.direct`.
+- A drop site inside a retcon destructor tests the tag once against a
+  constant mask, `(MASK >> tag) & 1`: a set bit calls `<dtor>.direct`, a
+  clear bit suspends into the running executor (`reussir.dtor.suspend`),
+  as before. MASK has the direct arms whose drop cannot run a retcon
+  destructor (cannot reach a Worklist record; a memoized walk over the
+  member types). A direct arm that holds a retcon value suspends too, so
+  that value is dropped in the running executor instead of starting its
+  own. The site is O(1) in the number of arms: a `record.dispatch` there
+  lowered to one block per tag, which CoroSplit then copied into every
+  resume clone.
+
+Upstream #800's load forwarding runs after the expansion as before, on
+every function including the `.direct` ones.
+
+Tests: conversion/retcon_drop_leaf.mlir checks the new shapes (the
+`.direct` function, the root site's call, the masked test inside a retcon
+destructor); conversion/retcon_drop_direct_nested.mlir checks that a
+nested retcon type's drop inside `.direct` is a call to that type's
+`.direct` (no copy of its arms) and that a direct arm holding a retcon
+value is left out of the mask.
+---
+ .../AcquireDropExpansion.cpp                  | 126 +++++++++++++++++-
+ .../conversion/retcon_drop_direct_nested.mlir |  67 ++++++++++
+ .../conversion/retcon_drop_leaf.mlir          |  26 ++--
+ 3 files changed, 204 insertions(+), 15 deletions(-)
+ create mode 100644 tests/integration/conversion/retcon_drop_direct_nested.mlir
+
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 796fdddf..396c71b0 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -28,6 +28,7 @@
+ #include <llvm/Support/LogicalResult.h>
+ #include <mlir/Dialect/Arith/IR/Arith.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
++#include <mlir/Dialect/SCF/IR/SCF.h>
+ #include <mlir/IR/Attributes.h>
+ #include <mlir/IR/Block.h>
+ #include <mlir/IR/Builders.h>
+@@ -269,6 +270,62 @@ private:
+     return record && record.classifyRecordDrop() == RecordDropKind::Direct;
+   }
+ 
++  // Whether dropping a `type` slot can run a retcon destructor (reach a
++  // Worklist record). Memoized; a type met again on the walk counts as no.
++  mutable llvm::DenseMap<mlir::Type, bool> reachesRetcon;
++  bool mayRunRetconDrop(mlir::Type type) const {
++    auto [it, inserted] = reachesRetcon.try_emplace(type, false);
++    if (!inserted)
++      return it->second;
++    bool result = false;
++    if (auto record = llvm::dyn_cast<RecordType>(type)) {
++      result = record.classifyRecordDrop() == RecordDropKind::Worklist;
++      for (auto [member, field] :
++           llvm::zip(record.getMembers(), record.getMemberIsField()))
++        if (!result && !field)
++          result = mayRunRetconDrop(
++              getProjectedType(member, false, Capability::shared));
++    } else if (auto nullable = llvm::dyn_cast<NullableType>(type)) {
++      result = mayRunRetconDrop(nullable.getPtrTy());
++    } else if (auto rc = llvm::dyn_cast<RcType>(type)) {
++      result = mayRunRetconDrop(rc.getElementType());
++    } else if (auto array = llvm::dyn_cast<ArrayType>(type)) {
++      result = mayRunRetconDrop(array.getElementType());
++    } else if (auto cell = llvm::dyn_cast<CellType>(type)) {
++      result = mayRunRetconDrop(cell.getElementType());
++    }
++    reachesRetcon[type] = result;
++    return result;
++  }
++
++  // `(mask >> tag) & 1`: bit i is set for a direct arm i whose drop cannot
++  // run a retcon destructor. Inside a retcon destructor, other direct arms
++  // suspend too, so the values in them stay in the running executor.
++  mlir::Value isDirectArm(RecordType recordType, mlir::Value ref,
++                          mlir::Location loc,
++                          mlir::PatternRewriter &rewriter) const {
++    unsigned arms = recordType.getMembers().size();
++    unsigned width = std::max(arms, 2u);
++    llvm::APInt mask(width, 0);
++    for (auto [idx, memberTy, memberIsField] : llvm::enumerate(
++             recordType.getMembers(), recordType.getMemberIsField()))
++      if (isDirectVariantMember(memberTy, memberIsField) &&
++          (memberIsField || !mayRunRetconDrop(memberTy)))
++        mask.setBit(idx);
++    auto maskType = rewriter.getIntegerType(width);
++    mlir::Value tag = ReussirRecordTagOp::create(
++        rewriter, loc, rewriter.getIndexType(), ref);
++    mlir::Value shift =
++        mlir::arith::IndexCastUIOp::create(rewriter, loc, maskType, tag);
++    mlir::Value bits = mlir::arith::ShRUIOp::create(
++        rewriter, loc,
++        mlir::arith::ConstantOp::create(
++            rewriter, loc, rewriter.getIntegerAttr(maskType, mask)),
++        shift);
++    return mlir::arith::TruncIOp::create(rewriter, loc, rewriter.getI1Type(),
++                                         bits);
++  }
++
+   void emitOutlinedDrop(mlir::func::FuncOp dtor, ReussirRefDropOp op,
+                         mlir::PatternRewriter &rewriter) const {
+     auto parent = op->getParentOfType<mlir::func::FuncOp>();
+@@ -281,6 +338,46 @@ private:
+       mlir::func::CallOp::create(rewriter, op.getLoc(), dtor, op.getRef());
+   }
+ 
++  // The direct-arm fast path of a retcon variant, emitted once per type: a
++  // plain (non-coroutine) function that dispatches on the tag, drops a direct
++  // arm in place and hands every other arm to the retcon destructor. Drop
++  // sites call it, so nested types' paths are calls, not copies.
++  mlir::func::FuncOp directDrop(RecordType recordType, AtomicKind kind,
++                                mlir::func::FuncOp dtor, ReussirRefDropOp op,
++                                mlir::PatternRewriter &rewriter) const {
++    auto module = op->getParentOfType<mlir::ModuleOp>();
++    std::optional<mlir::SymbolTable> ownTable;
++    auto &table =
++        symbols ? symbols->getSymbolTable(module) : ownTable.emplace(module);
++    std::string name =
++        (recordType.getDtorName(kind).getValue() + ".direct").str();
++    if (auto function = table.lookup<mlir::func::FuncOp>(name))
++      return function;
++    mlir::OpBuilder::InsertionGuard guard(rewriter);
++    rewriter.setInsertionPointToStart(module.getBody());
++    auto function = mlir::func::FuncOp::create(rewriter, op.getLoc(), name,
++                                               dtor.getFunctionType());
++    function.setPrivate();
++    table.insert(function);
++    function->setAttr("llvm.linkage",
++                      rewriter.getAttr<mlir::LLVM::LinkageAttr>(
++                          mlir::LLVM::linkage::Linkage::LinkonceODR));
++    function->setAttr("llvm.passthrough",
++                      rewriter.getStrArrayAttr({"nounwind"}));
++    inheritSanitizerPassthrough(module, function);
++    function.setAllArgAttrs(dtor.getAllArgAttrs());
++    mlir::Block *entry = function.addEntryBlock();
++    rewriter.setInsertionPointToStart(entry);
++    auto ret = mlir::func::ReturnOp::create(rewriter, op.getLoc());
++    rewriter.setInsertionPoint(ret);
++    auto drop =
++        ReussirRefDropOp::create(rewriter, op.getLoc(), entry->getArgument(0));
++    rewriter.setInsertionPoint(drop);
++    (void)rewriteDropVariant(recordType, Capability::unspecified, kind, drop,
++                             rewriter, dtor);
++    return function;
++  }
++
+   mlir::LogicalResult
+   rewriteDropVariant(RecordType recordType, Capability refCap,
+                      AtomicKind refAtomic, ReussirRefDropOp op,
+@@ -460,10 +557,31 @@ public:
+                              [](auto member) {
+                                return isDirectVariantMember(std::get<0>(member),
+                                                             std::get<1>(member));
+-                             }))
+-              return rewriteDropVariant(recordType, refCap,
+-                                        refType.getAtomicKind(), op, rewriter,
+-                                        dtor);
++                             })) {
++              auto direct = directDrop(recordType, refType.getAtomicKind(),
++                                       dtor, op, rewriter);
++              // Inside a retcon destructor the other arms must suspend: one
++              // test of the tag against the set of direct arms picks
++              // `direct` or the suspension.
++              auto parent = op->getParentOfType<mlir::func::FuncOp>();
++              if (parent && parent->hasAttr("reussir.retcon_drop")) {
++                mlir::Value isDirect =
++                    isDirectArm(recordType, op.getRef(), op.getLoc(), rewriter);
++                auto ifOp = mlir::scf::IfOp::create(rewriter, op.getLoc(),
++                                                    isDirect, true);
++                rewriter.setInsertionPointToStart(ifOp.thenBlock());
++                mlir::func::CallOp::create(rewriter, op.getLoc(), direct,
++                                           op.getRef());
++                rewriter.setInsertionPointToStart(ifOp.elseBlock());
++                emitOutlinedDrop(dtor, op, rewriter);
++                rewriter.eraseOp(op);
++                return llvm::success();
++              }
++              mlir::func::CallOp::create(rewriter, op.getLoc(), direct,
++                                         op.getRef());
++              rewriter.eraseOp(op);
++              return llvm::success();
++            }
+             emitOutlinedDrop(dtor, op, rewriter);
+             rewriter.eraseOp(op);
+             return llvm::success();
+diff --git a/tests/integration/conversion/retcon_drop_direct_nested.mlir b/tests/integration/conversion/retcon_drop_direct_nested.mlir
+new file mode 100644
+index 00000000..5bf7705d
+--- /dev/null
++++ b/tests/integration/conversion/retcon_drop_direct_nested.mlir
+@@ -0,0 +1,67 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true retcon-drops=true' --verify-each | %FileCheck %s
++
++// Two retcon variants, T1's direct arm T1Leaf holding a T0. A drop of either
++// type is a call to its `.direct` function, also inside the other type's
++// `.direct`, so a nested type's arms are not copied into the drop of its
++// parent (reussir#759: code size exponential in type nesting). Inside a
++// retcon destructor, the tag test leaves out a direct arm that holds a
++// retcon value: T1Leaf suspends, so its T0 is dropped in the running
++// executor instead of starting its own.
++
++!box = !reussir.record<compound "Box" {i64}>
++!t0_ = !reussir.record<variant "T0" incomplete>
++!t0two = !reussir.record<compound "T0Two" [value] {!t0_, !t0_}>
++!t0leaf = !reussir.record<compound "T0Leaf" [value] {!box}>
++!t0 = !reussir.record<variant "T0" {!t0two, !t0leaf}>
++!t1_ = !reussir.record<variant "T1" incomplete>
++!t1two = !reussir.record<compound "T1Two" [value] {!t1_, !t1_}>
++!t1leaf = !reussir.record<compound "T1Leaf" [value] {!t0}>
++!t1plain = !reussir.record<compound "T1Plain" [value] {!box}>
++!t1 = !reussir.record<variant "T1" {!t1two, !t1leaf, !t1plain}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}T0E.direct(
++  // CHECK: reussir.record.dispatch
++  // CHECK: return
++  // CHECK-LABEL: func.func private @{{.*}}T0E.retcon(
++  // CHECK: return
++
++  // One dispatch, T1's own; the T0 in arm 1 is a call to T0's `.direct`.
++  // CHECK-LABEL: func.func private @{{.*}}T1E.direct(
++  // CHECK: reussir.record.dispatch
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK-NOT: reussir.dtor.suspend
++  // CHECK: [1] ->
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK: call @{{.*}}T0E.direct(
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK-NOT: reussir.dtor.suspend
++  // CHECK: return
++  // CHECK-LABEL: func.func private @{{.*}}T1E.retcon(
++  // CHECK: return
++
++  // CHECK-LABEL: func.func @root(
++  // CHECK-NEXT: call @{{.*}}T1E.direct(
++  // CHECK-NEXT: return
++  func.func @root(%ref: !reussir.ref<!t1>) {
++    reussir.ref.drop (%ref : !reussir.ref<!t1>)
++    return
++  }
++
++  // The mask has arm 2 only (0b100, printed as -4 : i3): arm 0 is not
++  // direct, and arm 1 holds a T0.
++  // CHECK-LABEL: func.func @parent(
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK: arith.constant -4 : i3
++  // CHECK: reussir.record.tag
++  // CHECK: arith.shrui
++  // CHECK: scf.if
++  // CHECK: call @{{.*}}T1E.direct(
++  // CHECK: } else {
++  // CHECK: reussir.dtor.suspend @{{.*}}T1E.retcon
++  // CHECK: return
++  func.func @parent(%ref: !reussir.ref<!t1>) attributes {reussir.retcon_drop} {
++    reussir.ref.drop (%ref : !reussir.ref<!t1>)
++    return
++  }
++}
+diff --git a/tests/integration/conversion/retcon_drop_leaf.mlir b/tests/integration/conversion/retcon_drop_leaf.mlir
+index de23b90e..f06b3a24 100644
+--- a/tests/integration/conversion/retcon_drop_leaf.mlir
++++ b/tests/integration/conversion/retcon_drop_leaf.mlir
+@@ -9,7 +9,8 @@
+ !tree = !reussir.record<variant "LeafTree" {!empty, !leaf, !branch}>
+ 
+ module {
+-  // CHECK-LABEL: func.func @root(
++  // The direct-arm path is one function per type; the root site calls it.
++  // CHECK-LABEL: func.func private @{{.*}}LeafTreeE.direct(
+   // CHECK: reussir.record.dispatch
+   // CHECK: [0] ->
+   // CHECK-NOT: call
+@@ -22,6 +23,10 @@ module {
+   // CHECK: [2] ->
+   // CHECK: call @{{.*}}LeafTreeE.retcon
+   // CHECK: return
++  // CHECK-LABEL: func.func @root(
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK: call @{{.*}}LeafTreeE.direct(
++  // CHECK: return
+   // DIRECT-LABEL: func.func @root(
+   // DIRECT-NOT: reussir.record.dispatch
+   // DIRECT: call @{{.*}}LeafTreeE(
+@@ -30,17 +35,16 @@ module {
+     return
+   }
+ 
++  // Inside a retcon destructor one tag test picks the direct path or the
++  // suspension (arms 0 and 1 are direct: mask 0b011).
+   // CHECK-LABEL: func.func @parent(
+-  // CHECK: reussir.record.dispatch
+-  // CHECK: [0] ->
+-  // CHECK-NOT: call
+-  // CHECK-NOT: reussir.dtor.suspend
+-  // CHECK: reussir.scf.yield
+-  // CHECK: [1] ->
+-  // CHECK-NOT: .retcon
+-  // CHECK: reussir.rc.fetch
+-  // CHECK: reussir.rc.reinterpret
+-  // CHECK: [2] ->
++  // CHECK-NOT: reussir.record.dispatch
++  // CHECK: arith.constant 3 : i3
++  // CHECK: reussir.record.tag
++  // CHECK: arith.shrui
++  // CHECK: scf.if
++  // CHECK: call @{{.*}}LeafTreeE.direct(
++  // CHECK: } else {
+   // CHECK: reussir.dtor.suspend @{{.*}}LeafTreeE.retcon
+   // CHECK: return
+   func.func @parent(%ref: !reussir.ref<!tree>) attributes {reussir.retcon_drop} {
+-- 
+2.43.0
+

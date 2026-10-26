@@ -161,19 +161,44 @@ files, `runtime/` and `scripts/` from the repository root.
   the check, and the read could be one texture again (measure the reads
   first).
 
-### Drop glue in native Lean's release order (issue 2, missing feature)
+### Reussir's drop order is first field first (issue 2, missing feature)
 
-- **What:** The runtime frees its containers through the per-thread
-  pending stack that patch 02-b adds (`reussir_rt::drop`), and needs it to
-  build; 02-a and 02-c complete it.
-- **Why:** A missing feature, not a bug: Reussir's drop glue recursed once
-  per cell (upstream Reussir frees in bounded stack since `7954a367`,
-  its own way, first field first), and Lean frees iteratively, last field
-  first. Patches 02-a to 02-e (applied) free in Lean's order through a
-  stack the runtime shares
+- **What:** leanrt keeps its pending releases on Reussir's drop stack
+  (issue 23, patches 23-k to 23-m), through `pending`, with one flag
+  that tells whether a drain runs. Inside a drain (a free that starts at
+  a runtime object: an array, a reference set, a box, a task or thunk
+  cell; or the drain of a record that Reussir frees as a worklist),
+  every runtime object that Reussir's glue reaches is pushed (an array
+  as a cell that pushes its step when it is popped; an array of
+  immediates only, which releases nothing, and a typed array of `Nat`,
+  `Int` or `String` are freed at once), and the pops give native Lean's
+  order. A free that starts when user code drops a record runs no drain
+  at its top (for a Worklist record, each dead Worklist child is a drain
+  of its own), so the order there is Reussir's own: field order at every
+  record level from the root (plan
+  [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Order of releases in one free").
+- **Why:** A missing feature, not a bug: upstream Reussir `7954a367`
+  frees records at a bounded stack depth, first field first, each
+  member's subtree whole, with its state per drop; issue 23's worklist
+  (in lean2rr's series) frees Worklist records in place with a stack per
+  thread, which 23-k to 23-m open to a host. Lean frees iteratively, last
+  field first. The bases before Phase 2 (up to `l2r-base8`) had five
+  local patches, 02-a to 02-e, that replaced upstream's drop lowering
+  with a stack shared with leanrt, and a drain-end hook, 09-a (issue 9,
+  retired); they went when leanrt got its own stack, since a Reussir
+  change is the last resort (owner)
   ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md)).
-- **Where:** [../ownership.md](../ownership.md#containers-free-through-the-threads-pending-stack-in-leans-order).
-- **Remove only if:** never (required).
+- **Where:** [../ownership.md](../ownership.md#runtime-objects-free-through-leanrts-pending-stack-in-leans-order);
+  `runtime/leanrt/src/pending.rs`; `scripts/l2r.py`:
+  `check_reussir_patches` (it requires 23-f, 23-k and 23-m, so it
+  refuses the checkout of a base before Phase 2, whose glue still pushes
+  onto the old shared stack, and `l2r-base9`, which lacks the shared
+  stack).
+- **Remove only if:** the stack itself: never (a bounded stack through
+  runtime objects). The field order at the top of a free that user code
+  starts goes only if such a drop runs inside a drain of the shared
+  stack.
 
 ### Each texture is its own crate
 

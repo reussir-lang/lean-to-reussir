@@ -1,0 +1,433 @@
+From 0fef47d167f29e3619af309ca897ba9efa7d434c Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:37:20 -0400
+Subject: [PATCH 13/21] l2r-local: entry 23-e: worklist drops: nullable members
+ and locked cells
+
+Fourth step: worklist glue (23-d) defers every box of its record's cycle
+itself, so that nesting stays bounded by the type graph. Two ways
+remained in which glue released such a box through the record's entry,
+one native frame per level of the value (a chain linked through a
+nullable member overflowed a 256 KiB stack in
+runtime/drop_member_order.mlir's chains with worklist-drops on):
+
+- A nullable member's non-null box of a Worklist record is now deferred
+  like a plain member box.
+- A locked cell's payload is released, inside its critical section, by
+  a `__reussir_locked_drop` function, now under every option, not only
+  under retcon-drops. Released inline in the critical section, the
+  payload's decrement token was never freed: frontend/retcon_drop.rr
+  leaked the Arc box held by a Mutex<Arc<Tree>> under ASan, and so does
+  TPDE mode on l2r-base7 (neither option set; a 24-byte ASan leak). Inside
+  glue the function is a separate one, `__reussir_locked_drop.worklist`,
+  marked as glue, so that it defers the payload's Worklist box; outside
+  glue the ordinary one, which drops the payload through its entry.
+
+Boxes in record members, arrays and unlocked cells were already deferred
+by 23-d (the walk expands them inline). A record reached through another
+record's box is not affected: that box's own drop runs its own glue, or,
+outside the cycle, is bounded by the type graph.
+
+Tests: conversion/worklist_drop_members.mlir (a record linked to itself
+through a nullable, a cell, a mutex cell and a plain member: four
+deferrals, one in the glue locked drop, no tail release helper; a mutex
+cell dropped outside glue uses the ordinary locked drop);
+conversion/locked_cell_drop.mlir (TPDE's options: the locked drop frees
+its token); conversion/retcon_drop.mlir's run without retcon drops no
+longer excludes `__reussir_locked_drop`; conversion/mutex_cell_drop,
+rwlock_cell_drop and flatlock_cell_drop.mlir check the critical section's
+call of the locked drop and, in the locked drop, the payload's decrement
+(and the inner box's free, now under the lock).
+---
+ .../AcquireDropExpansion.cpp                  | 35 +++++++++++++------
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 14 ++++----
+ .../AcquireDropExpansion/WorklistDrop.h       |  6 ++++
+ .../conversion/flatlock_cell_drop.mlir        | 25 +++++++------
+ .../conversion/locked_cell_drop.mlir          | 19 ++++++++++
+ .../conversion/mutex_cell_drop.mlir           | 32 +++++++++--------
+ tests/integration/conversion/retcon_drop.mlir |  2 +-
+ .../conversion/rwlock_cell_drop.mlir          | 31 +++++++++-------
+ .../conversion/worklist_drop_members.mlir     | 35 +++++++++++++++++++
+ 9 files changed, 144 insertions(+), 55 deletions(-)
+ create mode 100644 tests/integration/conversion/locked_cell_drop.mlir
+ create mode 100644 tests/integration/conversion/worklist_drop_members.mlir
+
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 848e1351..1fa083a5 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -60,16 +60,19 @@ namespace reussir {
+ namespace {
+ class DropExpansionPattern : public mlir::OpRewritePattern<ReussirRefDropOp> {
+ private:
+-  mutable llvm::DenseMap<RefType, mlir::func::FuncOp> lockedDrops;
++  mutable llvm::DenseMap<std::pair<mlir::Type, unsigned>, mlir::func::FuncOp>
++      lockedDrops;
+ 
+-  mlir::func::FuncOp lockedDrop(RefType type, ReussirRefDropOp op,
++  // A `glue` locked drop is worklist glue itself, for use inside glue.
++  mlir::func::FuncOp lockedDrop(RefType type, bool glue, ReussirRefDropOp op,
+                                 mlir::PatternRewriter &rewriter) const {
+-    auto [it, inserted] = lockedDrops.try_emplace(type);
++    auto [it, inserted] = lockedDrops.try_emplace({type, unsigned(glue)});
+     if (!inserted)
+       return it->second;
+     auto module = op->getParentOfType<mlir::ModuleOp>();
+     for (auto function : module.getOps<mlir::func::FuncOp>()) {
+       if (function->hasAttr("reussir.locked_drop") &&
++          function->hasAttr(kWorklistGlueAttr) == glue &&
+           function.getNumArguments() == 1 &&
+           function.getArgumentTypes()[0] == type) {
+         it->second = function;
+@@ -79,10 +82,13 @@ private:
+     mlir::OpBuilder::InsertionGuard guard(rewriter);
+     rewriter.setInsertionPointToStart(module.getBody());
+     auto function = mlir::func::FuncOp::create(
+-        rewriter, op.getLoc(), "__reussir_locked_drop",
++        rewriter, op.getLoc(),
++        glue ? "__reussir_locked_drop.worklist" : "__reussir_locked_drop",
+         rewriter.getFunctionType({type}, {}));
+     function.setPrivate();
+     function->setAttr("reussir.locked_drop", rewriter.getUnitAttr());
++    if (glue)
++      function->setAttr(kWorklistGlueAttr, rewriter.getUnitAttr());
+     function->setAttr("llvm.linkage",
+                       rewriter.getAttr<mlir::LLVM::LinkageAttr>(
+                           mlir::LLVM::linkage::Linkage::Private));
+@@ -142,13 +148,12 @@ private:
+       rewriter.setInsertionPointToStart(body);
+       mlir::Value slot = ReussirRefFromMemrefOp::create(
+           rewriter, op.getLoc(), slotType, body->getArgument(0));
+-      if (retconDrops) {
+-        auto function = lockedDrop(slotType, op, rewriter);
+-        mlir::func::CallOp::create(rewriter, op.getLoc(), function,
+-                                   mlir::ValueRange{slot});
+-      } else {
+-        ReussirRefDropOp::create(rewriter, op.getLoc(), slot);
+-      }
++      // Always through a function: released inline in the critical
++      // section, the payload's decrement token would never be freed.
++      bool glue = worklistDrops && isInsideWorklistGlue(op);
++      auto function = lockedDrop(slotType, glue, op, rewriter);
++      mlir::func::CallOp::create(rewriter, op.getLoc(), function,
++                                 mlir::ValueRange{slot});
+       mlir::sync::SyncYieldOp::create(rewriter, op.getLoc());
+       rewriter.eraseOp(op);
+       return mlir::success();
+@@ -361,6 +366,14 @@ private:
+           &dispatcher.getNonNullRegion(), dispatcher.getNonNullRegion().begin(),
+           {nullableType.getPtrTy()}, {op.getLoc()});
+       rewriter.setInsertionPointToStart(nonNullBlock);
++      if (worklistDrops && canDeferMemberRelease(rcType, op)) {
++        emitDeferredMemberRelease(nonNullBlock->getArgument(0), op.getLoc(),
++                                  op->getParentOfType<mlir::ModuleOp>(),
++                                  rewriter, symbols);
++        ReussirScfYieldOp::create(rewriter, op.getLoc(), nullptr);
++        rewriter.eraseOp(op);
++        return mlir::success();
++      }
+       if (outlineRecord && tailRecursiveDrops &&
+           emitTailDropRelease(nonNullBlock->getArgument(0), op.getLoc(),
+                               op->getParentOfType<mlir::ModuleOp>(), rewriter,
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 2690f453..0eef8700 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -35,8 +35,6 @@
+ 
+ namespace reussir {
+ namespace {
+-constexpr llvm::StringLiteral kWorklistGlueAttr = "reussir.worklist_drop";
+-
+ class WorklistGlue {
+   mlir::ModuleOp module;
+   mlir::PatternRewriter &rewriter;
+@@ -131,11 +129,15 @@ mlir::func::FuncOp getWorklistDropEntry(RecordType type, AtomicKind kind,
+   return WorklistGlue(module, rewriter, symbols).entry(type, kind);
+ }
+ 
+-bool canDeferMemberRelease(RcType type, mlir::Operation *site) {
++bool isInsideWorklistGlue(mlir::Operation *site) {
+   auto function = site->getParentOfType<mlir::func::FuncOp>();
+-  return function && function->hasAttr(kWorklistGlueAttr) &&
+-         type.getCapability() == Capability::shared &&
+-         isWorklistDropRecord(type.getElementType());
++  return function && function->hasAttr(kWorklistGlueAttr);
++}
++
++bool canDeferMemberRelease(RcType type, mlir::Operation *site) {
++  return type.getCapability() == Capability::shared &&
++         isWorklistDropRecord(type.getElementType()) &&
++         isInsideWorklistGlue(site);
+ }
+ 
+ void emitDeferredMemberRelease(mlir::Value rc, mlir::Location loc,
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.h b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+index 9cf4813f..372ce369 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+@@ -13,6 +13,9 @@
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ 
+ namespace reussir {
++// Marks the functions of worklist glue (walks, glue locked drops).
++inline constexpr llvm::StringLiteral kWorklistGlueAttr = "reussir.worklist_drop";
++
+ // Whether `type` is a named record whose drop is `RecordDropKind::Worklist`.
+ bool isWorklistDropRecord(mlir::Type type);
+ 
+@@ -22,6 +25,9 @@ mlir::func::FuncOp getWorklistDropEntry(RecordType type, AtomicKind kind,
+                                         mlir::PatternRewriter &rewriter,
+                                         mlir::SymbolTableCollection *symbols);
+ 
++// Whether `site` is inside worklist glue (a walk).
++bool isInsideWorklistGlue(mlir::Operation *site);
++
+ // Whether a member box of `type` dropped at `site` is deferred: `site` is in
+ // worklist glue and the box is a shared box of a Worklist record.
+ bool canDeferMemberRelease(RcType type, mlir::Operation *site);
+diff --git a/tests/integration/conversion/flatlock_cell_drop.mlir b/tests/integration/conversion/flatlock_cell_drop.mlir
+index 4bf4c57a..ddada3a0 100644
+--- a/tests/integration/conversion/flatlock_cell_drop.mlir
++++ b/tests/integration/conversion/flatlock_cell_drop.mlir
+@@ -7,27 +7,32 @@
+ module {
+   // Dropping the last reference to a flatlock cell releases the managed
+   // payload through the same door every access uses: a combining-lock
+-  // critical section whose body loads the protected RC and decrements it —
+-  // never a leading-slot projection, which would address the lock header.
++  // critical section whose body passes the protected slot to a locked-drop
++  // function that loads the RC and decrements it — never a leading-slot
++  // projection, which would address the lock header.
++  // DROP-LABEL: func.func private @__reussir_locked_drop(
++  // DROP: %[[INNER:.+]] = reussir.ref.load(
++  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
+   // DROP-LABEL: func.func @flatlock_cell_drop
+   // DROP: reussir.rc.fetch_sub
+   // DROP-NOT: reussir.ref.project
+   // DROP: %[[VIEW:.+]] = reussir.ref.to_memref{{.*}} : memref<!sync.combining_lock<!reussir.rc<i64 atomic>>>
+   // DROP: sync.combining_lock.critical_section %[[VIEW]]
+   // DROP: %[[SLOT:.+]] = reussir.ref.from_memref
+-  // DROP: %[[INNER:.+]] = reussir.ref.load(%[[SLOT]]
+-  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
++  // DROP: call @__reussir_locked_drop(%[[SLOT]])
+   // DROP-NOT: reussir.ref.project
+ 
+-  // Fully lowered, the inline path: box count drops, the status flag is
+-  // test-and-set (the fast-path acquire), the inner box's count drops and it
+-  // is freed under the lock (the combining region cannot thread the token
+-  // out), the status is released, and the 32-byte cell box dies last.
++  // Fully lowered, the locked-drop function path: box count drops, the
++  // status flag is test-and-set (the fast-path acquire), the locked-drop
++  // function drops the inner box's count and frees it under the lock, the
++  // status is released, and the 32-byte cell box dies last.
++  // LLVM-LABEL: define private void @__reussir_locked_drop(ptr
++  // LLVM: atomicrmw sub ptr %{{.+}}, i32 1
++  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
+   // LLVM-LABEL: define void @flatlock_cell_drop(ptr
+   // LLVM: atomicrmw sub ptr %{{.+}}, i32 1
+   // LLVM: atomicrmw xchg ptr %{{.+}}, i8 1 acquire
+-  // LLVM: atomicrmw sub ptr %{{.+}}, i32 1
+-  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
++  // LLVM: call void @__reussir_locked_drop(ptr
+   // LLVM: store atomic i8 0, ptr %{{.+}} release
+   // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 32)
+   func.func @flatlock_cell_drop(%cell: !flatlock_rc) {
+diff --git a/tests/integration/conversion/locked_cell_drop.mlir b/tests/integration/conversion/locked_cell_drop.mlir
+new file mode 100644
+index 00000000..1f92e657
+--- /dev/null
++++ b/tests/integration/conversion/locked_cell_drop.mlir
+@@ -0,0 +1,19 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true tail-recursive-drops=false' --reussir-token-reuse --verify-each | %FileCheck %s
++
++// With neither retcon nor worklist drops (TPDE's options), a locked cell's
++// payload is still released by a locked-drop function, whose decrement
++// token is freed; inline in the critical section it was never freed.
++
++!b = !reussir.record<compound "LkBox" {i64}>
++module {
++  // CHECK-LABEL: func.func private @__reussir_locked_drop(
++  // CHECK: reussir.rc.fetch_sub
++  // CHECK: reussir.token.free
++  // CHECK-LABEL: func.func @locked(
++  // CHECK: sync.mutex.critical_section
++  // CHECK: call @__reussir_locked_drop(
++  func.func @locked(%ref: !reussir.ref<!reussir.cell<!reussir.rc<!b atomic> mutex>>) {
++    reussir.ref.drop (%ref : !reussir.ref<!reussir.cell<!reussir.rc<!b atomic> mutex>>)
++    return
++  }
++}
+diff --git a/tests/integration/conversion/mutex_cell_drop.mlir b/tests/integration/conversion/mutex_cell_drop.mlir
+index defd3792..ad330d48 100644
+--- a/tests/integration/conversion/mutex_cell_drop.mlir
++++ b/tests/integration/conversion/mutex_cell_drop.mlir
+@@ -7,9 +7,13 @@
+ module {
+   // Dropping the last reference to a mutex cell releases the managed payload
+   // through the same door every access uses: a critical section over the
+-  // mutex view, whose body loads the protected RC and decrements it. A
+-  // leading-slot projection would address the lock header instead of the
+-  // payload (and is rejected by the ref.project verifier).
++  // mutex view, whose body passes the protected slot to a locked-drop
++  // function that loads the RC and decrements it. A leading-slot projection
++  // would address the lock header instead of the payload (and is rejected by
++  // the ref.project verifier).
++  // DROP-LABEL: func.func private @__reussir_locked_drop(
++  // DROP: %[[INNER:.+]] = reussir.ref.load(
++  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
+   // DROP-LABEL: func.func @mutex_cell_drop
+   // DROP: reussir.rc.fetch_sub
+   // DROP: %[[REF:.+]] = reussir.rc.borrow
+@@ -18,27 +22,27 @@ module {
+   // DROP: sync.mutex.critical_section %[[VIEW]]
+   // DROP: ^bb0(%[[PAYLOAD:.+]]: memref<!reussir.rc<i64 atomic>>):
+   // DROP: %[[SLOT:.+]] = reussir.ref.from_memref(%[[PAYLOAD]]
+-  // DROP: %[[INNER:.+]] = reussir.ref.load(%[[SLOT]]
+-  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
++  // DROP: call @__reussir_locked_drop(%[[SLOT]])
+   // DROP-NOT: reussir.ref.project
+ 
+   // Fully lowered: the box count drops first; on the last reference the lock
+-  // state word (mutex field 0) is acquired, the payload pointer is loaded
+-  // from mutex field 1 — past the lock header — and its count is decremented
+-  // under the lock. Both frees happen after the unlock: the inner box token
+-  // leaves the critical section, and the cell box itself dies through the
+-  // mutex-aware 24-byte layout.
++  // state word (mutex field 0) is acquired and the locked-drop function gets
++  // mutex field 1 — past the lock header —: it loads the payload pointer,
++  // decrements its count and frees the inner box, under the lock. The cell
++  // box dies after the unlock, through the mutex-aware 24-byte layout.
++  // LLVM-LABEL: define private void @__reussir_locked_drop(ptr
++  // LLVM: %[[INNER:.+]] = load ptr, ptr %0
++  // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
++  // LLVM: call void @__reussir_deallocate(ptr %[[INNER]], i64 8, i64 16)
+   // LLVM-LABEL: define void @mutex_cell_drop(ptr
+   // LLVM: atomicrmw sub ptr %{{.+}}, i32 1
+   // LLVM: %[[CELL:.+]] = getelementptr { i32, { i32, ptr } }, ptr %{{.+}}, i32 0, i32 1
+   // LLVM: %[[STATE:.+]] = getelementptr { i32, ptr }, ptr %[[CELL]], i32 0, i32 0
+   // LLVM: cmpxchg ptr %[[STATE]]
+   // LLVM: %[[SLOT:.+]] = getelementptr { i32, ptr }, ptr %[[CELL]], i32 0, i32 1
+-  // LLVM: %[[INNER:.+]] = load ptr, ptr %[[SLOT]]
+-  // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
++  // LLVM: call void @__reussir_locked_drop(ptr %[[SLOT]])
+   // LLVM: atomicrmw xchg ptr %[[STATE]], i32 0
+-  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+-  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
++  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+   func.func @mutex_cell_drop(%cell: !mutex_rc) {
+     %t = reussir.rc.dec (%cell : !mutex_rc) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
+     reussir.token.free (%t : !reussir.nullable<!reussir.token<align: 8, size: 24>>)
+diff --git a/tests/integration/conversion/retcon_drop.mlir b/tests/integration/conversion/retcon_drop.mlir
+index 9e4556d4..d66ba109 100644
+--- a/tests/integration/conversion/retcon_drop.mlir
++++ b/tests/integration/conversion/retcon_drop.mlir
+@@ -1,5 +1,5 @@
+ // RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true retcon-drops=true' --verify-each | %FileCheck %s
+-// RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true retcon-drops=false' --verify-each | %FileCheck %s --check-prefix=DIRECT --implicit-check-not=.retcon --implicit-check-not=__reussir_locked_drop
++// RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true retcon-drops=false' --verify-each | %FileCheck %s --check-prefix=DIRECT --implicit-check-not=.retcon
+ 
+ !tree_ = !reussir.record<compound "Tree" incomplete>
+ !tree = !reussir.record<compound "Tree" { !reussir.rc<!reussir.cell<!reussir.rc<!tree_ shared> mutex> atomic>, !tree_, !tree_ }>
+diff --git a/tests/integration/conversion/rwlock_cell_drop.mlir b/tests/integration/conversion/rwlock_cell_drop.mlir
+index 8ad82b8f..76229f2e 100644
+--- a/tests/integration/conversion/rwlock_cell_drop.mlir
++++ b/tests/integration/conversion/rwlock_cell_drop.mlir
+@@ -7,9 +7,12 @@
+ module {
+   // Dropping the last reference to an rwlock cell releases the managed
+   // payload through the same door every mutation uses: a write critical
+-  // section over the rwlock view, whose body loads the protected RC and
+-  // decrements it — never a leading-slot projection, which would address the
+-  // lock header.
++  // section over the rwlock view, whose body passes the protected slot to a
++  // locked-drop function that loads the RC and decrements it — never a
++  // leading-slot projection, which would address the lock header.
++  // DROP-LABEL: func.func private @__reussir_locked_drop(
++  // DROP: %[[INNER:.+]] = reussir.ref.load(
++  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
+   // DROP-LABEL: func.func @rwlock_cell_drop
+   // DROP: reussir.rc.fetch_sub
+   // DROP-NOT: reussir.ref.project
+@@ -17,16 +20,20 @@ module {
+   // DROP: sync.rwlock.write_critical_section %[[VIEW]]
+   // DROP: ^bb0(%[[PAYLOAD:.+]]: memref<!reussir.rc<i64 atomic>>):
+   // DROP: %[[SLOT:.+]] = reussir.ref.from_memref(%[[PAYLOAD]]
+-  // DROP: %[[INNER:.+]] = reussir.ref.load(%[[SLOT]]
+-  // DROP: reussir.rc.dec(%[[INNER]] : !reussir.rc<i64 atomic>)
++  // DROP: call @__reussir_locked_drop(%[[SLOT]])
+   // DROP-NOT: reussir.ref.project
+ 
+   // Fully lowered: the box count drops first; on the last reference the
+   // state word of the two-word raw rwlock header is write-acquired (the
+-  // whole writer mask compare-exchanged in), the payload pointer is loaded
+-  // from rwlock field 1 — past the lock header — and its count is
+-  // decremented under the lock. Both frees happen after the unlock, and the
+-  // cell box dies through the rwlock-aware 24-byte layout.
++  // whole writer mask compare-exchanged in), and the locked-drop function
++  // gets rwlock field 1 — past the lock header —: it loads the payload
++  // pointer, decrements its count and frees the inner box, under the lock.
++  // The cell box dies after the unlock, through the rwlock-aware 24-byte
++  // layout.
++  // LLVM-LABEL: define private void @__reussir_locked_drop(ptr
++  // LLVM: %[[INNER:.+]] = load ptr, ptr %0
++  // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
++  // LLVM: call void @__reussir_deallocate(ptr %[[INNER]], i64 8, i64 16)
+   // LLVM-LABEL: define void @rwlock_cell_drop(ptr
+   // LLVM: atomicrmw sub ptr %{{.+}}, i32 1
+   // LLVM: %[[CELL:.+]] = getelementptr { i32, { { i32, i32 }, ptr } }, ptr %{{.+}}, i32 0, i32 1
+@@ -34,11 +41,9 @@ module {
+   // LLVM: %[[STATE:.+]] = getelementptr { i32, i32 }, ptr %[[HEADER]], i32 0, i32 0
+   // LLVM: cmpxchg ptr %[[STATE]], i32 0, i32 1073741823
+   // LLVM: %[[SLOT:.+]] = getelementptr { { i32, i32 }, ptr }, ptr %[[CELL]], i32 0, i32 1
+-  // LLVM: %[[INNER:.+]] = load ptr, ptr %[[SLOT]]
+-  // LLVM: atomicrmw sub ptr %[[INNER]], i32 1
++  // LLVM: call void @__reussir_locked_drop(ptr %[[SLOT]])
+   // LLVM: atomicrmw sub ptr %{{.+}}, i32 1073741823 release
+-  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+-  // LLVM-DAG: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 16)
++  // LLVM: call void @__reussir_deallocate(ptr %{{.+}}, i64 8, i64 24)
+   func.func @rwlock_cell_drop(%cell: !rwlock_rc) {
+     %t = reussir.rc.dec (%cell : !rwlock_rc) : !reussir.nullable<!reussir.token<align: 8, size: 24>>
+     reussir.token.free (%t : !reussir.nullable<!reussir.token<align: 8, size: 24>>)
+diff --git a/tests/integration/conversion/worklist_drop_members.mlir b/tests/integration/conversion/worklist_drop_members.mlir
+new file mode 100644
+index 00000000..72d9885a
+--- /dev/null
++++ b/tests/integration/conversion/worklist_drop_members.mlir
+@@ -0,0 +1,35 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true' --verify-each | %FileCheck %s --implicit-check-not=tail_release --implicit-check-not=reussir.dtor.suspend
++
++// Worklist glue defers every box of its record's cycle itself, whatever
++// holds it: a nullable member, a cell box (released inline, not by a tail
++// release helper), a locked cell (in a locked-drop function that is glue
++// itself) and a plain member. A locked cell outside glue keeps the ordinary
++// locked-drop function.
++
++!a_ = !reussir.record<compound "WmA" incomplete>
++!a = !reussir.record<compound "WmA" {!reussir.nullable<!reussir.rc<!a_>>, !reussir.cell<!reussir.rc<!a_ shared>>, !reussir.cell<!reussir.rc<!a_ shared> mutex>, !a_}>
++
++module {
++  // CHECK-LABEL: func.func private @__reussir_locked_drop.worklist(
++  // CHECK-SAME: reussir.worklist_drop
++  // CHECK: reussir.rc.defer @[[RELEASE:.*WmAE\.worklist\.release]](
++  // CHECK-LABEL: func.func private @{{.*}}WmAE.worklist.walk(
++  // CHECK: reussir.nullable.dispatch
++  // CHECK: reussir.rc.defer @[[RELEASE]](
++  // CHECK: reussir.rc.defer @[[RELEASE]](
++  // CHECK: sync.mutex.critical_section
++  // CHECK: call @__reussir_locked_drop.worklist(
++  // CHECK: reussir.rc.defer @[[RELEASE]](
++  // CHECK: return
++  func.func @root(%ref: !reussir.ref<!a>) {
++    reussir.ref.drop (%ref : !reussir.ref<!a>)
++    return
++  }
++  // CHECK-LABEL: func.func @locked(
++  // CHECK: sync.mutex.critical_section
++  // CHECK: call @__reussir_locked_drop(
++  func.func @locked(%ref: !reussir.ref<!reussir.cell<!reussir.rc<!a> mutex>>) {
++    reussir.ref.drop (%ref : !reussir.ref<!reussir.cell<!reussir.rc<!a> mutex>>)
++    return
++  }
++}

@@ -120,6 +120,10 @@ impl Glue for LeanrtGlue {
     /// a glue that breaks the drain contract R6 could make one, review
     /// RS15-05.)
     fn switched(&self, from: CtxId, to: CtxId) {
+        // No context switches inside a free: its stack of pending work is
+        // the thread's (`crate::pending`, lean-runtime's W3). Checked in
+        // debug builds (`L2R_LEANRT_RUSTFLAGS="-C debug-assertions"`).
+        debug_assert!(!crate::pending::releasing(), "leanrt: a context switch inside a free (lean-runtime's W3)");
         let event_loop = ls::switch_is_event_loop();
         CTX_STATES.with(|m| {
             let mut m = m.borrow_mut();

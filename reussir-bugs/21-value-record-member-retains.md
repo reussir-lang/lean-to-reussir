@@ -9,8 +9,9 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 ## Summary
 
 **Kind:** missed optimization. **Status:** patched (21-a), applied in
-`./reussir`'s series since 2026-10-25 (commit `8e9a6293`, `l2r-stepd`
-plus 21-a). No workaround in lean2rr. It shows only under
+`./reussir`'s series since 2026-10-25 (branch `l2r-base9-shared`, commit
+`9c10b983`; made as `8e9a6293`, `l2r-stepd` plus 21-a, the same code).
+No workaround in lean2rr. It shows only under
 `--int-backend rcgmp` (lean2rr's default since 2026-10-25): with the
 leanrt backend (`--int-backend leanrt`, the default until then), `Nat`
 and `Int` are tagged FFI handles (10-a), whose retains are `rc.inc`
@@ -123,9 +124,9 @@ and L17 compile to the same instructions with and without the patch
 
 Patch file
 [`patches/21-a-value-record-member-retains.patch`](patches/21-a-value-record-member-retains.patch)
-(commit `8e9a6293`). Its rule: a counted word's retain cancels against
-the member release of a record's expanded drop under the rules that hold
-for an rc member.
+(commit `9c10b983` on `l2r-base9-shared`, `8e9a6293` on `l2r-base8`). Its
+rule: a counted word's retain cancels against the member release of a
+record's expanded drop under the rules that hold for an rc member.
 
 - **Equivalence** (`lib/Analysis/EquivalenceAnalysis.cpp`,
   `decideLoadedEquivalent`): the same field of the same by-value record,
@@ -204,7 +205,9 @@ with loads.
 
 On `l2r-stepd` with 21-a, Reussir's lit suite has the results it has
 without it, apart from the new tests (763 pass; the 11 that fail also
-fail without 21-a), and `reussir-ut` passes 82 of 82.
+fail without 21-a), and `reussir-ut` passes 82 of 82. On `l2r-base9`
+its tests pass with the rest of the suite (776 pass, 2 fail for want of
+the `not` tool).
 
 ## Review
 

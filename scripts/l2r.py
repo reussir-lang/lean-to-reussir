@@ -392,28 +392,29 @@ def build_lean_runtime(out):
 # there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
 # (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
 # 00906e38 plus reussir-bugs/patches/series. Plain upstream fails the first
-# check. 02-a: both acquire/drop expansion passes of rrc's lowering pipeline
-# (pipeline.rs, and its C++ copy in Bridge.cppm) run with upstream's
-# tail-recursive and retcon drops (#677, #679) off, so that upstream's drop
-# lowering cannot mix with 02-a's glue; check_reussir_patches also checks
-# that no argument of the passes is upstream's switch (OptLevel::Tpde).
-# 09-a: every drain that released something calls the function the host
-# stores in `__reussir_drop_drained` once it is over; leanrt resolves the
-# promises a free dropped there (runtime/README.md, "The scheduler").
-# leanrt's reference to the symbol would also fail to compile without it.
+# check. 23-f: rrc's lowering pipeline (through the C API; the C++ bridge
+# has a copy) frees the records of a recursive type that is neither Direct
+# nor TailLoop through the per-thread drop stack of 23-a to 23-e (worklist
+# drops), not through upstream's retcon coroutines, whose memory grows by
+# one suspended frame per level of the value being freed
+# (reussir-bugs/23-worklist-drops.md). The check also refuses the checkout
+# of a base before Phase 2, whose drop glue pushed onto a stack that leanrt
+# no longer reads (patches 02-a to 02-e and 09-a, now out of the series).
+# 23-k and 23-m: that drop stack is shared with leanrt, whose pending stack
+# is built on it (runtime/leanrt/src/pending.rs): the end work after the
+# outermost drain (23-k: set_end_work, want_end_work) and steps, depth and
+# drain for a host (23-m; 23-l, the runs of cells, comes between them).
+# leanrt would also fail to compile without them.
 # 21-a (entry 21, inc/dec cancellation of integer members of [value]
 # records) is an optimization of code with rcgmp integers: nothing needs it,
 # so it is not checked.
 REQUIRED_REUSSIR_PATCHES = [
-    ("02-a", "crates/reussir-backend/src/pipeline.rs", "l2r-local: no tail-recursive or retcon drops"),
-    ("02-a", "lib/Bridge/Bridge.cppm", "options.tailRecursiveDrops = false"),
-    ("09-a", "crates/reussir-rt/src/drop.rs", "__reussir_drop_drained"),
+    ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
+    ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
+    ("23-m", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_step"),
     # The one-word box `LAny` keeps its payload's type number in the top 16
     # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
-    # The drop glue releases a cell's members in native Lean's order when a
-    # later field pushes work (reussir-bugs/02-native-drop-order.md).
-    ("02-e", "lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp", "releasesQuietly"),
 ]
 REUSSIR_HELP = ("build with upstream Reussir 00906e38 plus the patches of "
                 "reussir-bugs/patches/series (reussir-bugs/README.md)")
@@ -421,8 +422,7 @@ REUSSIR_HELP = ("build with upstream Reussir 00906e38 plus the patches of "
 
 def check_reussir_patches():
     """The Reussir checkout (L2R_REUSSIR) is one, and has the local patches
-    lean2rr requires (REQUIRED_REUSSIR_PATCHES), with upstream's
-    tail-recursive and retcon drops off (02-a)."""
+    lean2rr requires (REQUIRED_REUSSIR_PATCHES)."""
     if not (REUSSIR / "crates" / "reussir-rt" / "src").is_dir():
         sys.exit(f"l2r: no Reussir checkout at {REUSSIR} (no crates/reussir-rt/src there): "
                  "set L2R_REUSSIR to a Reussir checkout (default: reussir/ in the lean2rr checkout)")
@@ -431,12 +431,6 @@ def check_reussir_patches():
         if not src.is_file() or symbol not in src.read_text():
             sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks the local Reussir patch {patch} "
                      f"(`{symbol}` in {rel}), which lean2rr requires: {REUSSIR_HELP}")
-    rel = REQUIRED_REUSSIR_PATCHES[0][1]
-    calls = (REUSSIR / rel).read_text().split("reussirCreateAcquireDropExpansionPass(")[1:]
-    if not calls or any("Tpde" in c.split(")", 1)[0] for c in calls):
-        sys.exit(f"l2r: in the Reussir checkout {REUSSIR}, the acquire/drop expansion passes "
-                 f"({rel}) do not have upstream's tail-recursive and retcon drops off "
-                 f"(local Reussir patch 02-a), which lean2rr requires: {REUSSIR_HELP}")
 
 
 def build_leanrt():

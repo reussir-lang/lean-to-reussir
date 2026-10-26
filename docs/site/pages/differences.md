@@ -128,25 +128,33 @@ schedules native Lean can produce. See
 
 - **Order of releases in one free.** Natively a freed value releases what it
   holds last pushed, first released. lean2rr does the same inside every free
-  that starts at a container. When user code drops a record of handles by
-  itself, Reussir's inline release goes in field order. A value of a
-  parameter's type is a box, and Reussir releases a box at once. So the
-  boxes of the first two cells close in field order, and the rest last
-  first. A `List IO.FS.Handle` `L0 … L7` closes `L0 L1 L7 L6 … L2`
-  (natively `L0 L7 … L1` where Lean knows the constructor, else
-  `L7 … L0`). A structure `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}`
-  of handles closes `a b d c e` (natively `e d c b a`). An array set or
-  pop that frees the last reference to a record releases its fields last
-  first, as Lean does.
+  that starts at an object of the runtime: an array, a box, the old value
+  of a reference, a task or thunk cell. An array set or pop that frees the
+  last reference to a record releases its fields last first, as Lean
+  does. When user code drops a record of handles by itself, no runtime
+  free runs. Reussir releases the fields in field order, and each handle,
+  box or array that it reaches is a free of its own. So the order is
+  field order at every record level. A `List IO.FS.Handle` `L0 … L7`
+  closes `L0 L1 … L7` (natively `L0 L7 … L1` where Lean knows the
+  constructor, else `L7 … L0`). A structure
+  `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` of handles closes
+  `a b d c e` (natively `e d c b a`). Unresolved promises are resolved in
+  the same order.
+- **A value shared by two fields of one freed cell.** Inside a runtime
+  free, such a value can come out at another place. Reussir releases a
+  field completely before the next one. Lean first decrements all fields
+  of the cell. In `R{a : Y{x : W, h}, b : W}`, Lean closes `Y.h` before
+  `W.h`, and lean2rr closes `W.h` first.
 - **Release time of borrowed parameters.** lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.
-- **Promises released inside a free.** Their `sync` dependents run when the
-  whole free is over, not when the free reaches the promise. So they see
-  the rest of the container released too. Another unresolved promise of the
-  same container is still unresolved while they run, as natively.
+- **Promises released inside a free.** When a runtime free releases them,
+  their `sync` dependents run when the whole free is over, not when the
+  free reaches the promise. So they see the rest of the container released
+  too. Another unresolved promise of the same container is still
+  unresolved while they run, as natively.
 - **Child processes.** `IO.Process.output` reads both pipes together.
   Natively `Child.pid` leaks the child's pipes; lean2rr closes them.
 
@@ -171,8 +179,9 @@ garbage.
 - **Stack depth.** Frame sizes differ, so the depth of a stack overflow
   differs. The report itself is native's (`Stack overflow detected.
   Aborting.`, exit 134). lean2rr adds no recursion of its own: conversions,
-  list folds and the constant walk are loops, and frees use a stack of
-  pending work.
+  list folds and the constant walk are loops. Reussir frees records in a
+  loop or through a pending stack, which the runtime shares for its own
+  objects.
 - **Build time.** rrc compiles about 80 small functions per second. A
   program with thousands of constants takes minutes (natively seconds).
 
@@ -214,6 +223,7 @@ garbage.
 | One-block arrays | a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late |
 | Constants read in a loop | one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load |
 | No borrowed parameters | a traversal that keeps the nodes it visits writes counts native Lean only reads (about 1.5×) |
+| Dropping a deep value that is not a list (a snoc list, a tree deep along its left child) | Reussir's work list keeps one slot per level while it frees the value (heap memory, freed at the end); native Lean links its to-do list through the freed objects |
 
 ## Lean bugs we do not reproduce
 

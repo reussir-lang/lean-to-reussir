@@ -18,22 +18,27 @@ is lean2rr's output, `RtDepDropOrderBoxed.native.out` native's.
 - `list`: `[h1, …, h8]` built in `main` and dropped after `hs.length`.
   Natively Lean knows the constructor there (`lean_dec_ref_known`): the
   first cell's fields in order, each completely, then the rest last first:
-  `18765432`. lean2rr: `12876543`. Reussir's release of the first cell
-  also releases the members of the second cell before it drains the stack
-  of pending work, so the boxes of the first two cells are released at
-  once; from the third cell on they are pushed and released last first.
+  `18765432`. lean2rr: `12345678`. Reussir's release of the list goes
+  along its tail in a loop, and each boxed head is released where the
+  loop reaches it (a free of its own: no leanrt free runs), first cell
+  first.
 - `built`: the same list made by another function and dropped by `main`.
-  Natively `lean_dec`, all last first: `87654321`. lean2rr: `12876543`.
+  Natively `lean_dec`, all last first: `87654321`. lean2rr: `12345678`.
 - `pair`: a list holding one structure `{a := #[A0, A1], l := [L0, L1]}`,
   dropped after `length`: `L1L0A1A0`, as natively. The structure is the
   payload of a box, released inside a free of the runtime: its fields go
   on the stack of pending work and come back last first.
 - `typed`: the same structure in a monomorphic list type (`ALs`, whose
   field is the record itself, no box): natively `L1L0A1A0`, lean2rr
-  `A1A0L1L0`. Reussir's release of the first cell releases the record's
-  fields while no free runs, and the array frees its elements as soon as
-  the release reaches it.
+  `A1A0L0L1`. Reussir's release of the first cell releases the record's
+  fields in field order while no free runs: the array, a free of its own,
+  frees its elements last first (`A1A0`), then the list's handles go
+  first first (`L0L1`).
 
+With lean2rr's local Reussir drop patches (before the destructor port),
+Reussir's release of a list's first cell also released the members of
+the second cell before it drained its stack of pending work, and from
+the third cell on pushed them: `12876543` for both lists, and `A1A0L1L0`.
 Before the one-word box (dev, with the enum `L2RBox`), a boxed handle was a
 record cell, which Reussir's release pushes from the second cell on:
 `badce`, `18765432` for both lists (natively so in the `list` case), and

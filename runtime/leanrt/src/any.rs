@@ -38,14 +38,13 @@
 //! Reussir function that drops the payload at its type), through the drop
 //! worklist: the payload's cell is deferred as one pending cell, so a chain
 //! of a million nested boxes is freed without deep recursion and what the
-//! payload holds is released in native Lean's order. A payload whose number
-//! has `WIDE_BIT` (lean2rr gives it to types whose Reussir cell starts with
-//! an 8-byte header) is deferred with `__reussir_drop_defer_wide`: a run of
-//! such cells deferred one after the other (the heads of a list that a
-//! free releases whole) is linked through the cells and takes no memory. A
+//! payload holds is released in native Lean's order. The stack neither
+//! reads nor writes the cell: a pending cell costs one pointer of its
+//! vector (`pending::defer_cell`), whatever Reussir's layout of the cell. A
 //! leaf payload (a number with `LEAF_BIT`: lean2rr gives it to records and
-//! enums whose fields are all scalars) is released by a direct call, also
-//! inside a free: it holds nothing to order. The array free calls a payload's
+//! enums whose fields are all scalars, and to typed arrays of leaf elements)
+//! is released by a direct call, also inside a free: it holds nothing to
+//! order. The array free calls a payload's
 //! release directly where the deferred cell would be popped next anyway
 //! (`release_last_in_step`, and an array that keeps one element:
 //! `drop::ReleaseElems::free_single`).
@@ -115,21 +114,13 @@ pub const NUM_U64S: u64 = 11;
 pub const NUM_F32S: u64 = 12;
 pub const FIRST_PROGRAM_NUM: u64 = 16;
 /// The bit of a program payload number that marks a leaf type: a record or
-/// enum without counted or observable members (its fields are scalars), so
-/// that freeing it frees nothing else. lean2rr numbers leaf types with it
-/// (`release_last`).
+/// enum without counted or observable members (its fields are scalars), or
+/// a typed array of `Nat`, `Int`, `String` or arrays of scalars, whose free
+/// frees its elements at once (`drop::free_leaves`). Freeing one frees
+/// nothing that holds anything further, pushes nothing and has no
+/// observable effect. lean2rr numbers leaf types with it (`release_last`;
+/// `boxIsLeaf`, `boxLeafArrayElem`).
 pub const LEAF_BIT: u64 = 0x8000;
-/// The bit of a program payload number without `LEAF_BIT` that marks a
-/// type whose Reussir cell has a wide header: its first 8 bytes are the
-/// 32-bit count, then a 32-bit word that is padding or a fused tag below
-/// 2^16 (Reussir's `hasWideHeader`: a shared enum of at most 2^16
-/// constructors, or a shared struct whose alignment is 8). lean2rr numbers
-/// such types with it (`boxIsWide`); `release_last` defers their cells with
-/// `__reussir_drop_defer_wide`, which links a cell to the run on top
-/// through that header. Not meaningful on a leaf number (a leaf is never
-/// deferred; leaf numbers from `LEAF_BIT | WIDE_BIT` up have the bit set
-/// as part of their count).
-pub const WIDE_BIT: u64 = 0x4000;
 pub const MAX_NUM: u64 = (1 << (64 - ADDR_BITS)) - 1;
 
 /// A boxed value (see the module comment): one word, owning one reference
@@ -341,15 +332,15 @@ pub fn init_releases() {
 /// reference given up). A program payload (tested first) goes to the
 /// release of its type (`RELEASES`) through the worklist: its cell (the
 /// word without the number) is deferred as one pending cell, the rule of
-/// `drop::free_unique` for records (`drop::free_deferred`: Reussir's
-/// `__reussir_drop_defer`, which neither reads nor writes the cell, then
-/// its drain; `drop::free_deferred_wide` for a number with `WIDE_BIT`).
-/// Inside a free it is only pushed; outside one Reussir's drain releases
-/// it and then what it pushed (`drain_one`). So nested boxes are released
+/// `drop::free_unique` for records (`drop::free_deferred`:
+/// `pending::defer_cell`, which neither reads nor writes the cell). Inside a
+/// drain it is only pushed; outside one it is released at once, as the
+/// drain of that one cell, and then what it pushed. So nested boxes are released
 /// one after the other, not by recursion, and what a payload holds in
 /// native Lean's order. A leaf payload is released directly, inside a free
-/// too (`LEAF_BIT`: its release frees its own cell and nothing else, so it
-/// has no member to order, cannot recurse and pushes nothing). leanrt's
+/// too (`LEAF_BIT`: its release frees its own cell and, for a typed array of
+/// leaf elements, those elements at once, so it has no member to order,
+/// recurses at most one level and pushes nothing). leanrt's
 /// own kinds are dropped as their types (`release_kind`). `extern "C"`: no
 /// unwinding, so the textures that drop an `LAny` need no landing pad.
 /// `#[cold]`, though the last reference of a boxed record is common: the
@@ -370,9 +361,6 @@ pub extern "C" fn release_last(w: u64) {
         if num & LEAF_BIT != 0 {
             return unsafe { f(cell) };
         }
-        if num & WIDE_BIT != 0 {
-            return unsafe { crate::drop::free_deferred_wide(cell as usize, f) };
-        }
         return unsafe { crate::drop::free_deferred(cell as usize, f) };
     }
     release_kind(w, num)
@@ -386,8 +374,9 @@ pub extern "C" fn release_last(w: u64) {
 /// the only entry above the step, popped next with the step as the top
 /// entry again: the same release, at the same point, with the same stack
 /// (the argument is at the caller). leanrt's own kinds, and a payload
-/// without a release: `release_last` (a leaf kind is freed at once, an
-/// array pushes its step).
+/// without a release: `release_last` (a leaf kind is freed at once; an
+/// array of immediates too, another array goes on the stack as a cell
+/// that pushes its step when it is popped, `drop::free_vec`).
 #[inline(always)]
 pub(crate) unsafe fn release_last_in_step(w: u64) {
     let num = num_of(w);
@@ -416,17 +405,6 @@ pub(crate) fn frees_flat(w: u64) -> bool {
     let num = num_of(w);
     num >= FIRST_PROGRAM_NUM || matches!(num, NUM_NAT | NUM_INT | NUM_STR | NUM_F64 | NUM_U64)
 }
-
-// A payload's cell is deferred with `__reussir_drop_defer_wide` only when
-// lean2rr marks its number with `WIDE_BIT`, Reussir's own rule for the
-// cell's header (a function value's enum too); the other cells (an array, a
-// runtime object such as a thunk's or task's cell, a struct without an
-// 8-byte member) with `__reussir_drop_defer`,
-// one entry of the stack's vector each when they follow one another inside
-// a free (24 bytes; Reussir's glue releases a list's heads one after the
-// other before the drain pops any of them). The wide deferral costs about 3
-// instructions more where the stack is empty (no link can form there:
-// outside a free, where most payloads are released).
 
 /// `release_last` of one of leanrt's kinds: leaves are freed at once,
 /// arrays free their elements through the worklist themselves.
@@ -1062,12 +1040,6 @@ mod tests {
         drop(unsafe { take_word::<Rc<Node>>(cell as u64) });
     }
 
-    /// `Node` and `Probe` under numbers with `WIDE_BIT`: an `Rc`'s cell is
-    /// the count, then 4 bytes of padding before the payload (aligned to 8:
-    /// it holds a box), a wide header.
-    const WIDE_NODE: u64 = WIDE_BIT | 22;
-    const WIDE_PROBE: u64 = WIDE_BIT | 23;
-
     /// A program payload (number 105) that holds boxes in a vector, dropped
     /// in index order after the payload logs its id.
     struct Many {
@@ -1131,7 +1103,7 @@ mod tests {
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            SEEN.with(|l| l.borrow_mut().push((self.id, crate::drop::active(), reussir_rt::drop::depth())));
+            SEEN.with(|l| l.borrow_mut().push((self.id, crate::drop::active(), crate::pending::depth())));
         }
     }
 
@@ -1150,12 +1122,6 @@ mod tests {
         of(crate::alloc::rc_new(Probe { id, next: LAny::unit() }), LEAF_PROBE)
     }
 
-    /// A step of pending work that logs its argument.
-    unsafe fn step_mark(p: usize) -> bool {
-        LOG.with(|l| l.borrow_mut().push(p as u32));
-        true
-    }
-
     fn install() {
         super::install(&[
             Rel(NODE as u16, release_node),
@@ -1165,8 +1131,6 @@ mod tests {
             Rel(PAIR2 as u16, release_pair),
             Rel(PROBE as u16, release_probe),
             Rel(LEAF_PROBE as u16, release_probe),
-            Rel(WIDE_NODE as u16, release_node),
-            Rel(WIDE_PROBE as u16, release_probe),
             Rel(MANY as u16, release_many),
         ]);
     }
@@ -1297,9 +1261,8 @@ mod tests {
             .unwrap();
     }
 
-    /// A chain of three payload numbers in turn (two release functions, so
-    /// that Reussir's runs mix them; one number with `WIDE_BIT`), on the
-    /// same small stack: the same order.
+    /// A chain of two payload numbers in turn, on the same small stack: the
+    /// same order.
     #[test]
     fn deep_chain_of_two_numbers() {
         std::thread::Builder::new()
@@ -1308,14 +1271,14 @@ mod tests {
                 install();
                 let mut a = LAny::unit();
                 for i in 0..1_000_000 {
-                    a = of(crate::alloc::rc_new(Node { id: i, next: a }), [NODE2, NODE, WIDE_NODE][i as usize % 3]);
+                    a = of(crate::alloc::rc_new(Node { id: i, next: a }), [NODE2, NODE][i as usize % 2]);
                 }
                 drop(a);
                 let log = take_log();
                 assert_eq!(log.len(), 1_000_000);
                 assert!(log.iter().enumerate().all(|(k, &id)| id == 999_999 - k as u32));
                 assert!(!crate::drop::active());
-                assert_eq!(reussir_rt::drop::depth(), 0);
+                assert_eq!(crate::pending::depth(), 0);
             })
             .unwrap()
             .join()
@@ -1329,7 +1292,7 @@ mod tests {
     #[test]
     fn fields_in_lean_order() {
         install();
-        for (p, n) in [(PAIR, NODE), (PAIR, NODE2), (PAIR2, NODE), (PAIR2, NODE2), (PAIR, WIDE_NODE), (PAIR2, WIDE_NODE)] {
+        for (p, n) in [(PAIR, NODE), (PAIR, NODE2), (PAIR2, NODE), (PAIR2, NODE2)] {
             let leaf = |id| of(crate::alloc::rc_new(Node { id, next: LAny::unit() }), n);
             let x = pair(1, leaf(2), of(crate::alloc::rc_new(Node { id: 3, next: leaf(4) }), n), p);
             drop(x);
@@ -1340,7 +1303,7 @@ mod tests {
             let v = crate::array::push(crate::array::push(crate::array::with_capacity::<LAny>(2), x), y);
             drop(of(v, NUM_ARRAY));
             assert_eq!(take_log(), vec![20, 22, 24, 23, 21, 10, 12, 11], "pair {p}, node {n}");
-            assert_eq!(reussir_rt::drop::depth(), 0);
+            assert_eq!(crate::pending::depth(), 0);
         }
     }
 
@@ -1371,7 +1334,7 @@ mod tests {
         drop(v);
         assert_eq!(count(&shared), 1);
         assert!(take_log().is_empty());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
         drop(shared);
         assert_eq!(take_log(), vec![50]);
     }
@@ -1407,7 +1370,7 @@ mod tests {
         drop(node(101, of(holder(), NUM_ARRAY)));
         assert_eq!(take_log(), vec![101, 7, 5, 6]);
         assert!(!crate::drop::active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     /// The second pass of an array free calls a kept payload's release in
@@ -1452,7 +1415,7 @@ mod tests {
         assert_eq!(take_log(), vec![200]);
         assert_eq!(count(&shared), 1);
         assert!(!crate::drop::active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
         drop(shared);
         assert_eq!(take_seen(), vec![(50, true, 0)]);
     }
@@ -1463,8 +1426,7 @@ mod tests {
     /// release runs in a drain of its own with nothing else on the stack,
     /// as the step's pop had it, and what it pushes after it; a leaf
     /// payload is released directly (outside a drain: the one difference a
-    /// release can see). With work pending outside a drain, the step: its
-    /// drain releases that work too before the free returns.
+    /// release can see).
     #[test]
     fn one_kept_element_without_a_step() {
         install();
@@ -1488,21 +1450,8 @@ mod tests {
         }
         assert!(take_seen().is_empty());
         assert_eq!(count(&shared), 1);
-        assert_eq!(reussir_rt::drop::depth(), 0);
-        // Work pending outside a drain (as a record's `drop_in_place`
-        // leaves it between the members it defers and its drain). The leaf,
-        // the array's last kept element, is released directly in the
-        // array's step, above the pending work (depth 2).
-        crate::drop::defer(77, step_mark);
-        drop(arr(leaf_probe(4), &shared));
-        let (seen, log) = (take_seen(), take_log());
-        if reussir_rt::drop::depth() != 0 {
-            unsafe { reussir_rt::drop::__reussir_drop_drain() };
-        }
-        assert_eq!((seen, log), (vec![(4, true, 2)], vec![77]));
-        assert_eq!(count(&shared), 1);
         assert!(!crate::drop::active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     /// A deep nesting of one-element arrays freed outside a free: the one
@@ -1522,7 +1471,7 @@ mod tests {
                 drop(a);
                 assert_eq!(take_seen(), vec![(1, true, 0)]);
                 assert!(!crate::drop::active());
-                assert_eq!(reussir_rt::drop::depth(), 0);
+                assert_eq!(crate::pending::depth(), 0);
             })
             .unwrap()
             .join()
@@ -1671,7 +1620,7 @@ mod tests {
         let w: V<T> = as_(keep, num);
         assert_eq!(w.as_slice(), &[x[2], x[1], x[2]]);
         assert!(!crate::drop::active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     #[test]
@@ -1808,44 +1757,42 @@ mod tests {
         drop(pair(1, leaf_probe(2), probe(3, LAny::unit()), PAIR));
         assert_eq!(take_seen(), vec![(2, true, 0), (3, true, 0)]);
         assert_eq!(take_log(), vec![1]);
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
-    /// Payload numbers with `WIDE_BIT`: their cells, deferred one after
-    /// the other inside a free (the items of a `Many`, as the heads of a
-    /// list that Reussir's glue frees whole), link into one run of
-    /// Reussir's stack: one entry, so the depth a release sees stays 1,
-    /// where cells without the bit take an entry each (24 bytes in the
-    /// stack's vector). The same releases in the same order, each cell's
-    /// count set back to 1 before its release (`Rc`'s drop frees the cell),
-    /// also with two release functions in turn (the run's table).
+    /// Cells with one release function, deferred one after the other
+    /// inside a free (the items of a `Many`, as the heads of a list that
+    /// Reussir's glue frees whole inside a free), form one run of leanrt's
+    /// stack (`pending`): one entry, so the depth a release sees stays 1
+    /// (the other cells take one pointer each in the cells vector). Cells
+    /// with two release functions in turn start a run each. The same
+    /// releases in the same order either way, each cell as it was deferred
+    /// (`Rc`'s drop frees the cell).
     #[test]
-    fn wide_cells_link_into_one_run() {
+    fn cells_with_one_release_form_one_run() {
         install();
         let items = |nums: [u64; 4]| -> std::vec::Vec<LAny> {
             (0..4)
                 .map(|k| match nums[k] {
-                    WIDE_NODE => of(crate::alloc::rc_new(Node { id: 10 + k as u32, next: LAny::unit() }), WIDE_NODE),
+                    NODE => of(crate::alloc::rc_new(Node { id: 10 + k as u32, next: LAny::unit() }), NODE),
                     num => of(crate::alloc::rc_new(Probe { id: k as u32 + 1, next: LAny::unit() }), num),
                 })
                 .collect()
         };
-        drop(of(crate::alloc::rc_new(Many { id: 9, items: items([WIDE_PROBE; 4]) }), MANY));
-        assert_eq!(take_seen(), vec![(4, true, 1), (3, true, 1), (2, true, 1), (1, true, 0)]);
         drop(of(crate::alloc::rc_new(Many { id: 9, items: items([PROBE; 4]) }), MANY));
-        assert_eq!(take_seen(), vec![(4, true, 3), (3, true, 2), (2, true, 1), (1, true, 0)]);
-        drop(of(crate::alloc::rc_new(Many { id: 9, items: items([WIDE_PROBE, WIDE_NODE, WIDE_PROBE, WIDE_NODE]) }), MANY));
-        assert_eq!(take_seen(), vec![(3, true, 1), (1, true, 0)]);
-        assert_eq!(take_log(), vec![9, 9, 9, 13, 11]);
-        // With work pending below: the wide cells link onto the run on top,
-        // the pair's first field (deferred first, without the bit: a link
-        // writes only the cell that links), which comes out last.
-        let many = of(crate::alloc::rc_new(Many { id: 8, items: items([WIDE_PROBE; 4]) }), MANY);
+        assert_eq!(take_seen(), vec![(4, true, 1), (3, true, 1), (2, true, 1), (1, true, 0)]);
+        drop(of(crate::alloc::rc_new(Many { id: 9, items: items([PROBE, NODE, PROBE, NODE]) }), MANY));
+        assert_eq!(take_seen(), vec![(3, true, 2), (1, true, 0)]);
+        assert_eq!(take_log(), vec![9, 9, 13, 11]);
+        // With work pending below: the cells join the run on top, the
+        // pair's first field (deferred first, with the same release
+        // function), which comes out last.
+        let many = of(crate::alloc::rc_new(Many { id: 8, items: items([PROBE; 4]) }), MANY);
         drop(pair(1, probe(5, LAny::unit()), many, PAIR));
         assert_eq!(take_seen(), vec![(4, true, 1), (3, true, 1), (2, true, 1), (1, true, 1), (5, true, 0)]);
         assert_eq!(take_log(), vec![1, 8]);
         assert!(!crate::drop::active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     #[test]

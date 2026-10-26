@@ -1,0 +1,466 @@
+From 0e8c4cb044c9a2b9917a0d5e50fe1d32d4a526e6 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:35:45 -0400
+Subject: [PATCH 12/21] l2r-local: entry 23-d: worklist drops behind an option
+ (worklist-drops)
+
+Third step of the in-place worklist: the acquire/drop expansion can
+release a RecordDropKind::Worklist record through the thread's drop
+stack (23-a, 23-b) instead of a retcon coroutine. New pass option
+`worklist-drops` (default off; it wins over `retcon-drops`). No pipeline
+sets it yet.
+
+With the option, per Worklist record type and atomic kind
+(WorklistDrop.cpp):
+- every drop of the record calls `<dtor>.worklist(ref)`, the entry:
+  `reussir.drop.run @<dtor>.worklist.walk(ref)`;
+- `<dtor>.worklist.walk(ref)` (marked `reussir.worklist_drop`) is the
+  record's ordinary member walk, with one change: a member box of a
+  Worklist record is decremented, and once its count reaches zero it is
+  deferred with `reussir.rc.defer @<dtor>.worklist.release` instead of
+  released by recursion (an immediate is skipped; an atomic box uses
+  fetch_sub);
+- `<dtor>.worklist.release(box)`, what the drain calls: the walk of the
+  box's content, then the box's free (emitBoxFree, 23-c).
+
+So the order of a drop is: a cell's members other than Worklist boxes at
+once, in field order; the cell freed; its dead Worklist children later,
+the last one first, as Lean's lean_del pops its to-do list. A drop
+started inside the drain (by a foreign hook, say) returns before its dead
+children are released; they are popped after the hook returns (native
+Lean's nested lean_del completes instead). Native Lean also defers every
+dead member, not only those of the cycle. Upstream's
+retcon cleanup instead finishes each member's subtree before the next
+member (source order); that order needs state per level of the value,
+since a parent resumes after its first child's whole subtree, and this
+one needs none for any one-sided chain.
+
+A Worklist value reached through other glue calls its entry, which then
+only walks (the thread already drains). That is bounded as long as glue
+defers every box edge of the record's cycle that the type graph shows (a
+recursion through a closure's captures is not seen, as before). This patch covers boxes in
+record members, arrays and unlocked cells, which the walk expands inline
+(TailDrop's helpers take only boxes of TailLoop records, which lie outside
+a Worklist cycle). Two cases are left to 23-e: a box behind a nullable
+member still goes through the entry and recurses per level, and a locked
+cell's payload is released inline in its critical section (or, with
+retcon-drops also on, in a separate locked-drop function, through the
+entry).
+
+The retcon destructors are untouched; they are only bypassed for
+Worklist records when the option is on. The glue functions take their
+argument `noalias`, as the outlined destructors do.
+
+Test: conversion/worklist_drop.mlir (entry, walk with deferrals and an
+inline member release, release; with and without retcon-drops).
+---
+ .../Reussir/Conversion/AcquireDropExpansion.h |   3 +-
+ include/Reussir/Conversion/Passes.td          |   3 +
+ .../AcquireDropExpansion.cpp                  |  35 +++-
+ .../AcquireDropExpansion/CMakeLists.txt       |   1 +
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 175 ++++++++++++++++++
+ .../AcquireDropExpansion/WorklistDrop.h       |  34 ++++
+ .../integration/conversion/worklist_drop.mlir |  40 ++++
+ 7 files changed, 285 insertions(+), 6 deletions(-)
+ create mode 100644 lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+ create mode 100644 lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+ create mode 100644 tests/integration/conversion/worklist_drop.mlir
+
+diff --git a/include/Reussir/Conversion/AcquireDropExpansion.h b/include/Reussir/Conversion/AcquireDropExpansion.h
+index 0d5e78f6..6d7c8c35 100644
+--- a/include/Reussir/Conversion/AcquireDropExpansion.h
++++ b/include/Reussir/Conversion/AcquireDropExpansion.h
+@@ -37,7 +37,8 @@ namespace reussir {
+ void populateAcquireDropExpansionConversionPatterns(
+     mlir::RewritePatternSet &patterns, bool outlineRecord,
+     mlir::SymbolTableCollection *symbols = nullptr,
+-    bool tailRecursiveDrops = true, bool retconDrops = false);
++    bool tailRecursiveDrops = true, bool retconDrops = false,
++    bool worklistDrops = false);
+ 
+ } // namespace reussir
+ 
+diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
+index 33144023..aa631640 100644
+--- a/include/Reussir/Conversion/Passes.td
++++ b/include/Reussir/Conversion/Passes.td
+@@ -180,6 +180,9 @@ def ReussirAcquireDropExpansionPass : Pass<"reussir-acquire-drop-expansion"> {
+               /*default=*/"true", "whether to specialize tail-recursive drops">,
+        Option<"retconDrops", "retcon-drops", "bool",
+               /*default=*/"false", "whether to generate returned-continuation cleanup">,
++       Option<"worklistDrops", "worklist-drops", "bool", /*default=*/"false",
++              "whether Worklist records release through the thread's drop "
++              "stack (takes precedence over retcon-drops)">,
+        Option<"expandDecrement", "expand-decrement", "bool",
+               /*default=*/"false",
+               "whether to expand rc decrement operations (using the "
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 796fdddf..848e1351 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -14,6 +14,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "TailDrop.h"
++#include "WorklistDrop.h"
+ 
+ #include <algorithm>
+ #include <llvm/ADT/ArrayRef.h>
+@@ -193,6 +194,15 @@ private:
+ 
+   mlir::LogicalResult rewriteDropRc(RcType rcType, ReussirRefDropOp op,
+                                     mlir::PatternRewriter &rewriter) const {
++    if (worklistDrops && canDeferMemberRelease(rcType, op)) {
++      mlir::Value loaded = ReussirRefLoadOp::create(rewriter, op.getLoc(),
++                                                    rcType, op.getRef());
++      emitDeferredMemberRelease(loaded, op.getLoc(),
++                                op->getParentOfType<mlir::ModuleOp>(),
++                                rewriter, symbols);
++      rewriter.eraseOp(op);
++      return mlir::success();
++    }
+     if (outlineRecord && tailRecursiveDrops) {
+       mlir::Value loaded = ReussirRefLoadOp::create(rewriter, op.getLoc(), rcType,
+                                                   op.getRef());
+@@ -390,6 +400,7 @@ private:
+   bool outlineRecord;
+   bool tailRecursiveDrops;
+   bool retconDrops;
++  bool worklistDrops;
+   mlir::SymbolTableCollection *symbols;
+ 
+   bool shouldOutline(ReussirRefDropOp op, RecordType type) const {
+@@ -411,10 +422,12 @@ private:
+ public:
+   DropExpansionPattern(mlir::MLIRContext *context, bool outlineRecord,
+                        mlir::SymbolTableCollection *symbols,
+-                       bool tailRecursiveDrops, bool retconDrops)
++                       bool tailRecursiveDrops, bool retconDrops,
++                       bool worklistDrops)
+       : mlir::OpRewritePattern<ReussirRefDropOp>(context),
+         outlineRecord(outlineRecord), tailRecursiveDrops(tailRecursiveDrops),
+-        retconDrops(retconDrops), symbols(symbols) {}
++        retconDrops(retconDrops), worklistDrops(worklistDrops),
++        symbols(symbols) {}
+ 
+   mlir::LogicalResult
+   matchAndRewrite(ReussirRefDropOp op,
+@@ -447,6 +460,16 @@ public:
+           return rewriteDropCell(cellType, op, rewriter);
+         })
+         .Case<RecordType>([&](RecordType recordType) {
++          if (worklistDrops && shouldOutline(op, recordType) &&
++              isWorklistDropRecord(recordType)) {
++            auto entry = getWorklistDropEntry(
++                recordType, refType.getAtomicKind(),
++                op->getParentOfType<mlir::ModuleOp>(), rewriter, symbols);
++            mlir::func::CallOp::create(rewriter, op.getLoc(), entry,
++                                       op.getRef());
++            rewriter.eraseOp(op);
++            return llvm::success();
++          }
+           if (shouldOutline(op, recordType)) {
+             mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+             mlir::func::FuncOp dtor = createDtorIfNotExists(
+@@ -619,7 +642,8 @@ struct AcquireDropExpansionPass
+     mlir::SymbolTableCollection symbols;
+     mlir::RewritePatternSet patterns(&getContext());
+     populateAcquireDropExpansionConversionPatterns(
+-        patterns, outlineRecord, &symbols, tailRecursiveDrops, retconDrops);
++        patterns, outlineRecord, &symbols, tailRecursiveDrops, retconDrops,
++        worklistDrops);
+     if (expandDecrement)
+       populateRcDecrementExpansionConversionPatterns(patterns);
+     if (failed(
+@@ -636,9 +660,10 @@ struct AcquireDropExpansionPass
+ void populateAcquireDropExpansionConversionPatterns(
+     mlir::RewritePatternSet &patterns, bool outlineRecord,
+     mlir::SymbolTableCollection *symbols, bool tailRecursiveDrops,
+-    bool retconDrops) {
++    bool retconDrops, bool worklistDrops) {
+   patterns.add<DropExpansionPattern>(patterns.getContext(), outlineRecord,
+-                                     symbols, tailRecursiveDrops, retconDrops);
++                                     symbols, tailRecursiveDrops, retconDrops,
++                                     worklistDrops);
+   patterns.add<AcquireExpansionPattern>(patterns.getContext(), outlineRecord,
+                                      symbols);
+ }
+diff --git a/lib/Conversion/AcquireDropExpansion/CMakeLists.txt b/lib/Conversion/AcquireDropExpansion/CMakeLists.txt
+index 4eee532f..284b7df7 100644
+--- a/lib/Conversion/AcquireDropExpansion/CMakeLists.txt
++++ b/lib/Conversion/AcquireDropExpansion/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ add_mlir_conversion_library(MLIRReussirAcquireDropExpansion
+   AcquireDropExpansion.cpp
+   TailDrop.cpp
++  WorklistDrop.cpp
+ 
+   DEPENDS
+   MLIRReussirConversionPassIncGen
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+new file mode 100644
+index 00000000..2690f453
+--- /dev/null
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -0,0 +1,175 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++//
++// Worklist drops release a `RecordDropKind::Worklist` record through the
++// thread's stack of pending drops (reussir-rt's drop_stack.rs), as Lean's
++// lean_del does. Per record type and atomic kind:
++// - `<dtor>.worklist(ref)`, the entry: `reussir.drop.run` of the walk;
++// - `<dtor>.worklist.walk(ref)`: drops the members in field order, at once,
++//   except member boxes of Worklist records: a box whose count reaches zero
++//   is deferred with `reussir.rc.defer` instead of released by recursion;
++// - `<dtor>.worklist.release(box)`, called by the drain for a deferred box:
++//   the walk of its content, then the box's free.
++// The drain pops the deferred boxes last first. A Worklist value reached
++// through other glue calls its entry, which then only walks (the thread
++// already drains); since glue defers every box edge of its record's cycle,
++// such nesting is bounded by the type graph, not by the value's depth (for
++// the box edges the type graph shows: a recursion through a closure's
++// captures is not seen).
++//
++//===----------------------------------------------------------------------===//
++#include "WorklistDrop.h"
++#include "TailDrop.h"
++#include "Reussir/IR/RecordDrop.h"
++#include "Reussir/Transformation/SpecialPointerTag.h"
++#include <mlir/Dialect/Arith/IR/Arith.h>
++#include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
++#include <mlir/Dialect/SCF/IR/SCF.h>
++
++namespace reussir {
++namespace {
++constexpr llvm::StringLiteral kWorklistGlueAttr = "reussir.worklist_drop";
++
++class WorklistGlue {
++  mlir::ModuleOp module;
++  mlir::PatternRewriter &rewriter;
++  std::optional<mlir::SymbolTable> ownTable;
++  mlir::SymbolTable &table;
++  mlir::Location loc;
++
++  // `<dtor of type, kind><suffix>(arg)`, made with `body(arg)` on first use.
++  mlir::func::FuncOp function(RecordType type, AtomicKind kind,
++                              llvm::StringRef suffix, mlir::Type arg,
++                              llvm::function_ref<void(mlir::Value)> body) {
++    std::string name = (type.getDtorName(kind).getValue() + suffix).str();
++    if (auto existing = table.lookup<mlir::func::FuncOp>(name))
++      return existing;
++    mlir::OpBuilder::InsertionGuard guard(rewriter);
++    rewriter.setInsertionPointToStart(module.getBody());
++    auto function = mlir::func::FuncOp::create(
++        rewriter, loc, name, rewriter.getFunctionType({arg}, {}));
++    function.setPrivate();
++    table.insert(function);
++    function->setAttr("llvm.linkage",
++                      rewriter.getAttr<mlir::LLVM::LinkageAttr>(
++                          mlir::LLVM::linkage::Linkage::LinkonceODR));
++    function->setAttr("llvm.passthrough",
++                      rewriter.getStrArrayAttr({"nounwind"}));
++    inheritSanitizerPassthrough(module, function);
++    function.setArgAttr(0, "llvm.noalias", rewriter.getUnitAttr());
++    function.setArgAttr(0, "llvm.nonnull", rewriter.getUnitAttr());
++    function.setArgAttr(0, "llvm.noundef", rewriter.getUnitAttr());
++    rewriter.setInsertionPointToStart(function.addEntryBlock());
++    rewriter.setInsertionPoint(mlir::func::ReturnOp::create(rewriter, loc));
++    body(function.getArgument(0));
++    return function;
++  }
++  RefType ref(RecordType type, AtomicKind kind) {
++    return RefType::get(type.getContext(), type, Capability::unspecified,
++                        kind);
++  }
++
++public:
++  WorklistGlue(mlir::ModuleOp module, mlir::PatternRewriter &rewriter,
++               mlir::SymbolTableCollection *symbols)
++      : module(module), rewriter(rewriter),
++        table(symbols ? symbols->getSymbolTable(module)
++                      : ownTable.emplace(module)),
++        loc(rewriter.getUnknownLoc()) {}
++
++  mlir::func::FuncOp walk(RecordType type, AtomicKind kind) {
++    auto walk = function(type, kind, ".worklist.walk", ref(type, kind),
++                         [&](mlir::Value arg) {
++                           ReussirRefDropOp::create(rewriter, loc, arg,
++                                                    /*inlined=*/true, nullptr);
++                         });
++    walk->setAttr(kWorklistGlueAttr, rewriter.getUnitAttr());
++    return walk;
++  }
++
++  mlir::func::FuncOp entry(RecordType type, AtomicKind kind) {
++    return function(type, kind, ".worklist", ref(type, kind),
++                    [&](mlir::Value arg) {
++                      auto walkName = walk(type, kind).getSymNameAttr();
++                      ReussirDropRunOp::create(
++                          rewriter, loc, mlir::FlatSymbolRefAttr::get(walkName),
++                          arg);
++                    });
++  }
++
++  mlir::func::FuncOp release(RcType rc) {
++    auto type = llvm::cast<RecordType>(rc.getElementType());
++    AtomicKind kind = rc.getAtomicKind();
++    return function(type, kind, ".worklist.release", rc, [&](mlir::Value box) {
++      mlir::Value payload =
++          ReussirRcBorrowOp::create(rewriter, loc, ref(type, kind), box);
++      mlir::func::CallOp::create(rewriter, loc, walk(type, kind),
++                                 mlir::ValueRange{payload});
++      emitBoxFree(box, loc, module, rewriter);
++    });
++  }
++};
++} // namespace
++
++bool isWorklistDropRecord(mlir::Type type) {
++  auto record = llvm::dyn_cast<RecordType>(type);
++  return record && record.getName() &&
++         record.classifyRecordDrop() == RecordDropKind::Worklist;
++}
++
++mlir::func::FuncOp getWorklistDropEntry(RecordType type, AtomicKind kind,
++                                        mlir::ModuleOp module,
++                                        mlir::PatternRewriter &rewriter,
++                                        mlir::SymbolTableCollection *symbols) {
++  return WorklistGlue(module, rewriter, symbols).entry(type, kind);
++}
++
++bool canDeferMemberRelease(RcType type, mlir::Operation *site) {
++  auto function = site->getParentOfType<mlir::func::FuncOp>();
++  return function && function->hasAttr(kWorklistGlueAttr) &&
++         type.getCapability() == Capability::shared &&
++         isWorklistDropRecord(type.getElementType());
++}
++
++void emitDeferredMemberRelease(mlir::Value rc, mlir::Location loc,
++                               mlir::ModuleOp module,
++                               mlir::PatternRewriter &rewriter,
++                               mlir::SymbolTableCollection *symbols) {
++  auto type = llvm::cast<RcType>(rc.getType());
++  auto release = WorklistGlue(module, rewriter, symbols).release(type);
++  mlir::OpBuilder::InsertionGuard guard(rewriter);
++  // An immediate (a nullary arm under the special-pointer-tag scheme) owns
++  // no memory and its dummy box's count must not be read as unique.
++  if (module->hasAttr(kSpecialPtrTagAttr) && type.mayCarrySpecialPointerTag()) {
++    mlir::Value immediate = ReussirRcIsImmediateOp::create(
++        rewriter, loc, rewriter.getI1Type(), rc);
++    auto branch = mlir::scf::IfOp::create(rewriter, loc, immediate, true);
++    rewriter.setInsertionPointToStart(branch.elseBlock());
++  }
++  bool atomic = type.getAtomicKind() == AtomicKind::atomic;
++  mlir::Value count =
++      atomic ? ReussirRcFetchSubOp::create(rewriter, loc, rc).getRefCount()
++             : ReussirRcFetchOp::create(rewriter, loc, rc).getRefCount();
++  mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
++  mlir::Value unique = mlir::arith::CmpIOp::create(
++      rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
++  auto branch = mlir::scf::IfOp::create(rewriter, loc, unique, !atomic);
++  if (!atomic) {
++    rewriter.setInsertionPointToStart(branch.elseBlock());
++    mlir::Value decremented =
++        mlir::arith::SubIOp::create(rewriter, loc, count, one);
++    ReussirRcSetOp::create(rewriter, loc, rc, decremented);
++  }
++  rewriter.setInsertionPointToStart(branch.thenBlock());
++  ReussirRcDeferOp::create(
++      rewriter, loc, mlir::FlatSymbolRefAttr::get(release.getSymNameAttr()),
++      rc);
++}
++} // namespace reussir
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.h b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+new file mode 100644
+index 00000000..9cf4813f
+--- /dev/null
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+@@ -0,0 +1,34 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++#pragma once
++
++#include "Reussir/IR/ReussirOps.h"
++#include <mlir/Dialect/Func/IR/FuncOps.h>
++
++namespace reussir {
++// Whether `type` is a named record whose drop is `RecordDropKind::Worklist`.
++bool isWorklistDropRecord(mlir::Type type);
++
++// The entry of a Worklist record's drop, `<dtor>.worklist(ref)`.
++mlir::func::FuncOp getWorklistDropEntry(RecordType type, AtomicKind kind,
++                                        mlir::ModuleOp module,
++                                        mlir::PatternRewriter &rewriter,
++                                        mlir::SymbolTableCollection *symbols);
++
++// Whether a member box of `type` dropped at `site` is deferred: `site` is in
++// worklist glue and the box is a shared box of a Worklist record.
++bool canDeferMemberRelease(RcType type, mlir::Operation *site);
++
++// Decrements the member box `rc`, deferring it once its count reaches zero.
++void emitDeferredMemberRelease(mlir::Value rc, mlir::Location loc,
++                               mlir::ModuleOp module,
++                               mlir::PatternRewriter &rewriter,
++                               mlir::SymbolTableCollection *symbols);
++} // namespace reussir
+diff --git a/tests/integration/conversion/worklist_drop.mlir b/tests/integration/conversion/worklist_drop.mlir
+new file mode 100644
+index 00000000..976568eb
+--- /dev/null
++++ b/tests/integration/conversion/worklist_drop.mlir
+@@ -0,0 +1,40 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true retcon-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
++
++// A drop of a Worklist record calls its entry, which walks it under
++// `reussir.drop.run`. The walk releases the members in field order, at once,
++// except boxes of Worklist records, which it defers once dead; their release
++// walks the content and frees the box. worklist-drops wins over retcon-drops.
++
++!tree_ = !reussir.record<variant "WlTree" incomplete>
++!empty = !reussir.record<compound "WlEmpty" [value] {}>
++!box = !reussir.record<compound "WlBox" {i64}>
++!node = !reussir.record<compound "WlNode" [value] {!tree_, !box, !tree_}>
++!tree = !reussir.record<variant "WlTree" {!empty, !node}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.release(%arg0:
++  // CHECK: %[[REF:.*]] = reussir.rc.borrow(%arg0
++  // CHECK: call @{{.*}}WlTreeE.worklist.walk(%[[REF]])
++  // CHECK: reussir.rc.reinterpret(%arg0
++  // CHECK: reussir.token.free
++  // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.walk(
++  // CHECK-SAME: reussir.worklist_drop
++  // CHECK: [1] ->
++  // CHECK: reussir.rc.fetch
++  // CHECK-NEXT: arith.cmpi eq
++  // CHECK-NEXT: scf.if
++  // CHECK-NEXT: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
++  // CHECK-NEXT: } else {
++  // CHECK: reussir.rc.set
++  // CHECK: reussir.expanded_decrement
++  // CHECK: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
++  // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist(
++  // CHECK-NEXT: reussir.drop.run @{{.*}}WlTreeE.worklist.walk(
++  // CHECK-LABEL: func.func @root(
++  // CHECK: call @{{.*}}WlTreeE.worklist(
++  func.func @root(%ref: !reussir.ref<!tree>) {
++    reussir.ref.drop (%ref : !reussir.ref<!tree>)
++    return
++  }
++}

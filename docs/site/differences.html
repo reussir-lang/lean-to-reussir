@@ -180,25 +180,33 @@ schedules native Lean can produce. See
 <ul>
 <li><strong>Order of releases in one free.</strong> Natively a freed value releases what it
   holds last pushed, first released. lean2rr does the same inside every free
-  that starts at a container. When user code drops a record of handles by
-  itself, Reussir's inline release goes in field order. A value of a
-  parameter's type is a box, and Reussir releases a box at once. So the
-  boxes of the first two cells close in field order, and the rest last
-  first. A <code>List IO.FS.Handle</code> <code>L0 … L7</code> closes <code>L0 L1 L7 L6 … L2</code>
-  (natively <code>L0 L7 … L1</code> where Lean knows the constructor, else
-  <code>L7 … L0</code>). A structure <code>{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}</code>
-  of handles closes <code>a b d c e</code> (natively <code>e d c b a</code>). An array set or
-  pop that frees the last reference to a record releases its fields last
-  first, as Lean does.</li>
+  that starts at an object of the runtime: an array, a box, the old value
+  of a reference, a task or thunk cell. An array set or pop that frees the
+  last reference to a record releases its fields last first, as Lean
+  does. When user code drops a record of handles by itself, no runtime
+  free runs. Reussir releases the fields in field order, and each handle,
+  box or array that it reaches is a free of its own. So the order is
+  field order at every record level. A <code>List IO.FS.Handle</code> <code>L0 … L7</code>
+  closes <code>L0 L1 … L7</code> (natively <code>L0 L7 … L1</code> where Lean knows the
+  constructor, else <code>L7 … L0</code>). A structure
+  <code>{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}</code> of handles closes
+  <code>a b d c e</code> (natively <code>e d c b a</code>). Unresolved promises are resolved in
+  the same order.</li>
+<li><strong>A value shared by two fields of one freed cell.</strong> Inside a runtime
+  free, such a value can come out at another place. Reussir releases a
+  field completely before the next one. Lean first decrements all fields
+  of the cell. In <code>R{a : Y{x : W, h}, b : W}</code>, Lean closes <code>Y.h</code> before
+  <code>W.h</code>, and lean2rr closes <code>W.h</code> first.</li>
 <li><strong>Release time of borrowed parameters.</strong> lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.</li>
-<li><strong>Promises released inside a free.</strong> Their <code>sync</code> dependents run when the
-  whole free is over, not when the free reaches the promise. So they see
-  the rest of the container released too. Another unresolved promise of the
-  same container is still unresolved while they run, as natively.</li>
+<li><strong>Promises released inside a free.</strong> When a runtime free releases them,
+  their <code>sync</code> dependents run when the whole free is over, not when the
+  free reaches the promise. So they see the rest of the container released
+  too. Another unresolved promise of the same container is still
+  unresolved while they run, as natively.</li>
 <li><strong>Child processes.</strong> <code>IO.Process.output</code> reads both pipes together.
   Natively <code>Child.pid</code> leaks the child's pipes; lean2rr closes them.</li>
 </ul>
@@ -221,8 +229,9 @@ garbage.</p>
 <li><strong>Stack depth.</strong> Frame sizes differ, so the depth of a stack overflow
   differs. The report itself is native's (<code>Stack overflow detected.
   Aborting.</code>, exit 134). lean2rr adds no recursion of its own: conversions,
-  list folds and the constant walk are loops, and frees use a stack of
-  pending work.</li>
+  list folds and the constant walk are loops. Reussir frees records in a
+  loop or through a pending stack, which the runtime shares for its own
+  objects.</li>
 <li><strong>Build time.</strong> rrc compiles about 80 small functions per second. A
   program with thousands of constants takes minutes (natively seconds).</li>
 </ul>
@@ -287,6 +296,10 @@ garbage.</p>
 <td>No borrowed parameters</td>
 <td>a traversal that keeps the nodes it visits writes counts native Lean only reads (about 1.5×)</td>
 </tr>
+<tr>
+<td>Dropping a deep value that is not a list (a snoc list, a tree deep along its left child)</td>
+<td>Reussir's work list keeps one slot per level while it frees the value (heap memory, freed at the end); native Lean links its to-do list through the freed objects</td>
+</tr>
 </tbody>
 </table>
 <h2 id="lean-bugs-we-do-not-reproduce">Lean bugs we do not reproduce</h2>
@@ -304,7 +317,7 @@ kernel gives.</p>
 <h2 id="index-of-plan-10">Index of plan §10</h2>
 <p>Generated from the translation plan: every group and item of §10, so that
 this page can be checked against it.</p>
-<div class="idx"><div class="idxgrp"><h4>Unsupported programs</h4><ul><li>Module names</li></ul></div><div class="idxgrp"><h4>Evaluation and effects</h4><ul><li>Dictionary rebuilding</li><li>Tasks</li><li>Startup order of unrecorded constants</li><li>Compiler options of the program&#x27;s modules</li><li>Merging after erasure</li><li>Unread constants are not evaluated</li><li>Running out of memory</li><li>Build time</li><li>Casts that natively read an address</li><li>Pointer identity and sharing</li><li>Order of releases in one free</li><li>Release time of borrowed parameters</li><li>Order of panics in pure code</li><li>Stack depth</li><li>Stream redirection</li></ul></div><div class="idxgrp"><h4>Cost</h4><ul><li>No borrowed parameters</li><li>Casts between layouts that differ</li><li>Boxes</li><li>Reads take their container owned</li><li>Arrays and strings are one block each</li><li>Dropping a large array of records</li><li>Constants read in a loop</li></ul></div><div class="idxgrp"><h4>Runtime</h4><ul><li>Sharing is not observable: isExclusiveUnsafe answers false; …</li><li>IO.getNumHeartbeats is 0; dbgStackTrace prints nothing; a panic&#x27;s …</li><li>Only what a walk reaches is persistent (§5.14: …</li><li>An internal panic (INTERNAL PANIC: ..., the end …</li><li>Child processes (§5.8): code that reads one of …</li></ul></div><div class="idxgrp"><h4>Runtime: Lean bugs we do not reproduce</h4><ul><li>LB-01, a concurrent <code>IO.Ref.set</code> can be lost</li><li>LB-02, output followed by a large read on one handle</li><li>LB-03, an error without a file name</li><li>LB-15, a <code>null</code> stream leaks a <code>/dev/null</code> descriptor</li><li>LB-17, a <code>null</code> stream falls back to the parent&#x27;s stream</li><li>LB-14, after takeStdin, kill no longer reaches a …</li><li>LB-16, an over-long temporary directory aborts createTempFile and …</li><li>LB-29, <code>exit</code> waits for a stream held by a blocked reader</li><li>LB-30, LB-31, startup when the event loop&#x27;s descriptors cannot be made</li><li>LB-36, <code>Float.scaleB</code> with an <code>Int</code> outside the C <code>int</code> range</li><li>LB-39, a task priority cut to 32 bits</li><li>LB-40, <code>IO.Process.output</code> with an input waits for good</li><li>LB-41, after one stream error, every later <code>getLine</code> fails</li><li>LB-42, a child that cannot start writes the …</li><li>LB-43, LB-44, descriptor leaks</li><li>LB-45, <code>Std.Internal.UV.System</code> cuts ids and priorities to 32 bits</li><li>LB-46, <code>truncate</code> right after an <code>append</code> open empties the file</li><li>LB-47, <code>EBADMSG</code> is a protocol error or an unknown error</li><li>LB-50, a shutdown during a connect resolves the …</li><li>LB-51, <code>waitReadable</code> resolves <code>true</code> at the end of the stream</li><li>LB-52, a wait in a pool task wraps …</li><li>LB-11, <code>Nat.pow</code> with an exponent of 2^32 or more</li><li>LB-12, <code>Nat.shiftLeft</code> by 2^32 or more</li><li>LB-04, <code>Nat.shiftRight</code> of a huge value by 2^32 or more</li><li>LB-06, <code>ByteArray.copySlice</code> with an offset or length of 2^64 or more</li><li>LB-05, a result too big for GMP</li><li>LB-37, a capacity that cannot be reserved</li></ul></div><div class="idxgrp"><h4>Runtime: Lean defects and candidates followed as native</h4><ul><li>LB-48</li><li>LB-49</li><li>LBC-01 to LBC-05</li><li>LBC-06</li><li>LBC-07</li><li>LBC-08</li></ul></div><div class="idxgrp"><h4>Compiler: Lean bugs we do not reproduce</h4><ul><li>Data after a <code>match</code> with a type or proof arm: a wrong value or a crash</li><li>A boxed constant in a branch that never runs is computed at startup</li></ul></div><div class="idxgrp"><h4>Diagnostics</h4><ul><li>lean2rr&#x27;s own impossibilities (a Box unwrap of another …</li></ul></div><div class="idxgrp"><h4>Blocking, the event loop and promises</h4><ul><li>Blocking system calls</li><li>Event loop details</li><li>Promises released inside a free</li></ul></div><div class="idxgrp"><h4>Not supported</h4><ul><li>Every constant of the program is translated (§2.2), …</li><li>Lean-only target</li><li>Lean definitions where native Lean runs other code:</li><li>Re-declared runtime functions:</li><li>The Lean library&#x27;s externs implemented in C++ (Expr.mkData, …</li><li>With the optimization unread-fields (off by default), three …</li><li>The Lean package&#x27;s initializers (thousands of builtin_initialize …</li><li>An error in an initializer of Init or …</li><li>Where lean_initialize() runs, in a program that uses …</li><li>Loading a program that imports part of the …</li><li>Mathlib, and programs that import it: Mathlib&#x27;s module …</li></ul></div></div>
+<div class="idx"><div class="idxgrp"><h4>Unsupported programs</h4><ul><li>Module names</li></ul></div><div class="idxgrp"><h4>Evaluation and effects</h4><ul><li>Dictionary rebuilding</li><li>Tasks</li><li>Startup order of unrecorded constants</li><li>Compiler options of the program&#x27;s modules</li><li>Merging after erasure</li><li>Unread constants are not evaluated</li><li>Running out of memory</li><li>Build time</li><li>Casts that natively read an address</li><li>Pointer identity and sharing</li><li>Order of releases in one free</li><li>A value shared by two fields of one freed cell</li><li>Release time of borrowed parameters</li><li>Order of panics in pure code</li><li>Stack depth</li><li>Stream redirection</li></ul></div><div class="idxgrp"><h4>Cost</h4><ul><li>No borrowed parameters</li><li>Casts between layouts that differ</li><li>Boxes</li><li>Reads take their container owned</li><li>Arrays and strings are one block each</li><li>Dropping a large array of records</li><li>Constants read in a loop</li></ul></div><div class="idxgrp"><h4>Runtime</h4><ul><li>Sharing is not observable: isExclusiveUnsafe answers false; …</li><li>IO.getNumHeartbeats is 0; dbgStackTrace prints nothing; a panic&#x27;s …</li><li>Only what a walk reaches is persistent (§5.14: …</li><li>An internal panic (INTERNAL PANIC: ..., the end …</li><li>Child processes (§5.8): code that reads one of …</li></ul></div><div class="idxgrp"><h4>Runtime: Lean bugs we do not reproduce</h4><ul><li>LB-01, a concurrent <code>IO.Ref.set</code> can be lost</li><li>LB-02, output followed by a large read on one handle</li><li>LB-03, an error without a file name</li><li>LB-15, a <code>null</code> stream leaks a <code>/dev/null</code> descriptor</li><li>LB-17, a <code>null</code> stream falls back to the parent&#x27;s stream</li><li>LB-14, after takeStdin, kill no longer reaches a …</li><li>LB-16, an over-long temporary directory aborts createTempFile and …</li><li>LB-29, <code>exit</code> waits for a stream held by a blocked reader</li><li>LB-30, LB-31, startup when the event loop&#x27;s descriptors cannot be made</li><li>LB-36, <code>Float.scaleB</code> with an <code>Int</code> outside the C <code>int</code> range</li><li>LB-39, a task priority cut to 32 bits</li><li>LB-40, <code>IO.Process.output</code> with an input waits for good</li><li>LB-41, after one stream error, every later <code>getLine</code> fails</li><li>LB-42, a child that cannot start writes the …</li><li>LB-43, LB-44, descriptor leaks</li><li>LB-45, <code>Std.Internal.UV.System</code> cuts ids and priorities to 32 bits</li><li>LB-46, <code>truncate</code> right after an <code>append</code> open empties the file</li><li>LB-47, <code>EBADMSG</code> is a protocol error or an unknown error</li><li>LB-50, a shutdown during a connect resolves the …</li><li>LB-51, <code>waitReadable</code> resolves <code>true</code> at the end of the stream</li><li>LB-52, a wait in a pool task wraps …</li><li>LB-11, <code>Nat.pow</code> with an exponent of 2^32 or more</li><li>LB-12, <code>Nat.shiftLeft</code> by 2^32 or more</li><li>LB-04, <code>Nat.shiftRight</code> of a huge value by 2^32 or more</li><li>LB-06, <code>ByteArray.copySlice</code> with an offset or length of 2^64 or more</li><li>LB-05, a result too big for GMP</li><li>LB-37, a capacity that cannot be reserved</li></ul></div><div class="idxgrp"><h4>Runtime: Lean defects and candidates followed as native</h4><ul><li>LB-48</li><li>LB-49</li><li>LBC-01 to LBC-05</li><li>LBC-06</li><li>LBC-07</li><li>LBC-08</li></ul></div><div class="idxgrp"><h4>Compiler: Lean bugs we do not reproduce</h4><ul><li>Data after a <code>match</code> with a type or proof arm: a wrong value or a crash</li><li>A boxed constant in a branch that never runs is computed at startup</li></ul></div><div class="idxgrp"><h4>Diagnostics</h4><ul><li>lean2rr&#x27;s own impossibilities (a Box unwrap of another …</li></ul></div><div class="idxgrp"><h4>Blocking, the event loop and promises</h4><ul><li>Blocking system calls</li><li>Event loop details</li><li>Promises released inside a free</li></ul></div><div class="idxgrp"><h4>Not supported</h4><ul><li>Every constant of the program is translated (§2.2), …</li><li>Lean-only target</li><li>Lean definitions where native Lean runs other code:</li><li>Re-declared runtime functions:</li><li>The Lean library&#x27;s externs implemented in C++ (Expr.mkData, …</li><li>With the optimization unread-fields (off by default), three …</li><li>The Lean package&#x27;s initializers (thousands of builtin_initialize …</li><li>An error in an initializer of Init or …</li><li>Where lean_initialize() runs, in a program that uses …</li><li>Loading a program that imports part of the …</li><li>Mathlib, and programs that import it: Mathlib&#x27;s module …</li></ul></div></div>
   </main>
 </div>
 <footer>Generated by <code>docs/site/build.py</code> from the repository's files (Lean v4.34.0).

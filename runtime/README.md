@@ -386,10 +386,10 @@ B1), so the field order of the record's free is not seen. The last
 reference to a box is released out of line by `any::release_last`, inside
 a free the runtime starts, as one pending cell, and so is a record that a
 reference or cell set releases (`drop::free_unique`; both through
-`drop::free_deferred`: Reussir's `__reussir_drop_defer`, then its drain,
-which outside a free pops the cell at once), so its fields go in Lean's
-order, the last one first, as `lean_dec` frees them in `lean_array_uset`
-(review RS10-01). Inlined, a read's release meets the
+`drop::free_deferred`: leanrt's `pending::defer_cell`, then
+`pending::drain`, which outside a free pops the cell at once), so its
+fields go in Lean's order, the last one first, as `lean_dec` frees them in
+`lean_array_uset` (review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
 thanks to the `old count >= 1` that Reussir's `rc.inc` asserts) as long as
 no other store or call lies on a path between them. So a read gives its
@@ -517,10 +517,9 @@ the payload's count in line (Reussir patch 07-a masks the top bits); the
 last reference releases leanrt's kinds directly and a program payload
 through the program's release of its type (`l2r_any_rel_<num>_c(cell)`,
 a trampoline per payload type, in leanrt's table by number), its cell
-deferred on the drop worklist (a payload numbered with `WIDE_BIT`, whose
-cell has a wide header, with Reussir's `_wide` deferral, which links
-consecutive cells through their headers; a leaf payload, numbered with
-`LEAF_BIT`, released directly). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
+put on leanrt's pending stack (which never reads or writes it; cells
+with one release function share one entry, one pointer each; a leaf
+payload, numbered with `LEAF_BIT`, released directly). `l2r_any_of<T>(x, num)` and `l2r_any_as<T>(a, num)` box and unbox (a
 mismatch panics); `l2r_any_raw`/`l2r_any_raw_as<T>` split an immediate
 from a pointer first where the type has nullary variants;
 a type with nullary variants boxes through lean2rr's generated `l2r_box_T`,
@@ -606,8 +605,8 @@ new value first and then releases the old one as `lean_dec` does
 is decremented; the last reference to a record is freed inside a free the
 runtime starts (as one pending cell: `drop::free_unique` for a record,
 `any::release_last` for a box's payload, both through
-`drop::free_deferred`: Reussir's `__reussir_drop_defer`, then its drain,
-which outside a free pops the cell at once), so its fields go last first and the `sync`
+`drop::free_deferred`: leanrt's `pending::defer_cell`, then
+`pending::drain`, which outside a free pops the cell at once), so its fields go last first and the `sync`
 dependents of the promises it drops run when that free ends. A reference
 set then releases the reference itself (natively the caller's release
 after the borrowed set): a set that is the reference's last use frees the
@@ -625,23 +624,45 @@ records `r` as taken by the running thread (Lean 4.35's rule).
 
 **Freeing containers.** Native Lean frees an object iteratively: the
 children whose count drops to zero go on a stack of objects to free, popped
-last first. Reussir's drop glue does the same for records with the local
-patches 02-a and 02-b: the record members it frees go on a stack of
-pending work per thread (`reussir_rt::drop`), and it releases a container
+last first. Reussir frees records itself, at a bounded stack depth: a list
+in a loop, any other record whose drop could recurse through a stack of
+pending drops per thread (reussir-rt's `drop_stack`: the members in field
+order, a dead child record pushed and popped last first, Reussir issue
+23). It releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore
-`leanrt::drop`'s types, whose `Drop` frees the last reference through
-that same stack (so the runtime needs Reussir with 02-b): a container
-freed while another free runs (from an element's release, or from record
-glue) is pushed instead, and the outermost free, glue or container, pops
-the stack until it is empty. An array is freed in native Lean's two
+`leanrt::drop`'s types, and leanrt shares Reussir's stack of pending
+drops, with its "releasing" flag (`leanrt::pending`: `releasing`,
+`depth`, `defer_step`, `run_step`, `defer_cell`, `drain`,
+`want_end_work`, over `reussir_rt::drop_stack`; `drop::active`, `defer`,
+`run` and `release` wrap it): one drain pops the glue's records and
+leanrt's work in one order.
+A release that starts at a runtime object (a container, a box's
+payload, a record a set gives up) and can reach more work goes through it.
+Some releases outside a free are done at once without it: a stream
+handle's close (then `after_drain`), a promise's drop (resolved at once),
+an array whose block is freed without a step (`free_leaves`, a first pass
+that keeps no element, `free_now`, `free_single`; an element's release
+there may still use the stack) and a leaf payload. The first release
+on a thread that finds the flag clear and uses the stack is the
+outermost free: it sets the flag, runs the release, pops the
+stack until it is empty, clears the flag, and then runs the end work that
+a release asked for (`task::drained`). Every release that leanrt reaches
+below it, also through Reussir's glue, is pushed. So a value deep through
+records, containers and boxes is freed at a bounded depth. An array is
+freed in native Lean's two
 passes: its elements are decremented in index order, then those whose last
 reference went are released from the last one, and what an element's
 release pushes is done before the next element (`drop::free_vec`,
-`ReleaseElems::scan`), so the order of observable releases matches Lean's (file handles closed, and
-so flushed, promises resolved; `fs` and `task` push those too while a free
-runs), except at the top of a free that starts at a record that user code
-drops by itself (translation plan §10). An
+`ReleaseElems::scan`). Inside a drain, Reussir's glue visits a record
+first field first and every runtime object it reaches is pushed (`fs` and
+`task` push a stream's close and a promise's drop too while a free runs),
+so the pops give the order of observable releases that Lean has (file
+handles closed, and so flushed, promises resolved), except for a value
+that two fields of one freed cell hold. A free that starts when user code
+drops a record by itself has no drain around it: each runtime object
+that the glue reaches is a free of its own, so the order is field order at
+every record level from the root (translation plan §10). An
 array of Reussir records (`Bridge` elements, lean2rr's typed arrays) is
 freed by its step inside a free, and at once outside one (`free_now`, up
 to 16 nested levels, then the step): every element released in index
@@ -654,13 +675,20 @@ a shared payload decremented inline, and only a payload whose count is 1
 goes to `any::release_last`. Where the stack would pop that payload's cell
 next, the free skips the round trip: in the second pass's step every kept
 element but the last has its release called at once
-(`any::release_last_in_step`), and, outside a free with nothing pending,
-an array that keeps one element that is a program payload or a leaf of
-leanrt frees its block and gives that element to `any::release_last`
-without a step (`ReleaseElems::free_single`; an array element keeps the
-step); the order is the same (docs/implementation/ownership.md).
-(Inside a free the array is pushed as before: a later field of the record
-being freed may hold one of its elements.)
+(`any::release_last_in_step`), and, outside a free (the stack is then
+empty), an array that keeps one element that is a program payload or a
+leaf of leanrt frees its block and gives that element to
+`any::release_last` without a step (`ReleaseElems::free_single`; an array
+element keeps the step); the order is the same
+(docs/implementation/ownership.md). (Inside a free an array that holds
+only immediates is freed at once, as a typed array of `Nat`, `Int` or
+`String` is inside a free or outside one (`ReleaseElems::free_leaves`),
+and another array goes on the stack as a cell that pushes its step when
+it is popped: a later field of the record being freed may hold one of
+its elements.) `scripts/l2r.py` requires the local Reussir patches of
+the current base (`REQUIRED_REUSSIR_PATCHES`), so it refuses the checkout
+of an older base: the old stack of local patch 02-b, or a drop stack of
+Reussir's own beside leanrt's: two stacks do not compose.
 
 **Constants.** A constant's accessor tests its slot's word in a static
 table at a fixed address (`once::ready`: one load, inline; 0 while the
@@ -810,22 +838,24 @@ wait cores, core 3.1: `l2r_thunk_wait_busy(a)` is `wait_running_keyed(a)`,
 program that creates tasks (core 3.2, `leanrt::refs`), and the no-suspend
 scope: a stream handle's drop runs in `sched::no_suspend()`, where a
 dropped stream's flush hands what would wait to a writer thread, so no
-context is suspended inside a free (the free is the thread's,
-`reussir_rt::drop`). At the end of the free that closed it (right after a
-close outside a drain when nothing is pending on the thread's stack of
-pending work, at the drain's end otherwise), the
+context is suspended inside a free (the free's pending stack is the
+thread's, `leanrt::pending`). At the end of the free that closed it (right
+after the close when no drain runs, at the end of the drain that pushed
+the close otherwise), the
 writer ends while the other contexts run (lean-runtime's drain-end hook
 `after_drain`, `fs::FileHandle`'s drop and `task::drained`), as natively
-the close's `fclose` returns before the free goes on. A promise dropped inside a free is resolved with
+the close's `fclose` returns before the free goes on. A promise dropped
+inside a drain (leanrt's or Reussir's glue's) is resolved with
 `none`, its cell's store included, only once the free is over (core 3.3:
 when the free reaches it, in Lean's order, `task::defer_promise_drop` puts
-the resolution off with `defer`; the drain's end runs the resolutions in
+the resolution off with `defer`; the free's end runs the resolutions in
 that order, on this context, with `run_deferred`, before `after_drain`), since its dependents
-are Lean code that may block. Reussir reports every drain's end through
-`__reussir_drop_drained`, its local patch 09-a, which lean2rr requires:
-`scripts/l2r.py` stops with an error when the Reussir checkout lacks it,
-and leanrt names the symbol (`task::hook_drained`), so it would not link
-without it. Output
+are Lean code that may block. A promise dropped outside a drain
+(by itself, or reached by Reussir's glue as it frees a record that user
+code drops outside a drain) is resolved at once. The outermost drain runs
+that end work after it is over (`task::drained`, the end function leanrt
+gives the stack with `pending::want_end_work`: Reussir's local patch
+23-k). Output
 (`io::stream_put`, `fs::put_str`, `fs::flush`, a panic's lines), spawning a
 process and `IO.Process.exit` are lean-runtime's effect points
 (`sched::effect`); the program's clock reads are polling points

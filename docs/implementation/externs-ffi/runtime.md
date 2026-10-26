@@ -496,8 +496,10 @@ Paths are relative to the repository root.
     (leanrt's `later` list, `run_later` and its settle points are gone); a
     resolved one releases its task's cell there and then, in the free's
     order (review RS6-01).
-  Reussir's patch 09-a (the drain-end hook) is required: `scripts/l2r.py`
-  checks for it and leanrt names its symbol. lean-runtime pinned at
+  The drain's end then came from a local Reussir patch (a drain-end
+  hook), which lean2rr required; since leanrt has its own pending stack,
+  its outermost free runs that work itself (`pending::drain`,
+  [../tasks/dependents.md](../tasks/dependents.md)). lean-runtime pinned at
   `528fcbb` (wait-1; fixes-5's `IO.getTID`: a pool task gets its emulated
   worker's thread id, a dedicated task a new one, through
   `io::env::get_tid`, which lean2rr calls since step 5; fixes-6: a claim
@@ -520,9 +522,9 @@ Paths are relative to the repository root.
   task-area cases through lean2rr.
 - **Where:** `runtime/leanrt/src/sched.rs` (`on_finish`,
   `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
-  `task.rs` (`Promise`, `defer_promise_drop`, `resolve_with`, `hook_drained`,
-  `drained`), `drop.rs` (`run`, `assert_not_in_free`);
-  `scripts/l2r.py` (`check_reussir_patches`).
+  `task.rs` (`Promise`, `defer_promise_drop`, `resolve_with`,
+  `drained`), `drop.rs` (`run`, `assert_not_in_free`), `pending.rs`
+  (`drain`, `want_end_work`).
   Implementation notes: [../tasks/cells.md](../tasks/cells.md),
   [../tasks/dependents.md](../tasks/dependents.md),
   [../tasks/scheduler.md](../tasks/scheduler.md).
@@ -1074,14 +1076,15 @@ Paths are relative to the repository root.
   tested). The glue changes:
   - lean-runtime's new drain-end hook `sched::after_drain()` is called at
     the end of every free that closes a stream handle: in `task::drained`
-    (Reussir's drain-end hook) after `run_deferred` (lean-runtime's order
+    (then Reussir's drain-end hook; now the end of leanrt's own outermost
+    free, `pending::drain`) after `run_deferred` (lean-runtime's order
     since its RF14-07: each deferred resolution waits only for the writers
     handed off before it), installed at the
     first close a free puts off; and in `FileHandle`'s drop right after a
-    close made outside a drain, when nothing is pending on the thread's
-    stack of pending work (otherwise the close installs the hook, and the
-    drain that Reussir's drop glue runs before it returns waits at its end;
-    review RS14-01); since the close can switch contexts there, the
+    close made outside a free (with Reussir's old shared stack, only when
+    nothing was pending there; otherwise the close installed the hook, and
+    the drain that Reussir's drop glue ran before it returned waited at its
+    end: review RS14-01); since the close can switch contexts there, the
     outcome of the IO primitive that released the handle (leanrt's
     last-error slot) is each context's own, exchanged at each switch
     (hunt HCO-01)
@@ -1127,8 +1130,8 @@ Paths are relative to the repository root.
   reversed; a hang (the try took the lock, the task waited for it);
   `sincos`'s sine. With the new resolution and without the close's hook,
   `RtHandOffResolveAgain` passes: the resolution alone holds.
-- **Where:** `runtime/leanrt/src/task.rs` (`drained`, `hook_drained`,
-  `resolve_with`, `depend`'s doc), `fs.rs` (`FileHandle`'s drop,
+- **Where:** `runtime/leanrt/src/task.rs` (`drained`,
+  `resolve_with`, `depend`'s doc), `pending.rs` (`want_end_work`), `fs.rs` (`FileHandle`'s drop,
   `LastError`, `swap_last`), `sched.rs` (`switched`),
   `float.rs` (`libm_call`); `runtime/prelude.rr`
   (`l2r_promise_resolve_with`, the libm comment, `sinf`, `cosf`);

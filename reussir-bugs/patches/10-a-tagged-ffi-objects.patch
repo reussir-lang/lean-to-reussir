@@ -1,7 +1,7 @@
-From 46b195cf68edd58f6e4b16fe9ae7048de98cdeb8 Mon Sep 17 00:00:00 2001
+From 6272aed46a70ae8edd44cdad7f6a1a736c403bfa Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 06/13] l2r-local: tagged FFI objects: an odd handle is an
+Subject: [PATCH 01/21] l2r-local: tagged FFI objects: an odd handle is an
  immediate, not counted
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
@@ -640,7 +640,7 @@ index cb9115e6..1cb126cc 100644
  
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope) {
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 3bfedfc5..468632f4 100644
+index 1440c929..48fe2248 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -267,6 +267,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
@@ -689,7 +689,7 @@ index 3bfedfc5..468632f4 100644
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1696,6 +1735,11 @@ struct ReussirRcIncConversionPattern
+@@ -1648,6 +1687,11 @@ struct ReussirRcIncConversionPattern
        return mlir::success();
      }
      mlir::Value refcntPtr;
@@ -701,7 +701,7 @@ index 3bfedfc5..468632f4 100644
      // If inner element type is a FFI object, we do not reuse gep to expose
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
-@@ -1770,6 +1814,8 @@ struct ReussirRcIncConversionPattern
+@@ -1722,6 +1766,8 @@ struct ReussirRcIncConversionPattern
            isTaggedImmediate(top, op.getLoc(), rewriter));
      }
      mlir::LLVM::AssumeOp::create(rewriter, op.getLoc(), geOne);
@@ -710,7 +710,7 @@ index 3bfedfc5..468632f4 100644
  
      rewriter.eraseOp(op);
      return mlir::success();
-@@ -2558,6 +2604,17 @@ struct ReussirRcDecOpConversionPattern
+@@ -2510,6 +2556,17 @@ struct ReussirRcDecOpConversionPattern
      }
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
        mlir::FlatSymbolRefAttr cleanupHook = eleTy.getCleanupHook();
@@ -920,6 +920,3 @@ index 00000000..2c79d82d
 +
 +// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u64>", @{{.*}}_ffi_drop, tagged }
 +// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u32>", @{{[A-Za-z0-9_]*}}_ffi_drop }
--- 
-2.43.0
-

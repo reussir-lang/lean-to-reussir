@@ -1,0 +1,398 @@
+From 82b3985a7cc8bd8b79c2f6f027490dd1f47408f0 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:24:40 -0400
+Subject: [PATCH 09/21] l2r-local: entry 23-a: rt: a per-thread stack of
+ pending drops
+
+First step of replacing the retcon destructor executor for
+RecordDropKind::Worklist types with an in-place worklist, as Lean's
+lean_del frees: free a cell, keep its dead children on a stack, pop the
+last first. This patch adds only the runtime part; nothing calls it yet.
+
+Why: the executor keeps one suspended coroutine frame per level of a
+value until the level below is freed. A one-sided tree of 10^6 levels
+adds 85 bytes per level (left- or right-deep), a 64-arm enum chain whose
+recursive member comes first 622 bytes per level (CoroSplit gives each
+arm's spilled child its own frame slot). With source-order cleanup that
+state per level cannot go away: the parent resumes after its first
+child's whole subtree. A worklist whose glue releases a cell's members
+at once and defers only its dead children needs no state per level for
+any one-sided chain.
+
+drop_stack.rs:
+- `run(object, walk)` (C: `__reussir_drop_run`) calls `walk(object)` with
+  the thread marked as draining. The outermost run then pops the entries
+  that the walk deferred, last deferred first, until none is left; the
+  releases it pops may defer more. A run started while the thread drains
+  (a drop made by a popped release, or by a foreign hook the drain runs)
+  only calls the walk and returns before the dead members it deferred are
+  released: the running drain releases them. So the native stack stays
+  bounded however deep the value is, for the box edges the glue defers.
+- `defer(cell, release)` (C: `__reussir_drop_defer`) pushes one entry
+  while the thread drains; outside a drain it runs the release at once,
+  as a run of it. The stack never reads or writes `cell`.
+- One thread-local without a destructor: the flag and the entries' Vec by
+  its raw parts (16 bytes per pending entry). The buffer shrinks back to
+  64 entries after a drain; a guard frees it at thread exit, and a drain
+  that runs after the guard (a drop in a later thread-local destructor)
+  frees the buffer it needed at its end.
+
+Both entry points are registered in symbols.rs for in-process JITs.
+
+Tests (drop_stack/tests.rs): last-deferred-first order with nested
+deferrals; a run inside a release joins the drain; a chain of 10^6
+cells, each release deferring the next, on a 64 KiB thread stack; 10^4
+pending entries, the buffer shrunk afterwards (10^3 and 200 under Miri);
+a defer outside a drain runs at once; a drop in a thread-local
+destructor after the guard's (no leak under Miri); the two symbols are
+exported.
+---
+ crates/reussir-rt/src/drop_stack.rs       | 165 ++++++++++++++++++++++
+ crates/reussir-rt/src/drop_stack/tests.rs | 131 +++++++++++++++++
+ crates/reussir-rt/src/lib.rs              |   1 +
+ crates/reussir-rt/src/symbols.rs          |   3 +
+ 4 files changed, 300 insertions(+)
+ create mode 100644 crates/reussir-rt/src/drop_stack.rs
+ create mode 100644 crates/reussir-rt/src/drop_stack/tests.rs
+
+diff --git a/crates/reussir-rt/src/drop_stack.rs b/crates/reussir-rt/src/drop_stack.rs
+new file mode 100644
+index 00000000..40e75e4c
+--- /dev/null
++++ b/crates/reussir-rt/src/drop_stack.rs
+@@ -0,0 +1,165 @@
++//! A per-thread stack of pending drops.
++//!
++//! Drop glue whose release can recurse without bound runs under [`run`],
++//! which marks the thread as draining. Inside, each box whose count reaches
++//! zero is deferred onto this stack with the function that releases it
++//! ([`defer`]), and the outermost [`run`] pops the entries, last deferred
++//! first, until none is left, as Lean's `lean_del` does with its to-do list.
++//! A popped release may defer more entries; a [`run`] started while the
++//! thread drains does not drain, its deferrals join the running drain. So the
++//! native stack stays bounded however deep the value is, for the box edges
++//! the glue defers. Outside a drain the stack is empty. The stack never reads
++//! or writes a deferred pointer; its buffer shrinks back to `KEEP` entries
++//! after a drain and is freed at thread exit.
++
++use core::cell::Cell;
++use core::mem::ManuallyDrop;
++
++/// Releases one deferred pointer.
++pub type Release = unsafe extern "C" fn(*mut u8);
++
++#[derive(Clone, Copy)]
++struct Entry {
++    cell: *mut u8,
++    release: Release,
++}
++
++/// Capacity the buffer keeps after a drain.
++const KEEP: usize = 64;
++
++/// Whether the thread drains, whether its exit guard ran (a later drain then
++/// frees its buffer), and its pending drops, a `Vec<Entry>` by raw parts.
++struct State {
++    releasing: Cell<bool>,
++    exited: Cell<bool>,
++    len: Cell<usize>,
++    cap: Cell<usize>,
++    ptr: Cell<*mut Entry>,
++}
++
++thread_local! {
++    static STATE: State = const {
++        State {
++            releasing: Cell::new(false),
++            exited: Cell::new(false),
++            len: Cell::new(0),
++            cap: Cell::new(0),
++            ptr: Cell::new(core::ptr::dangling_mut()),
++        }
++    };
++    static GUARD: Guard = const { Guard };
++}
++
++/// Frees the buffer at thread exit (registered with the first buffer).
++struct Guard;
++
++impl Drop for Guard {
++    fn drop(&mut self) {
++        let _ = STATE.try_with(|state| {
++            state.exited.set(true);
++            state.with_vec(|v| *v = Vec::new());
++        });
++    }
++}
++
++/// The current thread's state (no destructor: it outlives the others).
++#[inline(always)]
++fn state() -> &'static State {
++    STATE.with(|state| unsafe { &*(state as *const State) })
++}
++
++impl State {
++    fn with_vec(&self, f: impl FnOnce(&mut Vec<Entry>)) {
++        let (ptr, len, cap) = (self.ptr.get(), self.len.get(), self.cap.get());
++        let mut v = ManuallyDrop::new(unsafe { Vec::from_raw_parts(ptr, len, cap) });
++        f(&mut v);
++        self.ptr.set(v.as_mut_ptr());
++        self.len.set(v.len());
++        self.cap.set(v.capacity());
++    }
++    /// Pops and runs entries (the thread draining) until none is left.
++    unsafe fn pop_all(&self) {
++        while self.len.get() != 0 {
++            let len = self.len.get() - 1;
++            self.len.set(len);
++            let entry = unsafe { self.ptr.get().add(len).read() };
++            unsafe { (entry.release)(entry.cell) };
++        }
++        if self.exited.get() {
++            self.with_vec(|v| *v = Vec::new());
++        } else if self.cap.get() > KEEP {
++            self.with_vec(|v| v.shrink_to(KEEP));
++        }
++    }
++}
++
++/// Whether the current thread drains: a release started now joins the drain.
++#[inline(always)]
++pub fn releasing() -> bool {
++    state().releasing.get()
++}
++
++/// Defers `release(cell)` until the current thread's drain pops it. Outside
++/// a drain, runs it at once, as a [`run`] of it. Safety: `release(cell)` must
++/// be sound whenever it runs.
++#[inline(always)]
++pub unsafe fn defer(cell: *mut u8, release: Release) {
++    let state = state();
++    if !state.releasing.get() {
++        return unsafe { run_outermost(cell, release) };
++    }
++    let len = state.len.get();
++    if len == state.cap.get() {
++        return unsafe { defer_slow(cell, release) };
++    }
++    unsafe { state.ptr.get().add(len).write(Entry { cell, release }) };
++    state.len.set(len + 1);
++}
++
++/// Runs `walk(object)` with the thread draining and then, unless a drain was
++/// already running, every entry deferred meanwhile. Inside a drain (a drop
++/// made by a release, or by a foreign hook, that the drain runs) it returns
++/// after the walk, before the dead members it deferred are released: the
++/// running drain releases them. Safety: `walk(object)` must be sound now.
++#[inline(always)]
++pub unsafe fn run(object: *mut u8, walk: Release) {
++    if releasing() {
++        return unsafe { walk(object) };
++    }
++    unsafe { run_outermost(object, walk) }
++}
++
++#[inline(never)]
++unsafe extern "C" fn run_outermost(object: *mut u8, walk: Release) {
++    let state = state();
++    state.releasing.set(true);
++    unsafe { walk(object) };
++    unsafe { state.pop_all() };
++    state.releasing.set(false);
++}
++
++#[cold]
++#[inline(never)]
++unsafe extern "C" fn defer_slow(cell: *mut u8, release: Release) {
++    let state = state();
++    if state.cap.get() == 0 {
++        // Past the guard's destruction the drain frees the buffer (`exited`).
++        let _ = GUARD.try_with(|_| ());
++    }
++    state.with_vec(|v| v.push(Entry { cell, release }));
++}
++
++/// C entry point of [`defer`], called by compiled drop glue.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __reussir_drop_defer(cell: *mut u8, release: Release) {
++    unsafe { defer(cell, release) }
++}
++
++/// C entry point of [`run`], called by compiled drop glue.
++#[unsafe(no_mangle)]
++pub unsafe extern "C" fn __reussir_drop_run(object: *mut u8, walk: Release) {
++    unsafe { run(object, walk) }
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/crates/reussir-rt/src/drop_stack/tests.rs b/crates/reussir-rt/src/drop_stack/tests.rs
+new file mode 100644
+index 00000000..1632ea17
+--- /dev/null
++++ b/crates/reussir-rt/src/drop_stack/tests.rs
+@@ -0,0 +1,131 @@
++use super::*;
++use std::cell::RefCell;
++
++thread_local! {
++    static LOG: RefCell<Vec<(char, usize)>> = const { RefCell::new(Vec::new()) };
++}
++fn log(kind: char, value: usize) {
++    // A drop in a thread-local destructor may outlive LOG.
++    let _ = LOG.try_with(|l| l.borrow_mut().push((kind, value)));
++}
++fn take_log() -> Vec<(char, usize)> {
++    LOG.with(|l| core::mem::take(&mut *l.borrow_mut()))
++}
++fn p(value: usize) -> *mut u8 {
++    core::ptr::without_provenance_mut(value)
++}
++const CHAIN: usize = if cfg!(miri) { 1_000 } else { 1_000_000 };
++const MANY: usize = if cfg!(miri) { 200 } else { 10_000 }; // Miri: smaller
++
++// `a(v)` defers `b(10 v)` and `b(10 v + 1)` for v < 10; `b(v)` defers nothing.
++unsafe extern "C" fn a(cell: *mut u8) {
++    let v = cell as usize;
++    log('a', v);
++    if v < 10 {
++        unsafe { defer(p(10 * v), b) };
++        unsafe { defer(p(10 * v + 1), b) };
++    }
++}
++unsafe extern "C" fn b(cell: *mut u8) {
++    log('b', cell as usize);
++}
++// A walk deferring `a(1)`, `b(2)`, `a(3)` in that order.
++unsafe extern "C" fn walk(_: *mut u8) {
++    log('w', 0);
++    unsafe { defer(p(1), a) };
++    unsafe { defer(p(2), b) };
++    unsafe { defer(p(3), a) };
++}
++const WALK: [(char, usize); 7] =
++    [('a', 3), ('b', 31), ('b', 30), ('b', 2), ('a', 1), ('b', 11), ('b', 10)];
++
++#[test]
++fn last_deferred_first() {
++    unsafe { run(p(0), walk) };
++    assert_eq!(take_log(), [[('w', 0)].as_slice(), &WALK].concat());
++}
++
++// A release that starts another drop: its walk runs at once and its
++// deferrals join the running drain.
++unsafe extern "C" fn nested(cell: *mut u8) {
++    log('n', cell as usize);
++    unsafe { run(p(0), walk) };
++    log('m', cell as usize);
++}
++unsafe extern "C" fn outer(_: *mut u8) {
++    unsafe { defer(p(7), b) };
++    unsafe { defer(p(8), nested) };
++}
++
++#[test]
++fn a_nested_run_joins_the_drain() {
++    unsafe { run(p(0), outer) };
++    let head = [('n', 8), ('w', 0), ('m', 8)];
++    assert_eq!(take_log(), [head.as_slice(), &WALK, &[('b', 7)]].concat());
++}
++
++// A chain of CHAIN cells, each release deferring the next (and a `b` for an
++// even cell), on a small native stack; then MANY pending entries.
++unsafe extern "C" fn chain(cell: *mut u8) {
++    let v = cell as usize;
++    if v > 1 {
++        unsafe { defer(p(v - 1), chain) };
++    }
++    if v % 2 == 0 {
++        unsafe { defer(p(v), b) };
++    }
++}
++unsafe extern "C" fn many(_: *mut u8) {
++    (0..MANY).for_each(|i| unsafe { defer(p(i), b) });
++}
++
++#[test]
++fn deep_chains_and_many_pending_entries() {
++    let thread = std::thread::Builder::new().stack_size(64 * 1024);
++    let check = || {
++        unsafe { run(p(CHAIN), chain) };
++        let log = take_log();
++        assert_eq!(log.len(), CHAIN / 2);
++        assert!(log.windows(2).all(|w| w[0].1 > w[1].1));
++        assert!(state().len.get() == 0 && state().cap.get() <= KEEP);
++        unsafe { run(p(0), many) };
++        assert_eq!(take_log(), (0..MANY).rev().map(|i| ('b', i)).collect::<Vec<_>>());
++        assert!(state().len.get() == 0 && state().cap.get() <= KEEP);
++    };
++    thread.spawn(check).unwrap().join().unwrap();
++}
++
++#[test]
++fn defer_outside_a_drain_runs_at_once() {
++    unsafe { defer(p(4), a) };
++    assert_eq!(take_log(), [('a', 4), ('b', 41), ('b', 40)]);
++    assert!(!releasing() && state().len.get() == 0);
++}
++
++// A drop in a thread-local destructor after the guard's: the drain frees the
++// buffer it needed (Miri checks for the leak).
++struct Late;
++impl Drop for Late {
++    fn drop(&mut self) {
++        unsafe { run(p(0), walk) };
++    }
++}
++thread_local! {
++    static LATE: Late = const { Late };
++}
++#[test]
++fn a_drop_after_the_thread_exit_guard() {
++    let thread = std::thread::spawn(|| {
++        LATE.with(|_| ());
++        unsafe { run(p(0), walk) };
++    });
++    thread.join().unwrap();
++}
++
++#[test]
++fn symbols_are_exported() {
++    let symbols = crate::symbols::exported_symbols();
++    for name in ["__reussir_drop_defer", "__reussir_drop_run"] {
++        assert!(symbols.iter().any(|s| s.name == name && !s.address.is_null()));
++    }
++}
+diff --git a/crates/reussir-rt/src/lib.rs b/crates/reussir-rt/src/lib.rs
+index 2dac6dee..08d672fe 100644
+--- a/crates/reussir-rt/src/lib.rs
++++ b/crates/reussir-rt/src/lib.rs
+@@ -14,6 +14,7 @@ static GLOBAL: alloc::ReussirGlobalAlloc = alloc::ReussirGlobalAlloc;
+ pub mod alloc;
+ pub mod bridge;
+ pub mod collections;
++pub mod drop_stack;
+ pub mod dtor_executor;
+ pub mod hash;
+ pub mod instrument;
+diff --git a/crates/reussir-rt/src/symbols.rs b/crates/reussir-rt/src/symbols.rs
+index 04411cc2..2bd02d92 100644
+--- a/crates/reussir-rt/src/symbols.rs
++++ b/crates/reussir-rt/src/symbols.rs
+@@ -14,6 +14,7 @@ use crate::alloc::{
+     __reussir_allocate, __reussir_allocate_small, __reussir_dealloc_unsized, __reussir_deallocate,
+     __reussir_realloc_unsized, __reussir_reallocate,
+ };
++use crate::drop_stack::{__reussir_drop_defer, __reussir_drop_run};
+ use crate::dtor_executor::{
+     __reussir_create_dtor_executor, __reussir_destroy_dtor_executor, __reussir_dtor_conti_alloc,
+     __reussir_dtor_conti_free, __reussir_dtor_executor_align, __reussir_dtor_executor_size,
+@@ -63,6 +64,8 @@ pub fn exported_symbols() -> &'static [RuntimeSymbol] {
+         __reussir_dealloc_unsized,
+         __reussir_reallocate,
+         __reussir_realloc_unsized,
++        __reussir_drop_defer,
++        __reussir_drop_run,
+         __reussir_dtor_executor_size,
+         __reussir_dtor_executor_align,
+         __reussir_create_dtor_executor,

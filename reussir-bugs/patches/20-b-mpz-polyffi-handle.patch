@@ -1,7 +1,7 @@
-From 6bd3120439ac228f66db9249cae3fde549844dc3 Mon Sep 17 00:00:00 2001
+From 036ed9f6368963d4ed0e7a660494ceb3df24af07 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 24 Oct 2026 23:43:29 -0400
-Subject: [PATCH 10/13] l2r-local: step D (R2): Nat and Int at polyffi type
+Subject: [PATCH 04/21] l2r-local: step D (R2): Nat and Int at polyffi type
  arguments are an owned handle, reussir_rt::rcgmp::Mpz
 
 #795 lets `Nat` and `Int` cross `#[ffi(import)]` as the raw rcgmp handle,
@@ -322,10 +322,10 @@ index cf7b2bb2..d3180152 100644
  set(REUSSIR_RT_MSAN_LIBRARY "${REUSSIR_RT_MSAN_LIBRARY}" PARENT_SCOPE)
  set(REUSSIR_RT_TSAN_LIBRARY "${REUSSIR_RT_TSAN_LIBRARY}" PARENT_SCOPE)
 diff --git a/crates/reussir-rt/src/lib.rs b/crates/reussir-rt/src/lib.rs
-index 9363b24e..db292817 100644
+index fc2dddca..2dac6dee 100644
 --- a/crates/reussir-rt/src/lib.rs
 +++ b/crates/reussir-rt/src/lib.rs
-@@ -24,6 +24,7 @@ pub mod panic;
+@@ -23,6 +23,7 @@ pub mod panic;
  #[cfg(feature = "pjrt")]
  pub mod pjrt;
  pub mod rc;
@@ -1126,6 +1126,3 @@ index 00000000..ec272515
 +// collection keeps after its wrapper released it is a use after free, a
 +// handle released by both sides a double free, and one neither releases a
 +// leak.
--- 
-2.43.0
-

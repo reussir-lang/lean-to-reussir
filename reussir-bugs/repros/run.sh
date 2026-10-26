@@ -9,12 +9,14 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
-# line here: 1 to 4, 6 to 8, 12, 17 and 18 (number 5 is retired). Entries
-# 9, 10 and 20 (missing features) have no repro: their patches carry their
-# own tests; 11 is a run-time cost of entry 2's stack; 13 needs a 32-bit
-# target, 14 MLIR written by hand, and 15 is shown by lean2rr's runtime
-# test RtArenaPurge. Entry 2's Miri test (bug02-unlink-provenance.rs) is
-# run by hand (its header). Each repro prints one line:
+# line here: 1 to 4, 6 to 8, 12, 17 to 19, 23 and 24 (numbers 5, 9, 11 and
+# 22 are retired). Entry 2's repros check the part of it that upstream
+# fixed (a bounded stack depth). Entries 10 and 20 (missing features) have
+# no repro: their patches carry their own tests; 13 needs a 32-bit target,
+# 14 MLIR written by hand, 15 is shown by lean2rr's runtime test
+# RtArenaPurge, and 21's patch has a lit test that shows it. Entry 24
+# needs RRC_CHECKOUT/build/bin/reussir-opt (a build with the tests on, or
+# its target reussir-opt); without it, SKIPPED. Each repro prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
@@ -31,9 +33,11 @@
 # L2R_LEAN_TOOLCHAIN; put first on PATH by scripts/toolchain.sh) and a
 # lean2rr build (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds
 # the runtime crate leanrt for the checkout once, under runtime/leanrt/target/.
-# Entries 3 and 4 compare the sizes of two outputs (--emit mlir-llvm,
-# --emit mlir); entries 6 and 17 read their LLVM IR (the calls left, the
-# stack slots left), entry 18 its aarch64 assembly (stores through x8); entry 8
+# Entries 3, 4 and 19 compare the sizes of two outputs (--emit mlir-llvm,
+# --emit mlir, --emit mlir-llvm); entries 6 and 17 read their LLVM IR (the
+# calls left, the stack slots left), entry 18 its aarch64 assembly (stores
+# through x8), entry 24 the MLIR after two passes (the token frees); entry
+# 23 links a C driver (cc) that measures peak RSS around each free; entry 8
 # counts the cells its program allocates (Reussir's allocation entry points
 # wrapped at link time); entry 12 is a Rust test of the checkout's runtime
 # sources, compiled with RUSTC. Everything takes seconds, except entry 2's
@@ -346,7 +350,69 @@ bug18() {
     else say_line FIXED 18 "both functions return in registers" "-O aggressive --no-pack-record-members"; fi
 }
 
-ALL="01 02 03 04 06 07 08 12 17 18"
+bug19() {
+    # The size of the LLVM-dialect module at N = 3 and N = 4 nested types:
+    # about 4x when exponential (upstream), about 1.4x with patch 19-a. With
+    # 23-f rrc makes no retcon destructors, so the size grows little too.
+    local n sz=()
+    for n in 3 4; do
+        python3 "$HERE/bug19-retcon-direct-arms.py" $n "$WORK/out/19-$n.rr"
+        { (cd "$WORK/run" && "$RRC" "$WORK/out/19-$n.rr" --emit mlir-llvm -O none -o "$WORK/out/19-$n.mlir") > "$WORK/out/19-$n.log" 2>&1; } 2> /dev/null
+        RC=$?
+        if [ $RC != 0 ]; then say_line OTHER 19 "N = $n: $(build_fail 19-$n)" "-O none"; return; fi
+        sz+=("$(stat -c %s "$WORK/out/19-$n.mlir")")
+    done
+    local r msg
+    r=$(ratio "${sz[1]}" "${sz[0]}")
+    msg="--emit mlir-llvm: N = 3: $((sz[0] / 1024)) KB, N = 4: $((sz[1] / 1024)) KB (${r}x for one more level)"
+    if ge "$r" 3; then say_line REPRODUCES 19 "$msg" "-O none"
+    elif le "$r" 2; then say_line FIXED 19 "$msg" "-O none"
+    else say_line OTHER 19 "$msg" "-O none"; fi
+}
+bug23() {
+    # Peak RSS growth (KiB) during the free of four values of 10^6 levels,
+    # measured by the C driver: about 85 bytes per level (left-deep tree:
+    # 84 MiB) with upstream's retcon drops, below 16 MiB each when fixed.
+    local d=$WORK/out/23 l r c f
+    mkdir -p "$d"
+    command -v cc > /dev/null || { say_line SKIPPED 23 "no cc"; return; }
+    { (cd "$WORK/run" && "$RRC" "$HERE/bug23-deep-free.rr" -o "$d/deep.o" --emit obj --relocation-mode pic -O aggressive) > "$d/log" 2>&1; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 23 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive"; return; fi
+    if ! cc "$d/deep.o" "$HERE/bug23-deep-free.c" -o "$d/deep" -L"$RT/deps" -lreussir_rt -Wl,-rpath,"$RT/deps" -Wl,-rpath-link,"$TL" > "$d/cc.log" 2>&1; then
+        say_line OTHER 23 "cc failed (see $d/cc.log)" "-O aggressive"; return
+    fi
+    local k g=()
+    for k in 0 1 2 3; do
+        { (cd "$WORK/run" && timeout 120 "$d/deep" 1000000 $k) > "$d/stdout$k" 2> "$d/stderr$k"; } 2> /dev/null
+        EXIT=$?
+        g+=("$(sed -n 's/^grew \([0-9]*\)$/\1/p' "$d/stdout$k")")
+        [ -n "${g[$k]}" ] || { say_line OTHER 23 "shape $k prints '$(head -c 200 "$d/stdout$k")' ($(signame $EXIT))" "-O aggressive"; return; }
+    done
+    read -r l r c f <<< "${g[*]}"
+    local msg="peak RSS growth during the free of 10^6 levels: left-deep tree $l KiB, right-deep $r, 64-arm chain $c, compositions $f"
+    if [ "$l" -ge 32768 ]; then say_line REPRODUCES 23 "$msg" "-O aggressive"
+    elif [ "$l" -lt 16384 ] && [ "$r" -lt 16384 ] && [ "$c" -lt 16384 ] && [ "$f" -lt 16384 ]; then say_line FIXED 23 "$msg" "-O aggressive"
+    else say_line OTHER 23 "$msg" "-O aggressive"; fi
+}
+bug24() {
+    # The token frees after the acquire/drop expansion with its default
+    # options (TPDE mode's) and token reuse: none when the payload's token
+    # leaks (upstream), one with 23-e.
+    local opt=$CK/build/bin/reussir-opt d=$WORK/out/24 n
+    [ -x "$opt" ] || { say_line SKIPPED 24 "no reussir-opt in $CK/build/bin (build its target reussir-opt)"; return; }
+    mkdir -p "$d"
+    { "$opt" "$HERE/bug24-locked-drop-token.mlir" --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' \
+        --reussir-token-reuse > "$d/out.mlir" 2> "$d/log"; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER 24 "reussir-opt $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$d/log")"; return; fi
+    n=$(grep -c 'reussir.token.free' "$d/out.mlir")
+    if [ "$n" = 0 ]; then say_line REPRODUCES 24 "a mutex cell's drop, TPDE options: the payload's token is never freed (no token.free)"
+    elif grep -q '@__reussir_locked_drop' "$d/out.mlir"; then say_line FIXED 24 "a mutex cell's drop, TPDE options: the payload's token is freed ($n token.free, in the locked-drop function)"
+    else say_line OTHER 24 "$n token.free, no locked-drop function"; fi
+}
+
+ALL="01 02 03 04 06 07 08 12 17 18 19 23 24"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

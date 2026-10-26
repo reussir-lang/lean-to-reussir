@@ -45,8 +45,9 @@
 //!   a free (whose walk runs Lean code, which may block) is resolved, its
 //!   cell's store included, once the free is over (lean-runtime's deferred
 //!   resolutions, core 3.3: `defer`, then `run_deferred` at the drain's
-//!   end, which Reussir reports through its patch 09-a).
-//! - **The drain's end** (`drained`, Reussir's drain-end hook): first the
+//!   end, `pending::want_end_work`).
+//! - **The drain's end** (`drained`, the end work of leanrt's drains,
+//!   `crate::pending`): first the
 //!   deferred resolutions (`run_deferred`: each waits only for the writers
 //!   of the streams handed off before it, review RF14-07), then
 //!   lean-runtime's drain-end hook `after_drain` (the writer threads of the
@@ -755,10 +756,18 @@ extern "C" {
 
 impl Drop for Promise {
     fn drop(&mut self) {
+        // Released inside a free (`active`: a drain of the thread's stack,
+        // leanrt's or Reussir's glue's: a container, a box's payload, a
+        // record, and what they hold): the free reaches it in Lean's order
+        // (`crate::drop`), and there releases a resolved promise's cell or
+        // puts an unresolved one's resolution off until the drain is over
+        // (test `RtPromiseDepFreeInDrain`). Otherwise nothing is pending on
+        // the thread (`crate::pending`: the stack is empty while no free
+        // runs), so it is resolved now and its dependents run, as natively
+        // where user code drops the promise itself. Where Reussir's glue reaches it in
+        // a record that user code frees, that is in field order, natively
+        // last field first (plan §10; test `RtPromiseDropRecordPending`).
         if crate::drop::active() {
-            // Released while a container is freed: the free reaches it in
-            // Lean's order (`crate::drop`), and there releases a resolved
-            // promise's cell or puts an unresolved one's resolution off.
             crate::drop::defer(self.cell, defer_promise_drop);
             return;
         }
@@ -766,7 +775,7 @@ impl Drop for Promise {
     }
 }
 
-/// The free reaches a promise it released (a step of Reussir's drain, in
+/// The free reaches a promise it released (a step of leanrt's drain, in
 /// Lean's order).
 /// - Resolved: there is nothing to resolve, and the promise's reference to
 ///   its cell goes right there, so what the cell holds is released in the
@@ -777,22 +786,33 @@ impl Drop for Promise {
 /// - Unresolved: natively its resolution with `none` runs right there, its
 ///   `sync` dependents included (`deactivate_promise`), but they are Lean
 ///   code that may block, and no context may suspend inside a free (the
-///   free is the thread's, `reussir_rt::drop`; lean-runtime's no-suspend
+///   free is the thread's, `crate::pending`; lean-runtime's no-suspend
 ///   scope, its rules R1-R3). So the whole resolution, the cell's store
 ///   included, is put off until the drain is over (lean-runtime's `defer`,
 ///   core 3.3), and runs there in the order the free reached the promises
-///   (`drained`). With the store made there too, the other contexts see
+///   (the drain's end work, `drained`). With the store made there too, the other contexts see
 ///   the promise unresolved until its dependents run, as natively (the
 ///   store-with-resolve shape of the design's review RW1-05).
-unsafe fn defer_promise_drop(cell: usize) -> bool {
+unsafe extern "C" fn defer_promise_drop(cell: usize) -> bool {
     if promise_resolved(cell) {
         return drop_promise_now(cell);
     }
-    hook_drained();
-    ls::defer(Deferred::Call(Box::new(move || unsafe {
+    defer_to_drain_end(Deferred::Call(Box::new(move || unsafe {
         drop_promise_now(cell);
     })));
     true
+}
+
+/// Put `d` off to the end of the running drain (lean-runtime's `defer`),
+/// and ask the drain for its end work, which runs it (`drained`'s
+/// `run_deferred`): leanrt's drain runs the end work only when a release in
+/// it asked (`pending::want_end_work`), so a deferral without the request
+/// would wait until a later drain that asks or the context's next settle
+/// point. Every `ls::defer` of
+/// leanrt goes through here (review P2-09 of the Phase 2 port).
+fn defer_to_drain_end(d: Deferred) {
+    crate::pending::want_end_work();
+    ls::defer(d);
 }
 
 /// The generated `l2r_promise_drop` resolves the promise with `none` unless
@@ -862,8 +882,7 @@ pub fn resolve_with(a: usize, store: &mut dyn FnMut()) -> u64 {
         debug_assert!(false, "leanrt: a promise resolved inside a free");
         free_entry(i);
         store();
-        hook_drained();
-        ls::defer(Deferred::Resolve(id));
+        defer_to_drain_end(Deferred::Resolve(id));
         return 0;
     }
     ls::resolve(id, || {
@@ -875,24 +894,15 @@ pub fn resolve_with(a: usize, store: &mut dyn FnMut()) -> u64 {
     0
 }
 
-/// Have Reussir's drains call `drained` when they end: the function every
-/// drain that released something calls once it is over
-/// (`reussir_rt::drop::__reussir_drop_drained`, local Reussir patch 09-a,
-/// which lean2rr requires: `scripts/l2r.py` checks for it, and this
-/// reference does not link without it). Installed at the first thing a
-/// free puts off to its end: an unresolved promise's resolution
-/// (`defer_promise_drop`) or a stream handle's close (`fs::FileHandle`'s
-/// drop), so a program with neither pays nothing at a drain's end.
-pub(crate) fn hook_drained() {
-    let f: extern "C" fn() = drained;
-    reussir_rt::drop::__reussir_drop_drained.store(f as *mut (), std::sync::atomic::Ordering::Relaxed);
-}
-
-/// A drain is over (`__reussir_drop_drained`, outside it), where a switch
-/// is allowed (Reussir calls it once the drain has ended, with nothing
-/// pending; every drain may put off a promise's resolution, whose
-/// dependents may block). In lean-runtime's order (docs/sched.md, "The
-/// glue", item 11):
+/// A drain is over, where a switch is allowed: the end work of the drains of
+/// the thread's stack (its end function, which `pending::want_end_work`
+/// registers: the stack calls it once its outermost drain has ended,
+/// leanrt's or one of Reussir's glue, with nothing pending, when a release
+/// in it asked for it, `pending::want_end_work`:
+/// an unresolved promise's resolution put off, `defer_promise_drop`, or a
+/// stream handle's close, `fs::FileHandle`'s drop; so a program with
+/// neither pays nothing at a drain's end). In lean-runtime's order
+/// (docs/sched.md, "The glue", item 11):
 /// - first the resolutions put off inside the drain run, in order, on this
 ///   context (lean-runtime's `run_deferred`; a free inside one of them
 ///   resolves its own promises at its own end, before the next, as natively
@@ -910,10 +920,10 @@ pub(crate) fn hook_drained() {
 ///   relaxed load while no writer runs in the process; it waits for
 ///   nothing in a no-suspend scope, while the context holds a stream lock,
 ///   or while a panic unwinds.
-extern "C" fn drained() {
-    if crate::drop::active() {
-        return;
-    }
+pub(crate) fn drained() {
+    // The stack calls it only once its outermost drain is over; a call inside
+    // a drain would leave the resolutions queued (review of the shared stack).
+    debug_assert!(!crate::drop::active(), "leanrt: end work inside a drain");
     // nothing queued: no out-of-line call (lean-runtime's count of pending
     // resolutions covers the queued ones; review RS6-04)
     if ls::deferred_pending() {

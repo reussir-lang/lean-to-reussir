@@ -1,0 +1,415 @@
+From 77ccdcc004144ccba1dc88865be39ce0fdc08b0c Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 17:12:43 -0400
+Subject: [PATCH 17/21] l2r-local: entry 23-i: worklist release: the last child
+ continues by a tail call
+
+An optimization of the release functions (23-d): in the worklist order,
+a freed cell's last dead Worklist child is released next, so a chain is
+a loop. The release pushed that child like the others and returned, and
+the drain popped it right away: a runtime call to defer, a pop and an
+indirect call per level of a chain.
+
+`<dtor>.worklist.release(box)` now expands the record itself instead of
+calling the walk (it is glue too). Per arm of a variant (or for a
+compound record), it releases the members as the walk does, except the
+arm's last member box that the walk would defer (a plain or nullable
+box of a Worklist record), provided no later member may push work onto
+the drain: after the other members, it loads that child, frees the box,
+decrements the child and, if it is dead, calls the child's release as a
+`musttail` call (the attribute TailDrop already uses). The drain would
+have popped that child next, since nothing was pushed after it; moving
+its decrement after the later members changes nothing observable, since
+their drops have no effect (a member counts as possibly pushing, and
+keeps the child deferred in field order, if it can reach a Worklist
+record, a closure or an FFI object, whose hooks may push: mayPush, one
+reachability walk per query like 23-h's holdsWorklistBox). The
+walk, which the entry runs on a payload it does not own, is unchanged.
+
+WebAssembly has tail calls only with the `tail-call` feature, which the
+module does not record, so on wasm targets the release keeps calling the
+walk and freeing the box. (TailDrop's `musttail` has the same limit:
+upstream's tail drop of a list fails in llc for wasm32-wasip1 without
+`+tail-call`; not changed here.)
+
+Instructions per freed cell (plain Reussir microbenchmark, 10^6 levels,
+cachegrind, before / after): right-deep tree 59.8 / 40.8, 64-arm enum
+chain 62.4 / 40.8, right-nested compositions 80.3 / 43.3, balanced tree
+59.8 / 50.3, rose tree 63.3 / 51.5; left-deep trees and left-nested
+compositions, whose last member is a leaf, unchanged (23-j).
+
+Tests: conversion/worklist_drop.mlir checks the release (deferral of the
+first child, the box member released, the free, the musttail call), a
+record whose `[value]` member of the cycle after the last child keeps
+that child deferred (no tail call; a review found the tail call taken
+there, which reordered the subtrees: runtime/drop_member_order.mlir's
+OrderTri case, 23-g), and, in a wasm32 module, the release calling the
+walk;
+codegen/retcon_drop_targets.rr checks the musttail call on six targets
+and the walk call on wasm32-wasip1.
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 202 +++++++++++++++---
+ .../codegen/retcon_drop_targets.rr            |  20 +-
+ .../integration/conversion/worklist_drop.mlir |  55 ++++-
+ 3 files changed, 229 insertions(+), 48 deletions(-)
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 4dc035c8..ca2b2f47 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -31,11 +31,56 @@
+ #include "Reussir/Transformation/SpecialPointerTag.h"
+ #include <llvm/ADT/DenseSet.h>
+ #include <mlir/Dialect/Arith/IR/Arith.h>
++#include <llvm/TargetParser/Triple.h>
+ #include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
++#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+ #include <mlir/Dialect/SCF/IR/SCF.h>
+ 
+ namespace reussir {
+ namespace {
++// Decrements the box `rc` and emits `dead()` where its count reached zero
++// (the box is then the caller's). An immediate (a nullary arm under the
++// special-pointer-tag scheme) owns no memory and its dummy box's count must
++// not be read as unique.
++void emitDecrement(mlir::Value rc, mlir::Location loc, mlir::ModuleOp module,
++                   mlir::PatternRewriter &rewriter,
++                   llvm::function_ref<void()> dead) {
++  auto type = llvm::cast<RcType>(rc.getType());
++  mlir::OpBuilder::InsertionGuard guard(rewriter);
++  if (module->hasAttr(kSpecialPtrTagAttr) && type.mayCarrySpecialPointerTag()) {
++    mlir::Value immediate = ReussirRcIsImmediateOp::create(
++        rewriter, loc, rewriter.getI1Type(), rc);
++    auto branch = mlir::scf::IfOp::create(rewriter, loc, immediate, true);
++    rewriter.setInsertionPointToStart(branch.elseBlock());
++  }
++  bool atomic = type.getAtomicKind() == AtomicKind::atomic;
++  mlir::Value count =
++      atomic ? ReussirRcFetchSubOp::create(rewriter, loc, rc).getRefCount()
++             : ReussirRcFetchOp::create(rewriter, loc, rc).getRefCount();
++  mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
++  mlir::Value unique = mlir::arith::CmpIOp::create(
++      rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
++  auto branch = mlir::scf::IfOp::create(rewriter, loc, unique, !atomic);
++  if (!atomic) {
++    rewriter.setInsertionPointToStart(branch.elseBlock());
++    mlir::Value decremented =
++        mlir::arith::SubIOp::create(rewriter, loc, count, one);
++    ReussirRcSetOp::create(rewriter, loc, rc, decremented);
++  }
++  rewriter.setInsertionPointToStart(branch.thenBlock());
++  dead();
++}
++
++// Whether a member of projected type `type` is a box that worklist glue
++// defers (possibly behind a nullable).
++bool isDeferredBox(mlir::Type type) {
++  if (auto nullable = llvm::dyn_cast<NullableType>(type))
++    type = nullable.getPtrTy();
++  auto rc = llvm::dyn_cast<RcType>(type);
++  return rc && rc.getCapability() == Capability::shared &&
++         isWorklistDropRecord(rc.getElementType());
++}
++
+ class WorklistGlue {
+   mlir::ModuleOp module;
+   mlir::PatternRewriter &rewriter;
+@@ -202,16 +247,127 @@ public:
+     });
+   }
+ 
++  // Whether releasing a `type` value may push work onto the drain: it can
++  // reach a Worklist record, a closure or an FFI object (whose hooks may).
++  llvm::DenseMap<mlir::Type, bool> pushes;
++  bool mayPush(mlir::Type root) {
++    return reaches(root, pushes, [](mlir::Type type, Next next) {
++      auto record = llvm::dyn_cast<RecordType>(type);
++      if (llvm::isa<ClosureType, FFIObjectType>(type) ||
++          (record && isWorklist(record)))
++        return true;
++      if (auto rc = llvm::dyn_cast<RcType>(type))
++        next(rc.getElementType());
++      else
++        inner(type, next);
++      return false;
++    });
++  }
++
++  // Releases the compound `record` at `ref`, in the box `box`, as the walk
++  // does, except the last member box the walk would defer, when no later
++  // member may push work (their drops then have no effect to reorder): it
++  // comes last, after the box's free, by a tail call of its release if dead.
++  void releaseCompound(RecordType record, AtomicKind kind, mlir::Value ref,
++                       mlir::Value box) {
++    size_t n = record.getMembers().size();
++    auto field = [&](size_t i) { return record.getMemberIsField()[i]; };
++    auto projected = [&](size_t i) {
++      return getProjectedType(record.getMembers()[i], false,
++                              Capability::unspecified, kind);
++    };
++    auto slot = [&](size_t i) -> mlir::Value {
++      auto type = RefType::get(record.getContext(), projected(i),
++                               Capability::unspecified, kind);
++      return ReussirRefProjectOp::create(rewriter, loc, type, ref,
++                                         rewriter.getIndexAttr(i));
++    };
++    std::optional<size_t> b;
++    for (size_t i = 0; i < n; ++i)
++      if (!field(i) && isDeferredBox(projected(i)))
++        b = i;
++    for (size_t i = b ? *b + 1 : n; i < n; ++i)
++      if (!field(i) && mayPush(projected(i)))
++        b.reset();
++    for (size_t i = 0; i < n; ++i)
++      if (i != b && !field(i) && !isTriviallyCopyable(projected(i)))
++        ReussirRefDropOp::create(rewriter, loc, slot(i));
++    if (!b)
++      return emitBoxFree(box, loc, module, rewriter);
++    mlir::Value child =
++        ReussirRefLoadOp::create(rewriter, loc, projected(*b), slot(*b));
++    emitBoxFree(box, loc, module, rewriter);
++    auto tail = [&](mlir::Value rc) {
++      auto next = release(llvm::cast<RcType>(rc.getType()));
++      emitDecrement(rc, loc, module, rewriter, [&] {
++        auto call = mlir::func::CallOp::create(rewriter, loc, next,
++                                               mlir::ValueRange{rc});
++        call->setAttr(kMustTailCallAttr, rewriter.getUnitAttr());
++      });
++    };
++    auto nullable = llvm::dyn_cast<NullableType>(child.getType());
++    if (!nullable)
++      return tail(child);
++    auto dispatch = ReussirNullableDispatchOp::create(rewriter, loc,
++                                                      mlir::Type{}, child);
++    mlir::OpBuilder::InsertionGuard guard(rewriter);
++    rewriter.createBlock(&dispatch.getNullRegion());
++    ReussirScfYieldOp::create(rewriter, loc, nullptr);
++    auto *present = rewriter.createBlock(&dispatch.getNonNullRegion(), {},
++                                         {nullable.getPtrTy()}, {loc});
++    tail(present->getArgument(0));
++    ReussirScfYieldOp::create(rewriter, loc, nullptr);
++  }
++
+   mlir::func::FuncOp release(RcType rc) {
+     auto type = llvm::cast<RecordType>(rc.getElementType());
+     AtomicKind kind = rc.getAtomicKind();
+-    return function(type, kind, ".worklist.release", rc, [&](mlir::Value box) {
+-      mlir::Value payload =
+-          ReussirRcBorrowOp::create(rewriter, loc, ref(type, kind), box);
+-      mlir::func::CallOp::create(rewriter, loc, walk(type, kind),
+-                                 mlir::ValueRange{payload});
+-      emitBoxFree(box, loc, module, rewriter);
+-    });
++    // Wasm has tail calls only with a feature the module does not record.
++    auto triple = module->getAttrOfType<mlir::StringAttr>(
++        mlir::LLVM::LLVMDialect::getTargetTripleAttrName());
++    bool tails = !triple || !llvm::Triple(triple.getValue()).isWasm();
++    auto release =
++        function(type, kind, ".worklist.release", rc, [&](mlir::Value box) {
++          mlir::Value payload =
++              ReussirRcBorrowOp::create(rewriter, loc, ref(type, kind), box);
++          if (!tails) {
++            mlir::func::CallOp::create(rewriter, loc, walk(type, kind),
++                                       mlir::ValueRange{payload});
++            return emitBoxFree(box, loc, module, rewriter);
++          }
++          if (!type.isVariant())
++            return releaseCompound(type, kind, payload, box);
++          llvm::SmallVector<mlir::Attribute> tags;
++          for (size_t i = 0; i < type.getMembers().size(); ++i)
++            tags.push_back(rewriter.getDenseI64ArrayAttr({int64_t(i)}));
++          auto dispatch = ReussirRecordDispatchOp::create(
++              rewriter, loc, mlir::Type{}, payload,
++              rewriter.getArrayAttr(tags), tags.size());
++          mlir::OpBuilder::InsertionGuard guard(rewriter);
++          for (auto [i, member, field] : llvm::enumerate(
++                   type.getMembers(), type.getMemberIsField())) {
++            auto armType = getProjectedType(member, field,
++                                            Capability::unspecified, kind);
++            auto *arm = rewriter.createBlock(
++                &dispatch.getRegions()[i], {},
++                {RefType::get(type.getContext(), armType,
++                              Capability::unspecified, kind)},
++                {loc});
++            auto record = llvm::dyn_cast<RecordType>(armType);
++            if (!field && record && record.isCompound()) {
++              releaseCompound(record, kind, arm->getArgument(0), box);
++            } else {
++              if (!field && !isTriviallyCopyable(armType))
++                ReussirRefDropOp::create(rewriter, loc, arm->getArgument(0),
++                                         /*inlined=*/true, nullptr);
++              emitBoxFree(box, loc, module, rewriter);
++            }
++            ReussirScfYieldOp::create(rewriter, loc, nullptr);
++          }
++        });
++    if (tails)
++      release->setAttr(kWorklistGlueAttr, rewriter.getUnitAttr());
++    return release;
+   }
+ };
+ } // namespace
+@@ -246,32 +402,10 @@ void emitDeferredMemberRelease(mlir::Value rc, mlir::Location loc,
+                                mlir::SymbolTableCollection *symbols) {
+   auto type = llvm::cast<RcType>(rc.getType());
+   auto release = WorklistGlue(module, rewriter, symbols).release(type);
+-  mlir::OpBuilder::InsertionGuard guard(rewriter);
+-  // An immediate (a nullary arm under the special-pointer-tag scheme) owns
+-  // no memory and its dummy box's count must not be read as unique.
+-  if (module->hasAttr(kSpecialPtrTagAttr) && type.mayCarrySpecialPointerTag()) {
+-    mlir::Value immediate = ReussirRcIsImmediateOp::create(
+-        rewriter, loc, rewriter.getI1Type(), rc);
+-    auto branch = mlir::scf::IfOp::create(rewriter, loc, immediate, true);
+-    rewriter.setInsertionPointToStart(branch.elseBlock());
+-  }
+-  bool atomic = type.getAtomicKind() == AtomicKind::atomic;
+-  mlir::Value count =
+-      atomic ? ReussirRcFetchSubOp::create(rewriter, loc, rc).getRefCount()
+-             : ReussirRcFetchOp::create(rewriter, loc, rc).getRefCount();
+-  mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
+-  mlir::Value unique = mlir::arith::CmpIOp::create(
+-      rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
+-  auto branch = mlir::scf::IfOp::create(rewriter, loc, unique, !atomic);
+-  if (!atomic) {
+-    rewriter.setInsertionPointToStart(branch.elseBlock());
+-    mlir::Value decremented =
+-        mlir::arith::SubIOp::create(rewriter, loc, count, one);
+-    ReussirRcSetOp::create(rewriter, loc, rc, decremented);
+-  }
+-  rewriter.setInsertionPointToStart(branch.thenBlock());
+-  ReussirRcDeferOp::create(
+-      rewriter, loc, mlir::FlatSymbolRefAttr::get(release.getSymNameAttr()),
+-      rc);
++  emitDecrement(rc, loc, module, rewriter, [&] {
++    ReussirRcDeferOp::create(
++        rewriter, loc, mlir::FlatSymbolRefAttr::get(release.getSymNameAttr()),
++        rc);
++  });
+ }
+ } // namespace reussir
+diff --git a/tests/integration/codegen/retcon_drop_targets.rr b/tests/integration/codegen/retcon_drop_targets.rr
+index 28629837..5781cee0 100644
+--- a/tests/integration/codegen/retcon_drop_targets.rr
++++ b/tests/integration/codegen/retcon_drop_targets.rr
+@@ -1,32 +1,34 @@
+ // RUN: %rrc %s --target-triple aarch64-pc-windows-msvc -Onone --emit llvm-ir -o %t.aarch64-pc-windows-msvc.ll
+-// RUN: %FileCheck %s < %t.aarch64-pc-windows-msvc.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,TAIL < %t.aarch64-pc-windows-msvc.ll
+ // RUN: %llc %t.aarch64-pc-windows-msvc.ll -filetype=obj -o %t.aarch64-pc-windows-msvc.o
+ // RUN: %rrc %s --target-triple x86_64-pc-windows-msvc -Onone --emit llvm-ir -o %t.x86_64-pc-windows-msvc.ll
+-// RUN: %FileCheck %s < %t.x86_64-pc-windows-msvc.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,TAIL < %t.x86_64-pc-windows-msvc.ll
+ // RUN: %llc %t.x86_64-pc-windows-msvc.ll -filetype=obj -o %t.x86_64-pc-windows-msvc.o
+ // RUN: %rrc %s --target-triple aarch64-apple-darwin -Onone --emit llvm-ir -o %t.aarch64-apple-darwin.ll
+-// RUN: %FileCheck %s < %t.aarch64-apple-darwin.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,TAIL < %t.aarch64-apple-darwin.ll
+ // RUN: %llc %t.aarch64-apple-darwin.ll -filetype=obj -o %t.aarch64-apple-darwin.o
+ // RUN: %rrc %s --target-triple i686-unknown-linux-gnu -Onone --emit llvm-ir -o %t.i686-unknown-linux-gnu.ll
+-// RUN: %FileCheck %s < %t.i686-unknown-linux-gnu.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,TAIL < %t.i686-unknown-linux-gnu.ll
+ // RUN: %llc %t.i686-unknown-linux-gnu.ll -filetype=obj -o %t.i686-unknown-linux-gnu.o
+ // RUN: %rrc %s --target-triple wasm32-wasip1 -Onone --emit llvm-ir -o %t.wasm32-wasip1.ll
+-// RUN: %FileCheck %s < %t.wasm32-wasip1.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,NOTAIL < %t.wasm32-wasip1.ll
+ // RUN: %llc %t.wasm32-wasip1.ll -filetype=obj -o %t.wasm32-wasip1.o
+ // RUN: %rrc %s --target-triple riscv64-unknown-linux-gnu -Onone --emit llvm-ir -o %t.riscv64-unknown-linux-gnu.ll
+-// RUN: %FileCheck %s < %t.riscv64-unknown-linux-gnu.ll
++// RUN: %FileCheck %s --check-prefixes=CHECK,TAIL < %t.riscv64-unknown-linux-gnu.ll
+ // RUN: %llc %t.riscv64-unknown-linux-gnu.ll -filetype=obj -o %t.riscv64-unknown-linux-gnu.o
+ 
+ enum Tree { Leaf, Branch(Tree, Tree) }
+ fn consume(tree: Tree) -> u64 { match tree { Tree::Leaf => 0, _ => 1 } }
+ extern "C" trampoline "consume" = consume;
+ 
+-// Worklist drops: the entry runs the walk on the thread's drop stack; the
+-// walk defers each dead Tree box with its release (walk, then free).
++// Worklist drops: the walk defers each dead Tree box; the release continues
++// with the last child by a musttail call (on wasm it calls the walk).
+ // CHECK-DAG: declare void @__reussir_drop_run(ptr, ptr)
+ // CHECK-DAG: declare void @__reussir_drop_defer(ptr, ptr)
+ // CHECK: define linkonce_odr void @[[TREE:.*TreeE]].worklist.release(ptr {{.*}})
+-// CHECK: call void @[[TREE]].worklist.walk(ptr
++// TAIL: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
++// TAIL: musttail call void @[[TREE]].worklist.release(ptr
++// NOTAIL: call void @[[TREE]].worklist.walk(ptr
+ // CHECK: define linkonce_odr void @[[TREE]].worklist.walk(ptr {{.*}})
+ // CHECK: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
+ // CHECK: define linkonce_odr void @[[TREE]].worklist(ptr {{.*}})
+diff --git a/tests/integration/conversion/worklist_drop.mlir b/tests/integration/conversion/worklist_drop.mlir
+index ab9f18c2..a7d029c2 100644
+--- a/tests/integration/conversion/worklist_drop.mlir
++++ b/tests/integration/conversion/worklist_drop.mlir
+@@ -3,8 +3,11 @@
+ 
+ // A drop of a Worklist record calls its entry, which walks it under
+ // `reussir.drop.run`. The walk releases the members in field order, at once,
+-// except boxes of Worklist records, which it defers once dead; their release
+-// walks the content and frees the box. worklist-drops wins over retcon-drops.
++// except boxes of Worklist records, which it defers once dead. Their release
++// does the same, frees the box and then continues with the arm's last
++// Worklist child, if dead and no later member may push work, by a tail call
++// (on WebAssembly, which may lack tail calls, it calls the walk and frees the
++// box). worklist-drops wins over retcon-drops.
+ 
+ !tree_ = !reussir.record<variant "WlTree" incomplete>
+ !empty = !reussir.record<compound "WlEmpty" [value] {}>
+@@ -15,10 +18,14 @@
+ 
+ module {
+   // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.release(%arg0:
+-  // CHECK: %[[REF:.*]] = reussir.rc.borrow(%arg0
+-  // CHECK: call @{{.*}}WlTreeE.worklist.walk(%[[REF]])
++  // CHECK-SAME: reussir.worklist_drop
++  // CHECK: reussir.record.dispatch
++  // CHECK: [1] ->
++  // CHECK: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
++  // CHECK: reussir.expanded_decrement
+   // CHECK: reussir.rc.reinterpret(%arg0
+-  // CHECK: reussir.token.free
++  // CHECK-NEXT: reussir.token.free
++  // CHECK: func.call @{{.*}}WlTreeE.worklist.release(%{{.*}}) {reussir.musttail}
+   // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.walk(
+   // CHECK-SAME: reussir.worklist_drop
+   // CHECK: [1] ->
+@@ -93,3 +100,41 @@ module {
+     return
+   }
+ }
++
++// -----
++
++!tree_ = !reussir.record<variant "WlWasmTree" incomplete>
++!node = !reussir.record<compound "WlWasmNode" [value] {!tree_, !tree_}>
++!tree = !reussir.record<variant "WlWasmTree" {!node}>
++
++module attributes {llvm.target_triple = "wasm32-unknown-wasip1"} {
++  // CHECK-LABEL: func.func private @{{.*}}WlWasmTreeE.worklist.release(%arg0:
++  // CHECK-NOT: reussir.worklist_drop
++  // CHECK: %[[REF:.*]] = reussir.rc.borrow(%arg0
++  // CHECK-NEXT: call @{{.*}}WlWasmTreeE.worklist.walk(%[[REF]])
++  // CHECK-NEXT: reussir.rc.reinterpret(%arg0
++  // CHECK-NEXT: reussir.token.free
++  func.func @wasm_root(%ref: !reussir.ref<!tree>) {
++    reussir.ref.drop (%ref : !reussir.ref<!tree>)
++    return
++  }
++}
++
++// -----
++
++// A later member that may push work (a [value] record of the cycle) keeps
++// the last child deferred, in field order: no tail call.
++!p_ = !reussir.record<compound "WlPush" incomplete>
++!inl = !reussir.record<compound "WlPushInl" [value] {!reussir.nullable<!reussir.rc<!p_>>}>
++!p = !reussir.record<compound "WlPush" {!reussir.nullable<!reussir.rc<!p_>>, i64, !inl}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}WlPushE.worklist.release(%arg0:
++  // CHECK: reussir.rc.defer @{{.*}}WlPushE.worklist.release(
++  // CHECK: call @{{.*}}WlPushInlE.worklist(
++  // CHECK-NOT: reussir.musttail
++  func.func @push_root(%ref: !reussir.ref<!p>) {
++    reussir.ref.drop (%ref : !reussir.ref<!p>)
++    return
++  }
++}

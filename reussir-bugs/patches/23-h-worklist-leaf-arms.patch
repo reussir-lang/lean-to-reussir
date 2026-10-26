@@ -1,0 +1,278 @@
+From c7f8015fc111116e97915e46bdfc4799452f6058 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 17:04:23 -0400
+Subject: [PATCH 16/21] l2r-local: entry 23-h: worklist entry: leaf arms
+ released in place
+
+An optimization of the worklist entry (23-d): every drop of a Worklist
+variant went through `__reussir_drop_run` (a runtime call, the thread
+flag set and cleared, an indirect call of the walk), even when the value
+was a leaf, an arm without Worklist boxes, which defers nothing. In
+lean2rr's deriv benchmarks most drops that start in user code are leaf
+expressions (`Val`, `Var`), and the round trip cost +7.9% instructions
+on L03 (deriv 10) and +4.4% on X02 (deriv 8) against l2r-base7's retcon
+drops, whose direct-arm path (19-a) releases such arms in place.
+
+The entry now dispatches on the tag when the variant has a leaf arm: a
+leaf arm is released in place (the arm's ordinary drop, in the entry,
+which is not glue), every other arm runs the walk under
+`reussir.drop.run` as before (the walk dispatches again). An arm is a
+leaf when no member can reach a box of a Worklist record (named or not)
+without passing the box of a named record, whose drop is outlined:
+through nullables, cells, arrays, records in place and boxes of
+anonymous records. The test is one reachability walk per query (a miss
+caches every type it visited, a hit the queried type), so it is linear
+in the types reached. Compound records and variants without a leaf arm
+keep the plain `drop.run` entry.
+
+Order: a leaf arm releases nothing that the worklist would defer, so the
+order of its members is the walk's (field order). Only a Worklist value
+of another type reached through a leaf arm's other record box now runs
+its own drop to completion at that point, since the thread is not marked
+as draining there.
+
+Instructions (cachegrind, gate23's lean2rr, leanrt backend, valgrind
+builds), base7 / before / after this patch: X02 deriv 8: 130.9M /
+136.6M / 133.3M; L03 deriv 10: 7427M / 8010M / 7565M; E07 rose_tree
+362.6M / 362.6M / 362.6M; L01 rbtree 1685M / 1668M / 1676M; L06
+binarytrees 6045M / 6011M / 6011M.
+
+Tests: conversion/worklist_drop.mlir gains a leaf arm with a box member
+(the entry releases it in place and runs the walk for the node arm), an
+anonymous arm that reaches the cycle through an anonymous boxed pair (not
+a leaf: a variant built so recursed once per level in its entry, a
+crash at 10^5 levels on a 256 KiB stack), and a leaf arm holding the box
+of a record outside the cycle that holds Worklist boxes of another type
+(released in place through that record's own drop).
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 110 +++++++++++++++++-
+ .../integration/conversion/worklist_drop.mlir |  61 +++++++++-
+ 2 files changed, 163 insertions(+), 8 deletions(-)
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 0eef8700..4dc035c8 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -29,6 +29,7 @@
+ #include "TailDrop.h"
+ #include "Reussir/IR/RecordDrop.h"
+ #include "Reussir/Transformation/SpecialPointerTag.h"
++#include <llvm/ADT/DenseSet.h>
+ #include <mlir/Dialect/Arith/IR/Arith.h>
+ #include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
+ #include <mlir/Dialect/SCF/IR/SCF.h>
+@@ -74,6 +75,72 @@ class WorklistGlue {
+                         kind);
+   }
+ 
++  using Next = llvm::function_ref<void(mlir::Type)>;
++  // Whether `step` hits a type reachable from `root`: `step(type, next)`
++  // answers whether `type` is a hit and calls `next` on the types it leads
++  // to. One walk per query: a miss caches every type it visited (none of
++  // them reaches a hit either), a hit caches `root`.
++  bool reaches(mlir::Type root, llvm::DenseMap<mlir::Type, bool> &cache,
++               llvm::function_ref<bool(mlir::Type, Next)> step) {
++    if (auto known = cache.find(root); known != cache.end())
++      return known->second;
++    llvm::DenseSet<mlir::Type> visited;
++    llvm::SmallVector<mlir::Type> work{root};
++    bool hit = false;
++    while (!hit && !work.empty()) {
++      mlir::Type type = work.pop_back_val();
++      if (!visited.insert(type).second)
++        continue;
++      auto known = cache.find(type);
++      hit = known != cache.end()
++                ? known->second
++                : step(type, [&](mlir::Type next) { work.push_back(next); });
++    }
++    if (hit)
++      cache[root] = true;
++    else
++      for (mlir::Type type : visited)
++        cache[type] = false;
++    return hit;
++  }
++  static bool isWorklist(RecordType record) {
++    return record.classifyRecordDrop() == RecordDropKind::Worklist;
++  }
++  // Calls `next` on the types `type` holds in place (members, elements).
++  static void inner(mlir::Type type, Next next) {
++    if (auto record = llvm::dyn_cast<RecordType>(type)) {
++      for (auto [member, field] :
++           llvm::zip(record.getMembers(), record.getMemberIsField()))
++        if (!field)
++          next(getProjectedType(member, false, Capability::shared));
++    } else if (auto nullable = llvm::dyn_cast<NullableType>(type)) {
++      next(nullable.getPtrTy());
++    } else if (auto array = llvm::dyn_cast<ArrayType>(type)) {
++      next(array.getElementType());
++    } else if (auto cell = llvm::dyn_cast<CellType>(type)) {
++      next(cell.getElementType());
++    }
++  }
++
++  // Whether releasing a `type` value in place can reach a box of a Worklist
++  // record (named or not) without passing a named record's box, whose drop
++  // is outlined: through nullables, cells, arrays, records in place and
++  // boxes of anonymous records.
++  llvm::DenseMap<mlir::Type, bool> holds;
++  bool holdsWorklistBox(mlir::Type root) {
++    return reaches(root, holds, [](mlir::Type type, Next next) {
++      auto rc = llvm::dyn_cast<RcType>(type);
++      auto record = llvm::dyn_cast<RecordType>(rc ? rc.getElementType() : type);
++      if (record && isWorklist(record))
++        return true;
++      if (rc && (!record || !record.getName()))
++        next(rc.getElementType());
++      else if (!rc)
++        inner(type, next);
++      return false;
++    });
++  }
++
+ public:
+   WorklistGlue(mlir::ModuleOp module, mlir::PatternRewriter &rewriter,
+                mlir::SymbolTableCollection *symbols)
+@@ -92,14 +159,47 @@ public:
+     return walk;
+   }
+ 
++  // A variant's arm that holds no Worklist box (a leaf) is released in place
++  // by the entry, without the drop stack: it would defer nothing.
+   mlir::func::FuncOp entry(RecordType type, AtomicKind kind) {
+     return function(type, kind, ".worklist", ref(type, kind),
+                     [&](mlir::Value arg) {
+-                      auto walkName = walk(type, kind).getSymNameAttr();
+-                      ReussirDropRunOp::create(
+-                          rewriter, loc, mlir::FlatSymbolRefAttr::get(walkName),
+-                          arg);
+-                    });
++      auto walkName =
++          mlir::FlatSymbolRefAttr::get(walk(type, kind).getSymNameAttr());
++      llvm::SmallVector<bool> leaf;
++      for (auto [member, field] :
++           llvm::zip(type.getMembers(), type.getMemberIsField()))
++        leaf.push_back(type.isVariant() &&
++                       (field || !holdsWorklistBox(getProjectedType(
++                                     member, false, Capability::shared))));
++      if (!llvm::is_contained(leaf, true)) {
++        ReussirDropRunOp::create(rewriter, loc, walkName, arg);
++        return;
++      }
++      llvm::SmallVector<mlir::Attribute> tags;
++      for (size_t i = 0; i < leaf.size(); ++i)
++        tags.push_back(rewriter.getDenseI64ArrayAttr({int64_t(i)}));
++      auto dispatch = ReussirRecordDispatchOp::create(
++          rewriter, loc, mlir::Type{}, arg, rewriter.getArrayAttr(tags),
++          tags.size());
++      mlir::OpBuilder::InsertionGuard guard(rewriter);
++      for (auto [i, member, field] : llvm::enumerate(
++               type.getMembers(), type.getMemberIsField())) {
++        auto armType = getProjectedType(member, field,
++                                        Capability::unspecified, kind);
++        auto *arm = rewriter.createBlock(
++            &dispatch.getRegions()[i], {},
++            {RefType::get(type.getContext(), armType, Capability::unspecified,
++                          kind)},
++            {loc});
++        if (!leaf[i])
++          ReussirDropRunOp::create(rewriter, loc, walkName, arg);
++        else if (!field && !isTriviallyCopyable(armType))
++          ReussirRefDropOp::create(rewriter, loc, arm->getArgument(0),
++                                   /*inlined=*/true, nullptr);
++        ReussirScfYieldOp::create(rewriter, loc, nullptr);
++      }
++    });
+   }
+ 
+   mlir::func::FuncOp release(RcType rc) {
+diff --git a/tests/integration/conversion/worklist_drop.mlir b/tests/integration/conversion/worklist_drop.mlir
+index 976568eb..ab9f18c2 100644
+--- a/tests/integration/conversion/worklist_drop.mlir
++++ b/tests/integration/conversion/worklist_drop.mlir
+@@ -1,5 +1,5 @@
+-// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
+-// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true retcon-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
++// RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
++// RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true worklist-drops=true retcon-drops=true' --verify-each | %FileCheck %s --implicit-check-not=reussir.dtor.suspend
+ 
+ // A drop of a Worklist record calls its entry, which walks it under
+ // `reussir.drop.run`. The walk releases the members in field order, at once,
+@@ -10,7 +10,8 @@
+ !empty = !reussir.record<compound "WlEmpty" [value] {}>
+ !box = !reussir.record<compound "WlBox" {i64}>
+ !node = !reussir.record<compound "WlNode" [value] {!tree_, !box, !tree_}>
+-!tree = !reussir.record<variant "WlTree" {!empty, !node}>
++!leaf = !reussir.record<compound "WlLeaf" [value] {!box}>
++!tree = !reussir.record<variant "WlTree" {!empty, !node, !leaf}>
+ 
+ module {
+   // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.release(%arg0:
+@@ -29,8 +30,19 @@ module {
+   // CHECK: reussir.rc.set
+   // CHECK: reussir.expanded_decrement
+   // CHECK: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
++  // The entry releases a leaf arm in place and runs the walk for the others.
+   // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist(
++  // CHECK: reussir.record.dispatch
++  // CHECK: [0] ->
++  // CHECK-NEXT: ^bb0
++  // CHECK-NEXT: reussir.scf.yield
++  // CHECK: [1] ->
++  // CHECK-NEXT: ^bb0
+   // CHECK-NEXT: reussir.drop.run @{{.*}}WlTreeE.worklist.walk(
++  // CHECK: [2] ->
++  // CHECK-NOT: reussir.drop.run
++  // CHECK: reussir.expanded_decrement
++  // CHECK: return
+   // CHECK-LABEL: func.func @root(
+   // CHECK: call @{{.*}}WlTreeE.worklist(
+   func.func @root(%ref: !reussir.ref<!tree>) {
+@@ -38,3 +50,46 @@ module {
+     return
+   }
+ }
++
++// -----
++
++// An anonymous arm that reaches the cycle (through an anonymous boxed pair)
++// is not a leaf: the entry runs the walk for it.
++!w_ = !reussir.record<variant "WlAnon" incomplete>
++!pair = !reussir.record<compound {!w_, !w_}>
++!w = !reussir.record<variant "WlAnon" {!reussir.record<compound "WlAnonEnd" [value] {}>, !reussir.record<compound [value] {!pair}>}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}WlAnonE.worklist(
++  // CHECK: [1] ->
++  // CHECK-NEXT: ^bb0
++  // CHECK-NEXT: reussir.drop.run @{{.*}}WlAnonE.worklist.walk(
++  func.func @anon_root(%ref: !reussir.ref<!w>) {
++    reussir.ref.drop (%ref : !reussir.ref<!w>)
++    return
++  }
++}
++
++// -----
++
++// A leaf arm may hold the box of a record outside the cycle that holds a
++// Worklist box of another type: that record's own drop releases it.
++!v_ = !reussir.record<variant "WlOther" incomplete>
++!v = !reussir.record<variant "WlOther" {!reussir.record<compound "WlOtherEnd" [value] {}>, !reussir.record<compound "WlOtherNode" [value] {!v_, !v_}>}>
++!s = !reussir.record<compound "WlHolder" {!v}>
++!t_ = !reussir.record<variant "WlLeafy" incomplete>
++!t = !reussir.record<variant "WlLeafy" {!reussir.record<compound "WlLeafyHold" [value] {!s}>, !reussir.record<compound "WlLeafyNode" [value] {!t_, !t_}>}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}WlLeafyE.worklist(
++  // CHECK: [0] ->
++  // CHECK-NOT: reussir.drop.run
++  // CHECK: call @{{.*}}WlHolderE(
++  // CHECK: [1] ->
++  // CHECK-NEXT: ^bb0
++  // CHECK-NEXT: reussir.drop.run @{{.*}}WlLeafyE.worklist.walk(
++  func.func @leafy_root(%ref: !reussir.ref<!t>) {
++    reussir.ref.drop (%ref : !reussir.ref<!t>)
++    return
++  }
++}

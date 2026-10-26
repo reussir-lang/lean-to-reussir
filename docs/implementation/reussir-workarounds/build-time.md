@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `00906e38` with the series
-(`./reussir` head `8e9a6293`, `l2r-stepd` plus 21-a); the workarounds
+(`./reussir` branch `l2r-base9-shared`, `6111586c`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)).
 One cost here is current, with no entry in `reussir-bugs/`:

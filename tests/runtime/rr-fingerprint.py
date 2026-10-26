@@ -24,9 +24,8 @@ one counter for the whole program (`fresh`, LowerBase.lean): types
 (`T_List_15`, `L2RRef245`, `L2RConvK827`, `Tuple12`, `L2RTask7`), helper
 functions (`l2r_zero_836`, `l2r_vconv_301`, `jp_77`), constructors of
 some types (a state machine's `j123`), the payload numbers of `Box` (the
-prelude's `LAny`: 16 and up, `0x4000` + 16 and up for a type whose cell
-has a wide header, `0x8000` + 16 and up for a leaf type, in the order the
-program boxes them) and every local name (`x815`, `kj909`); and
+prelude's `LAny`: 16 and up, `0x8000` + 16 and up for a leaf type, in the
+order the program boxes them) and every local name (`x815`, `kj909`); and
 it numbers the instances of each Lean declaration in the order Stage 1
 finds them (`l_List_lengthTR___l2r_1____redArg`). A definition added to a
 program shifts those numbers for code it does not touch. The canonical
@@ -139,6 +138,10 @@ LAST_NUM = re.compile(r",\s*(\d+)\s*$")
 NUM_LET = re.compile(r"(let bm\d+ : u64 = )(\d+)(;)")
 # A box's number, bound to a name that a `match` takes apart (`boxDispatch`).
 NUM_BIND = re.compile(r"\blet ([a-z]+\d+) : u64 = l2r_any_raw_num\(")
+# The payload number of a function value's typed immediate, `(num << 32) |
+# index`, taken apart by the unboxing of a function type (`genUnbox` in
+# Lower/Finish: `let fnN : u64 = fvN >> fsN;`, then `match fnN { 22 => ... }`).
+FN_NUM_BIND = re.compile(r"\blet (fn\d+) : u64 = fv\d+ >> fs\d+;")
 MATCH = re.compile(r"\bmatch ([a-z]+\d+)\s*\{")
 NUM_ARM = re.compile(r"\s*(\d+)\s*=>")
 ROUNDS = 4
@@ -175,8 +178,9 @@ def payload_spans(text):
     """The (start, end) spans of the payload numbers that calls and matches
     take in `text`, whatever lines they span: the last argument of a call of
     a PAYLOAD_CALL function (`l2r_any_of<T>(e, 17)`), and the number of an
-    arm of a `match` on a name bound to `l2r_any_raw_num(w)` (`17 => `; not
-    an arm of another match, as an immediate's index `bi`)."""
+    arm of a `match` on a name bound to `l2r_any_raw_num(w)` or to a function
+    value's payload number (`17 => `; not an arm of another match, as an
+    immediate's index `bi`)."""
     spans, n = set(), len(text)
     for m in PAYLOAD_CALL.finditer(text):
         i, depth = m.end(), 0
@@ -199,7 +203,7 @@ def payload_spans(text):
         a = LAST_NUM.search(text, m.end() + 1, bracket(text, m.end())[0])
         if a:
             spans.add(a.span(1))
-    bound = set(NUM_BIND.findall(text))
+    bound = set(NUM_BIND.findall(text)) | set(FN_NUM_BIND.findall(text))
     for m in MATCH.finditer(text):
         if bound and m.group(1) in bound:
             close, commas = bracket(text, m.end() - 1)

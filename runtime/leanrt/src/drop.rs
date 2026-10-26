@@ -3,33 +3,42 @@
 //!
 //! Native Lean frees an object iteratively (`lean_dec_ref_cold`): the
 //! children whose count drops to zero go onto a stack of objects to free,
-//! popped last first. Reussir's drop glue does the same with the local
-//! patch 02-b: a record member it frees is pushed on a stack of pending
-//! work per thread (`reussir_rt::drop`), which the outermost drop empties.
-//! A record releases a container field through the container's Rust `Drop`
-//! (the opaque type's drop hook), which releases the elements, records
-//! again: a tree whose children are in arrays, a chain of thunks.
+//! popped last first. leanrt does the same with its own stack of pending
+//! work per thread (`crate::pending`), which the outermost free empties.
+//! Reussir's drop glue frees records by itself, with a bounded stack
+//! (tail loops, and the per-thread stack of pending drops, reussir-rt's
+//! `drop_stack`, which this module shares through `crate::pending`), and
+//! releases a
+//! container field through the container's Rust `Drop` (the opaque type's
+//! drop hook), which releases the elements, records again: a tree whose
+//! children are in arrays, a chain of thunks.
 //!
 //! So the containers of the prelude are this module's types, with a `Drop`
-//! that frees their last reference through that same stack: one worklist
-//! per thread for records, containers and leaves. A container freed while
-//! another free runs (from an element's release, or from a record's glue)
-//! is pushed instead of freed; the outermost free, glue or container, pops
-//! the stack until it is empty. An array is freed in native Lean's two
+//! that frees their last reference through that stack: one worklist per
+//! thread for containers, boxes' payloads and observable leaves. A
+//! container freed while another free runs (from an element's release, or
+//! from a record's glue called by such a release) is pushed instead of
+//! freed; the outermost free pops the stack until it is empty. An array is freed in native Lean's two
 //! passes: the first decrements its elements in index order, keeping those
 //! whose last reference goes; the second releases the kept ones from the
 //! last, and whatever a release pushes is done before the next element.
 //! Releases of leaves (file handles,
 //! promises: releases that can be observed) reached while a free runs are
 //! pushed too (`active`/`defer`, used by `fs` and `task`). So the order of
-//! observable releases is Lean's: the last element first, a nested array's
-//! elements before the elements that precede it, a record's last field
-//! first. Except at the top of a free that starts at a record that user
-//! code drops (a list, tree or structure of handles dropped by itself):
-//! Reussir releases that first cell's fields inline, in field order, each
-//! completely (in Lean's order within it) before the next, so a list's head
-//! handle is closed first. Natively that depends on where the value is
-//! dropped (plan §10).
+//! observable releases inside a free is Lean's: the last element first, a
+//! nested array's elements before the elements that precede it, a record's
+//! last field first (Reussir's glue visits a record's fields first field
+//! first and depth first; each hook it reaches pushes, and the stack pops
+//! them last first). Except a value that two fields of one cell share: the
+//! glue frees it at the field that drops its last reference, so it comes
+//! out at that field's place, where native Lean frees it inside the cell's
+//! pop. And except a free that starts at a record that user code drops (a
+//! list, tree or structure of handles dropped by itself): no drain runs
+//! there (a tree's dead children each start one), so each hook the glue
+//! reaches is an outermost free of its
+//! own and ends before the glue goes on: the record levels from the root
+//! release in field order, so a list's head handle is closed first.
+//! Natively that depends on where the value is dropped (plan §10).
 //!
 //! The types are `#[repr(transparent)]` pointers whose block starts with
 //! the `u32` reference count, all Reussir relies on for an opaque type (the
@@ -41,12 +50,13 @@ use std::ops::{Deref, DerefMut};
 
 /// One unit of pending work: `step(p)` does part of it and answers whether
 /// it is finished (then the entry is removed).
-type Step = unsafe fn(usize) -> bool;
+type Step = crate::pending::Step;
 
-/// Whether a free is running on this thread (a release now is pushed).
+/// Whether a free is running on this thread, leanrt's or Reussir's glue's (a
+/// release now is pushed; `pending::releasing`).
 #[inline(always)]
 pub fn active() -> bool {
-    reussir_rt::drop::active()
+    crate::pending::releasing()
 }
 
 /// One of lean-runtime's wait cores is reached (a reference's wait, a busy
@@ -60,15 +70,15 @@ pub fn assert_not_in_free(what: &str) {
     debug_assert!(!active(), "leanrt: {what} inside a free (lean-runtime's W3)");
 }
 
-/// Push work for the running free (see `active`).
+/// Push work for the running free (see `active`; `pending::defer_step`).
 pub fn defer(p: usize, step: Step) {
-    reussir_rt::drop::defer_step(p, step);
+    crate::pending::defer_step(p, step);
 }
 
 /// Run `step` on `p` until it is finished, and everything it pushes; or,
-/// inside a running free, push it. No context may suspend inside a free
-/// (the free is the thread's, `reussir_rt::drop`: the other contexts would
-/// push their frees onto it); lean-runtime's glue item 11 asks for its
+/// inside a running free, push it (`pending::run_step`). No context may
+/// suspend inside a free (the free is the thread's, `crate::pending`: the
+/// other contexts would push their frees onto it); lean-runtime's glue item 11 asks for its
 /// no-suspend scope over the whole free path. leanrt enters it around the
 /// one step of a free that can wait: a stream handle's drop (its flush,
 /// `fs::close`). The rest never waits: a task's release, Reussir's own
@@ -78,7 +88,7 @@ pub fn defer(p: usize, step: Step) {
 /// `task::drained`).
 #[inline(never)]
 pub fn run(p: usize, step: Step) {
-    reussir_rt::drop::run_step(p, step);
+    crate::pending::run_step(p, step);
 }
 
 /// Release `x`, a value a reference or a task cell gave up (the prelude's
@@ -162,55 +172,51 @@ impl<X> ReleaseValue for reussir_rt::bridge::Bridge<X> {
 
 /// Release the record `p` (`release_value`; it may be shared, or a nullary
 /// variant: its release then only decrements, or does nothing). The
-/// record goes on the stack of pending work as one deferred cell
-/// (`__reussir_drop_defer`, which does not write the cell), and the drain
-/// releases it (`__reussir_drop_drain`; `free_deferred`). Outside a free
-/// that is Reussir's drain of one pending cell (`drain_one`): the drain
-/// starts, the record's `<record>_ffi_release` runs inside it (so its
-/// fields go on the stack and are released last first), and the drain
-/// ends, through the general loop only when the release pushed work.
-/// Inside a free the cell is only pushed, as a step would be, and released
-/// when the free pops it. The order is the same as with a step (`run`);
+/// record is deferred as one pending cell (`pending::defer_cell`: the cell
+/// is not written; `free_deferred`). Outside a drain that is the drain of
+/// that one cell (the stack's `defer` outside a drain): the drain starts,
+/// the record's `<record>_ffi_release` runs inside it (so the hooks its glue
+/// reaches push their work, released last first), and the drain ends.
+/// Inside a drain (leanrt's or Reussir's glue's) the cell is only pushed,
+/// as a step would be, and released when the drain pops it. The order is the same as with a step (`run`);
 /// the cost is lower: no entry in the stack's vector, no step dispatch, no
-/// `memmove` of the entries above it.
+/// `memmove` of the entries above it. One call (`free_deferred_call`): the
+/// textures that release a record (a thunk's or task's store,
+/// `l2r_lcell_set`; a reference's set) stay small enough to be inlined into
+/// the program's loops (`tests/runtime/wait-inline-check.sh`).
 #[inline(always)]
 unsafe fn free_unique<X>(p: usize) {
-    free_deferred(p, release_record::<X>);
+    free_deferred_call(p, release_record::<X>);
+}
+
+/// `free_deferred` out of line, for `free_unique`: the deferral inline
+/// (`pending::defer_cell`, the stack's `defer`: the thread's state, the
+/// flag and the run tests; with leanrt's former stack a deferral and a
+/// drain, about 90 instructions) kept LLVM from inlining a texture into the
+/// program (`l2r_lcell_set` at a thunk's state became a call in
+/// RtWaitInline's loops: the gate of the Phase 2 port). The old local
+/// Reussir stack had two calls there (`__reussir_drop_defer`,
+/// `__reussir_drop_drain`); this is one, not generic (the release is its
+/// argument).
+#[inline(never)]
+unsafe extern "C" fn free_deferred_call(p: usize, release: unsafe extern "C" fn(*mut u8)) {
+    unsafe { free_deferred(p, release) }
 }
 
 /// Free, as one pending cell (`free_unique`'s rule), a record or a box's
 /// program payload whose last reference is given up and whose release is
-/// `release(p)`: Reussir's `__reussir_drop_defer`, then
-/// `__reussir_drop_drain`. The deferral is not `_wide`: it neither reads
-/// nor writes `p` (the cell's layout is not known here), so the drain calls
-/// `release` with the cell as it was. Outside a free the drain pops the
-/// cell at once (the stack is last in, first out, so also with work
-/// pending it comes first); inside one the drain returns at once and the
-/// free pops the cell after what is pushed later. (`any::release_last`
-/// frees a box's program payload this way.) Inside a free each such cell
-/// starts a run of its own, so the run on top moves to the stack's vector:
-/// one 24-byte entry per cell deferred while others wait (the heads of a
-/// list that Reussir's glue frees whole); `free_deferred_wide` links them.
+/// `release(p)`: `pending::defer_cell`. The cell is neither read nor written
+/// (the cell's layout is not known here), so the drain calls `release` with
+/// the cell as it was. Outside a free the stack is empty, and the cell is
+/// released at once as the drain of that one cell; inside one the free pops
+/// the cell after what is pushed later.
+/// (`any::release_last` frees a box's program payload this way.) Inside a
+/// free, cells deferred one after the other with the same `release` (the
+/// boxed heads of a list that Reussir's glue frees whole inside a free)
+/// form one run of the stack and take one pointer each while they wait.
 #[inline(always)]
 pub(crate) unsafe fn free_deferred(p: usize, release: unsafe extern "C" fn(*mut u8)) {
-    reussir_rt::drop::__reussir_drop_defer(p as *mut u8, release);
-    reussir_rt::drop::__reussir_drop_drain();
-}
-
-/// `free_deferred` of a cell whose first 8 bytes are header: the 32-bit
-/// count (1), then a 32-bit word that is padding or a tag below 2^16
-/// (`any::WIDE_BIT`: lean2rr marks the payload types whose Reussir cell is
-/// laid out so, by Reussir's own rule). `__reussir_drop_defer_wide` links
-/// the cell to the run on top when there is one (the link takes the count
-/// and the upper 16 bits of the word; Reussir's drain sets both back, count
-/// 1 and the upper bits 0, before it calls `release`), so cells deferred
-/// one after the other take no memory, as native Lean's to-do list, which
-/// links the freed objects themselves. The order is the same as with
-/// `free_deferred`: a link only stores the run's next cell in the cell.
-#[inline(always)]
-pub(crate) unsafe fn free_deferred_wide(p: usize, release: unsafe extern "C" fn(*mut u8)) {
-    reussir_rt::drop::__reussir_drop_defer_wide(p as *mut u8, release);
-    reussir_rt::drop::__reussir_drop_drain();
+    crate::pending::defer_cell(p as *mut u8, release);
 }
 
 /// The release function of a record deferred by `free_unique`: its
@@ -390,12 +396,16 @@ pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
     // elements, last first. Inside a free the array is only pushed, and both
     // passes run when it is popped, after the work pushed after it (above
     // it: a later field of the record being freed may hold one of its
-    // elements), as natively the array is scanned when it is popped. An
-    // array that keeps exactly one element outside a free (the old copy of
-    // an array of boxes updated after a copy, which held one element of
-    // its own) may release it without the step (`free_single`), and an
-    // array of records is freed at once up to a bounded nesting
-    // (`free_now`).
+    // elements), as natively the array is scanned when it is popped. It is
+    // pushed as one pending cell (`push_step_vec`, which pushes the step
+    // when the cell is popped), so arrays pushed one after the other share
+    // one entry of the stack, one pointer each; an array that holds nothing
+    // counted (`counts_nothing`: immediates only) releases nothing and is
+    // freed at once. An array that keeps exactly one element outside a free
+    // (the old copy of an array of boxes updated after a copy, which held
+    // one element of its own) may release it without the step
+    // (`free_single`), and an array of records is freed at once up to a
+    // bounded nesting (`free_now`).
     if !active() {
         unsafe {
             (*o)._pad = SCANNED;
@@ -407,8 +417,28 @@ pub extern "C" fn free_vec<T: Clone>(o: *mut Hdr) {
                 return;
             }
         }
+        run(o as usize, step_vec::<T>);
+        return;
     }
-    run(o as usize, step_vec::<T>);
+    unsafe {
+        if T::counts_nothing(o) {
+            mi_free(o as *mut std::ffi::c_void);
+            return;
+        }
+        crate::pending::defer_cell(o as *mut u8, push_step_vec::<T>);
+    }
+}
+
+/// The release of an array deferred as a pending cell inside a free
+/// (`free_vec`): pushes the array's step, which the drain runs next, with
+/// the stack below it as it was below the cell. So the array's passes run
+/// where a step pushed in the cell's place would have run them, and the
+/// order of releases is the same; the cell takes one pointer of the
+/// stack's cells vector while it waits (inside a free, Reussir's glue
+/// releases a whole structure, a tree whose nodes hold arrays, within one
+/// pop: review RB-03 of the destructor port), a step a 24-byte entry.
+unsafe extern "C" fn push_step_vec<T: Clone>(p: *mut u8) {
+    crate::pending::defer_step(p as usize, step_vec::<T>);
 }
 
 /// How deep `free_now` runs inside itself on this thread: an element's
@@ -434,7 +464,7 @@ const SCANNED: u32 = 1;
 /// work (done first) or none is left (then free the block). A step runs
 /// only from the drain's loop: a free is always running here, with this
 /// step the top entry of the stack.
-unsafe fn step_vec<T: Clone>(p: usize) -> bool {
+unsafe extern "C" fn step_vec<T: Clone>(p: usize) -> bool {
     let o = p as *mut Hdr;
     if (*o)._pad != SCANNED {
         (*o)._pad = SCANNED;
@@ -443,7 +473,7 @@ unsafe fn step_vec<T: Clone>(p: usize) -> bool {
             return true;
         }
     }
-    let depth = reussir_rt::drop::depth();
+    let depth = crate::pending::depth();
     if !T::release_from_end(o, depth) {
         return false;
     }
@@ -493,6 +523,13 @@ trait ReleaseElems: Sized {
     /// not observable; else nothing (`false`). `Nat`, `Int` and `String`
     /// (`leaf_elems!`).
     unsafe fn free_leaves(o: *mut Hdr) -> bool;
+    /// Whether no element holds a count (immediates only, or no element),
+    /// read without changing anything: freeing the block then releases
+    /// nothing, so inside a free (`free_vec`) it is freed at once, with no
+    /// order to keep. A shared element does not count as nothing: another
+    /// field of the value being freed may hold it, and its last release
+    /// must come where the array's pass would make it.
+    unsafe fn counts_nothing(o: *mut Hdr) -> bool;
 }
 
 #[inline(always)]
@@ -506,7 +543,7 @@ unsafe fn release_from_end_each<T>(o: *mut Hdr, depth: usize) -> bool {
         if n == 0 {
             break;
         }
-        if reussir_rt::drop::depth() != depth {
+        if crate::pending::depth() != depth {
             return false;
         }
     }
@@ -534,6 +571,10 @@ impl<T> ReleaseElems for T {
     default unsafe fn free_leaves(_: *mut Hdr) -> bool {
         false
     }
+    #[inline(always)]
+    default unsafe fn counts_nothing(o: *mut Hdr) -> bool {
+        (*o).len == 0
+    }
 }
 
 /// The element kinds of lean2rr's typed arrays whose release is a leaf:
@@ -547,10 +588,14 @@ impl<T> ReleaseElems for T {
 /// payloads in line, and freed the block without the stack when it kept
 /// no element): fannkuch (X08) and merge sort (E02), which free many
 /// `Array Nat`s, ran 8.5% and 6.1% more instructions through the step
-/// (`step_vec`, Reussir's `run_step` and `drain_slow`). Inside a record's
-/// free, before its final drain, the step drained the record's earlier
-/// fields at once; freed at once, they stay pending and the drain pops them
-/// last first, native's order (`lean_del` pops the last field first).
+/// (`step_vec` and the stack's drain, then Reussir's `run_step` and
+/// `drain_slow`). Inside a record's free, before its final drain, the
+/// step drained the record's earlier fields at once; freed at once, they
+/// stay pending and the drain pops them last first, native's order
+/// (`lean_del` pops the last field first).
+/// lean2rr's `boxLeafArrayElem` (LowerBase.lean) lists the same element
+/// kinds: a boxed typed array of them is a leaf payload (`any::LEAF_BIT`),
+/// released directly also inside a free; the two lists must agree.
 macro_rules! leaf_elems {
     ($($t:ty),*) => {$(
         impl ReleaseElems for $t {
@@ -681,7 +726,8 @@ impl<X> ReleaseElems for reussir_rt::bridge::Bridge<X> {
 /// natively (`lean_del_core` frees the array, then pops its elements), and
 /// it is released after the step's entry is gone. (A leaf payload there is
 /// released at once by `any::release_last`, before the block is freed: it
-/// frees only its own cell, so no release can tell the difference.)
+/// frees its own cell and at most leaves under it and pushes nothing, so no
+/// release can tell the difference.)
 impl ReleaseElems for crate::any::LAny {
     #[inline(always)]
     unsafe fn release_from_end(o: *mut Hdr, depth: usize) -> bool {
@@ -705,7 +751,7 @@ impl ReleaseElems for crate::any::LAny {
                 break;
             }
             crate::any::release_last_in_step(w);
-            if reussir_rt::drop::depth() != depth {
+            if crate::pending::depth() != depth {
                 return false;
             }
         }
@@ -733,7 +779,7 @@ impl ReleaseElems for crate::any::LAny {
         (*o).len = k;
         k == 0
     }
-    /// Outside a free, with nothing pending on the stack, an array whose
+    /// Outside a free (so with nothing pending on the stack), an array whose
     /// first pass kept exactly one element that is a program payload or
     /// one of leanrt's leaves (a big number, a string, a scalar cell;
     /// `any::frees_flat`): the block is freed, then the element is given
@@ -742,30 +788,27 @@ impl ReleaseElems for crate::any::LAny {
     /// defers the element (its last kept one, `release_from_end`); the
     /// drain removes the step, pops the element and releases it with
     /// nothing else on the stack, then releases what that pushed, last
-    /// first, and ends (`__reussir_drop_drained`'s function, the promise
+    /// first, and ends (the end work, `pending::want_end_work`: the promise
     /// resolutions put off). Native `lean_del_core` does the same: the
     /// block is freed, then its element is popped. Here:
     ///
-    /// - a program payload that is not a leaf: `release_last` defers it and
-    ///   drains (`drop::free_deferred`); with nothing else pending that is
-    ///   Reussir's drain of one cell (`drain_one`), which starts a drain,
-    ///   pops the cell and runs its release with nothing else on the
-    ///   stack, then releases what it pushed and ends the same way;
+    /// - a program payload that is not a leaf: `release_last` defers it
+    ///   (`drop::free_deferred`); with nothing pending that is the drain of
+    ///   that one cell (the stack's `defer` outside a drain), which starts a
+    ///   drain, runs its release with nothing else on the stack, then
+    ///   releases what it pushed and ends the same way;
     /// - a leaf payload (`LEAF_BIT`) or one of leanrt's leaves: released
-    ///   directly, outside a drain. It frees its own block and nothing
-    ///   else (it has no member and holds no promise: a leanrt leaf is one
-    ///   `mi_free`, a leaf payload's release one cell's free, where a drain
-    ///   it may start finds nothing pending), so it pushes nothing and does
+    ///   directly, outside a drain. It frees its own block and at most
+    ///   leaves under it (it holds no promise: a leanrt leaf is one
+    ///   `mi_free`, a leaf payload's release one cell's free, or a typed
+    ///   array's free of its leaf elements at once, where a drain it may
+    ///   start finds nothing pending), so it pushes nothing and does
     ///   the same whether a drain runs or not; and the end of the drain
     ///   skipped here would have run nothing: a leaf puts off no
     ///   resolution, and outside a drain none is put off (each drain's end
     ///   runs those put off inside it).
     ///
-    /// Not with work pending (`depth() != 0`: a record's `drop_in_place`
-    /// outside a drain, between the members it defers and its drain): the
-    /// step's drain would release that work too, before this free returns,
-    /// and a leaf's direct release would leave it for later. Not for an
-    /// array of boxes (`NUM_ARRAY`): its release frees it through
+    /// Not for an array of boxes (`NUM_ARRAY`): its release frees it through
     /// `free_vec` again, so a deep nesting of one-element arrays would
     /// recurse; the step keeps such a free iterative (the unit test
     /// `any::tests::deep_nesting_of_one_element_arrays`: 10^6 levels on a
@@ -779,12 +822,18 @@ impl ReleaseElems for crate::any::LAny {
             return false;
         }
         let w = *elems::<u64>(o);
-        if !crate::any::frees_flat(w) || reussir_rt::drop::depth() != 0 {
+        if !crate::any::frees_flat(w) {
             return false;
         }
         mi_free(o as *mut std::ffi::c_void);
         crate::any::release_last(w);
         true
+    }
+    /// Immediates only (scalars, small `Nat`s and `Int`s, nullary variants).
+    #[inline(always)]
+    unsafe fn counts_nothing(o: *mut Hdr) -> bool {
+        let e = elems::<u64>(o);
+        (0..(*o).len).all(|i| crate::any::is_imm(*e.add(i)))
     }
 }
 
@@ -892,7 +941,7 @@ extern "C" fn free_cell<T>(p: usize) {
 }
 
 /// Free the cell at `p` (count 1), then release its value.
-unsafe fn step_cell<T>(p: usize) -> bool {
+unsafe extern "C" fn step_cell<T>(p: usize) -> bool {
     let v = crate::alloc::rc_into_inner(std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p));
     drop(v);
     true
@@ -937,9 +986,13 @@ mod tests {
 
     /// A record handle (`Bridge<TRec>`): its drop is the record's
     /// `<record>_ffi_release` (a count of 1 frees the cell, else a
-    /// decrement). As Reussir's glue, the free decrements a shared member in
-    /// place and releases a member whose count is 1 through `release`, so
-    /// that a member freed goes on the stack, as the glue defers it.
+    /// decrement). The free decrements a shared member in place and
+    /// releases a member whose count is 1 through `release`, so that a
+    /// member freed goes on the stack: the glue of Reussir's old local patch
+    /// 02-b, which deferred member records. It is kept as the harder case for
+    /// the stack's order (every record level goes through it). Upstream's
+    /// glue (l2r-base6 on) frees member records in place, depth first, and
+    /// only leanrt's hooks push: `GRec` below.
     struct TRec(*mut TCell);
 
     type B = reussir_rt::bridge::Bridge<TRec>;
@@ -981,7 +1034,7 @@ mod tests {
     }
 
     /// A step that drops the array in `HELD` (inside the free).
-    unsafe fn step_drop_held(_: usize) -> bool {
+    unsafe extern "C" fn step_drop_held(_: usize) -> bool {
         drop(HELD.with(|h| h.borrow_mut().take()));
         true
     }
@@ -1048,7 +1101,7 @@ mod tests {
         assert_eq!(members(), vec![70, 50, 60]);
         assert_eq!(FREE_NOW_DEPTH.with(|c| c.get()), 0);
         assert!(!active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     /// `release` frees a record inside a free: its members in Lean's
@@ -1065,7 +1118,7 @@ mod tests {
         release(B::new(rec(1, vec![a, b])));
         assert_eq!(take_log(), vec![1, 5, 6, 7, 2, 4, 3]);
         assert!(!active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
         assert_eq!(unsafe { (*shared.0).count }, 1);
         release(B::new(shared));
         assert_eq!(take_log(), vec![9]);
@@ -1083,7 +1136,7 @@ mod tests {
         unsafe { release_unique(B::new(rec(11, vec![a, rec(14, vec![rec(15, vec![])])]))) };
         assert_eq!(take_log(), vec![11, 14, 15, 12, 13]);
         assert!(!active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     thread_local! {
@@ -1092,7 +1145,7 @@ mod tests {
 
     /// A step that releases the record left in `PENDING`, logging 100
     /// before and 101 after.
-    unsafe fn step_release(_: usize) -> bool {
+    unsafe extern "C" fn step_release(_: usize) -> bool {
         LOG.with(|l| l.borrow_mut().push(100));
         let r = PENDING.with(|p| p.borrow_mut().take()).unwrap();
         release(B::new(r));
@@ -1108,7 +1161,7 @@ mod tests {
         let first = rec(4, vec![]);
         // The free: a step releasing `first` (pushed below), then one
         // releasing the pending record.
-        unsafe fn step_first(p: usize) -> bool {
+        unsafe extern "C" fn step_first(p: usize) -> bool {
             LOG.with(|l| l.borrow_mut().push(50));
             defer(0, step_release);
             release(B::new(TRec(p as *mut TCell)));
@@ -1119,13 +1172,167 @@ mod tests {
         run(p, step_first);
         assert_eq!(take_log(), vec![50, 4, 100, 101, 1, 3, 2]);
         assert!(!active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
+    }
+
+    /// A record of upstream Reussir's glue (l2r-base6 on): its free logs
+    /// `id` (`1000 + id` outside a leanrt free) and frees its fields in
+    /// place, in field order, depth first: a member record at once (its own
+    /// fields first), an array through leanrt's `free_vec`, the hook that
+    /// pushes work inside a free. Nothing of the record levels is deferred.
+    #[repr(C)]
+    struct GCell {
+        count: u32,
+        id: u32,
+        fields: std::vec::Vec<GField>,
+    }
+
+    enum GField {
+        Rec(GRec),
+        Arr(crate::array::RVec<BG>),
+    }
+
+    struct GRec(*mut GCell);
+
+    type BG = reussir_rt::bridge::Bridge<GRec>;
+
+    fn grec(id: u32, fields: std::vec::Vec<GField>) -> GRec {
+        GRec(Box::into_raw(Box::new(GCell { count: 1, id, fields })))
+    }
+
+    fn garr(xs: std::vec::Vec<GRec>) -> GField {
+        GField::Arr(xs.into_iter().map(BG::new).fold(crate::array::empty::<BG>(), crate::array::push))
+    }
+
+    impl Drop for GRec {
+        fn drop(&mut self) {
+            let c = unsafe { &mut *self.0 };
+            if c.count != 1 {
+                c.count -= 1;
+                return;
+            }
+            LOG.with(|l| l.borrow_mut().push(if active() { c.id } else { 1000 + c.id }));
+            let cell = unsafe { Box::from_raw(self.0) };
+            for f in cell.fields {
+                drop(f);
+            }
+        }
+    }
+
+    impl Clone for GRec {
+        fn clone(&self) -> Self {
+            unsafe { (*self.0).count += 1 };
+            GRec(self.0)
+        }
+    }
+
+    /// With upstream's glue, which frees member records in place, the
+    /// releases that leanrt's hooks make come in native Lean's order: each
+    /// array the glue reaches inside a free is pushed in visit order and
+    /// popped last first, and an array that an element's free reaches is
+    /// pushed above the step and released before the arrays pushed earlier.
+    /// `R1{a2{[x101]}, b3{c4{[y102]}, [z103{[q104]}]}}`: natively `R1`
+    /// pushes `a2`, `b3`; `b3` pushes `c4` and its array, whose `z103`
+    /// pushes its array; then `c4`'s array, then `a2`'s: the array elements
+    /// in the order 103, 104, 102, 101. The record levels (1 to 4) are
+    /// freed by the glue as it visits them, which no program sees. Dropped
+    /// by user code (no leanrt free; the arrays freed at once, `free_now`),
+    /// the arrays come in field order, the documented exception at the top
+    /// of such a free (plan §10).
+    #[test]
+    fn record_free_in_place_glue() {
+        let r = || {
+            grec(1, vec![
+                GField::Rec(grec(2, vec![garr(vec![grec(101, vec![])])])),
+                GField::Rec(grec(3, vec![
+                    GField::Rec(grec(4, vec![garr(vec![grec(102, vec![])])])),
+                    garr(vec![grec(103, vec![garr(vec![grec(104, vec![])])])]),
+                ])),
+            ])
+        };
+        release(BG::new(r()));
+        assert_eq!(take_log(), vec![1, 2, 3, 4, 103, 104, 102, 101]);
+        assert!(!active());
+        assert_eq!(crate::pending::depth(), 0);
+        drop(r());
+        assert_eq!(take_log(), vec![1001, 1002, 1101, 1003, 1004, 1102, 1103, 1104]);
+        assert_eq!(crate::pending::depth(), 0);
+    }
+
+    thread_local! {
+        /// The depths `step_arrays` saw: before, after the array of
+        /// immediates, after the three arrays of records.
+        static DEPTHS: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) };
+    }
+
+    /// Inside a free an array is pushed as one pending cell
+    /// (`push_step_vec`): arrays pushed one after the other share one
+    /// entry, and the drain releases them as it released their steps, the
+    /// last pushed first, each completely (an array of records in index
+    /// order: `ReleaseElems for Bridge`). An array of immediates is freed at
+    /// once and takes no entry (review RB-03 of the destructor port).
+    #[test]
+    fn arrays_inside_a_free_share_one_entry() {
+        unsafe extern "C" fn step_arrays(_: usize) -> bool {
+            let before = crate::pending::depth();
+            let imms = (0..4u64).map(crate::any::LAny::imm).fold(crate::array::empty::<crate::any::LAny>(), crate::array::push);
+            drop(imms);
+            let after_imms = crate::pending::depth();
+            for k in 0..3u32 {
+                let a = [B::new(rec(10 * k + 1, vec![])), B::new(rec(10 * k + 2, vec![]))];
+                drop(a.into_iter().fold(crate::array::empty::<B>(), crate::array::push));
+            }
+            DEPTHS.with(|d| d.set((before, after_imms, crate::pending::depth())));
+            true
+        }
+        run(0, step_arrays);
+        let (before, after_imms, after) = DEPTHS.with(|d| d.get());
+        assert_eq!(after_imms, before, "an array of immediates takes no entry");
+        assert_eq!(after, before + 1, "three arrays, one run");
+        assert_eq!(take_log(), vec![21, 22, 11, 12, 1, 2]);
+        assert!(!active());
+        assert_eq!(crate::pending::depth(), 0);
+    }
+
+    /// Arrays deferred as cells whose steps push work (each kept record
+    /// releases members, so a pop from the middle of a run spills the
+    /// rest of the run below the step), and arrays next to a record cell
+    /// (another release function), an array of immediates and empty
+    /// arrays (freed at once): the releases come in the order the steps
+    /// gave (review RB-03 of the destructor port, reviewer's case): an
+    /// array of records releases its elements in index order, and the
+    /// members they push are popped after it, the last pushed first.
+    #[test]
+    fn array_cells_whose_steps_push_work() {
+        unsafe extern "C" fn step_a(_: usize) -> bool {
+            let arr = |xs: std::vec::Vec<TRec>| xs.into_iter().map(B::new).fold(crate::array::empty::<B>(), crate::array::push);
+            for k in 0..3u32 {
+                drop(arr(vec![rec(10 * k + 1, vec![rec(10 * k + 5, vec![])]), rec(10 * k + 2, vec![rec(10 * k + 3, vec![]), rec(10 * k + 4, vec![])])]));
+                drop(crate::array::empty::<B>());
+            }
+            true
+        }
+        run(0, step_a);
+        assert_eq!(take_log(), vec![21, 22, 24, 23, 25, 11, 12, 14, 13, 15, 1, 2, 4, 3, 5]);
+        unsafe extern "C" fn step_b(_: usize) -> bool {
+            let arr = |xs: std::vec::Vec<TRec>| xs.into_iter().map(B::new).fold(crate::array::empty::<B>(), crate::array::push);
+            drop(arr(vec![rec(61, vec![])]));
+            release(B::new(rec(50, vec![rec(51, vec![])])));
+            drop((0..4u64).map(crate::any::LAny::imm).fold(crate::array::empty::<crate::any::LAny>(), crate::array::push));
+            drop(arr(vec![rec(62, vec![rec(63, vec![])])]));
+            drop(arr(vec![rec(64, vec![])]));
+            true
+        }
+        run(0, step_b);
+        assert_eq!(take_log(), vec![64, 62, 63, 50, 51, 61]);
+        assert!(!active());
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     thread_local! {
         static HELD_STRS: RefCell<Option<Vec<crate::string::LStr>>> = RefCell::new(None);
     }
-    unsafe fn step_drop_strs(_: usize) -> bool {
+    unsafe extern "C" fn step_drop_strs(_: usize) -> bool {
         drop(HELD_STRS.with(|h| h.borrow_mut().take()));
         true
     }
@@ -1147,7 +1354,7 @@ mod tests {
         run(0, step_drop_strs);
         assert!(!crate::is_shared(&s));
         assert!(!active());
-        assert_eq!(reussir_rt::drop::depth(), 0);
+        assert_eq!(crate::pending::depth(), 0);
     }
 
     #[test]

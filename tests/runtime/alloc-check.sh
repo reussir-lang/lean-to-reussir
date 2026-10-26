@@ -47,7 +47,8 @@
 #   SMALL ARGS | LARGE ARGS | FACTOR OFFSET [| rss FACTOR OFFSET_KB]
 # e.g. `300 | 1200 | 4 2000`: the program's arguments at the two sizes (a
 # few times apart; each run must take at most a few seconds on today's
-# lean2rr, also where it is quadratic), then the bound. NAME.opts is honored
+# lean2rr, also where it is quadratic), then the bound (each FACTOR an
+# integer or a decimal with at most two places, such as 1.4). NAME.opts is honored
 # as by run.sh. A NAME.xfail file marks the test as known to fail (as for
 # run.sh; its first line says why): a failure here is then XFAIL, a pass
 # XPASS. A NAME.xfail whose first line starts with `alloc-check:` is for this
@@ -75,6 +76,14 @@ else
   TESTS=()
   for f in "$HERE"/Rt*.alloc; do TESTS+=("$(basename "$f" .alloc)"); done
 fi
+
+# FACTOR x N, rounded down, for a FACTOR with at most two decimal places.
+factor_times() {
+  local f=$1 n=$2 i d=00
+  i=${f%%.*}
+  if [ "$f" != "$i" ]; then d=${f#*.}00; d=${d:0:2}; fi
+  echo $(( (10#$i * 100 + 10#$d) * n / 100 ))
+}
 
 # run_one DIR EXE ARGS TAG: run DIR/EXE with ARGS (split by the shell),
 # killed after 120 s; results in DIR/TAG.{out,err,code,rss}.
@@ -162,8 +171,8 @@ for t in "${TESTS[@]}"; do
         if [ -z "$n1" ] || [ -z "$n2" ] || [ -z "$l1" ] || [ -z "$l2" ]; then
           res="$res no allocation count (counter not linked, or the run was killed);"
         else
-          dn=$((n2 - n1)); dl=$((l2 - l1)); allowed=$((factor * (dn > 0 ? dn : 0) + offset))
-          dnb=$((nb2 - nb1)); dlb=$((lb2 - lb1)); allowedb=$((factor * (dnb > 0 ? dnb : 0) + 64 * offset))
+          dn=$((n2 - n1)); dl=$((l2 - l1)); allowed=$(($(factor_times "$factor" $((dn > 0 ? dn : 0))) + offset))
+          dnb=$((nb2 - nb1)); dlb=$((lb2 - lb1)); allowedb=$(($(factor_times "$factor" $((dnb > 0 ? dnb : 0))) + 64 * offset))
           nr=$(tail -1 "$d/$k.large.native.rss"); lr=$(tail -1 "$d/$k.large.l2r.rss")
           echo "  $t [$small -> $large]: allocations native +$dn, lean2rr +$dl (allowed +$allowed); bytes native +$dnb, lean2rr +$dlb (allowed +$allowedb); peak KB native $nr, lean2rr $lr"
           if [ "$dl" -gt "$allowed" ]; then
@@ -174,7 +183,7 @@ for t in "${TESTS[@]}"; do
           fi
           if [ -n "${rss// /}" ]; then
             read -r _ rf ro <<< "$rss"
-            if [ "$lr" -gt $((rf * nr + ro)) ]; then
+            if [ "$lr" -gt $(($(factor_times "$rf" "$nr") + ro)) ]; then
               res="$res peak memory $lr KB at '$large', native $nr KB (allowed $rf x $nr + $ro);"
             fi
           fi

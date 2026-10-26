@@ -1,0 +1,216 @@
+From 1418ad2207cc9ca54a525ca90ee9c470f58b1eeb Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 16:46:45 -0400
+Subject: [PATCH 14/21] l2r-local: entry 23-f: the pipelines use worklist
+ drops; retcon drops unreachable
+
+Fifth step: rrc's pipeline (crates/reussir-backend), the C++ bridge
+pipeline and the C API switch RecordDropKind::Worklist records from
+retcon coroutines to worklist drops (23-d, 23-e). TailLoop and Direct
+records are unchanged, and TPDE mode keeps plain recursive drops, as
+before.
+
+- C API: reussirCreateAcquireDropExpansionPass's last parameter is now
+  `worklistDrops` (was `retconDrops`); reussir-backend-sys renames it to
+  match, and rrc's pipeline passes the same value as before (on except
+  under TPDE). The bridge pipeline sets worklistDrops where it set
+  retconDrops. No driver can ask for retcon drops any more; the retcon
+  lowering, its LLVM passes and the runtime executor stay, reachable
+  only through reussir-opt's `retcon-drops` option and their own tests,
+  until they are deleted.
+
+Updated tests (what rrc emits for a recursive enum):
+- codegen/retcon_drop_targets.rr: on the seven targets, the entry, walk
+  and release functions and the drop stack calls, instead of the retcon
+  callbacks;
+- codegen/executable_pic_default_retcon.rr: the program passes a glue
+  address to the drop stack (instead of holding a retcon table); still no
+  text relocations;
+- frontend/coff_comdat.rr: the outlined drop of `Tree` is
+  `...TreeE.worklist` (comdat on COFF, none on Mach-O);
+- frontend/retcon_drop.rr: -O aggressive defers the dead boxes
+  (instead of the deferred-free action); its runs (10^5-deep trees,
+  forests, chains, locked cells on a 256 KiB stack) and the ASan run
+  (sanitizer/e2e/retcon_drop.rr) pass unchanged.
+---
+ crates/reussir-backend-sys/src/lib.rs          |  2 +-
+ include/Reussir-c/Passes.h                     |  2 +-
+ lib/Bridge/Bridge.cppm                         |  4 ++--
+ lib/CAPI/Passes.cpp                            |  4 ++--
+ .../codegen/executable_pic_default.rr          |  2 +-
+ .../codegen/executable_pic_default_retcon.rr   | 12 ++++++------
+ .../integration/codegen/retcon_drop_targets.rr | 18 ++++++++++--------
+ tests/integration/frontend/coff_comdat.rr      |  6 +++---
+ tests/integration/frontend/retcon_drop.rr      |  2 +-
+ 9 files changed, 27 insertions(+), 25 deletions(-)
+
+diff --git a/crates/reussir-backend-sys/src/lib.rs b/crates/reussir-backend-sys/src/lib.rs
+index a5ceff86..fb6092f8 100644
+--- a/crates/reussir-backend-sys/src/lib.rs
++++ b/crates/reussir-backend-sys/src/lib.rs
+@@ -173,7 +173,7 @@ unsafe extern "C" {
+         expand_decrement: bool,
+         outline_record: bool,
+         tail_recursive_drops: bool,
+-        retcon_drops: bool,
++        worklist_drops: bool,
+     ) -> MlirPass;
+     pub fn reussirCreateTokenReusePass(reuse_across_call: bool, emit_remarks: bool) -> MlirPass;
+ 
+diff --git a/include/Reussir-c/Passes.h b/include/Reussir-c/Passes.h
+index 36af7d3d..26e2ae33 100644
+--- a/include/Reussir-c/Passes.h
++++ b/include/Reussir-c/Passes.h
+@@ -88,7 +88,7 @@ MlirPass reussirCreateDebugInfoConversionPass(void);
+ MlirPass reussirCreateAcquireDropExpansionPass(bool expandDecrement,
+                                                bool outlineRecord,
+                                                bool tailRecursiveDrops,
+-                                               bool retconDrops);
++                                               bool worklistDrops);
+ // Token reuse can optionally reuse tokens across function calls and emit one
+ // structured optimization remark for every allocation/reuse decision.
+ MlirPass reussirCreateTokenReusePass(bool reuseAcrossCall, bool emitRemarks);
+diff --git a/lib/Bridge/Bridge.cppm b/lib/Bridge/Bridge.cppm
+index 0f45607c..ddf349c2 100644
+--- a/lib/Bridge/Bridge.cppm
++++ b/lib/Bridge/Bridge.cppm
+@@ -193,7 +193,7 @@ void createLoweringPipeline(mlir::PassManager &pm,
+   pm.addNestedPass<mlir::func::FuncOp>(
+       reussir::createReussirInferVariantTagPass());
+   reussir::ReussirAcquireDropExpansionPassOptions earlyDrops;
+-  earlyDrops.retconDrops = opt != REUSSIR_OPT_TPDE;
++  earlyDrops.worklistDrops = opt != REUSSIR_OPT_TPDE;
+   pm.addPass(reussir::createReussirAcquireDropExpansionPass(earlyDrops));
+   pm.addPass(reussir::createReussirConvertToSTDPass());
+   pm.addNestedPass<mlir::func::FuncOp>(
+@@ -203,7 +203,7 @@ void createLoweringPipeline(mlir::PassManager &pm,
+   options.expandDecrement = true;
+   options.outlineRecord = true;
+   options.tailRecursiveDrops = opt != REUSSIR_OPT_TPDE;
+-  options.retconDrops = opt != REUSSIR_OPT_TPDE;
++  options.worklistDrops = opt != REUSSIR_OPT_TPDE;
+   pm.addPass(reussir::createReussirAcquireDropExpansionPass(options));
+ 
+   {
+diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
+index 3167e860..8fcb85b4 100644
+--- a/lib/CAPI/Passes.cpp
++++ b/lib/CAPI/Passes.cpp
+@@ -168,12 +168,12 @@ MlirPass reussirCreatePreparePjrtPass(bool optimizeKernels) {
+ MlirPass reussirCreateAcquireDropExpansionPass(bool expandDecrement,
+                                                bool outlineRecord,
+                                                bool tailRecursiveDrops,
+-                                               bool retconDrops) {
++                                               bool worklistDrops) {
+   reussir::ReussirAcquireDropExpansionPassOptions options;
+   options.expandDecrement = expandDecrement;
+   options.outlineRecord = outlineRecord;
+   options.tailRecursiveDrops = tailRecursiveDrops;
+-  options.retconDrops = retconDrops;
++  options.worklistDrops = worklistDrops;
+   return wrapOwned(reussir::createReussirAcquireDropExpansionPass(options));
+ }
+ MlirPass reussirCreateTokenReusePass(bool reuseAcrossCall, bool emitRemarks) {
+diff --git a/tests/integration/codegen/executable_pic_default.rr b/tests/integration/codegen/executable_pic_default.rr
+index 1c6bb4b4..007cdcfc 100644
+--- a/tests/integration/codegen/executable_pic_default.rr
++++ b/tests/integration/codegen/executable_pic_default.rr
+@@ -9,7 +9,7 @@
+ // refused to link ("relocation R_AARCH64_ABS64 cannot be used against local
+ // symbol; recompile with -fPIC"). On x86-64 the code itself also holds
+ // absolute addresses. An explicit `--relocation-mode` is kept as given.
+-// `executable_pic_default_retcon.rr` checks a program with a retcon table.
++// `executable_pic_default_retcon.rr` checks a program with a recursive drop.
+ //
+ // `-O none` keeps the indirect call, and so the vtable. The vtable must be in
+ // writable data (`.data.rel.ro`, which RELRO then makes read-only), not in
+diff --git a/tests/integration/codegen/executable_pic_default_retcon.rr b/tests/integration/codegen/executable_pic_default_retcon.rr
+index 18eb3108..61b5cf4e 100644
+--- a/tests/integration/codegen/executable_pic_default_retcon.rr
++++ b/tests/integration/codegen/executable_pic_default_retcon.rr
+@@ -1,11 +1,11 @@
+ // REQUIRES: linux
+ // As `executable_pic_default.rr`, for a program without closures: the
+-// destructor of a recursive value (`Tree`, with two recursive fields) uses
+-// retcon tables, which also hold code addresses. Without `--relocation-mode`,
+-// the executable must have no text relocations, and the dynlib must link.
++// destructor of a recursive value (`Tree`, with two recursive fields) hands
++// the addresses of its glue to the runtime's drop stack. Without
++// `--relocation-mode`, the executable must have no text relocations, and the
++// dynlib must link.
+ //
+-// The IR check makes sure that the program has such a table. The tables are
+-// private constants without a symbol, so `llvm-nm` cannot show their section.
++// The IR check makes sure that the program passes such an address.
+ 
+ // RUN: %rrc %s -o %t.ll --emit llvm-ir -O none
+ // RUN: %FileCheck %s --check-prefix=IR < %t.ll
+@@ -18,7 +18,7 @@
+ // RUN: %rrc %s -o %t.so --emit dynlib -O none %rrc_linker
+ // RUN: %llvm-readobj --dynamic-table %t.so | %FileCheck %s
+ 
+-// IR: {{\.retcon\.[a-z0-9.]+}} = private constant {{.*}}ptr @
++// IR: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @{{.*}}.worklist.release)
+ 
+ // CHECK: DynamicSection [
+ // CHECK-NOT: TEXTREL
+diff --git a/tests/integration/codegen/retcon_drop_targets.rr b/tests/integration/codegen/retcon_drop_targets.rr
+index f6e69b9d..28629837 100644
+--- a/tests/integration/codegen/retcon_drop_targets.rr
++++ b/tests/integration/codegen/retcon_drop_targets.rr
+@@ -21,11 +21,13 @@ enum Tree { Leaf, Branch(Tree, Tree) }
+ fn consume(tree: Tree) -> u64 { match tree { Tree::Leaf => 0, _ => 1 } }
+ extern "C" trampoline "consume" = consume;
+ 
+-// CHECK: call void @__reussir_finish_dtor
+-// CHECK: define private ptr @{{.*}}.retcon.start.callback(ptr {{.*}}, ptr {{.*}}, ptr {{.*}})
+-// CHECK: call { ptr, ptr } @{{.*}}.retcon.start
+-// CHECK: store ptr
+-// CHECK: ret ptr
+-// CHECK: define private ptr @{{.*}}.resume.0.callback(ptr {{.*}}, i1 zeroext {{.*}}, ptr {{.*}})
+-// CHECK: store ptr
+-// CHECK: ret ptr
++// Worklist drops: the entry runs the walk on the thread's drop stack; the
++// walk defers each dead Tree box with its release (walk, then free).
++// CHECK-DAG: declare void @__reussir_drop_run(ptr, ptr)
++// CHECK-DAG: declare void @__reussir_drop_defer(ptr, ptr)
++// CHECK: define linkonce_odr void @[[TREE:.*TreeE]].worklist.release(ptr {{.*}})
++// CHECK: call void @[[TREE]].worklist.walk(ptr
++// CHECK: define linkonce_odr void @[[TREE]].worklist.walk(ptr {{.*}})
++// CHECK: call void @__reussir_drop_defer(ptr %{{.*}}, ptr @[[TREE]].worklist.release)
++// CHECK: define linkonce_odr void @[[TREE]].worklist(ptr {{.*}})
++// CHECK: call void @__reussir_drop_run(ptr %{{.*}}, ptr @[[TREE]].worklist.walk)
+diff --git a/tests/integration/frontend/coff_comdat.rr b/tests/integration/frontend/coff_comdat.rr
+index 4efabfc0..b2d221b4 100644
+--- a/tests/integration/frontend/coff_comdat.rr
++++ b/tests/integration/frontend/coff_comdat.rr
+@@ -44,14 +44,14 @@ pub fn consume(t : Tree) -> i64 {
+ }
+ 
+ // COFF-DAG: $_RIC3dupxE = comdat any
+-// COFF-DAG: $_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.retcon = comdat any
++// COFF-DAG: $_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.worklist = comdat any
+ // COFF-DAG: define weak_odr i64 @_RIC3dupxE(i64 %0) comdat
+-// COFF-DAG: define linkonce_odr void @_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.retcon(ptr noalias noundef nonnull %0) #{{[0-9]+}} comdat
++// COFF-DAG: define linkonce_odr void @_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.worklist(ptr noalias noundef nonnull %0) #{{[0-9]+}} comdat
+ 
+ // Mach-O: same mergeable linkage, natively weak-bound, and not a single
+ // comdat anywhere in the module.
+ // MACHO-NOT: comdat
+-// MACHO: define linkonce_odr void @_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.retcon(ptr noalias noundef nonnull %0) #{{[0-9]+}} {
++// MACHO: define linkonce_odr void @_RINvNvC4core9intrinsic13drop_in_placeC4TreeE.worklist(ptr noalias noundef nonnull %0) #{{[0-9]+}} {
+ // MACHO-NOT: comdat
+ // MACHO: define weak_odr i64 @_RIC3dupxE(i64 %0) {
+ // MACHO-NOT: comdat
+diff --git a/tests/integration/frontend/retcon_drop.rr b/tests/integration/frontend/retcon_drop.rr
+index 03c059f8..8713b5a3 100644
+--- a/tests/integration/frontend/retcon_drop.rr
++++ b/tests/integration/frontend/retcon_drop.rr
+@@ -1,6 +1,6 @@
+ // RUN: %rrc %s -Oaggressive -t llvm-ir -o %t.ll
+ // RUN: %FileCheck %s --check-prefix=FREE < %t.ll
+-// FREE: .action = private constant { ptr, i{{32|64}} } { ptr null, i{{32|64}} {{[0-9]+}} }
++// FREE: call void @__reussir_drop_defer(ptr %{{.*}}, ptr {{(nonnull )?}}@{{.*}}TreeE.worklist.release)
+ // RUN: %rrc %s -o %t.o --relocation-mode pic -Onone
+ // RUN: %cc %t.o %S/retcon_drop.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
+ // RUN: %t.exe

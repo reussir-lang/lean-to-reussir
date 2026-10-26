@@ -1,0 +1,11 @@
+# Deep chains of closures freed whole (Phase 2 on l2r-base7: upstream Reussir frees a closure enum whose variant has a
+# managed field after its recursive one, or two recursive fields, with its destructor executor, which keeps a frame per
+# level: at 10^6 levels `big` peaked at 652 MB, `comp` at 156 MB, native 102 MB and 86 MB; dev with the old drop patches
+# 68 MB and 46 MB). Peak memory at 10^6 within native's plus 4000 KB; allocations and bytes as native's.
+big 250000 | big 1000000 | 1 2000 | rss 1 4000
+bigu 250000 | bigu 1000000 | 1 2000 | rss 1 4000
+bigt 250000 | bigt 1000000 | 1 2000 | rss 1 4000
+comp 250000 | comp 1000000 | 1 2000 | rss 1 4000
+small 250000 | small 1000000 | 1 2000 | rss 1 4000
+smallu 250000 | smallu 1000000 | 1 2000 | rss 1 4000
+list 250000 | list 1000000 | 1 2000 | rss 1 4000

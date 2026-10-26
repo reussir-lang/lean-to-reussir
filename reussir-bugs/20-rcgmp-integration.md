@@ -11,8 +11,9 @@ upstream #770 to #803) do not have all that lean2rr needs to put Lean's
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
 rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a to
 20-e), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-stepd`, commits `c13b1ac3`, `6bd31204`, `cb24040e`, `729ea9fb`,
-`e3b96e03`); not upstream.
+`l2r-base9-shared`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
+`28fdf505`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`, `cb24040e`,
+`729ea9fb`, `e3b96e03`, the same code); not upstream.
 
 **Upstream (2026-10-25):** Not upstream at 00906e38. Reussir's
 maintainer asked that the Reussir-side changes for lean2rr be made first
@@ -23,17 +24,19 @@ upstream as pull requests of at most 300 changed lines each), its
 patches are prepared as pull request candidates, not opened. (20-a's
 `nonnegative` part drops if upstream sets the attribute itself.)
 
-| Patch | Step D name | `l2r-stepd` commit | Kind | What it adds |
+| Patch | Step D name | `l2r-base9-shared` commit | Kind | What it adds |
 |---|---|---|---|---|
-| [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `c13b1ac3` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
-| [20-b](patches/20-b-mpz-polyffi-handle.patch) | R2 | `6bd31204` | bug fix and feature | `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz` |
-| [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `cb24040e` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
-| [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `729ea9fb` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
-| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `e3b96e03` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
+| [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `eece8062` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
+| [20-b](patches/20-b-mpz-polyffi-handle.patch) | R2 | `036ed9f6` | bug fix and feature | `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz` |
+| [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `5e9a39e9` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
+| [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `e69cde10` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
+| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `28fdf505` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
 
 Step D's notes and the patches' subject lines use the names R1 to R3.
-The patches apply in this order, after the other 8 patches of the series
-(20-c and 20-d change 20-b's `Mpz`).
+The patches apply in this order, after 10-a and 07-a (until Phase 2,
+after the 8 of the drop series, 10-a and 07-a), with no change of code;
+20-c and 20-d change 20-b's `Mpz`. 21-a and entry 23's patches come
+after them.
 
 ## Context
 
@@ -347,11 +350,12 @@ the five patches. The review notes are
 local, outside this repository (`stepd-r12/review/`: `r1`, `r1b`, `r2`,
 `r2b`, `r2c`, `r3`).
 
-The same series also makes Reussir's C++ unit tests (`reussir-ut`) build
-and pass with the tests on (82 of 82): 02-b updates upstream's
-`glue_symbols.cpp` and 10-a adds an `FFIObjectType` builder that
-upstream's `record_drop.cpp` uses (issues [2](02-native-drop-order.md#patch)
-and [10](10-tagged-ffi-objects.md#where-in-reussir)).
+Reussir's C++ unit tests (`reussir-ut`) build and pass with the tests on
+(82 of 82 on `l2r-base9`): 10-a adds an `FFIObjectType` builder that
+upstream's `record_drop.cpp` uses
+([issue 10](10-tagged-ffi-objects.md#where-in-reussir)). (On `l2r-stepd`,
+patch 02-b also updated upstream's `glue_symbols.cpp` for its drain
+declaration; 02-b left with Phase 2.)
 
 ## Upstream note
 

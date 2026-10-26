@@ -304,6 +304,12 @@ drop (below), the program runs 493 M instructions instead of 602 M
   pass released immediates in line and freed the block without the
   stack); at once, 3.5% and 0.8% fewer than with boxes (561.6 M, 400.1 M;
   run 11 timed them through the step: 0.57 → 0.62 and 0.73 → 0.76).
+  Boxed (the head of a `List`, a field of a generic structure) such an
+  array is a leaf payload (`LEAF_BIT`, lean2rr's `boxLeafArrayElem`, which
+  lists the element kinds of leanrt's `leaf_elems!`; box-and-uniform.md,
+  "The last reference of a program payload goes to the program"): its
+  release is called directly, also inside a free, where it waited in the
+  pending stack before.
 - The placeholder that `Array.modify` stores is the element type's zero
   (`placeholder-cache`: a once-cell read), where a box was `box(0)`.
 - rrc compiles the array textures again for each typed record type (a

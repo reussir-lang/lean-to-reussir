@@ -2737,28 +2737,29 @@ another context, under its address: `l2r_thunk_wait_busy`, woken by
 `(slot << 1) | 1`: `once::claim`).
 
 No context is suspended inside a free (the free's pending work is the
-thread's, Reussir's `reussir_rt::drop`, and the other contexts would push
-their frees onto it): the drop of a stream handle runs in lean-runtime's
+thread's, the runtime's `leanrt::pending`, and the other contexts would
+push their frees onto it): the drop of a stream handle runs in lean-runtime's
 no-suspend scope (a dropped stream's flush hands what would wait to a
 writer thread), and nothing else a free reaches waits. This decides when the `sync`
 dependents of a promise dropped unresolved run (natively at once, on the
 dropping thread, wherever that happens):
 - a promise whose last reference is released by itself (not inside a
   free) is resolved with `none`, and its dependents run at once, as
-  natively;
-- a promise held by a container being freed (an array, a list, a
-  structure, a map, an `Option`, ...) is resolved with `none` as soon as
+  natively; so is a promise that Reussir's glue reaches as it frees a
+  record that user code drops (no free of the runtime runs there:
+  Reussir's drop keeps its state per call, on the context's own stack);
+- a promise held by a container that a free of the runtime releases (an
+  array, a reference's old value, a box, and a list, a structure, a map,
+  an `Option`, ... inside them) is resolved with `none` as soon as
   the free is over, its cell's store and the walk of its dependents
   together, in the order the free reached the promises (natively during
   the free, when it reaches the promise), before the code that released
   the container goes on (lean-runtime's deferred resolutions, `defer` and
   `run_deferred`). A free inside such a dependent is a free of its own:
   its promises' dependents run when it ends, before the dependent goes
-  on, as natively (test `RtPromiseNestedFreeOrder`). The runtime sees the
-  end of every free through local Reussir patch 09-a
-  (`__reussir_drop_drained`, which every drain that released something
-  calls when it ends), which lean2rr requires (`scripts/l2r.py` stops
-  with an error without it).
+  on, as natively (test `RtPromiseNestedFreeOrder`). The runtime's
+  outermost free runs these resolutions at its end
+  (`leanrt::pending::drain`, then `task::drained`).
 
 A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
@@ -3011,9 +3012,11 @@ Probe results (Reussir at the pinned commit):
   a no-inline attribute (lean2rr uses `#[transform_anchor]`, whose
   `no_inline` is a side effect); tagged
   opaque handles (one-word `Nat`/`Int`, §5.1: local patch 10-a,
-  reussir-bugs/10-tagged-ffi-objects.md); frees in native Lean's order
-  through a stack the runtime shares (local patches 02-a to 02-e;
-  reussir-bugs/02-native-drop-order.md).
+  reussir-bugs/10-tagged-ffi-objects.md); a host hook where a drop that
+  user code starts begins and ends, for Lean's order at the top of such a
+  free too (§10, *Order of releases in one free*;
+  reussir-bugs/02-native-drop-order.md; not written: a Reussir change is
+  the last resort).
 
 Answered (Lean):
 - Startup order: `EmitC.emitInitFn` runs the module's compiled
@@ -3335,67 +3338,71 @@ Each item says what differs and when.
   first (after a first pass that decrements every element in index order,
   so an element held twice is freed at its last index:
   `RtArrayDupFreeOrder`), a nested array's elements before the elements
-  before it, a record's last field first. Here the runtime's containers (`leanrt::drop`)
-  and Reussir's drop glue for records (local patch 02-b) push what they
-  free on one stack of pending work per thread, so the order is Lean's
-  inside every free that starts at a container (an array, a reference, a
-  thunk or task cell), through any records (tests `RtDropOrder`,
-  `RtDropOrderRec`; with Reussir patch 02-e, which scripts/l2r.py
-  requires, also a record field before a container field below the first
-  record: `RtNestedArrayFreeOrder`), and mostly below the first cell of a
-  free that starts at a record. An element of an array, a reference or a
-  thunk or task value is a box (rule 1): the last release of a boxed
-  record runs inside a free of leanrt's worklist, so a record replaced in
-  an array (`Array.set!`) is freed in Lean's order too. That first cell is the difference. When user
-  code drops a record by itself (a list, tree or structure of handles), Reussir's
-  inline release in the user's function releases its fields in field
-  order, each completely before the next. Natively the order depends on
-  where the value is dropped: where Lean's code knows the constructor
-  (`lean_dec_ref_known`, e.g. a structure it has just built), the fields
-  go in field order too, each completely; elsewhere (`lean_dec`) they go
-  last first. lean2rr's code does not drop values where Lean's does: where
-  Lean borrows a parameter and drops the value in the caller, lean2rr's
-  function takes the value and releases it as it destructures it. So a
-  value dropped by itself can come out in the other order. A value of a
-  parameter's type (a `List α` element, a field of type `α`) is a box
-  (rule 1), which Reussir does not push as it pushes a record: it calls
-  the box's drop, which releases the payload at once, inside a free of its
-  own, when no free runs (`any::release_last`). Reussir's release of the
-  first cell also releases the members of a record member it frees (the
-  second cell) before it drains the stack of pending work; from the third
-  cell on, members are pushed. So the boxes of the first two cells come
-  out in field order and the rest last first: a `List IO.FS.Handle`
-  `L0 … L7` dropped by itself closes `L0 L1 L7 L6 … L2` (natively
-  `L0 L7 … L1` where Lean knows the constructor, `L7 … L0` elsewhere),
-  and `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` over handles
-  closes `a b d c e` (natively `e d c b a`) (test `RtDepDropOrderBoxed`,
-  with expectation files; while a box was the record enum `L2RBox`, the
-  list closed `L0 L7 … L1` and the structure `b a d c e`). A tree of
+  before it, a record's last field first. Here Reussir frees records
+  itself, first field first (a record type with two recursive members,
+  or a managed member after its recursive one, through a stack of
+  pending drops: its dead children pushed, the last one going on at
+  once), and the runtime shares that stack (`leanrt::pending` over
+  reussir-rt's `drop_stack`). Inside a drain (a free that starts at a
+  runtime object: an array, a reference's `set`, an `Array.set!` or `pop`
+  that removes the last reference, a box, a thunk or task cell; or a
+  drain of Reussir's glue), every runtime object that Reussir's glue
+  reaches is pushed, and the pops, last pushed first, give Lean's order
+  through any records (tests `RtDropOrder`, `RtDropOrderRec`,
+  `RtNestedArrayFreeOrder`, `RtArraySetFreeOrder`,
+  `RtArrayPopFreeOrder`, `RtRefSetOrder`). An element of an array, a
+  reference or a thunk or task value is a box (rule 1), so a record
+  replaced in an array is freed in Lean's order too. The difference is a
+  free that starts when user code drops a record by itself (a list, tree
+  or structure of handles). No runtime free runs around it, so each
+  runtime object that Reussir's glue reaches (a handle, a promise, a box,
+  an array) is a free of its own, done before the glue goes on to the
+  next field. So the order is field order at every record level from the
+  root, and Lean's order again below the first runtime object. Natively
+  the order depends on where the value is dropped: where Lean's code
+  knows the constructor (`lean_dec_ref_known`, e.g. a structure it has
+  just built), the fields go in field order too, each completely;
+  elsewhere (`lean_dec`) they go last first. lean2rr's code does not drop
+  values where Lean's does: where Lean borrows a parameter and drops the
+  value in the caller, lean2rr's function takes the value and releases it
+  as it destructures it. So no fixed order matches both cases. Examples
+  (test `RtDepDropOrderBoxed`, with expectation files): a
+  `List IO.FS.Handle` `L0 … L7` dropped by itself closes `L0 L1 … L7`
+  (natively `L0 L7 … L1` where Lean knows the constructor, `L7 … L0`
+  elsewhere); `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` over
+  handles closes `a b d c e` (natively `e d c b a`); a structure
+  `{a : Array Handle, l : List Handle}` as the field of a monomorphic list
+  type dropped by itself closes `A1 A0 L0 L1` (natively `L1 L0 A1 A0`).
+  In a `List` that structure is a box's payload, released inside a free
+  of the runtime, so it closes `L1 L0 A1 A0` as natively. A tree of
   handles closes its left subtree before its handle and its right
-  subtree. No fixed
-  order of the fields in Reussir's releases matches both cases. Reversing
-  it was tried: that fixes these cases but breaks the field-order ones and
-  the order inside containers. One case below the first cell also differs:
-  a record that the first cell holds is released through its drop function
-  while no free runs, and that function frees a container field (an array,
-  a reference, a thunk) as soon as it reaches it, before the record fields.
-  So a structure `{a : Array Handle, l : List Handle}` as the field of a
-  monomorphic list type dropped by itself closes `A1 A0 L1 L0` (natively
-  `L1 L0 A1 A0`). In a `List` the structure is a box's payload, released
-  inside a free of the runtime, so it closes `L1 L0 A1 A0` as natively
-  (with `L2RBox`, `A1 A0 L1 L0`). An array set or
-  pop that removes the last reference to a record frees it inside a free
-  the runtime starts, so its fields go last first, as `lean_dec` frees them
-  in `lean_array_uset` and `lean_array_pop` (switch step 10, review
-  RS10-01; tests `RtArraySetFreeOrder`, `RtArrayPopFreeOrder`); before,
-  the record's own release freed them in field order. With an array of
-  boxes (rule 1) that record is a box's payload, freed the same way
-  (`any::release_last`, one pending cell).
+  subtree. Unresolved promises reached this way are resolved in the same
+  order, each before the glue goes on (natively when the free pops them),
+  so Lean code in their dependents can see the difference: a dependent
+  of a promise in a record's first field that reads a file written
+  through a handle in a later field reads it before that handle is
+  closed, natively after (test `RtPromiseDropRecordPending`, with
+  expectation files: `q`'s dependent before `p`'s).
+  (`RtDepDropOrderBoxed`'s and `RtDropUserListHandles`' expectation
+  files: `12345678` where native gives `87654321`.) Before the port to upstream Reussir's drop design,
+  Reussir's glue pushed record members on a stack shared with the
+  runtime, and only the first two cells of such a free came out in field
+  order (the list: `L0 L1 L7 … L2`).
+- *A value shared by two fields of one freed cell*: inside a free that
+  starts at a runtime object, a value that two fields of one freed cell
+  hold (directly or deeper down) can be released at another place than
+  natively. Reussir decrements a field's subtree while it descends;
+  native Lean decrements all fields of a cell first and frees the value
+  inside the pop of the cell that held it last. In
+  `R{a : Y{x : W, h}, b : W}`, with `W` held by `Y.x` and `R.b`, native
+  closes `Y.h` before `W.h`; lean2rr closes `W.h` first (`W` dies at
+  `b`, is pushed last and popped first; test `RtDropSharedSubtree`, with
+  expectation files). The base before the port gave the same order here.
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
   specializations differently from lean2rr's instance of it, the release
-  time follows the instance. A resource captured in a closure or a thunk
+  time follows the instance. A resource captured in a closure, or held by a thunk or a task,
   is not looked into (released at its last use). In a program that
   creates resources, a value of uniform type (`Box`) passed owned to a
   borrowed parameter is kept until the call returns: one more increment
@@ -3417,20 +3424,27 @@ Each item says what differs and when.
   The walk's work list and set of visited cells are heap memory while it
   runs (natively a stack of pointers): a few tens of bytes per cell of a value
   walked while a task is unfinished. Dropping a deep value:
-  Lean frees iteratively, through a stack of objects to free. The
-  runtime's containers (arrays, references, thunk and task cells:
-  `leanrt::drop`) do the same: a container freed while another is being
-  freed is pushed on a stack of pending work instead, which the outermost
-  free empties; so a value deep through containers, with records in
-  between (a tree whose children are in arrays, a record → array → record
-  chain, a chain of thunks or tasks), is freed at a bounded depth.
-  Records are freed by Reussir's drop glue, which with the local patches
-  releases the last record member being freed in a loop (02-a) and pushes
-  the other record members being freed on the same stack (02-b), so a
-  value deep through records too is freed at a bounded depth: a list, a
-  snoc list, a binary tree deep along its left child whose right children
-  are fresh nodes, a rose tree in uniform code (test `RtDropGlue`, 10⁶
-  levels at an 8 MB stack). The depth at which
+  Lean frees iteratively, through a stack of objects to free. Reussir
+  frees records at a bounded depth itself: in a loop when the last
+  managed member is the one recursive member (a list), through its own
+  stack of pending drops per thread otherwise (a snoc list, a binary tree
+  deep along its left child whose right children are fresh nodes, a rose
+  tree in uniform code, a chain of closures; tests `RtDropGlue`, 10⁶
+  levels at an 8 MB stack, `RtDeepTreeFree`, `RtClosureChainFree`). The
+  runtime's objects (arrays, references, thunk and task cells, boxes:
+  `leanrt::drop`, `leanrt::any`) are freed through the runtime's own
+  stack of pending releases (`leanrt::pending`): a release that the
+  runtime reaches while one of its frees runs, also through Reussir's
+  glue, is pushed instead, and the outermost free empties the stack. So
+  a value deep through records, containers and boxes (a tree whose
+  children are in arrays, a record → array → record chain, a chain of
+  thunks, tasks or boxes) is freed at a bounded depth
+  (`RtArrayDeepSharedFree`, `RtBoxDeepChain`). Reussir's stack holds a pending child record while it frees such a
+  value as one 24-byte entry, or 8 bytes when it follows one with the same
+  release function (a run) (heap memory, cut back when the drain ends); natively the to-do list is
+  linked through the freed objects and takes no memory. Reussir's glue
+  and the runtime share that stack, so one drain frees both in one
+  order. The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
   in either direction (the report itself is, in every thread: §5.11).
   Tasks run on lean-runtime's contexts, each with a stack of Lean's size
@@ -4050,7 +4064,12 @@ native's output and lean2rr's in expectation files, `NAME.native.*` and
   free's order after the free, since switch step 6; test
   `RtPromiseFreeLaterUnresolved`); a resolved promise is released inside
   the free, in its order (*Order of releases in one free*; test
-  `RtPromiseResolvedFreeOrder`).
+  `RtPromiseResolvedFreeOrder`). A container here is one that a free of
+  the runtime releases (an array, a reference's old value, a box, and
+  the records inside them). A promise that Reussir's glue reaches as it
+  frees a record that user code drops by itself is resolved before the
+  glue goes on to the next field, in field order (*Order of releases in
+  one free*).
 
 **Not supported** (lean2rr rejects the program at translation, naming each
 extern)

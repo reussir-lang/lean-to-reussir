@@ -1,7 +1,7 @@
-From 729ea9fbc5a4939fb4d7cceb6b775b5d423485e9 Mon Sep 17 00:00:00 2001
+From e69cde106e2649c4de0a6f2b7ab064fcb366c94b Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:30:35 -0400
-Subject: [PATCH 12/13] l2r-local: step D (R2c): Mpz::is_shared through
+Subject: [PATCH 06/21] l2r-local: step D (R2c): Mpz::is_shared through
  compiler-emitted glue from rcgmp.mpz.is_unique
 
 lean2rr's dbgTraceIfShared (Lean's `lean_dbg_trace_if_shared`, natively
@@ -404,6 +404,3 @@ index 00000000..64ecf078
 +
 +// The sanitized allocator backs every heap integer: asking a count reads only
 +// live heap integers, never an immediate, and changes none.
--- 
-2.43.0
-

@@ -1,0 +1,300 @@
+From fc9c1d20591a4fa97511ed67af408b94bf87db83 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Sun, 25 Oct 2026 20:14:44 -0400
+Subject: [PATCH 18/21] l2r-local: entry 23-j: worklist release: the tail call
+ picks the last dead of two children
+
+Follow-up of 23-i: its tail call took the arm's last deferred member, so
+a chain through an earlier member whose last member is a leaf (a
+left-deep tree `Node(l, v, Leaf)`, compositions nested on the left, a
+closure that captures the next closure and then a fresh one) still went
+through a deferral and a pop per level.
+
+Now the release considers the arm's last two such members, a and b. A
+candidate is decremented in its place (field order, the answer kept as
+an i1 by `deadTest`; an immediate never dies) when no later member may
+push work onto the drain (mayPush, 23-i), and, for a, also no member
+between a and b; otherwise it is released as the walk releases it,
+deferred in its place. After the box's free: if b died, a dead a is
+deferred and b's release is tail-called; else a dead a is tail-called.
+Earlier such members are deferred as before. So the order is the walk's:
+the last child deferred, with nothing pushed after it, is the one that
+continues, and the others are popped later, last first.
+
+Instructions per freed cell (microbenchmark, cachegrind, after 23-i /
+now): left-deep tree 59.8 / 42.3, left-nested compositions 86.3 / 44.3,
+right-deep tree 40.8 / 42.3, 64-arm chain 40.8 / 41.3, balanced tree
+50.3 / 52.8, rose tree 51.5 / 48.4 (l2r-base7's retcon drops: 73.3,
+109.2, 72.6, 98.6, 57.4, 66.8).
+
+Tests: conversion/worklist_drop.mlir checks the decision (the defer of a
+under "b died", the musttail calls of b and of a) and a record whose
+member between the two children may push work (a stays deferred in its
+place; b continues by a tail call).
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 157 ++++++++++++++----
+ .../integration/conversion/worklist_drop.mlir |  36 +++-
+ 2 files changed, 154 insertions(+), 39 deletions(-)
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index ca2b2f47..a0fbae82 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -11,12 +11,15 @@
+ // Worklist drops release a `RecordDropKind::Worklist` record through the
+ // thread's stack of pending drops (reussir-rt's drop_stack.rs), as Lean's
+ // lean_del does. Per record type and atomic kind:
+-// - `<dtor>.worklist(ref)`, the entry: `reussir.drop.run` of the walk;
++// - `<dtor>.worklist(ref)`, the entry: a variant's leaf arms (no Worklist
++//   box) released in place, the rest `reussir.drop.run` of the walk;
+ // - `<dtor>.worklist.walk(ref)`: drops the members in field order, at once,
+ //   except member boxes of Worklist records: a box whose count reaches zero
+ //   is deferred with `reussir.rc.defer` instead of released by recursion;
+ // - `<dtor>.worklist.release(box)`, called by the drain for a deferred box:
+-//   the walk of its content, then the box's free.
++//   the content released as by the walk, the box freed, and the last dead
++//   child, if no later member may push work, continued by a tail call (it is
++//   what the drain would pop next).
+ // The drain pops the deferred boxes last first. A Worklist value reached
+ // through other glue calls its entry, which then only walks (the thread
+ // already drains); since glue defers every box edge of its record's cycle,
+@@ -35,6 +38,7 @@
+ #include <mlir/Dialect/LLVMIR/LLVMAttrs.h>
+ #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+ #include <mlir/Dialect/SCF/IR/SCF.h>
++#include <utility>
+ 
+ namespace reussir {
+ namespace {
+@@ -264,10 +268,65 @@ public:
+     });
+   }
+ 
++  // Decrements the member box `child` (plain or nullable) and answers
++  // whether it died: its count reached zero, and it is the caller's.
++  mlir::Value deadTest(mlir::Value child) {
++    auto i1 = rewriter.getI1Type();
++    // `cond ? value() : false`
++    auto guarded = [&](mlir::Value cond,
++                       llvm::function_ref<mlir::Value()> value) {
++      auto branch = mlir::scf::IfOp::create(rewriter, loc, mlir::TypeRange{i1},
++                                            cond, true, true);
++      mlir::OpBuilder::InsertionGuard guard(rewriter);
++      rewriter.setInsertionPointToStart(branch.thenBlock());
++      mlir::scf::YieldOp::create(rewriter, loc, mlir::ValueRange{value()});
++      rewriter.setInsertionPointToStart(branch.elseBlock());
++      mlir::Value no = mlir::arith::ConstantIntOp::create(rewriter, loc, i1, 0);
++      mlir::scf::YieldOp::create(rewriter, loc, mlir::ValueRange{no});
++      return branch.getResult(0);
++    };
++    if (auto nullable = llvm::dyn_cast<NullableType>(child.getType()))
++      return guarded(ReussirNullableCheckOp::create(rewriter, loc, child), [&] {
++        return deadTest(ReussirNullableCoerceOp::create(
++            rewriter, loc, nullable.getPtrTy(), child));
++      });
++    auto type = llvm::cast<RcType>(child.getType());
++    auto test = [&]() -> mlir::Value {
++      bool atomic = type.getAtomicKind() == AtomicKind::atomic;
++      mlir::Value count =
++          atomic ? ReussirRcFetchSubOp::create(rewriter, loc, child).getRefCount()
++                 : ReussirRcFetchOp::create(rewriter, loc, child).getRefCount();
++      mlir::Value one = mlir::arith::ConstantIndexOp::create(rewriter, loc, 1);
++      mlir::Value unique = mlir::arith::CmpIOp::create(
++          rewriter, loc, mlir::arith::CmpIPredicate::eq, count, one);
++      if (!atomic) {
++        auto branch = mlir::scf::IfOp::create(rewriter, loc, unique, true);
++        mlir::OpBuilder::InsertionGuard guard(rewriter);
++        rewriter.setInsertionPointToStart(branch.elseBlock());
++        ReussirRcSetOp::create(
++            rewriter, loc, child,
++            mlir::arith::SubIOp::create(rewriter, loc, count, one));
++      }
++      return unique;
++    };
++    // An immediate owns no memory (see emitDecrement).
++    if (module->hasAttr(kSpecialPtrTagAttr) && type.mayCarrySpecialPointerTag()) {
++      mlir::Value immediate =
++          ReussirRcIsImmediateOp::create(rewriter, loc, i1, child);
++      mlir::Value yes = mlir::arith::ConstantIntOp::create(rewriter, loc, i1, 1);
++      return guarded(
++          mlir::arith::XOrIOp::create(rewriter, loc, immediate, yes), test);
++    }
++    return test();
++  }
++
+   // Releases the compound `record` at `ref`, in the box `box`, as the walk
+-  // does, except the last member box the walk would defer, when no later
+-  // member may push work (their drops then have no effect to reorder): it
+-  // comes last, after the box's free, by a tail call of its release if dead.
++  // does: members in field order. Of its last two member boxes the walk
++  // would defer, a and b, each that no later member may push work after (for
++  // a also none between a and b) is decremented in its place instead. Then
++  // the box is freed, and the last of them that died continues by a tail
++  // call of its release (the drain would pop it next); a dead a before a
++  // dead b is deferred.
+   void releaseCompound(RecordType record, AtomicKind kind, mlir::Value ref,
+                        mlir::Value box) {
+     size_t n = record.getMembers().size();
+@@ -282,41 +341,71 @@ public:
+       return ReussirRefProjectOp::create(rewriter, loc, type, ref,
+                                          rewriter.getIndexAttr(i));
+     };
+-    std::optional<size_t> b;
++    auto pushes = [&](size_t from, size_t to) {
++      return llvm::any_of(llvm::seq(from + 1, to), [&](size_t i) {
++        return !field(i) && mayPush(projected(i));
++      });
++    };
++    std::optional<size_t> a, b;
+     for (size_t i = 0; i < n; ++i)
+       if (!field(i) && isDeferredBox(projected(i)))
+-        b = i;
+-    for (size_t i = b ? *b + 1 : n; i < n; ++i)
+-      if (!field(i) && mayPush(projected(i)))
+-        b.reset();
+-    for (size_t i = 0; i < n; ++i)
+-      if (i != b && !field(i) && !isTriviallyCopyable(projected(i)))
++        a = std::exchange(b, i);
++    if (b && pushes(*b, n))
++      a.reset(), b.reset();
++    if (a && pushes(*a, *b))
++      a.reset();
++    mlir::Value childA, deadA, childB, deadB;
++    for (size_t i = 0; i < n; ++i) {
++      if (field(i) || isTriviallyCopyable(projected(i)))
++        continue;
++      if (i != a && i != b) {
+         ReussirRefDropOp::create(rewriter, loc, slot(i));
+-    if (!b)
+-      return emitBoxFree(box, loc, module, rewriter);
+-    mlir::Value child =
+-        ReussirRefLoadOp::create(rewriter, loc, projected(*b), slot(*b));
++        continue;
++      }
++      mlir::Value child =
++          ReussirRefLoadOp::create(rewriter, loc, projected(i), slot(i));
++      (i == a ? childA : childB) = child;
++      (i == a ? deadA : deadB) = deadTest(child);
++    }
+     emitBoxFree(box, loc, module, rewriter);
+-    auto tail = [&](mlir::Value rc) {
+-      auto next = release(llvm::cast<RcType>(rc.getType()));
+-      emitDecrement(rc, loc, module, rewriter, [&] {
+-        auto call = mlir::func::CallOp::create(rewriter, loc, next,
+-                                               mlir::ValueRange{rc});
+-        call->setAttr(kMustTailCallAttr, rewriter.getUnitAttr());
+-      });
++    if (!b)
++      return;
++    // The child's box, its release, and the call or deferral of it.
++    auto unbox = [&](mlir::Value child) -> mlir::Value {
++      if (auto nullable = llvm::dyn_cast<NullableType>(child.getType()))
++        return ReussirNullableCoerceOp::create(rewriter, loc,
++                                               nullable.getPtrTy(), child);
++      return child;
+     };
+-    auto nullable = llvm::dyn_cast<NullableType>(child.getType());
+-    if (!nullable)
+-      return tail(child);
+-    auto dispatch = ReussirNullableDispatchOp::create(rewriter, loc,
+-                                                      mlir::Type{}, child);
++    auto tail = [&](mlir::Value child) {
++      mlir::Value rc = unbox(child);
++      auto call = mlir::func::CallOp::create(
++          rewriter, loc, release(llvm::cast<RcType>(rc.getType())),
++          mlir::ValueRange{rc});
++      call->setAttr(kMustTailCallAttr, rewriter.getUnitAttr());
++    };
++    auto onlyIf = [&](mlir::Value cond, llvm::function_ref<void()> then) {
++      auto branch = mlir::scf::IfOp::create(rewriter, loc, cond, false);
++      mlir::OpBuilder::InsertionGuard guard(rewriter);
++      rewriter.setInsertionPointToStart(branch.thenBlock());
++      then();
++    };
++    auto branch = mlir::scf::IfOp::create(rewriter, loc, deadB, bool(a));
+     mlir::OpBuilder::InsertionGuard guard(rewriter);
+-    rewriter.createBlock(&dispatch.getNullRegion());
+-    ReussirScfYieldOp::create(rewriter, loc, nullptr);
+-    auto *present = rewriter.createBlock(&dispatch.getNonNullRegion(), {},
+-                                         {nullable.getPtrTy()}, {loc});
+-    tail(present->getArgument(0));
+-    ReussirScfYieldOp::create(rewriter, loc, nullptr);
++    rewriter.setInsertionPointToStart(branch.thenBlock());
++    if (a)
++      onlyIf(deadA, [&] {
++        mlir::Value rc = unbox(childA);
++        auto next = release(llvm::cast<RcType>(rc.getType()));
++        ReussirRcDeferOp::create(
++            rewriter, loc, mlir::FlatSymbolRefAttr::get(next.getSymNameAttr()),
++            rc);
++      });
++    tail(childB);
++    if (a) {
++      rewriter.setInsertionPointToStart(branch.elseBlock());
++      onlyIf(deadA, [&] { tail(childA); });
++    }
+   }
+ 
+   mlir::func::FuncOp release(RcType rc) {
+diff --git a/tests/integration/conversion/worklist_drop.mlir b/tests/integration/conversion/worklist_drop.mlir
+index a7d029c2..e015e1dc 100644
+--- a/tests/integration/conversion/worklist_drop.mlir
++++ b/tests/integration/conversion/worklist_drop.mlir
+@@ -4,10 +4,10 @@
+ // A drop of a Worklist record calls its entry, which walks it under
+ // `reussir.drop.run`. The walk releases the members in field order, at once,
+ // except boxes of Worklist records, which it defers once dead. Their release
+-// does the same, frees the box and then continues with the arm's last
+-// Worklist child, if dead and no later member may push work, by a tail call
+-// (on WebAssembly, which may lack tail calls, it calls the walk and frees the
+-// box). worklist-drops wins over retcon-drops.
++// does the same, frees the box and then continues with the last dead of the
++// arm's last two Worklist children that no later member may push work after,
++// by a tail call (on WebAssembly, which may lack tail calls, it calls the walk
++// and frees the box). worklist-drops wins over retcon-drops.
+ 
+ !tree_ = !reussir.record<variant "WlTree" incomplete>
+ !empty = !reussir.record<compound "WlEmpty" [value] {}>
+@@ -21,11 +21,16 @@ module {
+   // CHECK-SAME: reussir.worklist_drop
+   // CHECK: reussir.record.dispatch
+   // CHECK: [1] ->
+-  // CHECK: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
+   // CHECK: reussir.expanded_decrement
+   // CHECK: reussir.rc.reinterpret(%arg0
+   // CHECK-NEXT: reussir.token.free
++  // CHECK-NEXT: scf.if
++  // CHECK-NEXT: scf.if
++  // CHECK-NEXT: reussir.rc.defer @{{.*}}WlTreeE.worklist.release(
+   // CHECK: func.call @{{.*}}WlTreeE.worklist.release(%{{.*}}) {reussir.musttail}
++  // CHECK-NEXT: } else {
++  // CHECK-NEXT: scf.if
++  // CHECK-NEXT: func.call @{{.*}}WlTreeE.worklist.release(%{{.*}}) {reussir.musttail}
+   // CHECK-LABEL: func.func private @{{.*}}WlTreeE.worklist.walk(
+   // CHECK-SAME: reussir.worklist_drop
+   // CHECK: [1] ->
+@@ -138,3 +143,24 @@ module {
+     return
+   }
+ }
++
++// -----
++
++// A member between the last two children that may push work keeps the
++// first one deferred in field order; the last continues by a tail call.
++!m_ = !reussir.record<compound "WlMid" incomplete>
++!minl = !reussir.record<compound "WlMidInl" [value] {!reussir.nullable<!reussir.rc<!m_>>}>
++!m = !reussir.record<compound "WlMid" {!reussir.nullable<!reussir.rc<!m_>>, !minl, !reussir.nullable<!reussir.rc<!m_>>}>
++
++module {
++  // CHECK-LABEL: func.func private @{{.*}}WlMidE.worklist.release(%arg0:
++  // CHECK: reussir.rc.defer @{{.*}}WlMidE.worklist.release(
++  // CHECK: call @{{.*}}WlMidInlE.worklist(
++  // CHECK: reussir.token.free
++  // CHECK-NOT: } else {
++  // CHECK: func.call @{{.*}}WlMidE.worklist.release(%{{.*}}) {reussir.musttail}
++  func.func @mid_root(%ref: !reussir.ref<!m>) {
++    reussir.ref.drop (%ref : !reussir.ref<!m>)
++    return
++  }
++}

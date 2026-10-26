@@ -1,12 +1,12 @@
 /-! Runtime test: the order of releases when one free defers several boxes
 and records in a row (review of the deferral of a box's word, 22bcf89:
 `any::release_last` defers a box's tagged word as one pending cell, and a
-record cell with a wide header can follow it on the pending stack; since
-the release table it defers the payload's cell, to which a later wide
-cell may link). `Pack`
+record cell can follow it on the pending stack; since the release table
+it defers the payload's cell, and cells with one release function share
+one entry of the stack). `Pack`
 has three fields of erased type (each a one-word box holding an `H`
 record) and a record field `r` between them; freeing a `Pack` inside a free
-defers x's box, y's box, r's cell (wide header), z's box. Natively
+defers x's box, y's box, r's cell, z's box. Natively
 `lean_del` pushes x y r z and pops z r y x. Also a `Pack` dropped as the
 last reference given up by an array set, and a pack whose boxes hold
 records of two handles. Each handle's text reaches the shared temporary

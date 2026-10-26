@@ -128,7 +128,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   `LPromise` is `Rc<Box<dyn Any>>`, the FFI type of `LHandle`, so it
   crosses the FFI boundary (`isBoundaryTy`) and a box holds it as a pointer
   payload of its own (`l2r_any_of_ptr<LPromise>`: one word, the count at
-  offset 0, no wide header), without an `ElemBox` around it.
+  offset 0), without an `ElemBox` around it.
 - **Why:** Typed and uniform code share one promise; native semantics
   (`resolve_core`, `deactivate_promise`) (4f8f6f1). The test and the store
   are made inside lean-runtime's `resolve` (lean-runtime's glue item 4):
@@ -142,7 +142,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks).
   resolved and read, 11 now, natively 6 (hunt HBOX2-03, test
   `RtPromiseBoxAlloc` with its `.alloc` bound).
 - **Where:** `Lower/Promises.lean`: `promiseTask`, `promiseResolveFn`,
-  `promiseExtern`; `LowerBase.lean`: `isBoundaryTy`, `rrAlign8`;
+  `promiseExtern`; `LowerBase.lean`: `isBoundaryTy`;
   `Lower/Conv.lean`: `isOtherObject` (a promise read as a word through
   `unsafeCast` is an object, as a handle); `runtime/prelude.rr`: `l2r_promise_resolve_with`;
   `runtime/leanrt/src/task.rs`: `promise_new`, `promise_cell`,

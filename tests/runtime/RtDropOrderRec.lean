@@ -4,9 +4,11 @@ at once (each handle's tag reaches the shared file when it is closed).
 Native Lean frees through one stack of objects, last pushed first: a
 record's fields are pushed in order, so its last field is freed first, and
 a freed object's children before the objects pushed earlier. Here the
-array's free (`leanrt::drop`) and Reussir's drop glue for the records
-(local patch 02-b) share one stack of pending work, so the order is the
-same (plan §10). -/
+array's free (`leanrt::drop`) and Reussir's drop glue for the records share
+the thread's one stack of pending drops (Reussir's, which leanrt uses), so
+the order is the same (plan §10). With two stacks (Reussir's drain of a
+tree finishing before leanrt's stack popped the closes it pushed), the
+trees closed per subtree: `T6 T7 T3 T1 T4 T5 T2` for the depth-3 tree. -/
 inductive Tr where
   | leaf : Tr
   | node : Tr → IO.FS.Handle → Tr → Tr

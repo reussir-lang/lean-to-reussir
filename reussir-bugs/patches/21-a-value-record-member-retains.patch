@@ -1,8 +1,8 @@
-From 8e9a6293a858bf2fb144e4921f239e2d9b11c121 Mon Sep 17 00:00:00 2001
+From 9c10b983382bffd59c6546ba0528744109f3afff Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 07:38:16 -0400
-Subject: [PATCH] l2r-local: entry 21: cancel rcgmp retains of [value] record
- members against the record's drop
+Subject: [PATCH 08/21] l2r-local: entry 21: cancel rcgmp retains of [value]
+ record members against the record's drop
 
 A by-value record (or tuple) taken apart retains each member it extracts
 and then drops the record:
@@ -111,7 +111,7 @@ use after free, no leak).
  create mode 100644 tests/integration/sanitizer/bigint-value-record-members-asan.rr
 
 diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
-index a79d3ae7..d4e38df2 100644
+index c3b27536..c6fe7959 100644
 --- a/include/Reussir/IR/ReussirOps.h
 +++ b/include/Reussir/IR/ReussirOps.h
 @@ -105,6 +105,10 @@ void emitRCGMPRelease(mlir::OpBuilder &builder, mlir::Location loc,
@@ -689,6 +689,3 @@ index 00000000..a24b8ac0
 +// Integer members of by-value records and tuples whose extract retains cancel
 +// against the record's drop: ASan reports a cancelled retain that was still
 +// needed as a use after free, and its leak check a lost release.
--- 
-2.43.0
-
