@@ -305,7 +305,14 @@ to its own type keeps its field's place (`BA`), a field that `lazy-fields`
 binds where it is used keeps its place at the arm's start (`2S`), and a
 closure, a structure holding one or a task that holds a handle `C` dies
 with the scrutinee (`1CS` where the arm reads a field, `SC1b` where it
-does not). Each shape writes its tags to a file of its own and prints it.
+does not); from a bug hunt of the passes' interactions: two scrutinees of
+nested constructors' arms (`match r, q`, also as two `match`es) dying
+together, the inner one first (`TS`), and code cut out of a constructor's
+arm keeping its scrutinee's renumbering: a join point outlined there, a
+loop's state machine running one, a part `Outline` cut out of the arm's
+long path (`S1`, `1xSk0`). Each shape writes its tags to a file of its own
+and prints it. `RtDropArmOrderJp` runs join points declared in such an arm
+with `jp-small` off (`.opts`), so that a small one is outlined too (`S1`).
 `RtDropArmPushProj` is a documented difference (plan §10, with expectation
 files): natively Lean's `pushProj` keeps a scrutinee alive into the `if`
 that follows the arm's start, where the field is read (`1S`); lean2rr

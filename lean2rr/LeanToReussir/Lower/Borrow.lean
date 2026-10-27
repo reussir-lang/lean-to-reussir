@@ -431,25 +431,75 @@ def mayHoldAt (decl : Name) (x : FVarId) (ty : Expr) : LowerM Bool := do
   | some held => return held.contains (decl, x)
   | none => mayHoldRelease ty
 
-/-- The binders of code `c` with their mono types, in binding order: a
-`let` before its continuation, the fields a `cases` binds before its
-alternative's code, in field order, a local function (a closure) before
-its continuation, the parameters of a join point or local function before
-its body. A join point's continuation comes before its body: lean2rr can
-copy the body to a jump in the continuation (J1, J1′), where the body's
-variables then count as newer than the continuation's (natively the two
-are never in scope together). -/
-partial def armBinders (c : Code .pure) (acc : Array (FVarId × Expr)) : Array (FVarId × Expr) :=
+/-- What `armReleaseVars` computes (`LowerState.armVars`, `armAlts`,
+`armJps`), by declaration and variable. -/
+structure ArmOrders where
+  /-- The recorded variables with their binding order. -/
+  vars : Std.HashMap (Name × FVarId) Nat := {}
+  /-- For a constructor's alternative of a `cases` with two or more
+  alternatives that can run (natively a `cases`, `simpCase`), by its first
+  field: the order at which its scrutinee counts as bound anew there
+  (`withCtorAlt`), before the alternative's fields. -/
+  alts : Std.HashMap (Name × FVarId) Nat := {}
+  /-- For a join point: the scrutinees renumbered where it is declared (the
+  recorded scrutinees of the alternatives around its declaration, in
+  Lean's code, before `jp-sink`), as (the scrutinee's order, its order
+  there). -/
+  jps : Std.HashMap (Name × FVarId) (Array (Nat × Nat)) := {}
+  /-- The last order given. -/
+  next : Nat := 0
+
+/-- Give the next order to binder `x` (of mono type `ty`, in declaration
+`decl`), and record it when `x` may hold a resource and is not lent. -/
+def armBind (lent : Std.HashSet (Name × FVarId)) (decl : Name) (x : FVarId) (ty : Expr) :
+    StateT ArmOrders LowerM Unit := do
+  let k := (← get).next + 1
+  modify fun s => { s with next := k }
+  if !lent.contains (decl, x) && (← mayHoldAt decl x ty) then
+    modify fun s => { s with vars := s.vars.insert (decl, x) k }
+
+/-- Number the binders of code `c` of declaration `decl` in binding order:
+a `let` before its continuation, a local function (a closure) before its
+continuation, the parameters of a join point or local function before its
+body, and at a constructor's alternative of a `cases` with two or more
+alternatives that can run, first the scrutinee anew (`ArmOrders.alts`),
+then the alternative's fields in field order, then its code. A join
+point's continuation comes before its body: lean2rr can copy the body to a
+jump in the continuation (J1, J1′), where the body's variables then count
+as newer than the continuation's (natively the two are never in scope
+together). `renum`: the renumbered scrutinees around `c`, recorded for the
+join points declared in it (`ArmOrders.jps`). A local function's body
+starts without (natively a declaration of its own). -/
+partial def armWalk (lent : Std.HashSet (Name × FVarId)) (decl : Name) (c : Code .pure)
+    (renum : Array (Nat × Nat)) : StateT ArmOrders LowerM Unit := do
   match c with
-  | .let d k => armBinders k (acc.push (d.fvarId, d.type))
+  | .let d k =>
+    armBind lent decl d.fvarId d.type
+    armWalk lent decl k renum
   | .jp d k =>
-    armBinders d.value (d.params.foldl (fun a p => a.push (p.fvarId, p.type)) (armBinders k acc))
+    modify fun s => { s with jps := s.jps.insert (decl, d.fvarId) renum }
+    armWalk lent decl k renum
+    for p in d.params do armBind lent decl p.fvarId p.type
+    armWalk lent decl d.value renum
   | .fun d k _ =>
-    armBinders d.value (d.params.foldl (fun a p => a.push (p.fvarId, p.type))
-      (armBinders k (acc.push (d.fvarId, d.type))))
-  | .cases cs => cs.alts.foldl (fun acc alt =>
-      armBinders alt.getCode (alt.getParams.foldl (fun a p => a.push (p.fvarId, p.type)) acc)) acc
-  | _ => acc
+    armBind lent decl d.fvarId d.type
+    armWalk lent decl k renum
+    for p in d.params do armBind lent decl p.fvarId p.type
+    armWalk lent decl d.value #[]
+  | .cases cs =>
+    let running := (cs.alts.filter fun alt => !(alt.getCode matches .unreach _)).size
+    let discr := (← get).vars[(decl, cs.discr)]?
+    for alt in cs.alts do
+      let mut renum' := renum
+      if let .alt _ ps _ _ := alt then
+        if running ≥ 2 then
+          let n := (← get).next + 1
+          modify fun s => { s with next := n }
+          if let some p := ps[0]? then modify fun s => { s with alts := s.alts.insert (decl, p.fvarId) n }
+          if let some o := discr then renum' := renum'.push (o, n)
+      for p in alt.getParams do armBind lent decl p.fvarId p.type
+      armWalk lent decl alt.getCode renum'
+  | _ => pure ()
 
 /-- For the release order at the start of a branch (Emit/ArmRelease): the
 variables of the program that may hold a resource (`mayHoldAt`, the rule of
@@ -458,31 +508,50 @@ thunk or task that holds no resource is left out; in one that casts, the
 type rule, closures, thunks and tasks included) and that their code owns,
 not those it only borrows (`borrowInfo`'s lent variables: whoever lent them
 releases them, so their release by this code is never the last one), each
-with its binding order: its position in `armBinders` of its declaration
-(after the declaration's parameters), the order of native Lean's binding
-indices (`ExplicitRC`), on which the variables that lean2rr binds again (a
-field converted to its own type, a field a `lazy-fields` match binds later,
-a join point's parameter at an inlined jump) keep their place. By
-declaration and variable (`LowerState.armVars` says why). The release
-order of a value that holds no resource does not show, but for a pure task
-(dropped before it ran, it is deleted where lean2rr releases it, plan §10,
-"Release time of pure tasks"), which is ordered only in a program that
-casts, as `keepsAt` keeps it only there. Empty in a program that makes no
-resources (`programMakesResources`: `borrowInfo` then has no borrow flags,
-while it has them for every declaration with code, `main` included, in one
-that does). Computed once, before the declarations are lowered
-(`LowerState.armVars`). -/
-def armReleaseVars : LowerM (Std.HashMap (Name × FVarId) Nat) := do
+with its binding order (`armWalk`, after the declaration's parameters), the
+order of native Lean's binding indices (`ExplicitRC`), on which the
+variables that lean2rr binds again (a field converted to its own type, a
+field a `lazy-fields` match binds later, a join point's parameter at an
+inlined jump) keep their place; the orders at which scrutinees count as
+bound anew (`ArmOrders.alts`), and the renumbered scrutinees where each
+join point is declared (`ArmOrders.jps`). By declaration and variable
+(`LowerState.armVars` says why). The release order of a value that holds no
+resource does not show, but for a pure task (dropped before it ran, it is
+deleted where lean2rr releases it, plan §10, "Release time of pure tasks"),
+which is ordered only in a program that casts, as `keepsAt` keeps it only
+there. Empty in a program that makes no resources (`programMakesResources`:
+`borrowInfo` then has no borrow flags, while it has them for every
+declaration with code, `main` included, in one that does). Computed once,
+before the declarations are lowered (`LowerState.armVars`). -/
+def armReleaseVars : LowerM ArmOrders := do
   let (flags, lent) ← borrowInfo
   if flags.isEmpty then return {}
-  let mut out : Std.HashMap (Name × FVarId) Nat := {}
-  let mut k := 0
-  for (_, d) in (← read).decls do
-    let .code c := d.value | continue
-    for (x, ty) in armBinders c (d.params.map fun p => (p.fvarId, p.type)) do
-      k := k + 1
-      if !lent.contains (d.name, x) && (← mayHoldAt d.name x ty) then out := out.insert (d.name, x) k
+  let run : StateT ArmOrders LowerM Unit := do
+    for (_, d) in (← read).decls do
+      let .code c := d.value | continue
+      for p in d.params do armBind lent d.name p.fvarId p.type
+      armWalk lent d.name c #[]
+  let ((), out) ← run.run {}
   return out
+
+/-- For the release order at the start of a branch (Emit/ArmRelease): the
+`RR.Arm.seeds` of the arm of a constructor's alternative with fields `ps`
+of a `cases` on `discr` in declaration `decl`: the scrutinee counts as bound
+anew there (`armAlts`), when it is recorded (`armVars`). -/
+def armSeeds (decl : Name) (discr : FVarId) (ps : Array (Param .pure)) : LowerM (Array (Nat × Nat)) := do
+  let some o := (← getPart (·.armVars[(decl, discr)]?)) | return #[]
+  let some p := ps[0]? | return #[]
+  let some n := (← getPart (·.armAlts[(decl, p.fvarId)]?)) | return #[]
+  return #[(o, n)]
+
+/-- For the release order at the start of a branch (Emit/ArmRelease): join
+point `jp` of declaration `decl`, outlined as the function or state
+machine variant `name` (J3, J4), runs with the scrutinees renumbered where
+it is declared (`armJps`, `LowerState.armCutSeeds`). -/
+def noteCutSeeds (decl : Name) (jp : FVarId) (name : String) : LowerM Unit := do
+  if let some seeds := (← getPart (·.armJps[(decl, jp)]?)) then
+    unless seeds.isEmpty do
+      modify fun s => { s with armCutSeeds := s.armCutSeeds.insert name seeds }
 
 /-- For the release order at the start of a branch (Emit/ArmRelease):
 which binders of the arm of variant `variant` of a `match` on `scrut` (the

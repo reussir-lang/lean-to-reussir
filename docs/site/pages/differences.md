@@ -157,10 +157,11 @@ schedules native Lean can produce. See
   branches. lean2rr releases it at the start of the arm. Lean can fold the
   alternatives of a `cases` into a default alternative after a late pass:
   there the matched value keeps its place in the order, and lean2rr counts
-  it as the newest. And when lean2rr puts a join point's body under a
-  `match`, the matched value counts as the newest there too. The order
-  shows only when the matched value holds a resource and another resource
-  dies at the same place.
+  it as the newest. And when lean2rr copies a join point's body to a jump
+  under a `match` that Lean does not have around the join point, that
+  matched value counts as the newest there too. The order shows only when
+  the matched value holds a resource and another resource dies at the
+  same place.
 - **Release time of pure tasks.** A pure task (`Task.spawn`, `Task.map`,
   `Task.bind`) that the program drops before a worker starts it is deleted
   and does not run, as natively. But lean2rr releases the task at another

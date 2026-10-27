@@ -537,9 +537,11 @@ mutual
           -- J4: a variant of the state machine.
           let variant ← fresh "j"
           modify fun s => { s with smArms := s.smArms.push (variant, fparams, body) }
+          noteCutSeeds ctx.decl d.fvarId variant
           return ← lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.enter variant captured) } outlined retTy k
         let fn ← fresh "jp_"
         modify fun s => { s with fns := s.fns.push (.fn fn fparams retTy body) }
+        noteCutSeeds ctx.decl d.fvarId fn
         lowerCode { ctx with jumps := ctx.jumps.insert d.fvarId (.call fn captured) } outlined retTy k
       else
         let jumps := (countJumps k {}).getD d.fvarId 0
@@ -742,7 +744,8 @@ mutual
             let body ← lowerAlt armCtx outlined retTy k
             conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
             arms := arms.push { ty := tn, ctor := some layout.variant, binders := armBinders,
-                                body := { body with lets := pre ++ conv ++ body.lets } }
+                                body := { body with lets := pre ++ conv ++ body.lets },
+                                seeds := ← armSeeds ctx.decl cs.discr ps }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
           let body ← match dflt with

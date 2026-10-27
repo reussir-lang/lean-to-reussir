@@ -184,8 +184,11 @@ def emitStateMachine (d : Decl .pure) (sm : StateMachine) (params : Array (Strin
   -- though 42,835 to 135 allocations).
   let mode := RR.Item.enum sm.mode false
     (#[(sm.entry, params.map (·.2))] ++ arms.map fun (v, fps, _) => (v, fps.map (·.2)))
+  -- A variant that runs an outlined join point's body keeps the
+  -- scrutinees renumbered where the join point is declared (Emit/ArmRelease).
+  let cutSeeds ← getPart (·.armCutSeeds)
   let mkArm (v : String) (names : Array String) (b : RR.Block) : RR.Arm :=
-    { ty := sm.mode, ctor := some v, binders := names.map some, body := b }
+    { ty := sm.mode, ctor := some v, binders := names.map some, body := b, seeds := cutSeeds.getD v #[] }
   let matchArms := #[mkArm sm.entry (params.map (·.1)) block] ++ arms.map fun (v, fps, b) => mkArm v (fps.map (·.1)) b
   let m ← fresh "m"
   modify fun s => { s with

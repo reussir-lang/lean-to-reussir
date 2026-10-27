@@ -2096,7 +2096,11 @@ Rules:
   (J1, J1′, J2, J3), state machines (J4), outlined parts and the other
   passes' code alike; every name lean2rr gives a Lean variable (a field
   converted to its own type, a field bound where it is used) has that
-  variable's binding order, its place in the declaration's code. Two handles
+  variable's binding order, its place in the declaration's code, and a
+  renumbered scrutinee has an order of its own, at its alternative's
+  start (so a `match` nested in the arm renumbers its scrutinee later),
+  which code cut out of the arm keeps: an outlined join point declared
+  there (J3, J4) and a part `Outline` cut out. Two handles
   that die at a branch's start close `21` (Reussir alone: `12`); a
   scrutinee holding a handle `S` in a field the arm does not read, the arm
   reading its number, with two other handles that die there, `21S`
@@ -3468,15 +3472,23 @@ Each item says what differs and when.
   alternatives Lean's `simpCase` folds into a default alternative only
   after `toImpure` (bodies that become equal there) keeps its scrutinee's
   index in that alternative, where lean2rr counts the scrutinee as bound
-  at the `match`. A join point's body that lean2rr inlines (J1) or copies
-  (J1′) at a jump under a `match` counts the scrutinee as bound at the
-  `match`, where natively the body has the scrutinee's index at the join
-  point. In each case the order shows only when the scrutinee holds a
-  resource and another one dies at the same place. Natively the
-  scrutinee and the first field projected in a constructor's alternative
-  get one index (`withCtorAlt` and the first `let`), so when both die at
-  the start of a nested branch their order is not specified (it depends
-  on a hash set); lean2rr releases the field first. In a program that
+  at the `match`. A join point's body that lean2rr places under a `match`
+  that natively does not hold its declaration (inlined or copied at a
+  jump, J1 and J1′, or kept in the code after `jp-sink` moved the
+  declaration into an arm, J2) counts that `match`'s scrutinee as bound
+  there, where natively the body has the scrutinee's index at the join
+  point; an outlined join point (J3, J4) has the renumberings of its
+  declaration in Lean's code. In each case the order shows only when the
+  scrutinee holds a resource and another one dies at the same place.
+  Natively the scrutinee and the first `let` of a constructor's
+  alternative get one index (`withCtorAlt` and that `let`), so when both
+  die at the start of a nested branch their order is not specified (it
+  depends on a hash set). That first `let` is the projection of a field,
+  or of another value that `pushProj` moved into the alternative: the
+  value of an IO action bound just before the `match`, as in `let r ← mkR;
+  let h1 ← open; match r with | .two _ n => …` (natively `1S` or `S1`,
+  by the hash; lean2rr gives the field first, and `h1`, bound before the
+  `match`, after the scrutinee: `S1`). In a program that
   casts, a structure parameter that `flatten-structs` splits
   (`Flatten.castParamFree`: its fields read at the start) is the same
   shape when a `cases` follows those reads at once: natively `pushProj`

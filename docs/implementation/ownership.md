@@ -201,7 +201,10 @@ runtime.
   default arm (`_`); in an arm that reads a field (a scalar field too) it
   goes after the others, when a field the arm does not read may hold a
   resource (the same rule). In branches nested in a constructor's arm, `s`
-  counts as bound at the `match`. Examples (test `RtDropArmOrder`): two
+  counts as bound at the `match` (a `match` nested in that arm renumbers
+  its own scrutinee later, so newer), also in code cut out of the arm: an
+  outlined join point declared there (J3), a state machine's variant that
+  runs one (J4), a part that `Outline` cut out. Examples (test `RtDropArmOrder`): two
   handles that die at a branch start close `21`, three `321`; two
   unresolved promises run their `sync` printers `p2` then `p1`; a
   scrutinee holding a handle `S` in a field the arm does not read, the arm
@@ -210,7 +213,8 @@ runtime.
   on such a scrutinee bound first `21S`; a loop's exit `N1N2` for its
   parameters `a = N2`, `b = N1`; a field converted to its own type `BA`; a
   closure holding handle `C`, bound before the scrutinee, `1CS` in an arm
-  that reads a field and `SC1b` in one that does not.
+  that reads a field and `SC1b` in one that does not; `match r, q` with
+  both dying in a nested branch `TS` (`q`, the inner, first).
 - **How:** a step of the core over the generated functions, right after
   `Outline` and before the optional passes over them
   (`LoweredProgram.armRelease`, in `Main.lean`). It computes Reussir's
@@ -220,10 +224,14 @@ runtime.
   the code after does not), keeps the recorded values, and orders them by
   their Lean variables' binding order. The lowering records them: before
   the declarations are lowered, `armReleaseVars` numbers every binder of
-  each declaration in binding order (`armBinders`: a `let` where it is
-  bound, the fields of a `cases` at its alternative's start in field
-  order, a join point's parameters after its continuation, since lean2rr
-  can copy the body to a jump there) and keeps those that may hold a
+  each declaration in binding order (`armWalk`: a `let` where it is
+  bound; at a constructor's alternative of a `cases` with two or more
+  alternatives that can run, first the scrutinee anew, `ArmOrders.alts`,
+  then the fields in field order; a join point's parameters after its
+  continuation, since lean2rr can copy the body to a jump there), records
+  for each join point the scrutinees renumbered where Lean's code declares
+  it (`ArmOrders.jps`, before `jp-sink`, a lowering hook, moves it), and
+  keeps the binders that may hold a
   resource (`mayHoldAt`: the flow analysis' answer for the binder,
   `LowerCtx.resourceHeld?`, in a program that does not cast, which knows
   every binder of the lowered declarations; the type rule `mayHoldRelease`,
@@ -243,7 +251,12 @@ runtime.
   used, a join point's parameter at an inlined jump, a state machine's
   slot bound again) keep its place; and each `match` arm on such a value
   records which binders may hold a resource (`noteArmFields`, the same
-  rule). A
+  rule) and, as its `RR.Arm.seeds`, the order at which its scrutinee
+  counts as bound anew (`armSeeds`). An outlined join point's function
+  (J3) and a state machine's variant that runs one (J4, its arm's seeds)
+  get the renumberings of the join point's declaration (`noteCutSeeds`,
+  `LowerState.armCutSeeds`); a part that `Outline` cut out gets those at
+  its call (it has one), visited after the function that calls it. A
   release is an ordinary consuming use, so Reussir adds no release of
   its own: no double release. Once the step releases a scrutinee in one
   arm, Reussir borrows it for the whole `match` and releases it, with the
@@ -290,13 +303,26 @@ runtime.
   the match on every step, where `sink-proj` had moved it into the arms,
   and the backtracker's `pushNext` got two releases in its `_` arm
   (review of the regex benchmarks' code after timing run 17). Since then
-  the recorded set follows the rule of the borrow emulation.
+  the recorded set follows the rule of the borrow emulation. A bug hunt of
+  the passes' interactions (hunt-combos, judged) found two more: two
+  `match`es nested without a recorded binder between gave their
+  scrutinees one order (`2 × top + 1`), so the Reussir names decided
+  (`match r, q` dying together: `ST`, natively `TS`, where the inner `q` is
+  newer); and every generated function started without renumberings, so
+  in an outlined join point declared in a constructor's arm (J3), a state
+  machine's variant running one (J4) and a part `Outline` cut out of the
+  arm, the scrutinee went by its own binding (`1S`, natively `S1`, which
+  Reussir's order had given before). Hence an order for each
+  renumbering, from the declaration's code, and the seeds of cut-out code
+  (tests in `RtDropArmOrder` and `RtDropArmOrderJp`).
 - **Where:** `Emit/ArmRelease.lean` (`goBlock`, `goMatch`, `Pos`,
   `Info.key`, `LoweredProgram.armRelease`); `Lower/Borrow.lean`:
-  `armReleaseVars`, `armBinders`, `mayHoldAt`, `mayHoldRelease`,
-  `noteArmFields`;
+  `armReleaseVars`, `armWalk`, `ArmOrders`, `mayHoldAt`,
+  `mayHoldRelease`, `noteArmFields`, `armSeeds`, `noteCutSeeds`;
   `LowerBase.lean`: `noteVarUse`, `LowerState.armVars`, `armNames`,
-  `armFields`; the lookups in `Lower/Decls.lean` (`lowerArg`,
+  `armFields`, `armAlts`, `armJps`, `armCutSeeds`; `RR.lean`:
+  `Arm.seeds`; the state machines' arms (`Lower/StateMachine.lean`,
+  `Opt/StateMachines.lean`); the lookups in `Lower/Decls.lean` (`lowerArg`,
   `applyChain`), `Lower/Values.lean`, `Lower/Code.lean` (`return`,
   `lowerCases`), `Opt/LazyFields.lean`; `Emit/Program.lean`
   (`lowerProgram`); `runtime/prelude.rr`: `l2r_release_after`; plan
@@ -313,11 +339,15 @@ runtime.
   at the arm's start (test `RtDropArmPushProj`, with expectation files);
   a `cases` whose alternatives `simpCase` folds into a default
   alternative only after `toImpure` keeps its scrutinee's index there; a
-  join point's body that lean2rr places under a `match` (J1, J1′) counts
-  the scrutinee as bound there, natively its index at the join point;
-  natively the scrutinee and the first field projected in a constructor's
-  alternative have one index, so their order when both die at a nested
-  branch's start is not specified (lean2rr: the field first). In a
+  join point's body that lean2rr places under a `match` that natively does
+  not hold its declaration (J1, J1′ at a jump, J2 after `jp-sink` moved
+  the declaration into an arm) counts that scrutinee as bound there,
+  natively its index at the join point; natively the scrutinee and the
+  first `let` of a constructor's alternative (a field's projection, or
+  another value's that `pushProj` moved there: an IO action's value bound
+  just before the `match`) have one index, so their order when both die
+  at a nested branch's start is not specified (lean2rr: the field first,
+  a value bound before the `match` after the scrutinee). In a
   program that does not cast, a pure task that holds no resource is not
   recorded, so where it dies at an arm's start with other values its
   release keeps Reussir's place (its release time is lean2rr's anyway:

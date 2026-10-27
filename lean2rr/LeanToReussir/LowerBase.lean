@@ -454,6 +454,18 @@ structure LowerState where
   variant of its type: which binders of the variant's arm (by position)
   may hold a resource (`noteArmFields`). -/
   armFields : Std.HashMap (String × String) (Array Bool) := {}
+  /-- `armReleaseVars`' orders at which scrutinees count as bound anew in
+  constructors' alternatives (`ArmOrders.alts`; `RR.Arm.seeds`), by
+  declaration and the alternative's first field. -/
+  armAlts : Std.HashMap (Name × FVarId) Nat := {}
+  /-- `armReleaseVars`' renumbered scrutinees where each join point is
+  declared (`ArmOrders.jps`), by declaration and join point. -/
+  armJps : Std.HashMap (Name × FVarId) (Array (Nat × Nat)) := {}
+  /-- The renumbered scrutinees in an outlined join point's function (J3,
+  by the function's name) and in a state machine's variant that runs one
+  (J4, by the variant's name): those where the join point is declared
+  (`armJps`). -/
+  armCutSeeds : Std.HashMap String (Array (Nat × Nat)) := {}
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Types without a finite placeholder (their function in `zeroFns` is

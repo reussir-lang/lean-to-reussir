@@ -224,11 +224,15 @@ def emitStateMachineAlongside (d : Decl .pure) (sm : StateMachine) (params : Arr
       (out[i]?.join).map fun s => (n, some t, RR.Expr.var lay.slots[s]!.1)
     let b ← rewriteCallsB (place v) true b
     let body : RR.Block := ⟨bind ++ b.lets, b.result⟩
+    -- A variant that runs an outlined join point's body keeps the
+    -- scrutinees renumbered where the join point is declared
+    -- (Emit/ArmRelease).
+    let seeds ← getPart (·.armCutSeeds.getD v #[])
     match lay.tags with
     | some tags =>
       let some k := tags[v]? | throwError "lean2rr: unknown state-machine variant {v}"
-      return RR.Arm.lit k body
-    | none => return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body }
+      return { RR.Arm.lit k body with seeds }
+    | none => return { ty := sm.mode, ctor := some v, binders := (kept v fs).map (some ·.1), body, seeds }
   let mut matchArms := #[← mkArm sm.entry params block]
   for (v, fps, b) in arms do matchArms := matchArms.push (← mkArm v fps b)
   -- A match on an integer needs a wildcard; no call passes another integer.

@@ -48,14 +48,21 @@ hold a resource by the rule of the borrow emulation, `mayHoldAt`: the flow
 analysis, which follows closures, thunks and tasks, or in a program that
 casts the type, where every closure, thunk and task may; and that the code
 owns), and releases them at the arm's start, newest first, when there are
-at least two. Order: each name has its Lean variable's
-binding order (its place in the declaration's code, the order of native
-Lean's indices), also a name lean2rr gives the variable later (a field
-converted to its own type, a field `lazy-fields` binds where it is used, a
-join point's parameter at an inlined jump), in a function and in the
-functions cut out of it (`Outline`, the join points J3 and the state
-machines J4); a matched value counts as bound at the `match` in a
-constructor's arm and below it.
+at least two. Order: each name has its Lean variable's binding order (its
+place in the declaration's code, the order of native Lean's indices:
+`armWalk`), also a name lean2rr gives the variable later (a field converted
+to its own type, a field `lazy-fields` binds where it is used, a join
+point's parameter at an inlined jump). In a constructor's arm of a `cases`
+with two or more alternatives that can run, the scrutinee counts as bound
+anew, at an order `armWalk` gives the alternative before its fields
+(`RR.Arm.seeds`): newer than what is bound before, older than the arm's
+own variables, and a `match` nested in the arm renumbers its scrutinee
+later still. Code cut out of an arm keeps those renumberings (`Pos.moved`):
+an outlined join point's function (J3) and a state machine's variant that
+runs one (J4, as its arm's seeds) have those of the join point's
+declaration in Lean's code (before `jp-sink` moved it,
+`LoweredProgram.armCutSeeds`), a part that `Outline` cut out has those at
+its call (each part has one call; it is visited after its caller).
 
 The scrutinee `s` of a `match`, when it is recorded and dies in the match:
 - in an arm that reads none of its fields, it is released with the
@@ -90,8 +97,14 @@ branches that read no field (at their start) and after the projection in
 the others, where lean2rr releases it at the arm's start; a `cases` whose
 alternatives `simpCase` folds into a default alternative only after
 `toImpure` keeps its scrutinee's index there; a join point's body that
-lean2rr places under a `match` (J1, J1′) counts the scrutinee as bound
-there. (A structure that `flatten-structs` splits into its fields holds
+lean2rr places under a `match` that natively does not hold its
+declaration (inlined or copied at a jump, J1, J1′, or left in the code
+after `jp-sink` moved the declaration into an arm, J2) counts that
+scrutinee as bound there. Natively the scrutinee and the first `let` of a
+constructor's alternative (a field's projection, or another value's that
+`pushProj` moved there) share one index, so their order is not specified;
+here the field goes first, and a value bound before the `match` after the
+scrutinee. (A structure that `flatten-structs` splits into its fields holds
 nothing whose release shows: the flow analysis follows closures, thunks and
 tasks. In a program that casts, it can hold closures, thunks or tasks, but
 only one that native Lean owns and whose fields that may hold one the
@@ -129,28 +142,40 @@ continuation's free names, a layer per enclosing level). -/
 def unreachableBlock (b : Block) : Bool :=
   b.lets.isEmpty && b.result matches .call "l2r_unreachable" _ _
 
-/-- Where the code being visited is: the names live after it (`L`), the
-largest binding order of a recorded name bound on the way to it (`top`: the
-recorded names in scope come up to it), and the order keys of the matched
-values that a `match` it is in renumbered (`moved`: name ↦ order key). -/
+/-- Where the code being visited is: the names live after it (`L`), and
+the variables that count as bound anew there (`moved`: a variable's binding
+order ↦ its order there; the scrutinees of the `match`es whose
+constructors' arms it is in, `RR.Arm.seeds`, also those of the join point
+or the part of an arm that a function cut out runs). -/
 structure Pos where
   L : List Names
-  top : Nat
-  moved : Std.HashMap String Nat := {}
+  moved : Std.HashMap Nat Nat := {}
 
-/-- The binding order of recorded name `v`. -/
+/-- The binding order of recorded name `v` (of its Lean variable). -/
 def Info.order (I : Info) (v : String) : Nat := ((I.names.get? v).map (·.2)).getD 0
 
-/-- The order key of name `v` at `p`: twice its binding order, or the key a
-`match` gave it (odd: between the names bound before the `match` and
-those bound in its arm). Newest is largest. -/
-def Info.key (I : Info) (p : Pos) (v : String) : Nat := p.moved.getD v (2 * I.order v)
+/-- The order key of name `v` at `p`: its variable's binding order, or the
+order a `match` gave it anew. Newest is largest. -/
+def Info.key (I : Info) (p : Pos) (v : String) : Nat :=
+  let o := I.order v
+  p.moved.getD o o
 
-/-- `p` with names `xs` bound. -/
-def Info.bind (I : Info) (p : Pos) (xs : Array String) : Pos :=
-  { p with top := xs.foldl (fun m x => if I.names.contains x then max m (I.order x) else m) p.top }
+/-- `p` in an arm: its seeds counted (`RR.Arm.seeds`). -/
+def Pos.enter (p : Pos) (arm : Arm) : Pos :=
+  if arm.seeds.isEmpty then p else
+  { p with moved := arm.seeds.foldl (fun m (o, n) => m.insert o n) p.moved }
 
-abbrev M := StateM Nat
+/-- The state of the pass: the number of the next release's name, and for
+each part that `Outline` cut out of a function (`base_l2rpartK`), the
+renumbered variables at its call (each part has one call). -/
+structure St where
+  next : Nat := 0
+  partSeeds : Std.HashMap String (Std.HashMap Nat Nat) := {}
+
+abbrev M := StateM St
+
+/-- Whether `f` names a part that `Outline` cut out (`Outline.freshName`). -/
+def isPart (f : String) : Bool := (f.splitOn "_l2rpart").length > 1
 
 /-- `b` with `vs` released at its start, in that order, when there are at
 least two. -/
@@ -158,8 +183,8 @@ def releaseAt (I : Info) (vs : Array String) (b : Block) : M Block := do
   if vs.size < 2 then return b
   let mut lets := #[]
   for v in vs do
-    let k ← get
-    set (k + 1)
+    let k := (← get).next
+    modify fun s => { s with next := k + 1 }
     lets := lets.push (s!"l2rrel{k}", some (Ty.named "u64"),
       Expr.call "l2r_release_after" #[((I.names.get? v).map (·.1)).getD .unit] #[.var v])
   return { b with lets := lets ++ b.lets }
@@ -175,6 +200,10 @@ mutual
     | .var n => return (e, varNames n)
     | .atom t => return (e, (atomIdents t).foldl (·.insert ·) {})
     | .call f tys args =>
+      -- A part `Outline` cut out runs where it is called: with the
+      -- renumberings there.
+      if isPart f && !p.moved.isEmpty then
+        modify fun s => { s with partSeeds := s.partSeeds.insert f p.moved }
       let (args, fv) ← goArgs I args p
       return (.call f tys args, fv)
     | .ctor t v args =>
@@ -191,8 +220,8 @@ mutual
       return (.cast x t, fv)
     | .lam x t b =>
       -- A closure's body is a scope of its own: its captures and its
-      -- parameter are owned on entry.
-      let (b, fv) ← goBlock I b (I.bind { p with L := [] } #[x])
+      -- parameter are owned on entry (natively a declaration of its own).
+      let (b, fv) ← goBlock I b { L := [] }
       return (.lam x t b, fv.erase x)
     | .block b =>
       let (b, fv) ← goBlock I b p
@@ -223,21 +252,16 @@ mutual
       acc := union acc fa
     return (out, acc)
 
-  /-- A block: each `let`'s value with the rest of the block live after it,
-  and the names bound before it in scope. -/
+  /-- A block: each `let`'s value with the rest of the block live after it. -/
   partial def goBlock (I : Info) (b : Block) (p : Pos) : M (Block × Names) := do
-    -- The largest binding order of a recorded name bound before each `let`
-    -- (and before the result).
-    let tops := b.lets.foldl (init := #[p.top]) fun ts (x, _, _) =>
-      ts.push (if I.names.contains x then max ts.back! (I.order x) else ts.back!)
-    let (r, fr) ← goExpr I b.result { p with top := tops.back! }
+    let (r, fr) ← goExpr I b.result p
     let mut acc := fr
     let mut lets := b.lets
     for h : k in [:b.lets.size] do
       let i := b.lets.size - 1 - k
       let (x, t, e) := b.lets[i]!
       acc := acc.erase x
-      let (e, fe) ← goExpr I e { p with L := acc :: p.L, top := tops[i]! }
+      let (e, fe) ← goExpr I e { p with L := acc :: p.L }
       lets := lets.set! i (x, t, e)
       acc := union acc fe
     return (⟨lets, r⟩, acc)
@@ -248,14 +272,9 @@ mutual
     let sv? : Option String := match s with
       | .var n => if I.names.contains n then some n else none
       | _ => none
-    -- A `cases` natively when two or more arms can run: in a
-    -- constructor's arm the scrutinee counts as bound here.
-    let real := (arms.filter fun a => !unreachableBlock a.body).size
-    let posOf (arm : Arm) : Pos :=
-      let q := I.bind p (arm.binders.filterMap id)
-      match sv?, arm.ctor with
-      | some sv, some _ => if real ≥ 2 then { q with moved := q.moved.insert sv (2 * p.top + 1) } else q
-      | _, _ => q
+    -- In a constructor's arm of a `cases` with two or more alternatives
+    -- that can run, the scrutinee counts as bound anew (`RR.Arm.seeds`).
+    let posOf (arm : Arm) : Pos := p.enter arm
     let mut bodies : Array Block := #[]
     -- Each arm's body's free names (binders included), and the arm's own.
     let mut fbs : Array Names := #[]
@@ -336,14 +355,41 @@ mutual
 end
 
 /-- Every generated function, with releases at the start of its branches:
-its body, with its parameters in scope and nothing live after it. -/
-def armReleaseFns (I : Info) (fns : Array Item) : Array Item :=
-  let go : M (Array Item) := fns.mapM fun it => match it with
-    | .fn n ps r body => do
-      let start : Pos := I.bind { L := [], top := 0 } (ps.map (·.1))
-      return .fn n ps r (← goBlock I body start).1
-    | it => pure it
-  go.run' 0
+its body, with its parameters in scope and nothing live after it, and the
+variables renumbered where it runs: an outlined join point's function
+those where the join point is declared (`cutSeeds`, J3; a state machine's
+variant has them as its arm's seeds, J4), a part that `Outline` cut out
+those at its call (visited after the function that calls it). -/
+def armReleaseFns (I : Info) (cutSeeds : Std.HashMap String (Array (Nat × Nat))) (fns : Array Item) : Array Item :=
+  let go : M (Array Item) := do
+    let visit (it : Item) (moved : Std.HashMap Nat Nat) : M Item := match it with
+      | .fn n ps r body => do return .fn n ps r (← goBlock I body { L := [], moved }).1
+      | it => pure it
+    let mut out := fns
+    let mut done : Std.HashSet Nat := {}
+    -- The other functions first, then the parts whose calls were visited,
+    -- until none is left; a part nothing calls has no renumbering.
+    for h : i in [:fns.size] do
+      let .fn n .. := fns[i] | continue
+      if isPart n then continue
+      let moved := ((cutSeeds.get? n).getD #[]).foldl (fun m (o, k) => m.insert o k) {}
+      out := out.set! i (← visit fns[i] moved)
+      done := done.insert i
+    let mut progress := true
+    while progress do
+      progress := false
+      for h : i in [:fns.size] do
+        if done.contains i then continue
+        let .fn n .. := fns[i] | continue
+        let some moved := (← get).partSeeds.get? n | continue
+        out := out.set! i (← visit fns[i] moved)
+        done := done.insert i
+        progress := true
+    for h : i in [:fns.size] do
+      if done.contains i then continue
+      if let .fn .. := fns[i] then out := out.set! i (← visit fns[i] {})
+    return out
+  go.run' {}
 
 end ArmRelease
 
@@ -351,6 +397,6 @@ end ArmRelease
 that makes resources (`armNames` not empty), every generated function. -/
 def LoweredProgram.armRelease (p : LoweredProgram) : LoweredProgram :=
   if p.armNames.isEmpty then p else
-  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields } p.fns }
+  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields } p.armCutSeeds p.fns }
 
 end LeanToReussir

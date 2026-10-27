@@ -370,6 +370,136 @@ inductive S2 where
   | .two _ _ => IO.println s!"  twoFields: {← IO.FS.readFile p}"
   | .none => h1.putStr "n"; h2.putStr "m"
 
+/-- Two scrutinees renumbered by nested constructors' arms (`match r, q`),
+both bound before the matches, die together at a nested branch's start:
+the inner one (`q`, handle `T`) is the newer, so it goes first (`TS`), also
+when nothing is bound between the two matches. -/
+@[noinline] def mkRt (p : System.FilePath) (tag : String) (b : Bool) : IO R :=
+  if b then do pure (.two (← hnd p tag) 5) else pure .none
+
+@[noinline] def matchPair (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let r ← mkRt p "S" b
+  let q ← mkRt p "T" b
+  match r, q with
+  | .two _ n, .two _ m =>
+    if c then IO.println s!"{n} {m}"; keepR r; keepR q
+    else IO.println s!"  matchPair else: {← IO.FS.readFile p}"
+  | _, _ => keepR r; keepR q
+
+@[noinline] def nested2 (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let r ← mkRt p "S" b
+  let q ← mkRt p "T" b
+  match r with
+  | .two _ n =>
+    match q with
+    | .two _ m =>
+      if c then IO.println s!"{n} {m}"; keepR r; keepR q
+      else IO.println s!"  nested2 else: {← IO.FS.readFile p}"
+    | .none => keepR r
+  | .none => keepR q
+
+@[noinline] def nested2b (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let q ← mkRt p "T" b
+  let r ← mkRt p "S" b
+  match r with
+  | .two _ n =>
+    match q with
+    | .two _ m =>
+      if c then IO.println s!"{n} {m}"; keepR r; keepR q
+      else IO.println s!"  nested2b else: {← IO.FS.readFile p}"
+    | .none => keepR r
+  | .none => keepR q
+
+/-- Code cut out of a constructor's arm keeps the scrutinee's renumbering:
+`r` and `h1` (bound after `r`; a call before the `match` keeps Lean's
+`pushProj` from moving its binding into the arm) die at the `else` start
+inside a join point declared in the arm and outlined (J3), inside a loop's
+state machine running such a join point (J4), and inside a part that
+`Outline` cut out of the arm's long path: `r` first (`S1`). -/
+@[noinline] def jpCut (p : System.FilePath) (b c d : Bool) (k : Nat) : IO Unit := do
+  let r ← mkRt p "S" b
+  let h1 ← hnd p "1"
+  IO.println "  jpCut"
+  match r with
+  | .two _ n =>
+    let tag ← if d then do IO.print ""; pure "x" else pure "y"
+    IO.println s!"  jpCut {tag} {k}"
+    IO.println s!"  jpCut {tag} {k + 1}"
+    IO.println s!"  jpCut {tag} {k + 2} {k * 3}"
+    IO.println s!"  jpCut {tag} {k + 3} {k * 4} {k * k}"
+    IO.println s!"  jpCut {tag} {k + 4} {k * 5} {k * k * k}"
+    if c then IO.println s!"{n}"; keepR r; h1.putStr "x"
+    else IO.println s!"  jpCut else: {← IO.FS.readFile p}"
+  | .none => h1.putStr "n"
+
+@[noinline] partial def machineCut (p : System.FilePath) (n : Nat) (r : R) : IO Unit := do
+  let h1 ← hnd p s!"{n}"
+  IO.println s!"  machineCut {n}"
+  match r with
+  | .two _ m =>
+    let tag ← if n % 2 == 0 then do IO.print ""; pure "e" else pure "o"
+    IO.println s!"  machineCut {tag} {n} {m}"
+    IO.println s!"  machineCut {tag} {n + 1} {n * 3}"
+    IO.println s!"  machineCut {tag} {n + 2} {n * 4} {n * n}"
+    IO.println s!"  machineCut {tag} {n + 3} {n * 5} {n * n * n}"
+    if n == 0 then
+      IO.println s!"  machineCut end: {← IO.FS.readFile p}"
+    else
+      keepR r
+      h1.putStr "x"
+      machineCut p (n - 1) r
+  | .none => h1.putStr "n"
+
+@[noinline] def partCut (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let r ← mkRt p "S" b
+  let h1 ← hnd p "1"
+  IO.println "  partCut"
+  match r with
+  | .two _ n =>
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    IO.print ""
+    if c then IO.println s!"{n}"; keepR r; h1.putStr "x"
+    else IO.println s!"  partCut else: {← IO.FS.readFile p}"
+  | .none => h1.putStr "n"
+
 def fresh (name : String) : IO System.FilePath := do
   let p : System.FilePath := s!"droparm-{name}.txt"
   IO.FS.writeFile p ""
@@ -414,3 +544,10 @@ def main (args : List String) : IO Unit := do
   flipTask (← fresh "ft0") (if b then 0 else 2); report "ft0"
   flipTask (← fresh "ft1") (if b then 1 else 2); report "ft1"
   twoFields (← fresh "tf") b; report "tf"
+  matchPair (← fresh "mp") b (!b); report "mp"
+  nested2 (← fresh "n2") b (!b); report "n2"
+  nested2b (← fresh "n2b") b (!b); report "n2b"
+  jpCut (← fresh "jc") b (!b) b 3; report "jc"
+  let p ← fresh "mc"
+  machineCut p 1 (← mkRt p "S" b); report "mc"
+  partCut (← fresh "pc") b (!b); report "pc"

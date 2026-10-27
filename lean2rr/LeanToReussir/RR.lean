@@ -103,13 +103,20 @@ mutual
   pattern, outermost first (a match on a `Nat` or `Int`, Lower/IntMatch:
   `Int::OfNat(Nat::Succ(m))` is `wrap = #[("Int", "OfNat")]`, `ty = "Nat"`,
   `ctor = "Succ"`, `Nat::Succ(_)` is `wrap = #[("Nat", "Succ")]` with
-  `ctor = none`); the binders are the inner pattern's. -/
+  `ctor = none`); the binders are the inner pattern's. `seeds`: for the
+  release order at the start of a branch (Emit/ArmRelease), the variables
+  that count as bound anew in this arm's code, by binding order (variable's
+  order ↦ its order there): the scrutinee of a `cases` in a constructor's
+  alternative, and in an arm of a state machine that runs an outlined join
+  point's body, the scrutinees renumbered where the join point is declared;
+  not printed. -/
   structure Arm where
     ty : String
     ctor : Option String
     binders : Array (Option String)
     body : Block
     wrap : Array (String × String) := #[]
+    seeds : Array (Nat × Nat) := #[]
 
   /-- `{ let x : T = e; … result }`. -/
   structure Block where

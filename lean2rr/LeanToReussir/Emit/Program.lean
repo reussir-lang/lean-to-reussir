@@ -401,6 +401,9 @@ structure LoweredProgram where
   may hold one (`LowerState.armFields`). -/
   armNames : Std.HashMap String (RR.Ty × Nat) := {}
   armFields : Std.HashMap (String × String) (Array Bool) := {}
+  /-- The renumbered scrutinees in each outlined join point's function
+  (`LowerState.armCutSeeds`). -/
+  armCutSeeds : Std.HashMap String (Array (Nat × Nat)) := {}
 
 /-- What passes over the generated functions see of the program. -/
 def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
@@ -599,7 +602,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     -- order at the start of a branch (`noteVarUse`, Emit/ArmRelease; after
     -- the once-cells, which `borrowInfo` reads).
     let vs ← armReleaseVars
-    modify fun s => { s with armVars := vs }
+    modify fun s => { s with armVars := vs.vars, armAlts := vs.alts, armJps := vs.jps }
     -- A cycle of tail calls between declarations is one state machine
     -- (`lowerGroup`), lowered where its first declaration is.
     let groups := tailCallGroups decls
@@ -738,6 +741,6 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let (boxItem, st) ← (boxTypeItems.run ctx).run st
   timingMark "lowering: live functions, types" s!"{st.fns.size} functions"
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored,
-           armNames := st.armNames, armFields := st.armFields }
+           armNames := st.armNames, armFields := st.armFields, armCutSeeds := st.armCutSeeds }
 
 end LeanToReussir
