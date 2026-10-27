@@ -789,10 +789,14 @@ built-in integers
   RtMarkPersistentRefHandle, RtMarkPersistentPromise, RtPersistConstRef,
   RtPersistInitHandleDirect and RtCastViewFewer lose workers, such as
   `String.Slice.contains`' loop with its predicate; no benchmark program
-  casts). The borrow emulation asks the same analysis, run again on the
-  lowered declarations (by type in a program that casts: Lower/Borrow's
-  `keepsAt`), so it keeps an argument only for a parameter whose code the
-  pass left as Lean's. Example: lean-regex's driver reads its
+  casts). The borrow emulation and the release order at a branch's start
+  ask the same analysis, run again on the lowered declarations (by type in
+  a program that casts: Lower/Borrow's `keepsAt`, `armReleaseVars`,
+  through `mayHoldAt`), so it keeps an argument only for a parameter whose
+  code the pass left as Lean's; `keepsAt` checks this (an internal error
+  for a kept parameter of a declaration the pass rewrote: its workers,
+  their wrappers and the declarations whose code it changed, which `run`
+  records in `flattenRewritten`). Example: lean-regex's driver reads its
   input with `IO.FS.readFile`. The handle goes to `Handle.read` and to
   `readBinToEndInto.loop` only, so only that class holds a resource, and
   `εClosure`'s `SearchState` (`Vector σ.Update n`, an `Array lcAny`) is

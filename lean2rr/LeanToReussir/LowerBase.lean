@@ -149,7 +149,8 @@ structure LowerCtx where
   these declarations: `Emit/Program`); `none` otherwise, where the type
   rule decides (`mayHoldRelease`). The borrow emulation keeps an argument
   for a borrowed parameter only where it may hold one (`keepsAt`,
-  Lower/Borrow). -/
+  Lower/Borrow), and the release order at the start of a branch records
+  only such variables (`armReleaseVars`); both ask `mayHoldAt`. -/
   resourceHeld? : Option (Std.HashSet (Name × FVarId)) := none
   /-- Whether the program creates tasks (`programCreatesTasks`): then its
   reference operations are the task-aware ones (`refCellOp`), and it has
@@ -430,11 +431,12 @@ structure LowerState where
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
-  /-- The variables of the program that may hold something whose release
-  shows (a resource, a closure, a thunk, a task) and that their code owns,
-  not only borrows, with their binding order (`armReleaseVars`; for the
-  release order at the start of a branch, Emit/ArmRelease); empty in a
-  program that makes no resources. -/
+  /-- The variables of the program that may hold a resource (`mayHoldAt`:
+  by the flow analysis, or by type in a program that casts, where every
+  closure, thunk and task may) and that their code owns, not only borrows,
+  with their binding order (`armReleaseVars`; for the release order at the
+  start of a branch, Emit/ArmRelease); empty in a program that makes no
+  resources. -/
   armVars : Std.HashMap FVarId Nat := {}
   /-- The Reussir names of the uses of `armVars` in the generated code, with
   their types and their variables' binding order (`noteVarUse`). Names are
@@ -577,7 +579,7 @@ def fresh (pre : String) : LowerM String := do
 
 /-- The code being lowered uses Lean variable `x` by the Reussir name `n`
 of type `t`: recorded with `x`'s binding order (`LowerState.armNames`)
-when `x` may hold something whose release shows (`armVars`), for the
+when `x` may hold a resource (`armVars`), for the
 release order at the start of a branch (Emit/ArmRelease). Every lookup of a
 variable whose name the generated code then uses calls it (`lowerArg`,
 `applyChain`, a projection, a `return`, the scrutinee of a `cases`, ...), so

@@ -46,7 +46,17 @@ runtime.
   with closures, thunks and tasks counted, in a program that casts;
   [optional-passes.md](optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)).
   So where an argument is kept, the inference saw Lean's code and infers
-  what native Lean infers. Elsewhere lean2rr's code can differ (a structure
+  what native Lean infers. That rests on the two runs of the analysis
+  agreeing (flatten-structs' on its input, the lowering's on its output):
+  every parameter that the second run finds holding a resource belongs to
+  a declaration that `flatten-structs` left alone. `keepsAt` checks it: a
+  kept parameter of a declaration that the pass rewrote (a worker, a
+  wrapper, a declaration whose code it changed: `flattenRewritten`, set by
+  `Flatten.run`) is an internal error. `keepsAt` is only asked about
+  callees with borrow flags, which the inference computed on the lowered
+  declarations, the ones the analysis ran on, so its type-rule fallback
+  for a declaration the analysis did not see cannot fire (kept as a safe
+  default). Elsewhere lean2rr's code can differ (a structure
   that `flatten-structs` split no longer has its constructor), and the
   inference can take borrowed a parameter that native Lean takes owned;
   the argument is then not kept, which nobody can tell: it holds no
@@ -98,13 +108,15 @@ runtime.
   `RtBorrowTailNone`, `RtBorrowTailNoneH`).
 - **Where:** `Lower/Borrow.lean`: `resourceExterns`,
   `programMakesResources`, `inferBorrowedParams`, `borrowedVars`,
-  `borrowInfo`, `keepsAt`, `mayHoldRelease` (memoized for the run,
+  `borrowInfo`, `keepsAt`, `mayHoldAt`, `flattenRewritten`,
+  `mayHoldRelease` (memoized for the run,
   `releaseTypeCache`:
   [translator.md](translator.md#questions-about-types-are-answered-once-per-run)),
   `borrowKeeps`, `releaseAfter`,
   `boxedTarget`; `Emit/Program.lean` (the flow analysis on the lowered
   declarations, `LowerCtx.resourceHeld?`); `Opt/ResourceFlow.lean`:
-  `runNoCasts`; `Lower/Values.lean`: `lowerConstApp`;
+  `runNoCasts`; `Opt/Flatten.lean`: `run` (sets `flattenRewritten`);
+  `Lower/Values.lean`: `lowerConstApp`;
   `runtime/prelude.rr`: `l2r_release_after`; plan
   [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
   ("Borrowing").
@@ -151,27 +163,30 @@ runtime.
 ### Values that die at the start of an arm are released newest first
 
 - **What:** In a program that makes resources, when two or more values
-  that may hold something whose release shows (a resource, or a closure,
-  a thunk or a task, which may hold one) die at the start of a branch (the
-  arm of a `match`, a branch of an `if`: values another branch uses and
-  this one does not, which the code after it does not use), lean2rr
+  that may hold a resource (by the rule of the borrow emulation,
+  `mayHoldAt`: in a program that does not cast, the flow analysis, which
+  follows closures, thunks and tasks, so one of them counts only when it
+  may have captured a resource; in a program that casts, the type rule,
+  where every closure, thunk and task counts) die at the start of a branch
+  (the arm of a `match`, a branch of an `if`: values another branch uses
+  and this one does not, which the code after it does not use), lean2rr
   releases them there itself with `l2r_release_after`, newest binding
-  first. The scrutinee `s` of a `match`, when it may hold such a thing and
+  first. The scrutinee `s` of a `match`, when it may hold a resource and
   dies in the match: in an arm that reads none of its fields it goes with
   the others, first in a constructor's arm and by its own binding in the
   default arm (`_`); in an arm that reads a field (a scalar field too) it
-  goes after the others, when a field the arm does not read may hold such
-  a thing. In branches nested in a constructor's arm, `s` counts as bound
-  at the `match`. Examples (test `RtDropArmOrder`): two handles that die
-  at a branch start close `21`, three `321`; two unresolved promises run
-  their `sync` printers `p2` then `p1`; a scrutinee holding a handle `S`
-  in a field the arm does not read, the arm reading its `Nat` (or
-  `UInt64`) field, with two other handles, closes `21S` (`1S` with one);
-  an arm that reads no field `S21`; a default arm on such a scrutinee
-  bound first `21S`; a loop's exit `N1N2` for its parameters `a = N2`,
-  `b = N1`; a field converted to its own type `BA`; a closure holding
-  handle `C`, bound before the scrutinee, `1CS` in an arm that reads a
-  field and `SC1b` in one that does not.
+  goes after the others, when a field the arm does not read may hold a
+  resource (the same rule). In branches nested in a constructor's arm, `s`
+  counts as bound at the `match`. Examples (test `RtDropArmOrder`): two
+  handles that die at a branch start close `21`, three `321`; two
+  unresolved promises run their `sync` printers `p2` then `p1`; a
+  scrutinee holding a handle `S` in a field the arm does not read, the arm
+  reading its `Nat` (or `UInt64`) field, with two other handles, closes
+  `21S` (`1S` with one); an arm that reads no field `S21`; a default arm
+  on such a scrutinee bound first `21S`; a loop's exit `N1N2` for its
+  parameters `a = N2`, `b = N1`; a field converted to its own type `BA`; a
+  closure holding handle `C`, bound before the scrutinee, `1CS` in an arm
+  that reads a field and `SC1b` in one that does not.
 - **How:** a step of the core over the generated functions, right after
   `Outline` and before the optional passes over them
   (`LoweredProgram.armRelease`, in `Main.lean`). It computes Reussir's
@@ -184,16 +199,20 @@ runtime.
   each declaration in binding order (`armBinders`: a `let` where it is
   bound, the fields of a `cases` at its alternative's start in field
   order, a join point's parameters after its continuation, since lean2rr
-  can copy the body to a jump there) and keeps those whose mono type may
-  hold something whose release shows (`mayHoldRelease`: `mayHoldResource`
-  with closures, thunks and tasks counted) and that are not lent
+  can copy the body to a jump there) and keeps those that may hold a
+  resource (`mayHoldAt`: the flow analysis' answer for the binder,
+  `LowerCtx.resourceHeld?`, in a program that does not cast, which knows
+  every binder of the lowered declarations; the type rule `mayHoldRelease`,
+  `mayHoldResource` with closures, thunks and tasks counted, in one that
+  casts) and that are not lent
   (`borrowInfo`: whoever lent them releases them); every lookup of such a
   variable records the Reussir name it gives, with the variable's order
   (`noteVarUse`), so the names lean2rr gives a variable later (a field
   converted to its own type, a field `lazy-fields` binds where it is
   used, a join point's parameter at an inlined jump, a state machine's
   slot bound again) keep its place; and each `match` arm on such a value
-  records which binders may hold such a thing (`noteArmFields`). A
+  records which binders may hold a resource (`noteArmFields`, the same
+  rule). A
   release is an ordinary consuming use, so Reussir adds no release of
   its own: no double release. Once the step releases a scrutinee in one
   arm, Reussir borrows it for the whole `match` and releases it, with the
@@ -232,10 +251,19 @@ runtime.
   had made Reussir borrow the scrutinee, Reussir released the closure
   first (`CS1b`, natively `SC1b`). Hence the order by Lean variable and
   the closures, thunks and tasks among the recorded values (all in the
-  test).
+  test). They were first recorded by type, every closure, thunk and task
+  whatever it held; the order of a value that holds no resource does not
+  show (but for a pure task, below), and the extra releases changed hot
+  code: in the regex benchmarks' VM step (`eachStepChar.go`) the release
+  of a closure in the exit arm kept a projection (`let x = s.4`) above
+  the match on every step, where `sink-proj` had moved it into the arms,
+  and the backtracker's `pushNext` got two releases in its `_` arm
+  (review of the regex benchmarks' code after timing run 17). Since then
+  the recorded set follows the rule of the borrow emulation.
 - **Where:** `Emit/ArmRelease.lean` (`goBlock`, `goMatch`, `Pos`,
   `Info.key`, `LoweredProgram.armRelease`); `Lower/Borrow.lean`:
-  `armReleaseVars`, `armBinders`, `mayHoldRelease`, `noteArmFields`;
+  `armReleaseVars`, `armBinders`, `mayHoldAt`, `mayHoldRelease`,
+  `noteArmFields`;
   `LowerBase.lean`: `noteVarUse`, `LowerState.armVars`, `armNames`,
   `armFields`; the lookups in `Lower/Decls.lean` (`lowerArg`,
   `applyChain`), `Lower/Values.lean`, `Lower/Code.lean` (`return`,
@@ -258,7 +286,11 @@ runtime.
   the scrutinee as bound there, natively its index at the join point;
   natively the scrutinee and the first field projected in a constructor's
   alternative have one index, so their order when both die at a nested
-  branch's start is not specified (lean2rr: the field first). A
+  branch's start is not specified (lean2rr: the field first). In a
+  program that does not cast, a pure task that holds no resource is not
+  recorded, so where it dies at an arm's start with other values its
+  release keeps Reussir's place (its release time is lean2rr's anyway:
+  plan §10, "Release time of pure tasks"). A
   structure that `flatten-structs` splits into its fields holds nothing
   whose release shows (the flow analysis follows closures, thunks and
   tasks, and so does the type rule of a program that casts,

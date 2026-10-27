@@ -44,9 +44,11 @@ at an arm's start are those that the other arms use and this one does
 not, and that the code after the `if` or `match` does not use. Of these it
 takes the recorded ones (`LoweredProgram.armNames`: every name the
 lowering gave a variable of `armReleaseVars`, Lower/Borrow, one that may
-hold a resource, or a closure, a thunk or a task, which may hold one, and
-that the code owns), and releases them at the arm's start, newest first,
-when there are at least two. Order: each name has its Lean variable's
+hold a resource by the rule of the borrow emulation, `mayHoldAt`: the flow
+analysis, which follows closures, thunks and tasks, or in a program that
+casts the type, where every closure, thunk and task may; and that the code
+owns), and releases them at the arm's start, newest first, when there are
+at least two. Order: each name has its Lean variable's
 binding order (its place in the declaration's code, the order of native
 Lean's indices), also a name lean2rr gives the variable later (a field
 converted to its own type, a field `lazy-fields` binds where it is used, a
@@ -63,14 +65,16 @@ The scrutinee `s` of a `match`, when it is recorded and dies in the match:
   arm (before the arm's own releases), which is native's order in a
   constructor's arm;
 - in an arm that reads a field, it is released after the others, when a
-  field the arm does not read may hold something whose release shows
+  field the arm does not read may hold a resource
   (`LoweredProgram.armFields`; otherwise its release frees nothing that
   shows).
 Once an arm releases `s` itself, Reussir borrows it for the whole `match`
 and releases it with the other values that die in each arm that does not
 use it, oldest first: so then `s` is ordered in every arm where it dies with
-another recorded value. The values that are not recorded hold nothing whose
-release shows (or someone else holds them), so their order does not matter.
+another recorded value. The values that are not recorded hold no resource
+(or someone else holds them), so their order does not show, but for a pure
+task, whose release time is lean2rr's (plan §10, "Release time of pure
+tasks"; it is recorded only in a program that casts, by type).
 
 The optional passes after it keep the order: `sink-proj` moves a
 structure's projection into the branches that use the projected value, and

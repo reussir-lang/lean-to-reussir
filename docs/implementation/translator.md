@@ -220,8 +220,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
     (`mayHoldResource`, `resourceTypeCache`, for `unread-fields`), also
     through closures, thunks and tasks (`mayHoldRelease`, one function with
     a table of its own, `releaseTypeCache`, for `flatten-structs`' type
-    rule and the lowering of borrowed arguments, `keepsAt`, both in a
-    program that can cast, and the release order at a branch's start). It
+    rule, the lowering of borrowed arguments, `keepsAt`, and the release
+    order at a branch's start, all in a program that can cast). It
     is a reachability through array elements and
     constructor fields with one visited set per question, as rule 4's
     `mayHoldFn`: each type is looked at once per question, a `true` is

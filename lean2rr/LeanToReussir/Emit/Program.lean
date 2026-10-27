@@ -396,9 +396,9 @@ structure LoweredProgram where
   stepItems : Array RR.Item := #[]
   /-- What the lowering recorded for the release order at the start of a
   branch (Emit/ArmRelease): the Reussir names of the variables that may
-  hold something whose release shows, with their types and binding order
+  hold a resource (`mayHoldAt`), with their types and binding order
   (`LowerState.armNames`), and which binders of a match arm on such a value
-  may hold such a thing (`LowerState.armFields`). -/
+  may hold one (`LowerState.armFields`). -/
   armNames : Std.HashMap String (RR.Ty × Nat) := {}
   armFields : Std.HashMap (String × String) (Array Bool) := {}
 
@@ -541,7 +541,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
   let erased ← flowAnalysis decls casts.isSome inits
-  -- The borrow emulation's question, in a program that makes resources and
+  -- The question of the borrow emulation and of the release order at a
+  -- branch's start (`mayHoldAt`), in a program that makes resources and
   -- does not cast: which binders may hold a resource, by the flow analysis
   -- that guards flatten-structs, run on the declarations lowered here
   -- (after flatten-structs and the other passes; `LowerCtx.resourceHeld?`).

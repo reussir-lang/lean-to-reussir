@@ -88,9 +88,11 @@ and several optional passes help token reuse (see
   fields, and last in an arm that reads a field. Reussir releases them
   the oldest first, and the matched value first. So for a program that
   creates resources, lean2rr releases such values itself, in Lean's
-  order (`l2r_release_after`). It does this after `Outline`, on the
-  generated code, with Reussir's liveness: two handles that die at the
-  start of a branch close `21`, as natively, not `12`.
+  order (`l2r_release_after`). It does this only for the values that can
+  hold a resource, by the same rule as for borrowed parameters. The step
+  runs after `Outline`, on the generated code, with Reussir's liveness:
+  two handles that die at the start of a branch close `21`, as natively,
+  not `12`.
 - **`Runtime.forget`.** The value is never released, as natively: the
   call keeps its reference until the process ends (`std::mem::forget`). So
   a forgotten promise stays unresolved, a forgotten task still runs, and a

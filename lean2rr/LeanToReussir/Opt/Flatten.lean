@@ -2213,6 +2213,9 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (De
   let jpSlotDecls := st.slots.fold (init := ({} : NameSet)) fun acc s _ =>
     match s with | .jp n .. => acc.insert n | _ => acc
   let mut out := #[]
+  -- The declarations rewritten here (for the borrow emulation's check,
+  -- `flattenRewritten`): workers, wrappers, code changed in place.
+  let mut rewritten : NameSet := {}
   for d in decls do
     let some f := facts[d.name]? | out := out.push d; continue
     let .code body := d.value | out := out.push d; continue
@@ -2223,6 +2226,8 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (De
       f.calls.toList.any (fun (_, g) => workers.contains g) ||
       f.ctorLets.toList.any (fun (x, cl) => cl.alias.isNone && !cl.const && !st.built.contains (d.name, x))
     unless touched do out := out.push d; continue
+    rewritten := rewritten.insert d.name
+    if let some w := workers[d.name]? then rewritten := rewritten.insert w
     let result := st.results[d.name]?
     let origRes := (splitArrows d.type d.params.size).2
     let resTy := match result with | some rs => tupleTyOf rs | none => origRes
@@ -2278,6 +2283,7 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (De
       out := out.push { d with params := wps, value := .code wbody.1 }
     | none =>
       out := out.push { d with params, type := ty, value := .code body' }
+  flattenRewritten.set rewritten
   if timing then
     IO.eprintln s!"flatten: {decls.size} declarations: collect {t1 - t0} ms, analysis {t2 - t1} ms, rewrite {(← IO.monoMsNow) - t2} ms"
   return out

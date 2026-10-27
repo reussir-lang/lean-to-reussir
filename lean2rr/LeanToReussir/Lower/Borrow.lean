@@ -281,10 +281,10 @@ mixes two environments. -/
 initialize resourceTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
 /-- The answers of `mayHoldResource` with `closures` (`mayHoldRelease`), as
-`resourceTypeCache`'s: flatten-structs' type rule (in a program that casts),
-the release order at a branch's start (`armReleaseVars`, `noteArmFields`)
-and, in a program that casts, the lowering of borrowed arguments
-(`keepsAt`) ask it. -/
+`resourceTypeCache`'s: in a program that casts, flatten-structs' type rule,
+the lowering of borrowed arguments (`keepsAt`) and the release order at a
+branch's start (`armReleaseVars`, `noteArmFields`), the last two through
+`mayHoldAt`, ask it. -/
 initialize releaseTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
 /-- Whether a value of mono type `e` may hold a resource with an
@@ -366,6 +366,31 @@ shows: a resource (`mayHoldResource`), or a closure, a thunk or a task, which
 may hold one (`mayHoldResource` does not look into them). -/
 def mayHoldRelease (e : Expr) : CoreM Bool := mayHoldResource e (closures := true)
 
+/-- Whether binder `x` (of mono type `ty`) of declaration `decl`, a
+declaration that is lowered, may hold a resource whose release shows: the
+rule of the borrow emulation (`keepsAt`) and of the release order at the
+start of a branch (`armReleaseVars`, `noteArmFields`). In a program that
+does not cast, by the flow analysis (`LowerCtx.resourceHeld?`): it ran on
+the lowered declarations and walked every binder of their code (their
+parameters, `let`s, local functions and their parameters, join points'
+parameters, the fields of `cases`); a binder without a node there has a
+type that cannot carry a resource (`ResourceFlow.mayCarry`). It follows
+closures, thunks and tasks, so a closure or a task that captured a handle
+may hold one and one that captured none does not. In a
+program that casts, by type (`mayHoldRelease`: every closure, thunk and
+task may). -/
+def mayHoldAt (decl : Name) (x : FVarId) (ty : Expr) : LowerM Bool := do
+  match (← read).resourceHeld? with
+  | some held => return held.contains (decl, x)
+  | none => mayHoldRelease ty
+
+/-- The declarations that flatten-structs (Opt/Flatten, `Flatten.run`)
+rewrote in this process' program (one program per process: `Main.lean`,
+`run`): its workers (`f._l2r_flat`), their wrappers and every other
+declaration whose code it changed; empty when the pass is off. `keepsAt`
+checks that it keeps no argument passed to one of their parameters. -/
+initialize flattenRewritten : IO.Ref NameSet ← IO.mkRef {}
+
 /-- The binders of code `c` with their mono types, in binding order: a
 `let` before its continuation, the fields a `cases` binds before its
 alternative's code, in field order, a local function (a closure) before
@@ -387,19 +412,25 @@ partial def armBinders (c : Code .pure) (acc : Array (FVarId × Expr)) : Array (
   | _ => acc
 
 /-- For the release order at the start of a branch (Emit/ArmRelease): the
-variables of the program that may hold something whose release shows
-(`mayHoldRelease` of their mono type) and that their code owns, not those it
-only borrows (`borrowInfo`'s lent variables: whoever lent them releases
-them, so their release by this code is never the last one), each with its
-binding order: its position in `armBinders` of its declaration (after the
-declaration's parameters), the order of native Lean's binding indices
-(`ExplicitRC`), on which the variables that lean2rr binds again (a field
-converted to its own type, a field a `lazy-fields` match binds later, a
-join point's parameter at an inlined jump) keep their place. Empty in a
-program that makes no resources (`programMakesResources`: `borrowInfo` then
-has no borrow flags, while it has them for every declaration with code,
-`main` included, in one that does). Computed once, before the declarations
-are lowered (`LowerState.armVars`). -/
+variables of the program that may hold a resource (`mayHoldAt`, the rule of
+`keepsAt`: in a program that does not cast, the flow analysis, so a closure,
+thunk or task that holds no resource is left out; in one that casts, the
+type rule, closures, thunks and tasks included) and that their code owns,
+not those it only borrows (`borrowInfo`'s lent variables: whoever lent them
+releases them, so their release by this code is never the last one), each
+with its binding order: its position in `armBinders` of its declaration
+(after the declaration's parameters), the order of native Lean's binding
+indices (`ExplicitRC`), on which the variables that lean2rr binds again (a
+field converted to its own type, a field a `lazy-fields` match binds later,
+a join point's parameter at an inlined jump) keep their place. The release
+order of a value that holds no resource does not show, but for a pure task
+(dropped before it ran, it is deleted where lean2rr releases it, plan §10,
+"Release time of pure tasks"), which is ordered only in a program that
+casts, as `keepsAt` keeps it only there. Empty in a program that makes no
+resources (`programMakesResources`: `borrowInfo` then has no borrow flags,
+while it has them for every declaration with code, `main` included, in one
+that does). Computed once, before the declarations are lowered
+(`LowerState.armVars`). -/
 def armReleaseVars : LowerM (Std.HashMap FVarId Nat) := do
   let (flags, lent) ← borrowInfo
   if flags.isEmpty then return {}
@@ -409,33 +440,33 @@ def armReleaseVars : LowerM (Std.HashMap FVarId Nat) := do
     let .code c := d.value | continue
     for (x, ty) in armBinders c (d.params.map fun p => (p.fvarId, p.type)) do
       k := k + 1
-      if !lent.contains x && (← mayHoldRelease ty) then out := out.insert x k
+      if !lent.contains x && (← mayHoldAt d.name x ty) then out := out.insert x k
   return out
 
 /-- For the release order at the start of a branch (Emit/ArmRelease):
 which binders of the arm of variant `variant` of a `match` on `scrut` (the
-Reussir name of Lean variable `discr`) may hold something whose release
-shows (`mayHoldRelease`), recorded (`LowerState.armFields`) when the matched
-value may (`armVars`).
+Reussir name of Lean variable `discr`, in the code of declaration `decl`)
+may hold a resource (`mayHoldAt`, as `armReleaseVars`), recorded
+(`LowerState.armFields`) when the matched value may (`armVars`).
 The arm's fields are `ps`, at the binder positions `fields` gives
 (`CtorLayout.fields`); a hidden field (an entry after the last of `ps`,
 `IO.Process.Child`'s) counts as one that may. -/
-def noteArmFields (discr : FVarId) (scrut variant : String) (ps : Array (Param .pure))
+def noteArmFields (decl : Name) (discr : FVarId) (scrut variant : String) (ps : Array (Param .pure))
     (fields : Array (Option (Nat × RR.Ty))) (nbinders : Nat) : LowerM Unit := do
   unless (← getPart (·.armVars.contains discr)) do return
   let mut flags := Array.replicate nbinders false
   for h : i in [:fields.size] do
     if let some (j, _) := fields[i] then
       let may ← match ps[i]? with
-        | some p => mayHoldRelease p.type
+        | some p => mayHoldAt decl p.fvarId p.type
         | none => pure true
       if may then flags := flags.set! j true
   modify fun s => { s with armFields := s.armFields.insert (scrut, variant) flags }
 
 /-- Whether an argument passed to parameter `p` of declaration `f`, which
 Lean borrows, is kept until the call returns: when the parameter may hold
-a resource. In a program that does not cast, by the flow analysis that
-guards flatten-structs, run on the lowered declarations
+a resource (`mayHoldAt`). In a program that does not cast, by the flow
+analysis that guards flatten-structs, run on the lowered declarations
 (`LowerCtx.resourceHeld?`): it follows closures, thunks and tasks, so a
 `Thunk IO.FS.Handle`, an `IO.FS.Stream` over a file or a callback that
 captured a handle is kept, as natively, and a value that holds none is
@@ -452,14 +483,30 @@ reader flatten-structs splits, overflowed the stack: test
 resource, which nobody can tell, but a pure task: its release time is
 lean2rr's (plan §10, "Release time of pure tasks"). In a program that casts
 (no flow analysis), by type (`mayHoldRelease`), as flatten-structs decides
-there: what it may split holds nothing that the type rule counts. A
-declaration the analysis did not see (none at present: it runs on the
-declarations that are lowered) falls back to the type rule. -/
+there: what it may split holds nothing that the type rule counts.
+
+This relies on an assumption that the two flow runs (flatten-structs' on
+its input, this one on its output) agree: every parameter that this run
+finds holding a resource belongs to a declaration that flatten-structs left
+alone, so Lean's inference saw Lean's code there. It is checked here: a
+kept parameter of a declaration that flatten-structs rewrote (a worker, a
+wrapper, a declaration whose code it changed: `flattenRewritten`) is an
+internal error.
+
+`f` is always a lowered declaration: the callers ask only about callees
+with borrow flags (`borrowInfo`), which the inference computed on the
+lowered declarations, the ones the flow analysis ran on, and they look up
+`f`'s parameters there first. The type rule for any other `f` is
+unreachable; it stays as a safe default. -/
 def keepsAt (f : Name) (p : Param .pure) : LowerM Bool := do
-  let ctx ← read
-  match ctx.resourceHeld? with
-  | some held => if ctx.decls.contains f then return held.contains (f, p.fvarId) else mayHoldRelease p.type
-  | none => mayHoldRelease p.type
+  -- Unreachable (see above): a safe default.
+  unless (← read).decls.contains f do return ← mayHoldRelease p.type
+  let keep ← mayHoldAt f p.fvarId p.type
+  if keep && (← flattenRewritten.get).contains f then
+    throwError "lean2rr: the borrow emulation would keep the argument of parameter {p.binderName} of {f}, \
+      which may hold a resource, but flatten-structs rewrote {f}, so Lean's borrow inference did not see \
+      Lean's code there (Lower/Borrow, keepsAt; translation plan §5.8); internal error"
+  return keep
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the

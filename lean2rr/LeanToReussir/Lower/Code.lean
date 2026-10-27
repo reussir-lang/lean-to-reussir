@@ -723,7 +723,7 @@ mutual
             let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
                                     shared := info.shape == .enum, view := view.isSome }
             let (armBinders, armCtx) ← H.enumFields ctx' arm binders
-            noteArmFields cs.discr scrut layout.variant ps layout.fields armBinders.size
+            noteArmFields ctx.decl cs.discr scrut layout.variant ps layout.fields armBinders.size
             let (pre, armCtx) ← H.armPrelude armCtx arm armBinders
             -- The fields bound by the match, at their parameters' own types
             -- (`bindField`); a hook may have left some to be bound later

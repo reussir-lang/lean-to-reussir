@@ -2032,8 +2032,9 @@ Rules:
   field at its type arguments, so not a `List Nat`, although its one
   Reussir type holds `Box`es). `flatten-structs` leaves alone the
   declarations whose parameters may hold one, so there the inference sees
-  Lean's code; elsewhere lean2rr's code can differ (a split structure has
-  no constructor) and the inference can take borrowed a parameter that
+  Lean's code (checked: a kept parameter of a declaration that the pass
+  rewrote is an internal error); elsewhere lean2rr's code can differ (a
+  split structure has no constructor) and the inference can take borrowed a parameter that
   native Lean takes owned, so keeping such an argument would only break a
   tail call that native Lean makes (a cycle of tail calls that passes a
   new value stored in a structure whose reader is split):
@@ -2075,10 +2076,12 @@ Rules:
   creates resources, a step of the core after `Outline`
   (Emit/ArmRelease) releases them with `l2r_release_after` at the arm's
   start in native's order, where two or more values that may hold a
-  resource (decided as for borrowing, on mono types, but with closures,
-  thunks and tasks counted as values that may hold one) and that the code
-  owns die there, and puts the scrutinee last where the arm reads a field
-  and a field it does not read may hold a resource. The step computes
+  resource (decided as for borrowing: by the flow analysis, which counts a
+  closure, a thunk or a task only when it may have captured one, or, in a
+  program that casts, by mono type, where every closure, thunk and task
+  counts) and that the code owns die there, and puts the scrutinee last
+  where the arm reads a field and a field it does not read may hold a
+  resource. The step computes
   Reussir's liveness on the generated code, so it holds for join points
   (J1, J1′, J2, J3), state machines (J4), outlined parts and the other
   passes' code alike; every name lean2rr gives a Lean variable (a field
@@ -3475,7 +3478,8 @@ Each item says what differs and when.
   reads only `j.n` before a wait: natively the caller keeps `j`, and its
   task, until `report` returns; the emulation of borrowed parameters keeps
   only values that may hold a resource, a pure task only in a program that
-  makes resources and casts, by type, §5.8 and the item above);
+  makes resources and casts, by type, §5.8 and the item above, and so
+  does the release order at the start of a branch);
   `flatten-structs`
   splits a structure into its fields, and Reussir releases a task field
   that a path does not use at the start of that path (a loop's exit, a
