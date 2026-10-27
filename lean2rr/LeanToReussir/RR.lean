@@ -147,6 +147,20 @@ instance : Inhabited Block := ⟨⟨#[], .unitVal⟩⟩
 
 def Block.ofExpr (e : Expr) : Block := ⟨#[], e⟩
 
+/-- Identifier tokens of an atom's text (`x == k`, `i + one`): atoms can
+mention variables. A token that starts with a digit (`1u64`, `0x1f`) is a
+number, not a name. -/
+def atomIdents (t : String) : Array String := Id.run do
+  let mut out := #[]
+  let mut cur := ""
+  for c in t.toList do
+    if c.isAlphanum || c == '_' then cur := cur.push c
+    else
+      if !cur.isEmpty then out := out.push cur
+      cur := ""
+  if !cur.isEmpty then out := out.push cur
+  return out.filter fun s => !(s.front.isDigit)
+
 /-- A top-level item. -/
 inductive Item where
   /-- `enum [value]? Name { v1(T, …), v2, … }` -/

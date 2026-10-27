@@ -35,11 +35,16 @@ analysis), computed here while they are generated (`Finish.finishLive`):
 The `Box` enum and the function-value enums keep every variant registered:
 only arms and functions go. Every other match (persist walks, typed code's
 own unboxing in line) keeps all its arms, and every arm of a function
-reached counts. A variant that only text names (raw items, atoms) counts as
-made. A removed arm matches a variant no running code builds, so the program
-computes the same results; an extern that only a removed arm would call is
-not reported as missing. Without the pass, every helper requested is
-generated with every arm.
+reached counts. A variant of a function-value enum (`L2RFn_…`) that only
+text names (raw items, atoms) counts as made (`textRefs`). A payload of
+`Box` counts as made only where a box construction names its number
+(`exprRefs`: `l2r_any_of(x, n)` and its kin); no raw text builds one (the
+entry point and the startup chain leave every conversion to generated
+functions: `l2r_mk_args`, `l2r_main_code`, `l2r_init_put_N`,
+`l2r_err_string`). A removed arm matches a variant no running code builds,
+so the program computes the same results; an extern that only a removed
+arm would call is not reported as missing. Without the pass, every helper
+requested is generated with every arm.
 -/
 
 namespace LeanToReussir

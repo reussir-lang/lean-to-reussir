@@ -170,7 +170,7 @@ schedules native Lean can produce. See
 - **Child processes.** `IO.Process.output` reads both pipes together.
   Natively `Child.pid` leaks the child's pipes; lean2rr closes them.
 
-## Casts that read addresses
+## Casts
 
 `unsafeCast` of an object to a number natively gives its address, which
 changes on every run. lean2rr gives a deterministic word with the
@@ -179,6 +179,12 @@ objects, the low bits of the value for a big number. A cast with no native
 meaning (a number read as a constructor with fields) panics with `INTERNAL
 PANIC: unreachable code has been reached`, where native Lean crashes or reads
 garbage.
+
+A value can be read as another inductive whose constructor reads fewer
+fields. When such a value is unique, native Lean reuses its cell and does
+not release the fields that the other constructor does not read. A file
+handle in such a field stays open until the program ends. lean2rr releases
+all the fields of the value.
 
 ## Limits
 

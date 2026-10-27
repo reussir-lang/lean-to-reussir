@@ -16,7 +16,10 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 /-- The `let` binding the matched variable again, to its constructor, in an
-alternative of a constructor without fields that uses it. -/
+alternative of a constructor without fields that uses it (`binders` has one
+entry per field of the matched record: for a view, a cast value matched as
+another type, the source constructor's, which may have fields that the
+target constructor does not read). -/
 def nullaryPrelude (ctx : CodeCtx) (arm : CasesArm) (binders : Array (Option String)) :
     LowerM (ArmLets × CodeCtx) := do
   unless binders.isEmpty && hasFVar arm.discr arm.code do return (#[], ctx)

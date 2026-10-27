@@ -115,7 +115,9 @@ also when no Lean code reads them:
 The pass does nothing in a program that can read a value as another type
 (`unsafeCast` in the program's own code). In a program whose kept code
 makes tasks, it replaces a value only when it cannot hold a task, nor can
-the values that a closure holds. In a program whose kept code opens files or
+the values that a closure holds. This rule also applies to a value that a
+partial application gives to an unused parameter, because the closure
+holds that value. In a program whose kept code opens files or
 starts processes, it replaces no value that may hold a file handle or a
 process: a handle that is released earlier is flushed and closed
 earlier. A pass over the kept code follows where such values can go. The startup steps of the program, `Init` and

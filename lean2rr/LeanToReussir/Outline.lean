@@ -77,20 +77,7 @@ structure Limits where
   left in place. -/
   minRest : Nat := 16
 
-/-- Identifier tokens of an atom's text (`x == k`, `i + one`): atoms can
-mention variables. -/
-def atomIdents (t : String) : Array String := Id.run do
-  let mut out := #[]
-  let mut cur := ""
-  for c in t.toList do
-    if c.isAlphanum || c == '_' then cur := cur.push c
-    else
-      if !cur.isEmpty then out := out.push cur
-      cur := ""
-  if !cur.isEmpty then out := out.push cur
-  return out.filter fun s => !(s.front.isDigit)
-
-/-- Free variables, in order of first use. -/
+/-- Free variables, in order of first use (an atom's names: `atomIdents`). -/
 structure Fvs where
   order : Array String := #[]
   seen : Std.HashSet String := {}

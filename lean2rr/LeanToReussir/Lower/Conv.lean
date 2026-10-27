@@ -354,19 +354,23 @@ def zeroFinite (t : RR.Ty) : LowerM Bool := do
 /-- The box of constant `v : t` (a call of a nullary declaration, or a
 literal), built once and kept in a once-cell (`cafAccessor`, without the
 walk for tasks: the constant's own accessor walked its value): the
-accessor `l2r_boxed_N`, one per constant and type. -/
-def boxedConst (v : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
-  let key := match v with
-    | .call f _ _ => s!"{f}:{t.enc}"
-    | .atom a => s!"#{a}:{t.enc}"
-    | _ => ""
-  if let some f ← getPart (·.boxedConstFns[key]?) then return .call f #[] #[]
+accessor `l2r_boxed_N`, one per constant and type. The key is the called
+function or the literal's text, so only a call without arguments (the
+only call `closedLetValue` gives) or a literal is cached; for any other
+value, `none` (the caller boxes it in line). -/
+def boxedConst (v : RR.Expr) (t : RR.Ty) : LowerM (Option RR.Expr) := do
+  let key? : Option String := match v with
+    | .call f #[] #[] => some s!"{f}:{t.enc}"
+    | .atom a => some s!"#{a}:{t.enc}"
+    | _ => none
+  let some key := key? | return none
+  if let some f ← getPart (·.boxedConstFns[key]?) then return some (.call f #[] #[])
   let f ← fresh "l2r_boxed_"
   modify fun s => { s with boxedConstFns := s.boxedConstFns.insert key f }
   let body : RR.Block := ⟨#[("c", some t, v)], ← boxValue (.var "c") t⟩
   let items ← cafAccessor f RR.Ty.box body (walk := false)
   modify fun s => { s with fns := s.fns ++ items }
-  return .call f #[] #[]
+  return some (.call f #[] #[])
 
 /-- `e : t` boxed (the box API's `boxValue`), as native Lean boxes:
 - a placeholder of `t` (`zeroValue`: Lean's `box(0)` read at `t`) is
@@ -391,7 +395,7 @@ def boxOf (e : RR.Expr) (t : RR.Ty) : LowerM RR.Expr := do
     if (← getPart (·.zeroFns[t]?)) == some f then return ← boxZero
   if let some v := bound then
     if (← read).boxedConsts && !(← getPart (·.inConstBody)) && (← boxAllocates t) then
-      return ← boxedConst v t
+      if let some b ← boxedConst v t then return b
   boxValue e t
 
 /-- Unwrap a `Box` at Reussir type `t`, fixed by the Lean types (the box

@@ -6,11 +6,12 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 /-- `f` folded over the free occurrences of variable names in an RR
-expression/block, in the order in which they occur in its text. -/
+expression/block, in the order in which they occur in its text (also the
+names an atom's text mentions, `RR.atomIdents`). -/
 partial def rrFoldFree {α : Type} (f : α → String → α) (e : RR.Expr) (bound : Std.HashSet String) (acc : α) : α :=
   match e with
   | .var n => if bound.contains n || n.startsWith "L2RUnit" then acc else f acc n
-  | .atom _ => acc
+  | .atom t => (RR.atomIdents t).foldl (fun acc n => if bound.contains n then acc else f acc n) acc
   | .call _ _ args => args.foldl (fun acc a => rrFoldFree f a bound acc) acc
   | .apply fn a => rrFoldFree f a bound (rrFoldFree f fn bound acc)
   | .ctor _ _ args => args.foldl (fun acc a => rrFoldFree f a bound acc) acc
@@ -664,16 +665,22 @@ mutual
       let some info := (← get).typeInfos[tn]?
         | throwError "lean2rr: cases on non-nominal type {tn} ({cs.typeName})"
       -- The alternatives' constructors, at each constructor position of
-      -- the matched type, and their layouts over its records.
-      let (actors, layoutOf) ← match view with
-        | none => pure (info.ctorOrder, fun c => info.ctors.find? c)
+      -- the matched type, and their layouts over its records; for a view,
+      -- also the number of fields of the record each one matches (the
+      -- source constructor's, which can hold fields the target
+      -- constructor does not read, `castFieldMap`).
+      let (actors, layoutOf, viewRecordSize) : Array Name × (Name → Option CtorLayout) × (Name → Option Nat) ←
+        match view with
+        | none => pure (info.ctorOrder, fun c => info.ctors.find? c, fun _ => none)
         | some dn =>
           let some di := (← get).typeInfos[dn]? | throwError "lean2rr: no type {dn}"
           let mut m : NameMap CtorLayout := {}
+          let mut sizes : NameMap Nat := {}
           for (sc, dc) in info.ctorOrder.zip di.ctorOrder do
             if let (some sl, some dl) := (info.ctors.find? sc, di.ctors.find? dc) then
               m := m.insert dc (← viewLayout sc dc sl dl)
-          pure (di.ctorOrder, fun c => m.find? c)
+              sizes := sizes.insert dc (sl.fields.filter (·.isSome)).size
+          pure (di.ctorOrder, fun c => m.find? c, fun c => sizes.find? c)
       match info.shape with
       | .struct =>
         let some alt := cs.alts[0]? | throwError "lean2rr: empty cases"
@@ -696,7 +703,12 @@ mutual
           match altFor ctor with
           | some (.alt _ ps k _) =>
             let mut ctx' := ctx
-            let mut binders := Array.replicate (layout.fields.filter (·.isSome)).size (none : Option String)
+            -- One binder per field of the record (`_` where no parameter
+            -- reads it), so the hooks see the record's own number of
+            -- fields (Opt/NullaryScrutinee rebuilds a value only when its
+            -- record has none).
+            let nrec := (viewRecordSize ctor).getD (layout.fields.filter (·.isSome)).size
+            let mut binders := Array.replicate nrec (none : Option String)
             for h : i in [:ps.size] do
               let p := ps[i]
               match layout.fields[i]? with

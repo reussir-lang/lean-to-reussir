@@ -18,7 +18,14 @@ values"); divergences in
   then other scalars by decreasing size: Lean's `getCtorLayout`), not the
   same declaration position. Same-size scalars are reinterpreted. A field
   that reads data the source does not have (or part of a scalar) makes the
-  pair non-isomorphic.
+  pair non-isomorphic. Scalar slots are paired by their offset within the
+  scalar area and `usize` slots by their index among the `usize` fields,
+  without the constructors' numbers of object fields, where natively the
+  offset counts from the first field (`8 * numObjs + off`): the two differ
+  only where native's read is undefined (`S3.d (s : String) (x : UInt8)`
+  read as `T3.d (x : UInt8)`: lean2rr reads `S3`'s `x`; native reads the
+  object field's bytes, which lean.h's assertion `offset >=
+  lean_ctor_num_objs(o) * sizeof(void*)` rejects).
 - **Why:** `S₁ {a : UInt8, b : Nat}` read as `S₂ {x : Nat, y : UInt8}` is
   natively `x = b`, `y = a` (adv4 RP4-04, ca9b64d).
 - **Where:** `Lower/Conv.lean`: `nativeSlots`, `castFieldMap`,
@@ -181,13 +188,28 @@ values"); divergences in
   enumeration as `Bool` or as one with another constructor count, is
   converted by index first; anything else is converted to the matched
   type's instance; a type without representation runs its only
-  alternative.
+  alternative. An arm's pattern has one binder per field of the source
+  constructor's record, `_` where the target constructor reads none of it
+  (a target constructor without fields reads none), so the hooks see the
+  record's own count: `nullary-scrutinee` rebuilds the matched value only
+  when the source constructor has no fields either, and `lazy-fields`
+  matches it again with the same pattern. A unique value's unread fields
+  are released where the value dies; natively Lean reuses its cell and
+  never releases them (plan §10, "Fields of a cast value that native code
+  reuses"; test `RtCastViewUnique`).
 - **Why:** The alternatives were looked up in the wrong type's
   constructors: every arm was dropped ("unreachable code"), or the program
   was rejected ("bad constructor", "cases on non-nominal type") (adv3
-  RP3-4/RP3-5, 8cf7987).
+  RP3-4/RP3-5, 8cf7987). The patterns had the target constructor's number
+  of fields, so where it reads fewer fields than the source record holds
+  (`S | a (x : Nat) | b (y : Nat)` read as `T | a | b (y : Nat)`; an
+  `Option Nat` read as a two-constructor enumeration) rrc refused the
+  program ("variant `c_a` has 1 field(s), but the pattern binds 0"), and
+  `nullary-scrutinee` rebuilt `S.a` without its field (layout hunt
+  2026-10-26, test `RtCastViewFewer`).
 - **Where:** `Lower/Values.lean`: `CastCases`, `castCases`, `viewLayout`;
-  `Lower/Code.lean`: `lowerCases`; `Lower/Hooks.lean`: `CasesArm.view`.
+  `Lower/Code.lean`: `lowerCases` (`viewRecordSize`); `Lower/Hooks.lean`:
+  `CasesArm.view`.
 - **Remove only if:** never.
 
 ### A cast with no conversion warns and panics at run time

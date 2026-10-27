@@ -93,7 +93,10 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 ### The matched value of a nullary arm is rebuilt (`nullary-scrutinee`)
 
 - **What:** In the arm of a constructor without fields, a use of the
-  matched value uses a new nullary value instead (free in Reussir).
+  matched value uses a new nullary value instead (free in Reussir). For a
+  cast value matched as another type, the arm matches the source
+  constructor, which must have no fields either
+  ([../conversions/casts.md](../conversions/casts.md#a-cases-on-a-cast-value-matches-through-the-values-own-constructors)).
 - **Why:** `leaf` reused as the children of a new node no longer keeps the
   scrutinee alive, so its cell can be reused (1146ff0).
 - **Where:** `Opt/NullaryScrutinee.lean`: `nullaryPrelude` (pins the
@@ -104,12 +107,16 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
 
 - **What:** A projection `let x = s.j` at the top of an alternative moves
   into the branches of the following `if`/`match` that use `x`, when
-  another branch keeps `s` whole.
+  another branch keeps `s` whole. A use is a variable or a name in an
+  atom's text (`RR.atomIdents`, which the outlining's free variables and
+  the lowering's `rrFoldFree` use too): atoms can name locals (today only
+  `let`s of their own block).
 - **Why:** The same phantom-donor problem as Reussir issue 1: an association-list
   update that keeps the pair whole in one branch allocated a new cons per
   element and freed the matched one after its recursive call, which was
   then no longer a tail call (adv4 PF4-10, 3e3a6aa).
-- **Where:** `Opt/SinkProj.lean`: `sinkHere`, `Block.sinkProj`.
+- **Where:** `Opt/SinkProj.lean`: `sinkHere`, `Block.sinkProj`,
+  `Expr.freeVars`; `RR.lean`: `atomIdents`.
 - **Remove only if:** the pass is off.
 
 ### A scrutinee that ends with a brace is parenthesized

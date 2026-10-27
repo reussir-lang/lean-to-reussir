@@ -127,10 +127,13 @@ where
 and the variables used in `c` outside the alternatives (of `cases` in `c`)
 that do not use `x`. The latter are the fields of `x` that must be bound
 before `c` when `x` stays live in `c`. Uses in local functions and join
-points count (conservatively). A `cases` with one alternative (a structure)
-is no branch: its code counts as the rest of `c`, since it is lowered
-without `lowerAlt`. The state caches whether a join point's body uses `x`
-(shared with `usesVarM`). -/
+points count (conservatively). A `cases` with one alternative is no
+branch: its code counts as the rest of `c`. For a structure that is
+required, since its alternative is lowered without `lowerAlt` (no pending
+field could be bound there); an enumeration's single alternative does go
+through `lowerAlt` (its arm, then the unreachable default), and counting
+its uses here only binds those fields earlier. The state caches whether a
+join point's body uses `x` (shared with `usesVarM`). -/
 partial def liveScan (jps : Std.HashMap FVarId (Code .pure)) (x : FVarId) (c : Code .pure) :
     StateM JpMemo (Bool × Std.HashSet FVarId) := do
   let inArg : Arg .pure → Bool := fun | .fvar y => y == x | _ => false

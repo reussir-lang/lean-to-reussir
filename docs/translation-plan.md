@@ -1327,7 +1327,9 @@ inductive whose constructors the matched type's read (§5.1) is matched
 through its own constructors, position by position, and each field is
 bound from the source field at the same native layout slot, at its own
 type (converted only where it is used), so the value is not converted as a
-whole:
+whole. The pattern binds the source constructor's record, `_` for a field
+that the target constructor does not read (a target constructor without
+fields reads none):
 
 ```
 match (unsafeCast x : L2) with | .cons h _ => h | .nil => 0     -- x : L1
@@ -3270,6 +3272,37 @@ Each item says what differs and when.
   canonicalizes NaN). A cast between `Float32` and `UInt32` copies the bits
   too; natively it crashes (a boxed `UInt32` is a tagged scalar, a boxed
   `Float32` a cell).
+- *Fields of a cast value that native code reuses* (§5.5): a unique value
+  matched through a view whose target constructor reads fewer fields than
+  the source constructor holds has its cell reused natively for a new
+  value, and the fields the target does not read are never released.
+  Lean's IR resets the cell with the target constructor's number of fields
+  (`scoreImpl` of test `RtCastViewUnique`: `S.b (r : IO.Ref Nat) (h :
+  IO.FS.Handle) (k : Nat)` read as `T.b (r : IO.Ref Nat)`), and the fast
+  path of the reset releases only the unread fields among those
+  (`src/lean/Lean/Compiler/LCNF/ExpandResetReuse.lean`, `mkFastPath`: one
+  `dec` per field of `mask`, which has the reset's `nFields` entries); the
+  IR then reuses the cell for the result:
+  ```
+  T.b →
+    let x_13 : tobj := proj[0] x_1;
+    block_14 (x_15 : tobj) (x_16 : u8) := …
+        setTag x_15 := 0;
+        set x_15[0] := x_17;   -- S.b's cell, its h and k still in it
+    let x_21 : u8 := isShared x_1;
+    case x_21 : u8 of
+    Bool.false → jmp block_14 x_1 x_21
+  ```
+  So a handle in field 1 stays open: its text reaches the file only when
+  the C library flushes its streams at exit (`strace`: a `write` of the
+  handle's file descriptor at exit, no `close`). lean2rr releases the
+  matched value, every field included, where it dies: the handle is closed
+  and flushed at the view (expectation files: native reads the file empty,
+  lean2rr reads the text). Lean's documentation of `unsafeCast` warns that
+  such a cast between types whose representations differ can be memory
+  unsafe, so this is not listed as a Lean bug. A value still shared at
+  the view is released later with its own layout natively too, and the
+  two agree (`RtCastViewFewer`'s `Rev`).
 - *Pointer identity and sharing* (§9) are not preserved: `ptrAddrUnsafe`
   answers the address of a value's cell in its own representation, or a
   word computed from a scalar's value, so `ptrEq`, `ptrEqList` and

@@ -15,9 +15,10 @@ open Lean Compiler LCNF
 (translation plan §5.8); returns `none` for ordinary externs. -/
 def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array RR.Expr) :
     LowerM (Option RR.Expr) := do
-  if let some e ← ctorCallbackExtern (← externSymbol orig) ret args then return some e
+  let sym ← externSymbol orig
+  if let some e ← ctorCallbackExtern sym ret args then return some e
   if let some e ← lazyExtern orig params ret args then return some e
-  if let some e ← promiseExtern (← externSymbol orig) params ret args then return some e
+  if let some e ← promiseExtern sym params ret args then return some e
   if let some e ← processExtern orig params ret args then return some e
   match orig with
   -- `IO.Process.exit : UInt8 → IO α` never returns; nor does `forceExit`,
@@ -30,7 +31,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
       .call "l2r_unreachable" #[rt] #[]⟩)
   | _ => pure ()
   -- `ptrAddrUnsafe` (see `addrOf`).
-  if (← externSymbol orig) == "lean_ptr_addr" then
+  if sym == "lean_ptr_addr" then
     let some p := params[0]? | return none
     return some (← addrOf args[0]! (← lowerType p))
   -- `dbgTraceIfShared msg a` at a Reussir shared record type
@@ -39,20 +40,19 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- which would need the record's Rust type name (clean step C7). Other
   -- types take the default path (a value type or an enumeration in a fresh
   -- wrapper, never shared).
-  if (← externSymbol orig) == "lean_dbg_trace_if_shared" then
+  if sym == "lean_dbg_trace_if_shared" then
     if let some p := params[1]? then
       let t ← lowerType p
       if ← isSharedRecordTy t then
         return some (.call "l2r_dbg_trace_if_shared_rec" #[t] #[args[0]!, args[1]!])
   -- `Lean.Name.beq`: structural equality (see `structEqFn`).
-  if (← externSymbol orig) == "lean_name_eq" then
+  if sym == "lean_name_eq" then
     let .named tn ← lowerType params[0]! | return none
     let some f ← structEqFn tn | return none
     return some (.call f #[] #[args[0]!, args[1]!])
   -- Slices (`ByteSlice.beq`, `String.Slice` hash and `<`): the runtime
   -- takes the fields — the bytes or string, start, end — of each slice.
-  let sliceSym := (← externSymbol orig)
-  if let some prim := sliceGlue? sliceSym then
+  if let some prim := sliceGlue? sym then
     let st ← lowerType params[0]!
     let .named sn := st | return none
     let some info := (← get).typeInfos[sn]? | return none
@@ -84,7 +84,7 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- `Array.mk : List α → Array α`
   -- `String.mk : List Char → String`: push the characters onto a string
   -- made at their UTF-8 size (`stringOfList`).
-  if (← externSymbol orig) == "lean_string_mk" then
+  if sym == "lean_string_mk" then
     let lt ← lowerType params[0]!
     return some (← stringOfList s!"l2r_string_of_list_{lt.render.map fun c => if c.isAlphanum then c else '_'}" lt args[0]!)
   if orig == ``Array.mk then
@@ -110,7 +110,6 @@ def customExtern (orig : Name) (params : Array Expr) (ret : Expr) (args : Array 
   -- whose boxes it reads (`check`: all immediates, or immediates and the
   -- float and `UInt64` cells), and a generated loop, element by element
   -- (`arrayMapFn`), the others.
-  let sym ← externSymbol orig
   -- With compact arrays (`compact-arrays`), an `Array UInt8` and an
   -- `Array Float` are the runtime's bytes and floats already: `mk` and
   -- `data` are the identity (natively a copy; the result is the same value).

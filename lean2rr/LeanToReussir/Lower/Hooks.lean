@@ -119,9 +119,11 @@ structure LowerHooks where
   `let`s and the context for the code. Plain: every field projected at the
   match (`bindStructFields`; Opt/LazyFields binds some later). -/
   structFields : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx) := bindStructFields
-  /-- The fields of an enum alternative, bound by the match's `binders` (at
-  record positions) and in the context: the binders and the context for the
-  code. Plain: unchanged (Opt/LazyFields unbinds some, bound later). -/
+  /-- The fields of an enum alternative, bound by the match's `binders` (one
+  per field of the matched record, at record positions; for a view, the
+  source constructor's record) and in the context: the binders and the
+  context for the code. Plain: unchanged (Opt/LazyFields unbinds some,
+  bound later). -/
   enumFields : CodeCtx → CasesArm → Array (Option String) → LowerM (Array (Option String) × CodeCtx) :=
     fun ctx _ binders => pure (binders, ctx)
   /-- `let`s before an enum alternative's code, given its binders. Plain:

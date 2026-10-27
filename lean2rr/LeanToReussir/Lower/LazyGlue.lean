@@ -276,7 +276,7 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let xTy ← pty xi
     let xt := RR.Ty.box
     let fTy ← pty fi
-    let .fn _ fRes := fTy | throwError "lean2rr: {orig} of a function of type {fTy.render}"
+    let .fn _ _ := fTy | throwError "lean2rr: {orig} of a function of type {fTy.render}"
     let applied : LowerM RR.Expr := do
       applyTo args[fi]! fTy (← lazyGet args[xi]! xTy xt) xt (if isMap then t else rt)
     let now ← if isMap then do pure (lazyDone z (← applied)) else applied
@@ -284,7 +284,6 @@ def lazyExternGlue (orig : Name) (params : Array Expr) (ret : Expr) (args : Arra
     let g := rawFnValue (.fn .unit (if isMap then t else rt)) u (.ofExpr (← applied))
     let later := RR.Expr.call (← taskNewFn z true (bind := !isMap)) #[]
       #[g, prioOf args[2]!, .atom (toString (taskKind true true))]
-    let _ := fRes
     let laterB ← taskDepend z rt later args[xi]! args[3]!
     let d ← fresh "sync"
     let cond : RR.Expr := .ite args[3]! (.ofExpr (← taskDone z args[xi]!)) (.ofExpr (.atom "false"))

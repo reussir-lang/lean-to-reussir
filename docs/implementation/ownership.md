@@ -97,8 +97,11 @@ runtime.
   arguments: `put3 a b c` releases `c`, `b`, `a`; `put4 w h1 h2 h1`
   releases `h2`, `h1`, `w`; in `own3 x y x` with the first parameter owned,
   `x` counts from its first (owned) position, so `y` goes first. A variable
-  is kept when it is passed to a borrowed parameter at any position. The
-  `_boxed` wrappers (`boxedTarget`) release last parameter first.
+  is kept when it is passed to a borrowed parameter at any position and
+  the type of the first such parameter may hold a resource
+  (`mayHoldResource`; in `own3 x y x` the type of the third parameter,
+  not of the first). The `_boxed` wrappers (`boxedTarget`) release last
+  parameter first.
 - **Why:** Lean's `ExplicitRC.addDecAfterFullApp` visits the arguments in
   order, takes each variable at its first occurrence (`isFirstOcc`) when
   some occurrence is borrowed (`isBorrowParam`), and *prepends* its `dec`

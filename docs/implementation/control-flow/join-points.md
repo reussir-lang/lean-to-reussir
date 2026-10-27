@@ -182,9 +182,10 @@ relative to `lean2rr/LeanToReussir/`. Plan
   scrutinee, a lazily bound field) captures the old names its jumps pass.
   The binders that a rebuilt matched value reads (`fresh-rebuild`) are
   recorded there too. Free variables are also found inside casts (an
-  `RR.Expr.cast` node). The captured variables come in the order of their
-  first use in the lowered body (`rrFreeVarsInOrder`), not in the order of
-  their names.
+  `RR.Expr.cast` node) and in an atom's text (the names it mentions,
+  `RR.atomIdents`; a name not in scope is not captured). The captured
+  variables come in the order of their first use in the lowered body
+  (`rrFreeVarsInOrder`), not in the order of their names.
 - **Why:** Every `Std.Http` program failed in rrc with "unknown variable"
   (round 6 IO6-14, 8f1dfa7, test `RtJpRebound`); an `IO.FS.Mode` index in
   a join point was missed inside a cast (adv2 EFF-2, aa03809); a join

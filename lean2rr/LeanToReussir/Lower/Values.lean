@@ -83,22 +83,24 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
     coerce e t rty
   | .code fn params ret keep =>
     let n := params.size
-    -- Arguments Lean lends to the callee: released after the call
-    -- (Lower/Borrow).
-    let keeps ← borrowKeeps ctx f args n
-    -- Rule 4a: the arguments of the parameters the function takes.
+    -- Rule 4a: the arguments of the parameters the function takes. A call
+    -- (`args.size ≥ n`) releases the arguments Lean lends to the callee
+    -- after it returns (`borrowKeeps`, Lower/Borrow).
     if args.size == n then
+      let keeps ← borrowKeeps ctx f args n
       let as ← lowerTaken ctx args params keep n
       coerce (← releaseAfter (.call fn #[] as) ret keeps) ret rty
     else if args.size < n then
       let supplied ← lowerTaken ctx args params keep args.size
       let target ← boxedTarget f fn params keep ret
-      let ty ← match (← read).decls.find? f with
-        | some d => some <$> lowerType d.type
-        | none => pure none
-      partialApp { id := "d" ++ target, params, ret, call := .code target, keep, ty } args.size supplied
-        rty
+      -- A `.code` callee is a declaration of `decls` (`calleeOf`).
+      let some d := (← read).decls.find? f
+        | throwError "lean2rr: partial application of {f}, which has no declaration (internal error)"
+      let ty ← lowerType d.type
+      partialApp { id := "d" ++ target, params, ret, call := .code target, keep, ty := some ty } args.size
+        supplied rty
     else
+      let keeps ← borrowKeeps ctx f args n
       let as ← lowerTaken ctx args params keep n
       let (e, t) ← applyChain (← releaseAfter (.call fn #[] as) ret keeps) ret ctx args[n:].toArray
       coerce e t rty
@@ -137,11 +139,10 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       coerce e t rty
   | .ctor c =>
     let arity := c.numParams + c.numFields
-    let rt ← lowerType (← if args.size ≥ arity then pure resTy else pure resTy)
     -- The instance is determined by the result type of a saturated
     -- application; for a partial application, by the codomain.
     let (_, fullTy) := splitFnType resTy (arity - min arity args.size)
-    let fullRt ← if args.size ≥ arity then pure rt else lowerType fullTy
+    let fullRt ← lowerType (if args.size ≥ arity then resTy else fullTy)
     -- Expected Reussir types of the constructor's arguments.
     let argTys ← do
       match fullRt with
@@ -257,7 +258,10 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
             | _, _, _, _ => pure none
           pure (RR.Expr.var n, src, layout)
         | .convert dty =>
-          let .named dn := dty | return ← zeroValue rty
+          -- Unreachable: Lean turns the projections of the structures that
+          -- lean2rr's runtime represents itself into extern calls.
+          let .named dn := dty
+            | throwError "lean2rr: projection {sn}.{i} of a value converted to {dty.render} (internal error)"
           let di ← getPart (·.typeInfos[dn]?)
           pure (← coerce (.var n) st dty, dn, di.bind fun i => i.ctorOrder[0]?.bind i.ctors.find?)
         | .unit => return ← zeroValue rty

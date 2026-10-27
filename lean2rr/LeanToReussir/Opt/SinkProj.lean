@@ -23,7 +23,9 @@ projection `let x = s.j` of a block that ends in an `if` or `match` moves
 when no later binding of the block and not the condition (scrutinee) uses
 `x`, some branches use `x` and others do not, and one of those others uses
 `s` whole. Values are immutable and a projection has no effect, so the
-value is the same, and the field is only retained where it is used.
+value is the same, and the field is only retained where it is used. A
+name that an atom's text mentions counts as a use (`atomIdents`, as for
+the outlining's free variables and the lowering's `rrFoldFree`).
 -/
 
 namespace LeanToReussir.RR
@@ -33,12 +35,13 @@ def Arm.bound (a : Arm) (bound : Std.HashSet String) : Std.HashSet String :=
   a.binders.foldl (fun b x => match x with | some x => b.insert x | none => b) bound
 
 mutual
-  /-- Free variables of `e` (names bound in `bound` excluded). -/
+  /-- Free variables of `e` (names bound in `bound` excluded), also the
+  names an atom's text mentions (`atomIdents`). -/
   partial def Expr.freeVars (e : Expr) (bound : Std.HashSet String) (acc : Std.HashSet String) :
       Std.HashSet String :=
     match e with
     | .var n => if bound.contains n then acc else acc.insert n
-    | .atom _ => acc
+    | .atom t => (atomIdents t).foldl (fun acc n => if bound.contains n then acc else acc.insert n) acc
     | .call _ _ args | .ctor _ _ args => args.foldl (fun acc a => a.freeVars bound acc) acc
     | .apply f a => a.freeVars bound (f.freeVars bound acc)
     | .field e _ | .cast e _ => e.freeVars bound acc

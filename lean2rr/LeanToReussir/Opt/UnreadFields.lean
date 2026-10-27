@@ -83,7 +83,10 @@ does not see may read it:
   is replaced only when it cannot hold a task, nor can the values a
   closure captured (`holdsNoTask`, or the same test on the values of a
   constant): natively a constant's first evaluation waits for the tasks
-  its value holds, closures' captured values included;
+  its value holds, closures' captured values included. This holds at a
+  field and at an unused parameter of a partial application, which the
+  closure holds (`keepCaptured`: `adder t` keeps the task `t` although
+  `adder` does not use it);
 - in a program whose kept code makes resources (files, child processes),
   a value that may hold one is not replaced, neither at a field nor at an
   unused parameter: natively it would keep the resource alive, and a file
@@ -181,8 +184,9 @@ structure Ctx where
   /-- Whether a value that may hold a resource stays where it is (the kept
   code makes resources, `programMakesResources`). -/
   resources : Bool := false
-  /-- Whether a closure stored in an unread field must be shown to hold no
-  task first (the kept code creates tasks). -/
+  /-- Whether a value stored in an unread field, or passed to an unused
+  parameter of a partial application, must be shown to hold no task
+  before it is replaced (the kept code creates tasks). -/
   tasks : Bool
   /-- Whether the reasons are recorded (`L2R_UNREAD_FIELDS_WHY`). -/
   explain : Bool := false
@@ -200,6 +204,9 @@ structure St where
   constBusy : NameSet := {}
   /-- Rounds of the fixpoint (for `L2R_DEBUG`). -/
   rounds : Nat := 0
+  /-- Arguments at unused parameters that stay because a closure holds
+  them and they may hold a task (`keepCaptured`; for `L2R_DEBUG`). -/
+  captured : Nat := 0
 
 abbrev M := ReaderT Ctx (StateRefT St CoreM)
 
@@ -354,17 +361,26 @@ def fieldRead (c : ConstructorVal) (j : Nat) : M Bool := do
   let f := (← get).facts
   return f.allRead.contains c.induct || f.read.contains (c.name, j)
 
-/-- Whether the argument `a` that constructor `c` stores in field `j` may be
+/-- Whether the argument `a` that constructor `c` stores in a field may be
 replaced by `◾` when the field is not read: a function value or data, but
 never a field of a type the lowering or the runtime reads by itself
 (`alwaysRead`) or represents by itself (`builtinTypeNames`: strings,
 arrays, numbers, thunks, tasks). -/
-def replaceable (c : ConstructorVal) (_j : Nat) (a : Arg .pure) : M Bool := do
+def replaceable (c : ConstructorVal) (a : Arg .pure) : M Bool := do
   let .fvar x := a | return false
   if alwaysRead.contains c.induct || builtinTypeNames.contains c.induct then return false
   let loc := (← get).loc
   if ← isR a then return false
   if (← read).tasks then noTaskValue loc x 8 else return true
+
+/-- Whether argument `a` of a partial application (`partialApp`) of a
+declaration stays at a parameter the declaration does not use: in a
+program whose kept code creates tasks, the closure holds the argument, so
+it is replaced only when it cannot hold a task (as in `replaceable`). -/
+def keepCaptured (partialApp : Bool) (a : Arg .pure) : M Bool := do
+  let .fvar x := a | return false
+  if !partialApp || !(← read).tasks then return false
+  return !(← noTaskValue (← get).loc x 8)
 
 def markRead (ctor : Name) (j : Nat) : M Unit := do
   unless (← get).facts.read.contains (ctor, j) do
@@ -657,14 +673,17 @@ def useValue (v : LetValue .pure) (reason : Why) : M Unit := do
           if ← fieldRead cv j then
             let by_ := (← get).facts.readBy[(c, j)]?
             useArg args[i] fun _ => s!"field {j} of {c}{(by_.map (s!", read by {·}")).getD ""}"
-          else if !(← replaceable cv j args[i]) then
+          else if !(← replaceable cv args[i]) then
             useArg args[i] fun _ => s!"field {j} of {c} (data, or may hold a task)"
     | .code d =>
-      markLive c fun _ => s!"{if args.size < d.params.size then "partial application" else "call"}, {reason ()}"
+      let partialApp := args.size < d.params.size
+      markLive c fun _ => s!"{if partialApp then "partial application" else "call"}, {reason ()}"
       let ps := (← get).facts.params.getD c #[]
       for h : i in [:args.size] do
         if i ≥ d.params.size || ps[i]?.getD false || (← isR args[i]) then
           useArg args[i] fun _ => s!"parameter {i} of {c}"
+        else if ← keepCaptured partialApp args[i] then
+          useArg args[i] fun _ => s!"parameter {i} of {c}, captured (may hold a task)"
     | .ext orig =>
       markExtern c reason
       for a in args do useArg a fun _ => s!"argument of extern {orig}"
@@ -754,13 +773,17 @@ where
         for h : i in [:args.size] do
           if i < cv.numParams then continue
           let j := i - cv.numParams
-          if !(← fieldRead cv j) && (← replaceable cv j args[i]) then out := out.set! i .erased
+          if !(← fieldRead cv j) && (← replaceable cv args[i]) then out := out.set! i .erased
         return .const c us out
       | .code d =>
         let ps := (← get).facts.params.getD c #[]
+        let partialApp := args.size < d.params.size
         let mut out := args
         for h : i in [:args.size] do
-          if i < d.params.size && !(ps[i]?.getD false) && !(← isR args[i]) then out := out.set! i (erase args[i])
+          if i < d.params.size && !(ps[i]?.getD false) && !(← isR args[i]) then
+            if ← keepCaptured partialApp args[i] then
+              modify fun s => { s with captured := s.captured + 1 }
+            else out := out.set! i (erase args[i])
         return .const c us out
       | .ext _ => return v
     | v => return v
@@ -849,7 +872,7 @@ def run (keys : NameMap InstKey) (roots : Array Name) (inits : Array (Name × Na
   if debug then
     IO.eprintln s!"lean2rr: unread-fields: {out.size} of {decls.size} declarations kept, {dropped} dropped; \
       {st.facts.read.size} fields read, {st.facts.allRead.size} types read whole, {st.rounds} rounds\
-      {if tasks then ", tasks: closures checked" else ""}\
+      {if tasks then s!", tasks: closures checked (captured arguments kept: {st.captured})" else ""}\
       {if resources then s!", resources: kept where they may be held ({if st.facts.rEscape then "escaped" else "followed"})" else ""}"
   if explain then
     for n in st.facts.externs do

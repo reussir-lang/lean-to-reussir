@@ -70,9 +70,15 @@ are relative to `lean2rr/LeanToReussir/`. Plan
   `l2r_stderr_put`, `l2r_task_run_one`, `l2r_task_walk`,
   `l2r_promise_drop`; the conversion counter) and of the prelude is a
   name reached. So are the identifiers of every atom of a function reached
-  (`Lower/Process` renders expressions into atoms), and every `T::v` of
-  `Box` or of a function-value enum that text names counts as made.
-  Variables are never names: lean2rr refers to functions only by calls.
+  (`Lower/Process` renders expressions into atoms), and every `T::v` of a
+  function-value enum (`L2RFn_…`, `liveTracked`) that text names counts
+  as made. Text is not scanned for `Box` payloads: a payload counts as
+  made only where a box construction names its number (`exprRefs`:
+  `l2r_any_of(x, n)` and its kin), and no raw text builds one (the entry
+  point and the startup chain leave every conversion to generated
+  functions: `l2r_mk_args`, `l2r_main_code`, `l2r_init_put_N`,
+  `l2r_err_string`). Variables are never names: lean2rr refers to
+  functions only by calls.
 - **Why:** The runtime calls generated code only through the trampolines,
   which are raw text, and builds no `Box` or function value of its own:
   the payloads of `Box` that a program boxes and the `L2RFn_…` enums
@@ -84,7 +90,8 @@ are relative to `lean2rr/LeanToReussir/`. Plan
   (`retypable`). Taking every identifier of text as a name keeps whatever
   text mentions.
 - **Where:** `Lower/Live.lean`: `liveFollow` (raw items), `liveRootText`
-  (the prelude, from `Emit/Program.lean`), `textRefs`.
+  (the prelude, from `Emit/Program.lean`), `textRefs`, `liveTracked`,
+  `exprRefs` (box constructions).
 - **Remove only if:** never, while the pass exists: a construction or call
   that the scan misses would lose an arm or a function.
 

@@ -355,9 +355,10 @@ where
 first `n` passed to `f`) that the caller keeps until the call returns: the
 variables (name, type) the caller owns that are passed to a parameter Lean
 borrows (at any position: `f x x` with the second parameter borrowed keeps
-`x`), of a type that may hold a resource. In the order of their first
-occurrence in `args`, as Lean's `addDecAfterFullApp` visits them
-(`releaseAfter` releases them in reverse). -/
+`x`), of a type that may hold a resource (the type of the first borrowed
+parameter it is passed to). In the order of their first occurrence in
+`args`, as Lean's `addDecAfterFullApp` visits them (`releaseAfter`
+releases them in reverse). -/
 def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) :
     LowerM (Array (String × RR.Ty)) := do
   let (flags, lent) ← borrowInfo
@@ -369,13 +370,15 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     let .fvar x := args[i] | continue
     -- Its first occurrence only (Lean's `isFirstOcc`).
     if (args.extract 0 i).contains (.fvar x) then continue
-    -- Passed to a borrowed parameter somewhere (Lean's `isBorrowParam`).
-    unless args.zipIdx.any (fun (a, j) => a == .fvar x && bs[j]?.getD false) do continue
+    -- Passed to a borrowed parameter somewhere (Lean's `isBorrowParam`):
+    -- the first such position.
+    let some j := args.zipIdx.findSome? (fun (a, j) => if a == .fvar x && bs[j]?.getD false then some j else none)
+      | continue
     if lent.contains x then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
-    -- The type of the parameter it is passed to (the variable's).
-    let some p := (d?.bind (·.params[i]?)) | continue
+    -- The type of the borrowed parameter it is passed to.
+    let some p := (d?.bind (·.params[j]?)) | continue
     if ← mayHoldResource p.type then out := out.push (v, t)
   return out
 

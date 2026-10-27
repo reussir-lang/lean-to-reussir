@@ -50,7 +50,7 @@ built-in integers
 | `sink-proj` | structure projections sunk into the branches that use them | the projection is unused later in the block and in the condition, and no binder clashes; applies only where some branches use it while another keeps the structure whole | [cases](control-flow/cases.md#structure-projections-move-into-the-branches-that-use-them-sink-proj) |
 | `fresh-rebuild` | an arm returning a fresh matched value returns it rebuilt | the value is freshly built (whole-program analysis); the arm binds every field and only returns it | [cases](control-flow/cases.md#fresh-values-returned-whole-are-rebuilt-fresh-rebuild) |
 | `flatten-structs` | a structure argument of a loop (join point, self-recursive function) and a structure or two-constructor result passed as its fields at their precise types (worker/wrapper) | a value is split only where its fields are known at every jump, self-call and return; a whole use keeps that level whole, except two rebuilds that add no allocation: a loop's parameter at the loop's exit after a step that built a new value (the first step peeled into the wrapper), and a call's result (each value built at most once per run of its scope); a value whose object is inspected (`ptrAddrUnsafe`, `dbgTraceIfShared`, `isExclusiveUnsafe`) or that the caller passed in is never rebuilt; a result level stays whole when callers (or the wrapper) only use it whole, or when a shared object may arrive there; results with function types or without finite placeholders are not split; in a program that creates resources, declarations with a parameter or result that may hold one, and those whose borrow flags decide the flag of such a parameter, are left alone and join point parameters that may hold one stay whole (their inferred borrows stay Lean's), decided by a whole-program flow analysis of the values (`ResourceFlow`; by type in a program that can cast); bounds: 8 levels, 16 variables, peeled bodies of at most 300 nodes | below |
-| `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant that text names counts as built | [liveness](conversions/liveness.md) |
+| `conv-liveness` | unboxing, application and conversion helpers generated only for what live code reaches; unreachable functions dropped | none needed for soundness: an arm left out matches a variant that no live code builds, so no value of it exists at run time; every identifier of raw text, of the prelude and of atoms is a root, every arm of other matches counts, and a variant of a function-value enum that text names counts as built (a `Box` payload only where a box construction names its number) | [liveness](conversions/liveness.md) |
 | `merge-fns` | generated functions equal up to their own and local names merged: a copy calls the first, calls of a copy call the first | the canonical texts are equal (the same code once names are renamed in binding order, inside atoms too); a copy keeps its name and calls the function its first ends at, never itself; nothing is removed; a function called from one place only stays (LLVM inlines it there), except startup code (`_init`, `l2r_persist_`) | below |
 | `prelude-liveness` | the runtime prelude's functions that the program text does not name, directly or through the prelude's kept functions, are left out of the `.rr`, and so are its whole-line comments outside textures | none needed for soundness: a function no text names cannot be called, and a comment is only lexed; a texture stays as it is; every identifier of the generated text and of the prelude's items that always stay (the `extern "rust"` blocks, the types) is a root, also in string literals and in comments at the end of a line; only functions of the form `fn NAME` at column 0, outside a texture, with no attributes but `#[ffi(import)]` and `#[transform_anchor]`, can go; a name the scan missed would make rrc stop with an unknown function, not build another program | below |
 
@@ -135,7 +135,12 @@ built-in integers
   data) is replaced only when it cannot hold a task, nor can the values a
   closure captures (`holdsNoTask`, or the same test on a constant's
   value): natively a constant's first evaluation waits for the tasks its
-  value holds, captured values included. In a program whose kept code makes resources
+  value holds, captured values included. The test runs at a field and at
+  an unused parameter of a partial application, which the closure holds
+  (`keepCaptured`): `adder t`, with `adder` not using `t`, keeps the task
+  `t` (bug hunt of the pass, S1: the unused-parameter path replaced it;
+  test `RtUnreadFieldsTaskParam`, whose `.l2r-debug` checks the count of
+  arguments kept so, which `L2R_DEBUG` prints). In a program whose kept code makes resources
   (`programMakesResources`: files, child processes, promises), a value that may
   hold one is not replaced, at a field or at an unused parameter (F3, test
   `RtUnreadFieldsHandle`): natively the closure keeps the handle alive,
@@ -174,7 +179,7 @@ built-in integers
   the data widening, B1; `costly 21` in a function body, with a constant
   argument, behaves the same, while `boom (k + 5)` stays).
 - **Where:** `Opt/UnreadFields.lean` (`fixpoint`, `go`, `useValue`,
-  `replaceable`, `mayHoldCode`, `externReads`, `alwaysRead`,
+  `replaceable`, `keepCaptured`, `mayHoldCode`, `externReads`, `alwaysRead`,
   `noTaskValue`, `taint`, `taintValue`, `mayHoldRes`, `usesOnly`,
   `rewrite`, `run`); `PassConfig.lean`: `prunePasses`;
   `Main.lean`: `pipeline` (the roots, the steps of the `Lean` package's
@@ -191,7 +196,10 @@ built-in integers
   handle), `RtUnreadFieldsData` (`Expr`s in a field no code reads, left
   out) and `RtUnreadFieldsDataOff` (the same program refused without the
   pass), `RtUnreadFieldsDataRead` (data read by projection, by a match,
-  through a nested field and by derived instances only, kept); each with
+  through a nested field and by derived instances only, kept),
+  `RtUnreadFieldsTaskParam` (in a program that creates tasks: a task in a
+  field no code reads, and a task a closure captured at an unused
+  parameter, kept); each with
   `.enable-opts` (the two `Off` tests have `.opts`, which keeps the pass
   off in a run that turns it on for all).
 - **Remove only if:** the runtime has the `Lean` package's C++ functions
@@ -453,7 +461,10 @@ built-in integers
   constant computed from literals whose box is an immediate, see
   [nat-int](representations/nat-int.md#the-lowering))
   or a `UInt64`/`USize` literal from 2^63; `lowerCode` records the
-  variables bound to one (`closedLetValue`, `LowerState.closedLets`). Not
+  variables bound to one (`closedLetValue`, `LowerState.closedLets`). The
+  once-cell's key is the called function (a call without arguments, the
+  only call `closedLetValue` gives) or the literal's text; `boxedConst`
+  caches no other value (it would be boxed in line). Not
   in the body of a declaration without parameters (`inConstBody`, set by
   `lowerDecl`): that body runs once, so a once-cell there saves no
   allocation and costs a slot and two functions per constant (a table

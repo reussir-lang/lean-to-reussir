@@ -487,11 +487,12 @@ def stderrPutFn : LowerM RR.Item := do
 /-- `l2r_eq_<T>(a, b)`: structural equality on generated type `tn` whose
 fields are `tn` itself, strings, `Nat`s or scalars (`Lean.Name.beq`,
 `lean_name_eq`: the same constructor and equal fields; a name's cached hash
-is compared first). `none` for other field types. -/
+is compared first). `none` for a structure and for other field types. -/
 partial def structEqFn (tn : String) : LowerM (Option String) := do
   let name := s!"l2r_eq_{tn}"
   if (← hasFn name) then return some name
   let some info := (← get).typeInfos[tn]? | return none
+  if info.shape == .struct then return none
   let fieldEq (t : RR.Ty) (x y : String) : Option RR.Expr :=
     match t with
     | .named n =>
@@ -515,13 +516,10 @@ partial def structEqFn (tn : String) : LowerM (Option String) := do
     for i in order.reverse do
       let some e := fieldEq tys[i]! xs[i]! ys[i]! | return none
       body := if body matches .atom "true" then e else .ite e (.ofExpr body) (.ofExpr (.atom "false"))
-    let tyName := match info.shape with | .struct => tn | _ => tn
     let inner := RR.Expr.mtch (.var "b") #[
-      { ty := tyName, ctor := if info.shape == .struct then none else some l.variant,
-        binders := ys.map some, body := .ofExpr body },
-      { ty := tyName, ctor := none, binders := #[], body := .ofExpr (.atom "false") }]
-    arms := arms.push { ty := tyName, ctor := some l.variant, binders := xs.map some, body := .ofExpr inner : RR.Arm }
-  if info.shape == .struct then return none
+      { ty := tn, ctor := some l.variant, binders := ys.map some, body := .ofExpr body },
+      { ty := tn, ctor := none, binders := #[], body := .ofExpr (.atom "false") }]
+    arms := arms.push { ty := tn, ctor := some l.variant, binders := xs.map some, body := .ofExpr inner : RR.Arm }
   let item := RR.Item.fn name #[("a", .named tn), ("b", .named tn)] .bool (.ofExpr (.mtch (.var "a") arms))
   modify fun s => { s with fns := s.fns.push item }
   return some name
