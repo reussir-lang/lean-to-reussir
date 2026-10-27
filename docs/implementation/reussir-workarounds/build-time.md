@@ -218,20 +218,26 @@ lean2rr's files.
   off), so that rrc's texture cache (a local patch since 2026-10-04;
   upstream Reussir #690, commit `84336b63`, reads the same variable) takes
   the bitcode of
-  textures it compiled before from there. The `rustc-native` script's
-  text names lean-runtime's build (`# lean-runtime build <digest>`):
-  rrc's key hashes the script and the `--polyffi-libdir` directories, and
-  cargo's build of lean-runtime (once it has dependencies) puts its rlibs
-  in none of them. A change of leanrt, lean-runtime, Reussir's runtime or
-  the toolchain makes a new set of entries (about 8 KB each). rrc prunes
+  textures it compiled before from there. The `rustc-native-<hash>`
+  script's text names lean-runtime's build (`# lean-runtime build
+  <digest>`): rrc's key hashes the script (its path and text) and the
+  `--polyffi-libdir` directories, and cargo's build of lean-runtime (once
+  it has dependencies) puts its rlibs in none of them. The script is named
+  after a hash of its text and never changes once written (since
+  2026-10-27; before, one `rustc-native` per build directory, rewritten by
+  each build with other settings, so a concurrent build's rrc ran the
+  other build's script). A change of leanrt, lean-runtime, Reussir's runtime,
+  the texture flags or the toolchain makes a new set of entries (about 8 KB
+  each). rrc prunes
   the directory (`llvm::pruneCache`): it removes the entries
   (`llvmcache-*`) not read for a week and keeps their total at most
   1 GiB. It does not remove other files, such as the `<hex>.bc` entries of
   the old local patch (deleted once, at the move to Reussir `7954a367`).
   A `%` in the directory's path makes #690's cache store nothing (the old
   patch's review finding FCR-03, not in #690); lean2rr's default path
-  has none. The key hashes the rlibs' bytes, so `build_locked` runs rustc
-  for leanrt and lean-runtime in the crate's directory: rustc records its
+  has none. The key hashes the rlibs' bytes, so `build_locked` runs
+  leanrt's rustc in the crate's directory (cargo, which builds
+  lean-runtime, runs rustc in lean-runtime's checkout): rustc records its
   working directory in an rlib, and a rebuild from another directory would
   otherwise change every key (the recorded source paths, which panic
   messages show, stay absolute and unchanged).

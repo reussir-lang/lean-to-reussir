@@ -140,6 +140,10 @@ for t in "${TESTS[@]}"; do
     elif ! L2R_DISABLE_OPTS=$opts L2R_RRC_FLAGS="${L2R_RRC_FLAGS:-} $AC_RRC" \
          python3 "$ROOT/scripts/l2r.py" "$t" --lean-path "$d" -o "$d/l2r" > "$d/build-l2r.log" 2>&1; then
       why=" lean2rr build failed (see $d/build-l2r.log)"
+    elif grep -q "^l2r: rrc crashed" "$d/build-l2r.log"; then
+      # scripts/l2r.py retried without --reuse-across-call (a fallback for
+      # users); in a test that is a Reussir crash.
+      why=" rrc crashed and scripts/l2r.py rebuilt without --reuse-across-call: a Reussir crash (see $d/build-l2r.log)"
     else
       k=0
       while IFS= read -r line || [ -n "$line" ]; do

@@ -1205,7 +1205,7 @@ Paths are relative to the repository root.
   fetch --locked` fills the cache once; `l2r.py` says so when a crate is
   missing), rlibs and the `.rmeta` of its own stub rlib from cargo's JSON
   messages. leanrt is built with `--extern lean_runtime=...` and `-L
-  dependency=` for each rlib directory; the `rustc-native` wrapper that
+  dependency=` for each rlib directory; the `rustc-native-<hash>` wrapper that
   rrc compiles textures with adds the same, and its text names
   lean-runtime's build (its digest: rrc's texture cache keys on the
   script's text, and cargo's rlibs are in no `--polyffi-libdir`

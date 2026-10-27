@@ -388,7 +388,9 @@ each *texture* (the Rust body of a prelude function) with rustc, one run
 per texture. lean2rr writes only the prelude functions that the program
 uses, so a small program has about 75 textures, not about 480. The driver
 gives rrc a cache directory, so rrc does not compile an unchanged texture
-again.
+again. A build with other settings (another Reussir, another rustc, other
+flags) uses its own build directory and its own rustc wrapper, so builds
+with different settings can run at the same time.
 
 ## Key decisions
 

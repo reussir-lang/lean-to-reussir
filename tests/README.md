@@ -236,7 +236,14 @@ run under `L2R_DEBUG=1`, which prints its whole-program facts: whether the
 program can cast, the compact array kinds; a line of either that starts
 with `[OPT,…] ` is checked only while none of those optimizations is
 turned off, so that a fact an optimization prints does not fail a run
-with it off). Each
+with it off). A test also fails when rrc crashed during its build:
+`scripts/l2r.py` then builds again without `--reuse-across-call`, a
+fallback for users that would hide a new Reussir crash. At its start
+`run.sh` prints the lean2rr binary, the Reussir checkout and the checkout
+it uses, and warns when one of lean2rr's hidden switches
+(`L2R_NO_OUTLINE`, `L2R_NO_INLINE_ANCHORS`, `L2R_COUNT_CONVERSIONS`,
+`L2R_ALLOW_MISSING_EXTERNS`) is set in the environment: the check scripts
+set them per command. Each
 test's header says what it covers. Many come from the adversarial reviews:
 a finding (a bug a reviewer reproduced, fixed since) or a check that held
 up in review.

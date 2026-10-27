@@ -61,6 +61,11 @@ for t in "${PROGS[@]}"; do
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why=" lean2rr build failed (see $d/build-l2r.log)"
   else
+    # scripts/l2r.py retries without --reuse-across-call when rrc dies from
+    # a signal (a fallback for users); in a test that is a Reussir crash.
+    if grep -q "^l2r: rrc crashed" "$d/build-l2r.log"; then
+      status=fail; why="$why rrc crashed and scripts/l2r.py rebuilt without --reuse-across-call: a Reussir crash (see $d/build-l2r.log);"
+    fi
     run_one ./native native
     run_one ./l2r l2r
     for k in out err code; do

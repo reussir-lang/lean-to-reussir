@@ -47,21 +47,44 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
 
 `scripts/l2r.py` does everything:
 
-1. builds the shared crate `lean_runtime` (below), then `leanrt` against
-   it, both with the pinned rustc (`L2R_RUSTC`) and the same flags, into
-   `runtime/leanrt/target/` (`liblean_runtime.rlib`, `libleanrt.rlib`;
-   `target/rt-<hash>/` for another Reussir checkout), each cached (leanrt
-   by a hash of its sources and of lean-runtime's build). rustc runs in
-   the crate's directory, whatever the caller's: rustc records its working
-   directory in the rlib, and rrc's texture cache (step 3) hashes the
-   rlibs, so a rebuild from another directory would miss on every texture;
-   built this way, a rebuild gives the same bytes;
+1. builds the shared crate `lean_runtime` with the pinned toolchain's
+   cargo (below; cargo's target directory is `lr-cargo/` in leanrt's
+   build directory), then `leanrt` against it with the pinned rustc
+   (`L2R_RUSTC`), both with the same rustc and flags, into leanrt's build
+   directory (`libleanrt.rlib`), and Reussir's core interface
+   (`core.rri`, step 3) with the checkout's rrc. leanrt's build directory
+   is `runtime/leanrt/target/`, or a subdirectory of it for each setting
+   that changes the rlibs, nested in this order: `rt-<hash>/` for another
+   Reussir checkout (`L2R_REUSSIR`), `rustc-<hash>/` for another rustc
+   (`L2R_RUSTC`), `flags-<hash>/` for `L2R_LEANRT_RUSTFLAGS`,
+   `lr-<hash>/` for another lean-runtime checkout (`L2R_LEAN_RUNTIME`)
+   and `feat-<hash>/` for extra features (`L2R_LEAN_RUNTIME_FEATURES`); so
+   a build with other settings never rebuilds the rlibs that a concurrent
+   build is linking. lean-runtime is cached by cargo's fingerprints,
+   leanrt by a hash of its sources, of lean-runtime's build and of
+   Reussir's runtime crate, `core.rri` by a hash of Reussir's core sources
+   and rrc. leanrt's rustc runs in the crate's directory, whatever the
+   caller's (cargo runs lean-runtime's in its checkout): rustc records its
+   working directory in the rlib, and rrc's texture cache (step 3) hashes
+   the rlibs, so a rebuild from another directory would miss on every
+   texture; built this way, a rebuild gives the same bytes;
 2. runs lean2rr (`L2R_LEAN2RR`) with `--prelude runtime/prelude.rr`
    (the text keeps only the prelude functions the program uses: the
-   optimization `prelude-liveness`);
+   optimization `prelude-liveness`) and `L2R_SHIM_DIR`, the directory of
+   lean2rr's shim library built with that binary: this checkout's
+   `lean2rr/.lake/build/lib/lean` for this checkout's lean2rr; for another
+   lean2rr binary the `lib/lean` directory of its own build (`../../lib/lean`
+   from the binary, where lean2rr itself looks when `L2R_SHIM_DIR` is
+   unset), or this checkout's when that directory has no shim (a copy of
+   the binary alone). With another checkout's lean2rr the driver prints
+   one line on stderr that names the binary, the shim, the prelude, leanrt
+   and lean-runtime it uses;
 3. runs rrc (`L2R_REUSSIR`; with `--reuse-across-call` unless `l2r.py` gets
-   `--no-reuse-across-call`) with
-   - `--polyffi-rust-path <leanrt dir>/rustc-native`: a wrapper that
+   `--no-reuse-across-call`; when rrc dies from a signal, `l2r.py` says so
+   on stderr, `l2r: rrc crashed (signal N); retrying without
+   --reuse-across-call`, and builds again without it, a fallback for
+   users, and `tests/runtime/run.sh` fails a test whose build did) with
+   - `--polyffi-rust-path <leanrt dir>/rustc-native-<hash>`: a wrapper that
      adds `-C target-cpu=native -C target-feature=-outline-atomics`. With the
      plain rustc, textures are not inlined into Reussir code, and calls through
      the packed-argument boundary (float or `str` arguments, four or more
@@ -74,9 +97,18 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      `--extern lean_runtime=<rlib>` (and `=<rmeta>` for cargo's rlib, which
      holds only a metadata stub) with `-L dependency=<dir>` for each
      directory of lean-runtime's rlibs: rustc needs `lean_runtime` whenever
-     it loads `leanrt`, and the prelude's textures call it (as `sem`).
-   - `--polyffi-libdir runtime/leanrt/target` (so textures find `leanrt`
-     and `lean_runtime`),
+     it loads `leanrt`, and the prelude's textures call it (as `sem`). And
+     `L2R_TEXTURE_RUSTFLAGS`, after the native flags. The wrapper is named
+     after a hash of its text and written once, atomically: rrc runs it by
+     path for every texture and for the final link, so a concurrent build
+     with other settings (other texture flags, another lean-runtime build)
+     writes a wrapper of its own instead of changing this one.
+   - `--polyffi-libdir` for each of Reussir's `build/target-rt/release`
+     and `build/target-rt/release/deps` (its runtime crate `reussir_rt`),
+     the pinned rustc's target library directory (`rustc --print
+     target-libdir`: `std`) and leanrt's build directory (`leanrt`); cargo's
+     rlibs of lean-runtime are in none of them, so the wrapper names them
+     (above),
    - `--link-lib libleanrt.rlib --link-lib liblean_runtime.rlib` (then
      lean-runtime's dependencies, dependents first) `--link-lib
      libl2r_rcgmp.a --link-lib libgmp.a`, in this order: GNU ld reads each
@@ -88,9 +120,16 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      `--link-lib`, followed by `-lgmp`, and with GMP's archive before it
      its GMP symbols would stay undefined until `-lgmp`, which takes a
      `libgmp.so` where the first directory with a libgmp has one. So GMP
-     (from the Lean toolchain, `$(lean --print-prefix)/lib/libgmp.a`, or
+     (the one shipped with the Lean toolchain, `lib/libgmp.a` of
+     `L2R_LEAN_TOOLCHAIN`, by default the elan toolchain that
+     `lean2rr/lean-toolchain` pins, whatever `lean` is on `PATH`; or
      `L2R_GMP`) is static by its place on the line, as natively;
      `tests/runtime/run.sh` checks that an executable needs no `libgmp`,
+   - `--no-pack-record-members` (Reussir's packed record layout and its
+     in-place reuse, old bug 2), `--relocation-mode pic`, `--package-name
+     prog --extern core=<leanrt dir>/core.rri` (Reussir's core package,
+     which declares the built-in `Nat` and `Int`) and the flags of
+     `L2R_RRC_FLAGS`,
    - and the environment variable `REUSSIR_FFI_CACHE_DIR`
      (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
      empty turns it off): rrc compiles each texture of the program text
@@ -99,8 +138,8 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      for a one-line program, 330 for a regex engine), and
      with rrc's texture cache (a local patch on the old stack; upstream
      Reussir #690 reads the same variable) it keeps their bitcode there
-     and reuses it (an rrc without a cache ignores the variable). Its key covers the texture, the `rustc-native` script (whose
-     text also names lean-runtime's build), rustc's options and every
+     and reuses it (an rrc without a cache ignores the variable). Its key covers the texture, the `rustc-native-<hash>` script (its
+     path and text; the text also names lean-runtime's build), rustc's options and every
      library in the `--polyffi-libdir` directories, so a change to leanrt or
      lean-runtime only makes new entries. rrc prunes the directory
      (`llvm::pruneCache`): it removes the entries (`llvmcache-*`) not read
@@ -166,7 +205,18 @@ rest.
   `cfg_aliases`, are not), each before the packages it depends on; the
   environment's `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS` and
   `CARGO_TARGET_*_RUSTFLAGS` are removed, since they would override
-  `RUSTFLAGS`. Cargo's fingerprints are the cache. Build scripts run as
+  `RUSTFLAGS`, and so are `CARGO_PROFILE_*` (leanrt, a plain rustc build,
+  never sees them: lean-runtime would be built with another profile than
+  leanrt), `CARGO_UNSTABLE_*`, `CARGO_INCREMENTAL`, the rustc wrappers
+  (`RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`,
+  `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTC`) and what
+  would move the build (`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET`,
+  `CARGO_BUILD_BUILD_DIR`). Cargo's fingerprints are the cache; they
+  follow file modification times, so a lean-runtime tree copied over the
+  checkout with older times than the last build's is taken as built
+  (cargo's `-Zchecksum-freshness` does not change that with the pinned
+  cargo, 1.100.0-nightly of 2026-08-22: it still records modification
+  times). Build scripts run as
   cargo runs them; one that links native libraries is refused (`l2r.py`
   does not pass those on yet). leanrt itself stays a plain rustc build.
   `proc-title`'s ELF constructor is lean-runtime's own: the title

@@ -53,8 +53,13 @@ compiles it with the program. Plan
 
 ### The shim is loaded with the program and treated as library
 
-- **What:** The driver names lean2rr's build library directory in
-  `L2R_SHIM_DIR`; lean2rr puts it last on the search path and always
+- **What:** The driver names the library directory of the lean2rr
+  binary's build in `L2R_SHIM_DIR` (this checkout's for its own lean2rr;
+  for another checkout's binary that build's `lib/lean`, as lean2rr finds
+  it when the variable is unset, and this checkout's only when that
+  directory has no shim; with another checkout's binary the driver prints
+  one line on stderr naming the binary, the shim, the prelude, leanrt and
+  lean-runtime it uses); lean2rr puts it last on the search path and always
   imports `L2RShim` with the program, stopping when the directory does not
   hold it (or `L2RShim.Core`). It counts as a toolchain module: no startup work, constants
   evaluated lazily, and its `unsafe`/`@[extern]`/`@[export]` declarations
@@ -63,10 +68,11 @@ compiles it with the program. Plan
   ([../translator.md](../translator.md#program-modules-named-like-leans-library-are-rejected)).
 - **Why:** The shim is lean2rr's own trusted code, not the program's (RV6T
   fixes, 0d358d4). A wrong shim directory failed only in rrc (round 8
-  RV8L-06, 694f9cf).
+  RV8L-06, 694f9cf). Another checkout's lean2rr got this checkout's shim,
+  prelude and leanrt, and nothing said so (driver hunt, 2026-10-27).
 - **Where:** `Env.lean`: `shimDir`, `shimModules`, `loadEnvironment`;
   `CompileRecord.lean`: `isToolchainModule`; `scripts/l2r.py`:
-  `SHIM_DIR`.
+  `shim_dir`, `note_mixed_checkouts`.
 - **Remove only if:** never.
 
 ### Only the shim's part over `Init` is loaded when its `Std` imports clash with the program

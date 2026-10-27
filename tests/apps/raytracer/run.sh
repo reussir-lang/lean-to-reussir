@@ -67,6 +67,12 @@ if ! (cd "$BUILD" && LEAN_ABORT_ON_PANIC=1 python3 "$ROOT/scripts/l2r.py" Main -
   echo "FAIL  lean2rr build failed (see $BUILD/build-l2r.log)"
   exit 1
 fi
+# scripts/l2r.py retries without --reuse-across-call when rrc dies from a
+# signal (a fallback for users); here that is a Reussir crash.
+if grep -q "^l2r: rrc crashed" "$BUILD/build-l2r.log"; then
+  echo "FAIL  rrc crashed and scripts/l2r.py rebuilt without --reuse-across-call: a Reussir crash (see $BUILD/build-l2r.log)"
+  exit 1
+fi
 
 pass=0; fail=0; failed=()
 for n in "${NAMES[@]}"; do

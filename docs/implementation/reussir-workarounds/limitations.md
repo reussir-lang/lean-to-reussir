@@ -242,7 +242,8 @@ files, `runtime/` and `scripts/` from the repository root.
 ### The driver's choice of rrc flags
 
 - **What:** `-O aggressive` by default; `--reuse-across-call` on unless
-  `--no-reuse-across-call` (with the retry for old bug 4);
+  `--no-reuse-across-call` (with the retry for old bug 4, which fails a
+  test of `tests/runtime/run.sh`);
   `--no-pack-record-members` (old bug 2); `--relocation-mode pic` (issue
   5, now retired: before upstream `ea240b19`, rrc compiled static code into
   the PIE it linked; since then PIC is rrc's default for executables, so
@@ -254,14 +255,19 @@ files, `runtime/` and `scripts/` from the repository root.
   with `REUSSIR_FFI_CACHE_DIR` set, for rrc's texture cache (old issue
   35, a cost,
   [build-time.md](build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
-  `leanrt` is built per Reussir checkout (`L2R_REUSSIR`) and cached by a
+  `leanrt` is built per Reussir checkout (`L2R_REUSSIR`), rustc
+  (`L2R_RUSTC`), `L2R_LEANRT_RUSTFLAGS`, lean-runtime checkout and extra
+  lean-runtime features, each in a directory of its own, and cached by a
   hash of its sources, under a file lock for concurrent drivers; rustc
   runs in the crate's directory, so a rebuild gives the same bytes from
-  any caller's directory (the texture cache hashes the rlibs).
+  any caller's directory (the texture cache hashes the rlibs). The rustc
+  wrapper that rrc runs is named after a hash of its text and written
+  once, so concurrent builds with other settings never change each
+  other's (driver hunt, 2026-10-27).
 - **Why:** `-O aggressive` made every classic benchmark faster than native
   (`-O default` left sieve 7% slower; e238a98). Reuse across calls is
   Lean's reset/reuse across calls (444a70a). The runtime rlib links against
   the checkout's runtime crates (e238a98, c3e9d99).
 - **Where:** `scripts/l2r.py`: `main`, `leanrt_out`, `build_leanrt`,
-  `build_locked`.
+  `build_locked`, `rustc_wrapper`.
 - **Remove only if:** n/a (configuration).

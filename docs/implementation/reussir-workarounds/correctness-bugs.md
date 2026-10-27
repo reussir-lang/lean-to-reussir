@@ -77,11 +77,15 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
 ### Old bug 4: rrc recursed forever on two equal recursive types
 
 - **What:** When rrc dies from a signal, `scripts/l2r.py` retries without
-  `--reuse-across-call` (and says so on stderr).
+  `--reuse-across-call` (and says so on stderr: `l2r: rrc crashed (signal
+  N); retrying without --reuse-across-call`). `tests/runtime/run.sh`
+  fails a test whose build log has that line, so a gate sees a new
+  Reussir crash instead of a build without reuse across calls.
 - **Why:** Reussir's structural type comparison crashed on a user list and
   `List` (456bc97). Reussir fixes it (#654, commit `634fb551`, formerly a
-  local patch; in the old base `943f2195`).
-- **Where:** `scripts/l2r.py`: `main`.
+  local patch; in the old base `943f2195`). The retry hid any later crash
+  from the tests (driver hunt, 2026-10-27).
+- **Where:** `scripts/l2r.py`: `main`; `tests/runtime/run.sh`.
 - **Remove only if:** it stays as a fallback for unknown crashes; it costs
   nothing when rrc does not crash.
 

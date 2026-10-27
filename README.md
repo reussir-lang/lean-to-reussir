@@ -42,6 +42,37 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
 - Python 3.11 or later (`scripts/l2r.py` reads lean-runtime's `Cargo.toml`
   with `tomllib`)
 
+## Building
+
+1. Build lean2rr: `cd lean2rr && lake build`. This builds the binary
+   `lean2rr/.lake/build/bin/lean2rr` and its shim library `L2RShim`
+   (`lean2rr/.lake/build/lib/lean`; both are default targets).
+2. Once, fill cargo's registry cache with the crates that lean-runtime
+   needs (the driver builds it offline): run `cargo fetch --locked` in
+   `third_party/lean-runtime` with the cargo of the pinned Rust toolchain
+   (next to the rustc that `scripts/l2r.py` uses: `L2R_RUSTC`, by default
+   that of `nightly-2026-08-31`).
+3. Translate and build a program. Compile it with the Lean toolchain that
+   lean2rr is pinned to (in bash, `. scripts/toolchain.sh` puts it first on
+   `PATH`), then run the driver, which runs lean2rr and rrc, and builds and
+   links the runtime:
+
+   ```
+   lean -o Hello.olean Hello.lean
+   python3 scripts/l2r.py Hello.lean -o hello    # or: scripts/l2r.py Hello --lean-path DIR -o hello
+   ./hello
+   ```
+
+   Set `L2R_REUSSIR` when Reussir is not checked out in `reussir/`.
+   `--keep-rr FILE` keeps the generated Reussir text, `--emit llvm-ir`
+   writes LLVM IR instead of an executable, and `--disable-opt` and
+   `--enable-opt` turn lean2rr's optional passes off or on. The driver's
+   docstring lists its environment variables;
+   [`runtime/README.md`](runtime/README.md#building-and-linking) describes
+   its steps, and [`tests/README.md`](tests/README.md) the test runners
+   (`tests/runtime/run.sh [NAME...]` builds programs both ways and
+   compares their runs).
+
 ## Layout
 
 - `lean2rr/` — the translator (a Lake package); its optional passes live in

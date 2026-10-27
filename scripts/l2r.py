@@ -22,7 +22,9 @@ Environment overrides: L2R_REUSSIR (Reussir checkout with build/), L2R_RUSTC
 toolchain directory; default: the elan toolchain lean2rr/lean-toolchain
 names), L2R_GMP (path of libgmp.a; default: the one shipped with that
 toolchain), L2R_LEAN2RR (the lean2rr
-binary), L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
+binary; another checkout's build gets the shim built with it, and the
+driver names on stderr the checkouts the build's parts come from),
+L2R_DISABLE_OPTS and L2R_ENABLE_OPTS (comma-separated lean2rr
 optimizations to turn off or on, as --disable-opt/--enable-opt; spaces
 around the names are ignored; `lean2rr --list-opts` lists them),
 L2R_LEANRT_RUSTFLAGS (extra rustc flags for leanrt and lean-runtime, split
@@ -47,12 +49,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REUSSIR = Path(os.environ.get("L2R_REUSSIR", ROOT / "reussir")).resolve()
-RUSTC = Path(os.environ.get(
-    "L2R_RUSTC",
-    Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc")).resolve()
-LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr")).resolve()
+DEFAULT_RUSTC = Path.home() / ".rustup/toolchains/nightly-2026-08-31-aarch64-unknown-linux-gnu/bin/rustc"
+RUSTC = Path(os.environ.get("L2R_RUSTC", DEFAULT_RUSTC)).resolve()
+# This checkout's lean2rr build: the binary and its shim library.
+OWN_LEAN2RR = ROOT / "lean2rr" / ".lake" / "build" / "bin" / "lean2rr"
+OWN_SHIM_DIR = ROOT / "lean2rr" / ".lake" / "build" / "lib" / "lean"
+LEAN2RR = Path(os.environ.get("L2R_LEAN2RR", OWN_LEAN2RR)).resolve()
 PRELUDE = ROOT / "runtime" / "prelude.rr"
-SHIM_DIR = ROOT / "lean2rr" / ".lake" / "build" / "lib" / "lean"
 LEANRT_SRC = ROOT / "runtime" / "leanrt" / "src"
 LEANRT_OUT = ROOT / "runtime" / "leanrt" / "target"
 # The shared runtime crate, the lean-runtime crate (repo lean-runtime-rs,
@@ -96,25 +99,40 @@ def rustc_wrapper(rlib, lr):
     adds `lean_runtime` (`lr`, a LeanRuntime), which leanrt depends on, as an
     extern crate (the prelude's textures call it as `sem`) and the
     directories of its rlibs as dependency search paths (where rustc finds
-    it, and its own dependencies, when it loads leanrt). One per `leanrt`
-    build directory (per Reussir checkout).
+    it, and its own dependencies, when it loads leanrt).
 
     The script's text names lean-runtime's build (`lr.digest`): rrc's
     texture cache (`REUSSIR_FFI_CACHE_DIR`) hashes the
     script's text and the libraries in the `--polyffi-libdir` directories,
-    and cargo's build of lean-runtime puts its rlibs in none of them."""
-    w = rlib.parent / "rustc-native"
+    and cargo's build of lean-runtime puts its rlibs in none of them.
+
+    The script is named after a hash of its text (`rustc-native-<sha12>` in
+    leanrt's build directory) and written only when it is missing (or does
+    not hold that text), atomically (a temporary file renamed), so a script
+    never changes once written: rrc runs it by path for every texture and for
+    the final link, so each build's rrc runs a script with its own settings
+    while another build (other L2R_TEXTURE_RUSTFLAGS, another lean-runtime
+    build) writes its own. Until 2026-10-27 the script was one
+    `rustc-native` per directory, rewritten by the last build: a build
+    paused at rrc's start while another ran with L2R_TEXTURE_RUSTFLAGS
+    compiled its textures with the other build's target features."""
     flags = "%s --extern leanrt='%s'%s%s" % (
         " ".join(NATIVE_FLAGS + TEXTURE_FLAGS), rlib, "".join(" --extern '%s'" % e for e in lr.externs),
         "".join(" -L dependency='%s'" % d for d in lr.dirs))
     text = ("#!/bin/sh\n# lean-runtime build %s\n"
             "case \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
             "exec '%s' \"$@\" %s --edition 2018\n" % (lr.digest, RUSTC, flags, RUSTC, flags))
+    w = rlib.parent / ("rustc-native-" + hashlib.sha256(text.encode()).hexdigest()[:12])
     if not w.exists() or w.read_text() != text:
-        tmp = w.with_name(w.name + ".%d" % os.getpid())
-        tmp.write_text(text)
-        tmp.chmod(0o755)
-        os.replace(tmp, w)
+        fd, tmp = tempfile.mkstemp(dir=rlib.parent, prefix=".rustc-native-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(text)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, w)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
     return w
 
 
@@ -178,14 +196,18 @@ LEAN_RUNTIME_FEATURES = LEAN_RUNTIME_BASE_FEATURES + [f for f in LEAN_RUNTIME_EX
 def leanrt_out():
     """Where leanrt and lean-runtime are built: leanrt links against the
     Reussir checkout's runtime crates, so another checkout (L2R_REUSSIR, e.g.
-    a patched Reussir) gets its own directory, and so do extra flags
-    (L2R_LEANRT_RUSTFLAGS), another lean-runtime checkout (L2R_LEAN_RUNTIME)
-    and extra features (L2R_LEAN_RUNTIME_FEATURES)."""
+    a patched Reussir) gets its own directory, and so do another rustc
+    (L2R_RUSTC), extra flags (L2R_LEANRT_RUSTFLAGS), another lean-runtime
+    checkout (L2R_LEAN_RUNTIME) and extra features
+    (L2R_LEAN_RUNTIME_FEATURES): a build with other settings never rebuilds
+    the rlibs that a concurrent build's rrc is reading or linking."""
     def key(text):
         return hashlib.sha256(text.encode()).hexdigest()[:12]
     out = LEANRT_OUT
     if REUSSIR.resolve() != (ROOT / "reussir").resolve():
         out = out / ("rt-" + key(str(REUSSIR.resolve())))
+    if RUSTC != DEFAULT_RUSTC.resolve():
+        out = out / ("rustc-" + key(str(RUSTC)))
     if LEANRT_FLAGS:
         out = out / ("flags-" + key(" ".join(LEANRT_FLAGS)))
     if LEAN_RUNTIME != LEAN_RUNTIME_PIN.resolve():
@@ -294,12 +316,20 @@ def build_lean_runtime_cargo(out, cargo):
         sys.exit(f"l2r: no {cargo_bin} next to the pinned rustc (lean-runtime has dependencies)")
     # leanrt's rustc and flags; nothing in the environment may override them
     # (CARGO_ENCODED_RUSTFLAGS and the build/target rustflags win over
-    # RUSTFLAGS) or move the build.
+    # RUSTFLAGS), change the release profile (CARGO_PROFILE_*: leanrt, a
+    # plain rustc build, never sees them, so the two crates would be
+    # compiled differently, e.g. lean-runtime at another opt-level), turn on
+    # unstable cargo features (CARGO_UNSTABLE_*), wrap rustc, or move the
+    # build (CARGO_BUILD_BUILD_DIR moves its intermediate files out of the
+    # target directory). Also used for `cargo metadata` (cargo_link_order).
     env = dict(os.environ, RUSTC=str(RUSTC), RUSTFLAGS=" ".join(NATIVE_FLAGS + LEANRT_FLAGS))
     for v in list(env):
         if v in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
                  "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_RUSTC",
-                 "CARGO_BUILD_RUSTC_WRAPPER") or (v.startswith("CARGO_TARGET_") and v.endswith("_RUSTFLAGS")):
+                 "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
+                 "CARGO_BUILD_BUILD_DIR", "CARGO_INCREMENTAL") \
+                or v.startswith(("CARGO_PROFILE_", "CARGO_UNSTABLE_")) \
+                or (v.startswith("CARGO_TARGET_") and v.endswith("_RUSTFLAGS")):
             del env[v]
     features = ["--features", ",".join(LEAN_RUNTIME_FEATURES)] if LEAN_RUNTIME_FEATURES else []
     cmd = [str(cargo_bin), "build", "--offline", "--locked", "--release", "--lib",
@@ -563,6 +593,40 @@ def rcgmp_runtime_link(libdirs, tmp):
              + ", ".join(str(d) for d in libdirs))
 
 
+def checkout_of(lean2rr):
+    """The lean2rr checkout whose build the binary `lean2rr` is
+    (`<checkout>/lean2rr/.lake/build/bin/lean2rr`), or None."""
+    tail = [p.name for p in lean2rr.parents[:4]]
+    return lean2rr.parents[4] if len(lean2rr.parents) > 4 and tail == ["bin", "build", ".lake", "lean2rr"] else None
+
+
+def shim_dir():
+    """The directory of lean2rr's shim library (lean2rr/L2RShim.lean, built
+    with lean2rr) to pass as L2R_SHIM_DIR: this checkout's build for this
+    checkout's lean2rr; for another lean2rr binary (L2R_LEAN2RR) the
+    `lib/lean` directory of that binary's own build (`../../lib/lean` from
+    the binary, where lean2rr itself looks when L2R_SHIM_DIR is unset), so
+    that a binary gets the shim built with it, and this checkout's only
+    when that directory has no shim (a copy of the binary alone)."""
+    if LEAN2RR == OWN_LEAN2RR.resolve():
+        return OWN_SHIM_DIR
+    own = LEAN2RR.parent.parent / "lib" / "lean"
+    return own if (own / "L2RShim.olean").is_file() else OWN_SHIM_DIR
+
+
+def note_mixed_checkouts(shim):
+    """One line on stderr when the lean2rr binary is not this checkout's
+    build: the driver, the prelude, leanrt and lean-runtime come from this
+    checkout (L2R_LEAN_RUNTIME aside), so a build that mixes checkouts says
+    which parts it took from where. Silent for this checkout's lean2rr."""
+    if LEAN2RR == OWN_LEAN2RR.resolve():
+        return
+    co = checkout_of(LEAN2RR)
+    sys.stderr.write(f"l2r: lean2rr {LEAN2RR} ({f'checkout {co}' if co else 'not in a lean2rr checkout'}) "
+                     f"with the shim in {shim}, the prelude {PRELUDE}, leanrt {LEANRT_SRC.parent} "
+                     f"and lean-runtime {LEAN_RUNTIME} (driver checkout {ROOT})\n")
+
+
 def module_and_path(arg, lean_path):
     """The module to translate and the LEAN_PATH entries to add: `arg` is a
     module name (passed on as it is: lean2rr reads non-identifier
@@ -618,9 +682,12 @@ def main():
     # lean2rr's shim library (lean2rr/L2RShim.lean, built with lean2rr):
     # Lean implementations of Std.Internal.UV's externs, which lean2rr
     # compiles with the program. lean2rr looks for it there only (after the
-    # program's modules and Lean's library), also when L2R_LEAN2RR is a copy
-    # of the binary elsewhere.
-    env["L2R_SHIM_DIR"] = str(SHIM_DIR)
+    # program's modules and Lean's library): the build of the lean2rr binary
+    # in use (`shim_dir`), also when L2R_LEAN2RR is a copy of the binary
+    # elsewhere.
+    shim = shim_dir()
+    env["L2R_SHIM_DIR"] = str(shim)
+    note_mixed_checkouts(shim)
     # rrc compiles each of the prelude's textures with its own rustc run,
     # most of its time on a small program; this directory keeps the bitcode
     # (rrc's texture cache, a local patch on the old stack and upstream
@@ -706,8 +773,11 @@ def main():
             res = subprocess.run(rrc + ["--reuse-across-call"], env=env, cwd=tmp, capture_output=True, text=True)
             if res.returncode < 0:
                 # rrc crashed (RcCreateFusion's structural type comparison
-                # recurses forever on two structurally equal recursive types,
-                # e.g. a user list and `List`): retry without reuse across calls.
+                # recursed forever on two structurally equal recursive types,
+                # e.g. a user list and `List`; fixed in Reussir #654): retry
+                # without reuse across calls, a fallback for unknown crashes.
+                # tests/runtime/run.sh fails a test whose build log has this
+                # line, so that a new Reussir crash is not hidden from a gate.
                 sys.stderr.write(f"l2r: rrc crashed (signal {-res.returncode}); retrying without --reuse-across-call\n")
                 run(rrc, env=env, cwd=tmp)
             elif res.returncode != 0:

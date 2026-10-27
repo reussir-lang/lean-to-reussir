@@ -74,6 +74,13 @@
 # stderr is not searched instead: a panic message has no fixed prefix (the
 # panic under `Name.append` prints `Error: unreachable @ extractMainModule`;
 # round 9 RV9S-01, test RtHygSpecName).
+# A test also fails when its build log has scripts/l2r.py's line `l2r: rrc
+# crashed`: the driver then built again without --reuse-across-call (its
+# fallback for users), which would hide a new Reussir crash from a gate.
+# At its start the script prints the lean2rr binary, the Reussir checkout and
+# the checkout it uses, and warns when one of lean2rr's hidden switches
+# (L2R_NO_OUTLINE, L2R_NO_INLINE_ANCHORS, L2R_COUNT_CONVERSIONS,
+# L2R_ALLOW_MISSING_EXTERNS) is set in the environment.
 # Environment: L2R_REUSSIR, L2R_LEAN2RR, L2R_RUSTC, L2R_LEAN_RUNTIME,
 # L2R_LEAN_RUNTIME_FEATURES (see scripts/l2r.py);
 # L2R_DISABLE_OPTS / L2R_ENABLE_OPTS (comma-separated lean2rr optimizations
@@ -100,6 +107,27 @@ if [ ! -f "$LR/Cargo.toml" ]; then
   echo "no lean-runtime at $LR: run \`git submodule update --init third_party/lean-runtime\` (or set L2R_LEAN_RUNTIME)" >&2
   exit 2
 fi
+# Say once what the run tests: the lean2rr binary, the Reussir checkout, and
+# the checkout whose driver, prelude and leanrt it uses (with commits, where
+# they are git checkouts).
+commit_of() {
+  local c
+  [ -e "$1/.git" ] && c=$(git -C "$1" log -1 --format=%h 2> /dev/null) || return 1
+  git -C "$1" diff --quiet HEAD 2> /dev/null || c="$c with uncommitted changes"
+  echo "$c"
+}
+L2R_BIN=$(readlink -f "${L2R_LEAN2RR:-$ROOT/lean2rr/.lake/build/bin/lean2rr}")
+RS=${L2R_REUSSIR:-$ROOT/reussir}
+echo "run.sh: lean2rr $L2R_BIN ($( [ -e "$L2R_BIN" ] && date -r "$L2R_BIN" '+built %F %T' || echo missing));" \
+  "Reussir $RS ($(commit_of "$RS" || echo 'no git'));" \
+  "checkout $ROOT ($(commit_of "$ROOT" || echo 'no git')): driver, prelude, leanrt; lean-runtime $LR"
+# lean2rr's hidden switches change every translation of the run; the check
+# scripts set them per command, never in the environment.
+for v in L2R_NO_OUTLINE L2R_NO_INLINE_ANCHORS L2R_COUNT_CONVERSIONS L2R_ALLOW_MISSING_EXTERNS; do
+  if [ -n "${!v+set}" ]; then
+    echo "run.sh: warning: $v is set in the environment ($v='${!v}'): lean2rr applies it to every test, which then does not test the default translation" >&2
+  fi
+done
 
 if [ $# -gt 0 ]; then
   TESTS=("$@")
@@ -189,6 +217,11 @@ for t in "${TESTS[@]}"; do
         > "$d/build-l2r.log" 2>&1; then
     status=fail; why="lean2rr build failed (see $d/build-l2r.log)"
   else
+    # scripts/l2r.py retries without --reuse-across-call when rrc dies from
+    # a signal (a fallback for users); in a test that is a Reussir crash.
+    if grep -q "^l2r: rrc crashed" "$d/build-l2r.log"; then
+      status=fail; why="$why rrc crashed and scripts/l2r.py rebuilt without --reuse-across-call: a Reussir crash ($(grep -m1 '^l2r: rrc crashed' "$d/build-l2r.log"); see $d/build-l2r.log);"
+    fi
     for f in "$HERE/$t.l2r-log" "$HERE/$t.l2r-debug"; do
       [ -f "$f" ] || continue
       while IFS= read -r line; do
