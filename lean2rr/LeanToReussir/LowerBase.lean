@@ -422,6 +422,20 @@ structure LowerState where
   /-- Lean's borrowed parameters of the program's declarations, and the
   variables they lend (`Lower/Borrow`), once computed. -/
   borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
+  /-- The variables of the program that may hold something whose release
+  shows (a resource, a closure, a thunk, a task) and that their code owns,
+  not only borrows, with their binding order (`armReleaseVars`; for the
+  release order at the start of a branch, Emit/ArmRelease); empty in a
+  program that makes no resources. -/
+  armVars : Std.HashMap FVarId Nat := {}
+  /-- The Reussir names of the uses of `armVars` in the generated code, with
+  their types and their variables' binding order (`noteVarUse`). Names are
+  unique in the program. -/
+  armNames : Std.HashMap String (RR.Ty × Nat) := {}
+  /-- For a `match` on a value of `armVars` (by its Reussir name) and a
+  variant of its type: which binders of the variant's arm (by position)
+  may hold a resource (`noteArmFields`). -/
+  armFields : Std.HashMap (String × String) (Array Bool) := {}
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Types without a finite placeholder (their function in `zeroFns` is
@@ -552,6 +566,19 @@ def fresh (pre : String) : LowerM String := do
   let n ← getPart (·.counter)
   modify fun s => { s with counter := n + 1 }
   return s!"{pre}{n}"
+
+/-- The code being lowered uses Lean variable `x` by the Reussir name `n`
+of type `t`: recorded with `x`'s binding order (`LowerState.armNames`)
+when `x` may hold something whose release shows (`armVars`), for the
+release order at the start of a branch (Emit/ArmRelease). Every lookup of a
+variable whose name the generated code then uses calls it (`lowerArg`,
+`applyChain`, a projection, a `return`, the scrutinee of a `cases`, ...), so
+every name lean2rr gives the variable (a conversion, a later binding of a
+field) gets its order. -/
+def noteVarUse (x : FVarId) (n : String) (t : RR.Ty) : LowerM Unit := do
+  if t != .unit then
+    if let some k := (← getPart (·.armVars[x]?)) then
+      modify fun s => { s with armNames := s.armNames.insert n (t, k) }
 
 /-- An injective, identifier-safe encoding of a string: ASCII letters and
 digits are kept, `_` becomes `__`, and any other character `c` becomes

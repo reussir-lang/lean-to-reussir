@@ -65,7 +65,8 @@ after the stages: Stage 1 (`monomorphize`, `--emit inst`), Stage 2
 `retypeErasedData`), Stage 3 (`retypeMono`, from the
 declarations the entry point calls, `--emit retyped`), the registry's
 passes over mono LCNF, Stage 4 (`lowerProgram`, with the registry's
-lowering hooks), `Outline`, the
+lowering hooks), `Outline`, the release order at the start of a branch
+(`Emit/ArmRelease`, §5.8), the
 registry's passes over the generated functions, and the program text
 (`--emit rr`). The modules of
 `lean2rr/LeanToReussir/`:
@@ -99,7 +100,8 @@ registry's passes over the generated functions, and the program text
   program's steps),
   `Outline` (deep and long tail paths and `let` values cut into
   functions, for rrc; run before the optional passes over the generated
-  functions);
+  functions), `Emit/ArmRelease` (the values that die at the start of a
+  branch released in native Lean's order, §5.8; run after `Outline`);
 - `Dump`: typed LCNF dumps for the `--emit` checkpoints;
 - `PassConfig`: the configurable parts of the pipeline; `Opt/*.lean`: the
   optional passes, and `Opt/Registry.lean`.
@@ -2045,6 +2047,36 @@ Rules:
   Other values keep Reussir's release times: the same results without the
   extra reference counting. The process glue keeps a `Child` alive across
   `wait`, `tryWait` and `kill`, which borrow it by annotation.
+- **Release order at the start of a branch.** When several values die at
+  the start of a branch (the arm of a `match`, a branch of an `if`:
+  values another branch uses and this one does not), natively Lean
+  releases them there newest first (`ExplicitRC.addPrologForAlt` sorts
+  them by binding index and prepends a `dec` for each). A `cases` with two
+  or more alternatives gives its scrutinee a new index, the newest, in a
+  constructor's alternative (`withCtorAlt`) but not in the default one: a
+  scrutinee whose fields the alternative does not read goes first, and in
+  branches nested in that alternative it counts as bound at the `cases`.
+  A scrutinee whose fields the alternative reads (a scalar field too) is
+  live there until its last projection: it goes after the others. Reussir
+  releases such values oldest first, and a matched value that dies in the
+  match first. Resources show the order (handles close and flush, the
+  `sync` dependents of an unresolved promise run). So, in a program that
+  creates resources, a step of the core after `Outline`
+  (Emit/ArmRelease) releases them with `l2r_release_after` at the arm's
+  start in native's order, where two or more values that may hold a
+  resource (decided as for borrowing, on mono types, but with closures,
+  thunks and tasks counted as values that may hold one) and that the code
+  owns die there, and puts the scrutinee last where the arm reads a field
+  and a field it does not read may hold a resource. The step computes
+  Reussir's liveness on the generated code, so it holds for join points
+  (J1, J1′, J2, J3), state machines (J4), outlined parts and the other
+  passes' code alike; every name lean2rr gives a Lean variable (a field
+  converted to its own type, a field bound where it is used) has that
+  variable's binding order, its place in the declaration's code. Two handles
+  that die at a branch's start close `21` (Reussir alone: `12`); a
+  scrutinee holding a handle `S` in a field the arm does not read, the arm
+  reading its number, with two other handles that die there, `21S`
+  (`S12`); with no field read, `S21` (test `RtDropArmOrder`).
 
 ### 5.9 Panics and unreachable code
 
@@ -3392,6 +3424,36 @@ Each item says what differs and when.
   creates resources, a value of uniform type (`Box`) passed owned to a
   borrowed parameter is kept until the call returns: one more increment
   and release per such call.
+- *Release order at the start of a branch* (§5.8): emulated for values
+  that may hold a resource, by the place of their Lean variables in the
+  code and where lean2rr's generated code releases them, which follow
+  Lean's but for three shapes. Natively Lean's `pushProj` moves the
+  projections at the start of an alternative into the branches of a
+  `cases` that follows at once, so the scrutinee stays live into that
+  `cases`: it dies at the start of the branches that read none of the
+  projected fields, and after the projection in the others; lean2rr
+  releases it at the arm's start, after it takes the fields (`match r |
+  .two _ n => if c then …n… else …h1…`: `1S` natively in the `then`
+  branch, where `h1` dies, `S1` through lean2rr; test
+  `RtDropArmPushProj`, with expectation files). Natively a `cases` whose
+  alternatives Lean's `simpCase` folds into a default alternative only
+  after `toImpure` (bodies that become equal there) keeps its scrutinee's
+  index in that alternative, where lean2rr counts the scrutinee as bound
+  at the `match`. A join point's body that lean2rr inlines (J1) or copies
+  (J1′) at a jump under a `match` counts the scrutinee as bound at the
+  `match`, where natively the body has the scrutinee's index at the join
+  point. In each case the order shows only when the scrutinee holds a
+  resource and another one dies at the same place. Natively the
+  scrutinee and the first field projected in a constructor's alternative
+  get one index (`withCtorAlt` and the first `let`), so when both die at
+  the start of a nested branch their order is not specified (it depends
+  on a hash set); lean2rr releases the field first. A structure that
+  `flatten-structs` splits into its fields (it keeps whole the values that
+  may hold a resource, decided without closures, so a structure holding a
+  closure can be split) is released field by field: each field by its own
+  binding order at an arm's start, and at its own last use where it dies
+  inside a block, where natively the structure is released whole at its
+  last use.
 - *Release time of pure tasks* (§5.14): a pure task (`Task.spawn`,
   `Task.map`, `Task.bind`) whose last reference the program drops before
   a worker starts it is deleted and never runs, as natively; but the place

@@ -406,7 +406,11 @@ entry point or from the runtime's entries. See
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself. The step value is a <code>[value]</code> enum, so a step needs
   no heap cell.</li>
-<li><strong>Passes over the generated functions</strong>: <code>sink-proj</code>.</li>
+<li><strong>Release order at the start of a branch.</strong> In a program that creates
+  resources, the values that die together at the start of a branch are
+  released in Lean's order, the newest first (see
+  <a href="runtime.html#memory-management">Runtime</a>).</li>
+<li><strong>Passes over the generated functions</strong>: <code>sink-proj</code>, <code>merge-fns</code>.</li>
 <li>The text: <code>prog.rr</code>, with the functions of <code>prelude.rr</code> that it uses
   prepended (<code>prelude-liveness</code>).</li>
 </ul>

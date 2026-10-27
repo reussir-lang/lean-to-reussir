@@ -393,6 +393,13 @@ structure LoweredProgram where
   strLits : Array String
   anchored : Std.HashSet String := {}
   stepItems : Array RR.Item := #[]
+  /-- What the lowering recorded for the release order at the start of a
+  branch (Emit/ArmRelease): the Reussir names of the variables that may
+  hold something whose release shows, with their types and binding order
+  (`LowerState.armNames`), and which binders of a match arm on such a value
+  may hold such a thing (`LowerState.armFields`). -/
+  armNames : Std.HashMap String (RR.Ty × Nat) := {}
+  armFields : Std.HashMap (String × String) (Array Bool) := {}
 
 /-- What passes over the generated functions see of the program. -/
 def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
@@ -576,6 +583,11 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     for st in startup do
       if let .init decl _ := st then
         modify fun s => { s with initSlots := s.initSlots.insert decl s.cafSlots, cafSlots := s.cafSlots + 1 }
+    -- The variables whose uses the lowering records for the release
+    -- order at the start of a branch (`noteVarUse`, Emit/ArmRelease; after
+    -- the once-cells, which `borrowInfo` reads).
+    let vs ← armReleaseVars
+    modify fun s => { s with armVars := vs }
     -- A cycle of tail calls between declarations is one state machine
     -- (`lowerGroup`), lowered where its first declaration is.
     let groups := tailCallGroups decls
@@ -713,6 +725,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
     else pure (fnItems, st)
   let (boxItem, st) ← (boxTypeItems.run ctx).run st
   timingMark "lowering: live functions, types" s!"{st.fns.size} functions"
-  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored }
+  return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored,
+           armNames := st.armNames, armFields := st.armFields }
 
 end LeanToReussir

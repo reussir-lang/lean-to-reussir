@@ -287,6 +287,29 @@ names. Each prints, so a part left out shows as a missing line or a failed
 build; its `.l2r-debug` checks that the pass ran and that its guard did
 not turn it off.
 
+`RtDropArmOrder` checks the order of the releases at the start of a branch
+(plan §5.8, "Release order at the start of a branch"): handles that die
+together at a branch's start close newest first (`21`, `321`), two
+unresolved promises run their `sync` dependents newest first, and a
+matched value that holds a handle goes first in an arm that reads none of
+its fields (`S21`), last in an arm that reads a field (`21S`, `1S`; a
+`UInt64` field, or a field read only in a nested branch, too), by its
+binding in a default arm, and as bound at the `match` in a branch nested in
+a constructor's arm (`S1`); a structure keeps its binding (`2S1`). The
+other shapes: the error arm of an IO call, an enumeration's default arm,
+the branches after a join point (copied at its jumps, and outlined: a
+function that takes the handles by their names) and a loop's exit (also
+in a loop that is one state machine); from the review: a field converted
+to its own type keeps its field's place (`BA`), a field that `lazy-fields`
+binds where it is used keeps its place at the arm's start (`2S`), and a
+closure, a structure holding one or a task that holds a handle `C` dies
+with the scrutinee (`1CS` where the arm reads a field, `SC1b` where it
+does not). Each shape writes its tags to a file of its own and prints it.
+`RtDropArmPushProj` is a documented difference (plan §10, with expectation
+files): natively Lean's `pushProj` keeps a scrutinee alive into the `if`
+that follows the arm's start, where the field is read (`1S`); lean2rr
+releases it at the arm's start (`S1`).
+
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run), in one build, as
 scripts/l2r.py builds leanrt, linked with the Reussir checkout's rcgmp

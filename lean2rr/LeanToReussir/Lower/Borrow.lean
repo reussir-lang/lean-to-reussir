@@ -281,6 +281,10 @@ process translates one program (`Main.lean`: `run`), so the table never
 mixes two environments. -/
 initialize resourceTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
+/-- The answers of `mayHoldResource` with `closures` (`mayHoldRelease`), as
+`resourceTypeCache`'s. -/
+initialize releaseTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
+
 /-- Whether a value of mono type `e` may hold a resource with an
 observable release (see `resourceExterns`): a handle (`IO.FS.Handle`, whose
 mono type is `lcAny`), so also any value of unknown type (`lcAny`), or a
@@ -289,12 +293,13 @@ arguments (a reference is `lcAny` in mono code) (`IO.Process.Child` holds its pi
 `List Nat` holds none). Decided on mono types, not Reussir types: a field
 of a parameter's type is a `Box` in every instantiation (one type per
 inductive), which would make every container look like a handle's.
-Closures, thunks and tasks are not looked into. So: whether a type that
-holds a resource is reachable from `e` through array elements and
-constructor fields.
+Closures, thunks and tasks are not looked into: with `closures`
+(`mayHoldRelease`) each of them counts as one that may hold a resource. So:
+whether a type that holds a resource is reachable from `e` through array
+elements and constructor fields.
 
 A plain reachability with one visited set per question (linear in the
-types it reaches), memoized (`resourceTypeCache`) as rule 4's `mayHoldFn`:
+types it reaches), memoized (`resourceTypeCache`, with `closures` `releaseTypeCache`) as rule 4's `mayHoldFn`:
 a `true` holds for every type on the path that found it, a `false` for
 every type the search visited. (Until 2026-10-26 the lowering searched
 along every simple path, cutting a cycle on the path only, without a table:
@@ -302,34 +307,37 @@ a program that imports `Cslib.Init` spent 52 s of the 76 s it lowered
 declarations there; then the searches kept a `false` only where the search
 below met no type above it on the path, still exponential in the size of a
 dense mutual block: RtResDenseMutual's eight members.) -/
-partial def mayHoldResource (e : Expr) : CoreM Bool := do
+partial def mayHoldResource (e : Expr) (closures : Bool := false) : CoreM Bool := do
+  let cache := if closures then releaseTypeCache else resourceTypeCache
   let visited ← IO.mkRef ({} : Std.HashSet Expr)
-  let found ← go e visited
+  let found ← go cache e visited
   unless found do
     let vs ← visited.get
-    resourceTypeCache.modify fun c => vs.fold (fun c t => c.insert t false) c
+    cache.modify fun c => vs.fold (fun c t => c.insert t false) c
   return found
 where
   /-- Whether a type that holds a resource is reachable from `e` through
   types not visited yet; `true` is kept for `e`. -/
-  go (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
+  go (cache : IO.Ref (Std.HashMap Expr Bool)) (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
     let e := e.consumeMData.headBeta
-    if let some r := (← resourceTypeCache.get)[e]? then return r
+    if let some r := (← cache.get)[e]? then return r
     if (← visited.get).contains e then return false
     visited.modify (·.insert e)
-    let r ← search e visited
-    if r then resourceTypeCache.modify (·.insert e true)
+    let r ← search cache e visited
+    if r then cache.modify (·.insert e true)
     return r
   /-- The rules for `e`, its array element and its constructors' fields
   through `go`. -/
-  search (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
-    if e.isForall || e.isSort then return false
+  search (cache : IO.Ref (Std.HashMap Expr Bool)) (e : Expr) (visited : IO.Ref (Std.HashSet Expr)) : CoreM Bool := do
+    if e.isSort then return false
+    if e.isForall then return closures
     let .const n _ := e.getAppFn | return true
     if n == ``lcAny || n == ``IO.FS.Handle then return true
+    if closures && (n == ``Thunk || n == ``Task) then return true
     let args := e.getAppArgs
     if n == ``Array then
       return ← match args[0]? with
-        | some a => go a visited
+        | some a => go cache a visited
         | none => pure true
     if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
     let env ← getEnv
@@ -346,10 +354,81 @@ where
         | .forallE _ d b _ =>
           let m ← toMonoTypeKeep d
           if !(m.isErased || m == mkConst ``lcVoid) then
-            if ← go m visited then return true
+            if ← go cache m visited then return true
           ty := b.instantiate1 anyExpr
         | _ => break
     return false
+
+/-- Whether a value of mono type `e` may hold something whose release
+shows: a resource (`mayHoldResource`), or a closure, a thunk or a task, which
+may hold one (`mayHoldResource` does not look into them). -/
+def mayHoldRelease (e : Expr) : CoreM Bool := mayHoldResource e (closures := true)
+
+/-- The binders of code `c` with their mono types, in binding order: a
+`let` before its continuation, the fields a `cases` binds before its
+alternative's code, in field order, a local function (a closure) before
+its continuation, the parameters of a join point or local function before
+its body. A join point's continuation comes before its body: lean2rr can
+copy the body to a jump in the continuation (J1, J1′), where the body's
+variables then count as newer than the continuation's (natively the two
+are never in scope together). -/
+partial def armBinders (c : Code .pure) (acc : Array (FVarId × Expr)) : Array (FVarId × Expr) :=
+  match c with
+  | .let d k => armBinders k (acc.push (d.fvarId, d.type))
+  | .jp d k =>
+    armBinders d.value (d.params.foldl (fun a p => a.push (p.fvarId, p.type)) (armBinders k acc))
+  | .fun d k _ =>
+    armBinders d.value (d.params.foldl (fun a p => a.push (p.fvarId, p.type))
+      (armBinders k (acc.push (d.fvarId, d.type))))
+  | .cases cs => cs.alts.foldl (fun acc alt =>
+      armBinders alt.getCode (alt.getParams.foldl (fun a p => a.push (p.fvarId, p.type)) acc)) acc
+  | _ => acc
+
+/-- For the release order at the start of a branch (Emit/ArmRelease): the
+variables of the program that may hold something whose release shows
+(`mayHoldRelease` of their mono type) and that their code owns, not those it
+only borrows (`borrowInfo`'s lent variables: whoever lent them releases
+them, so their release by this code is never the last one), each with its
+binding order: its position in `armBinders` of its declaration (after the
+declaration's parameters), the order of native Lean's binding indices
+(`ExplicitRC`), on which the variables that lean2rr binds again (a field
+converted to its own type, a field a `lazy-fields` match binds later, a
+join point's parameter at an inlined jump) keep their place. Empty in a
+program that makes no resources (`programMakesResources`: `borrowInfo` then
+has no borrow flags, while it has them for every declaration with code,
+`main` included, in one that does). Computed once, before the declarations
+are lowered (`LowerState.armVars`). -/
+def armReleaseVars : LowerM (Std.HashMap FVarId Nat) := do
+  let (flags, lent) ← borrowInfo
+  if flags.isEmpty then return {}
+  let mut out : Std.HashMap FVarId Nat := {}
+  let mut k := 0
+  for (_, d) in (← read).decls do
+    let .code c := d.value | continue
+    for (x, ty) in armBinders c (d.params.map fun p => (p.fvarId, p.type)) do
+      k := k + 1
+      if !lent.contains x && (← mayHoldRelease ty) then out := out.insert x k
+  return out
+
+/-- For the release order at the start of a branch (Emit/ArmRelease):
+which binders of the arm of variant `variant` of a `match` on `scrut` (the
+Reussir name of Lean variable `discr`) may hold something whose release
+shows (`mayHoldRelease`), recorded (`LowerState.armFields`) when the matched
+value may (`armVars`).
+The arm's fields are `ps`, at the binder positions `fields` gives
+(`CtorLayout.fields`); a hidden field (an entry after the last of `ps`,
+`IO.Process.Child`'s) counts as one that may. -/
+def noteArmFields (discr : FVarId) (scrut variant : String) (ps : Array (Param .pure))
+    (fields : Array (Option (Nat × RR.Ty))) (nbinders : Nat) : LowerM Unit := do
+  unless (← getPart (·.armVars.contains discr)) do return
+  let mut flags := Array.replicate nbinders false
+  for h : i in [:fields.size] do
+    if let some (j, _) := fields[i] then
+      let may ← match ps[i]? with
+        | some p => mayHoldRelease p.type
+        | none => pure true
+      if may then flags := flags.set! j true
+  modify fun s => { s with armFields := s.armFields.insert (scrut, variant) flags }
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the

@@ -118,6 +118,124 @@ runtime.
   ("Borrowing").
 - **Remove only if:** the borrow emulation goes (see above).
 
+### Values that die at the start of an arm are released newest first
+
+- **What:** In a program that makes resources, when two or more values
+  that may hold something whose release shows (a resource, or a closure,
+  a thunk or a task, which may hold one) die at the start of a branch (the
+  arm of a `match`, a branch of an `if`: values another branch uses and
+  this one does not, which the code after it does not use), lean2rr
+  releases them there itself with `l2r_release_after`, newest binding
+  first. The scrutinee `s` of a `match`, when it may hold such a thing and
+  dies in the match: in an arm that reads none of its fields it goes with
+  the others, first in a constructor's arm and by its own binding in the
+  default arm (`_`); in an arm that reads a field (a scalar field too) it
+  goes after the others, when a field the arm does not read may hold such
+  a thing. In branches nested in a constructor's arm, `s` counts as bound
+  at the `match`. Examples (test `RtDropArmOrder`): two handles that die
+  at a branch start close `21`, three `321`; two unresolved promises run
+  their `sync` printers `p2` then `p1`; a scrutinee holding a handle `S`
+  in a field the arm does not read, the arm reading its `Nat` (or
+  `UInt64`) field, with two other handles, closes `21S` (`1S` with one);
+  an arm that reads no field `S21`; a default arm on such a scrutinee
+  bound first `21S`; a loop's exit `N1N2` for its parameters `a = N2`,
+  `b = N1`; a field converted to its own type `BA`; a closure holding
+  handle `C`, bound before the scrutinee, `1CS` in an arm that reads a
+  field and `SC1b` in one that does not.
+- **How:** a step of the core over the generated functions, right after
+  `Outline` and before the optional passes over them
+  (`LoweredProgram.armRelease`, in `Main.lean`). It computes Reussir's
+  liveness on the generated code (free variables, and the rules of
+  Reussir's `ownership.rs` for `If`, `Match` and argument lists: what dies
+  at an arm's start is what the other arms use, this one does not and
+  the code after does not), keeps the recorded values, and orders them by
+  their Lean variables' binding order. The lowering records them: before
+  the declarations are lowered, `armReleaseVars` numbers every binder of
+  each declaration in binding order (`armBinders`: a `let` where it is
+  bound, the fields of a `cases` at its alternative's start in field
+  order, a join point's parameters after its continuation, since lean2rr
+  can copy the body to a jump there) and keeps those whose mono type may
+  hold something whose release shows (`mayHoldRelease`: `mayHoldResource`
+  with closures, thunks and tasks counted) and that are not lent
+  (`borrowInfo`: whoever lent them releases them); every lookup of such a
+  variable records the Reussir name it gives, with the variable's order
+  (`noteVarUse`), so the names lean2rr gives a variable later (a field
+  converted to its own type, a field `lazy-fields` binds where it is
+  used, a join point's parameter at an inlined jump, a state machine's
+  slot bound again) keep its place; and each `match` arm on such a value
+  records which binders may hold such a thing (`noteArmFields`). A
+  release is an ordinary consuming use, so Reussir adds no release of
+  its own: no double release. Once the step releases a scrutinee in one
+  arm, Reussir borrows it for the whole `match` and releases it, with the
+  other values, oldest first in every arm that does not use it; so then
+  the step orders it in every arm where it dies with another recorded
+  value (the values it does not record hold nothing whose release shows,
+  or someone else holds them). `sink-proj`, after it, moves a
+  structure's projection into the branches that use the projected value,
+  and counts a release as such a use (the projection comes first, then
+  the releases in their order).
+- **Why:** Natively `ExplicitRC.addPrologForAlt` releases the values that
+  die at an alternative's start in one prolog, sorted by their binding
+  index, each `dec` prepended: newest first; `withCtorAlt` gives the
+  `cases`'s scrutinee a new index in a constructor's alternative (the
+  newest so far), not in the default one; a scrutinee whose fields the
+  alternative reads is live until its last projection, so its `dec` comes
+  after the prolog. A `cases` with one alternative left (`simpCase`; a
+  structure's) is no `cases` and gives no new index. Reussir releases the
+  values that die at an arm's start oldest first, and a matched value
+  that dies in the match first, after retaining the fields the arm reads.
+  Only resources can tell: handles close and flush in that order, and an
+  unresolved promise's last reference resolves its `result?` with `none`,
+  which runs its `sync` dependents. Through lean2rr the shapes above gave
+  `12`, `123`, `p1` first, `S12` (`S1`), `S12`, `S12` and `N2N1`
+  (bug hunt hunt-front b2 to b4 and its judge, ArmEdge; test
+  `RtDropArmOrder`). A first version ordered a scrutinee by its own
+  binding in a branch nested in a constructor's arm: `S1` natively, `1S`
+  through lean2rr (Reussir's oldest first had matched there by chance);
+  a structure keeps its binding (`2S1`, both in the test). Its review
+  found three more shapes where ordering by the Reussir names' numbers
+  (lean2rr's one counter) went wrong where Reussir alone had matched: a
+  field converted to its own type got a name after the arm's other
+  binders (`AB`, natively `BA`); a field that `lazy-fields` binds where it
+  is used got a name after the arm's `let`s (`S2`, natively `2S`); and a
+  closure holding a handle was not recorded, so in an arm where the step
+  had made Reussir borrow the scrutinee, Reussir released the closure
+  first (`CS1b`, natively `SC1b`). Hence the order by Lean variable and
+  the closures, thunks and tasks among the recorded values (all in the
+  test).
+- **Where:** `Emit/ArmRelease.lean` (`goBlock`, `goMatch`, `Pos`,
+  `Info.key`, `LoweredProgram.armRelease`); `Lower/Borrow.lean`:
+  `armReleaseVars`, `armBinders`, `mayHoldRelease`, `noteArmFields`;
+  `LowerBase.lean`: `noteVarUse`, `LowerState.armVars`, `armNames`,
+  `armFields`; the lookups in `Lower/Decls.lean` (`lowerArg`,
+  `applyChain`), `Lower/Values.lean`, `Lower/Code.lean` (`return`,
+  `lowerCases`), `Opt/LazyFields.lean`; `Emit/Program.lean`
+  (`lowerProgram`); `runtime/prelude.rr`: `l2r_release_after`; plan
+  [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
+  ("Release order at the start of a branch") and
+  [§10](../translation-plan.md#10-known-divergences-and-unsupported-features).
+- **Remove only if:** Reussir releases the values that die at an arm's
+  start newest first and a matched value whose fields the arm reads after
+  them (Lean's order). Limits (plan §10, "Release order at the start of a
+  branch"): natively Lean's `pushProj` moves the projections at an
+  alternative's start into the branches of a `cases` that follows at
+  once, so the scrutinee dies at the start of the branches that read no
+  field and after the projection in the others, where lean2rr releases it
+  at the arm's start (test `RtDropArmPushProj`, with expectation files);
+  a `cases` whose alternatives `simpCase` folds into a default
+  alternative only after `toImpure` keeps its scrutinee's index there; a
+  join point's body that lean2rr places under a `match` (J1, J1′) counts
+  the scrutinee as bound there, natively its index at the join point;
+  natively the scrutinee and the first field projected in a constructor's
+  alternative have one index, so their order when both die at a nested
+  branch's start is not specified (lean2rr: the field first); a structure
+  that `flatten-structs` splits into its fields (it keeps whole the values
+  that `mayHoldResource` says may hold a resource, which counts no
+  closure, so a structure holding a closure can be split) is released
+  field by field: each field by its own binding order at an arm's start,
+  and at its own last use where it dies inside a block, where natively the
+  structure is released whole at its last use.
+
 ### Reference sets store the new value before releasing the old one
 
 - **What:** `l2r_rc_set_ref` (references) reads the old value, stores the

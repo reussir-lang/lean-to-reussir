@@ -150,6 +150,18 @@ schedules native Lean can produce. See
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.
+- **Release order at the start of a branch.** lean2rr releases the values
+  that die at the start of a branch in Lean's order, the newest first.
+  Three shapes stay different. When an `if` or a `match` comes directly
+  after the start of an arm, Lean reads the matched value's fields in the
+  branches that use them: the matched value stays alive into those
+  branches. lean2rr releases it at the start of the arm. Lean can fold the
+  alternatives of a `cases` into a default alternative after a late pass:
+  there the matched value keeps its place in the order, and lean2rr counts
+  it as the newest. And when lean2rr puts a join point's body under a
+  `match`, the matched value counts as the newest there too. The order
+  shows only when the matched value holds a resource and another resource
+  dies at the same place.
 - **Release time of pure tasks.** A pure task (`Task.spawn`, `Task.map`,
   `Task.bind`) that the program drops before a worker starts it is deleted
   and does not run, as natively. But lean2rr releases the task at another

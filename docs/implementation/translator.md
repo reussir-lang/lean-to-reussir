@@ -127,7 +127,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
   [externs-ffi/program-externs.md](externs-ffi/program-externs.md#refusals-are-reported-at-translation-with-the-reason)),
   `L2R_TIMINGS` prints one line per step of the pipeline on stderr
   (loading, Stages 1 to 3, the passes over mono code, the parts of the
-  lowering, the passes over the generated functions, rendering, writing):
+  lowering, `Outline`, the release order at the start of a branch, the
+  passes over the generated functions, rendering, writing):
   the wall time of the step, the time since the start, the resident memory
   now and at most (`VmRSS`, `VmHWM`), and a count of what the step made;
   the output does not change (`LeanToReussir/Timings.lean`: `timingMark`),

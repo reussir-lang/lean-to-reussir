@@ -324,9 +324,9 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
           need.filter (early.contains ·.1)
         else need
       if now.isEmpty then continue
-      let scrut := match ctx.vars[l.discr]? with
-        | some (n, _) => n
-        | none => l.scrut
+      let scrut ← match ctx.vars[l.discr]? with
+        | some (n, t) => do noteVarUse l.discr n t; pure n
+        | none => pure l.scrut
       let mut lets := #[]
       let mut ctx' := ctx
       for (p, j, ft, pt) in now do
@@ -349,9 +349,9 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
     if now.isEmpty then continue
     -- The value's current name: the match of an enclosing lazy value may
     -- have bound it again (it is a field of that value).
-    let scrut := match ctx.vars[l.discr]? with
-      | some (n, _) => n
-      | none => l.scrut
+    let scrut ← match ctx.vars[l.discr]? with
+      | some (n, t) => do noteVarUse l.discr n t; pure n
+      | none => pure l.scrut
     let mut binders := Array.replicate l.nbinders (none : Option String)
     let mut ctx' := ctx
     let mut conv := #[]

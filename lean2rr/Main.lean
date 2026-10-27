@@ -193,8 +193,8 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
       | _ => m)
   timingMark "stage 4 (lowering)" s!"{prog.fns.size} functions"
   -- `Outline` (core; first, so that the passes after it see bounded
-  -- functions), the registry's passes over the generated functions, and
-  -- the program text. `L2R_NO_OUTLINE` and
+  -- functions), the release order at branch starts (core), the registry's
+  -- passes over the generated functions, and the program text. `L2R_NO_OUTLINE` and
   -- `L2R_NO_INLINE_ANCHORS` turn the two build-time workarounds off, for
   -- the repros of three Reussir costs (fixed upstream in Reussir #672,
   -- #670 and #674; their repros are in git history) and of the inliner's
@@ -203,6 +203,11 @@ def pipeline (opts : CliOptions) (cfg : PassConfig) (stage : String) : CoreM Str
   let prog := if (← IO.getEnv "L2R_NO_OUTLINE").isSome then prog else prog.outline
   let prog := if noAnchors then { prog with anchored := {} } else prog
   timingMark "outline" s!"{prog.fns.size} functions"
+  -- The values that die at the start of a branch, released in native
+  -- Lean's order (core; Emit/ArmRelease), on the functions `Outline` made
+  -- and before the passes over them (`sink-proj` keeps the order).
+  let prog := prog.armRelease
+  timingMark "release order at branch starts" s!"{prog.armNames.size} names"
   let prog := prog.runRRPasses cfg
   timingMark "passes over the generated functions" s!"{prog.fns.size} functions"
   -- `inline-anchors`, last, on the final functions and calls: the

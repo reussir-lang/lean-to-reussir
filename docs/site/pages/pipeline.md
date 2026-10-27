@@ -349,7 +349,11 @@ See [Runtime](runtime.html#startup) for the entry point.
   keeps its loops: the cut part returns a step value, and the function makes
   the tail call itself. The step value is a `[value]` enum, so a step needs
   no heap cell.
-- **Passes over the generated functions**: `sink-proj`.
+- **Release order at the start of a branch.** In a program that creates
+  resources, the values that die together at the start of a branch are
+  released in Lean's order, the newest first (see
+  [Runtime](runtime.html#memory-management)).
+- **Passes over the generated functions**: `sink-proj`, `merge-fns`.
 - The text: `prog.rr`, with the functions of `prelude.rr` that it uses
   prepended (`prelude-liveness`).
 
