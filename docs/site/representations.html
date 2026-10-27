@@ -288,7 +288,9 @@ element type gives the <em>storage kind</em>:</p>
   another type (<code>rows : Array (Array α)</code>, <code>xs : List (Array α)</code>) holds
   them in boxes already. Its arrays can be compact with no change.</li>
 <li><strong>Values without arrays.</strong> An empty list or <code>none</code> holds no array. One
-  such value can go where lists of arrays of different kinds are expected.</li>
+  such value can go where lists of arrays of different kinds are expected.
+  This is also true for a constant that Lean makes from such a value (for
+  example, the error that a loop throws).</li>
 <li><strong>Boxes.</strong> A compact array in a box is one word with the kind's number
   (7 to 12). If generic code ever unboxes it as an array of boxes, the
   runtime converts it (a copy). The check makes this unreachable.</li>

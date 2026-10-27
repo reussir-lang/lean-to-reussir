@@ -40,7 +40,8 @@ partial def endsInJumps (c : Code .pure) (targets : FVarIdSet) (outlined : FVarI
     else endsInJumps k targets outlined
   | _ => false
 
-/-- Join points jumped to from inside the body of join point `inside`. -/
+/-- The join points that code `c` jumps to (also from the bodies of the
+join points and local functions it declares), added to `s`. -/
 partial def jumpsIn : Code .pure → FVarIdSet → FVarIdSet
   | .jmp j _, s => s.insert j
   | .let _ k, s => jumpsIn k s
@@ -93,8 +94,10 @@ partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bo
     if counts.getD d.fvarId 0 ≤ 1 then s.insert d.fvarId else s
   let scope : JpScope := { bodies := jpBodiesOf body, single := once, loop }
   let mut outlined : FVarIdSet := {}
-  -- The join points declared inside the body of each outlined join point.
+  -- The join points declared inside the body of each outlined join point,
+  -- and those its body jumps to (`jumpsIn`).
   let mut inside : Std.HashMap FVarId FVarIdSet := {}
+  let mut jumpsFrom : Std.HashMap FVarId FVarIdSet := {}
   let mut changed := true
   while changed do
     changed := false
@@ -107,12 +110,13 @@ partial def chooseOutlined (duplicate : JpScope → FunDecl .pure → Nat → Bo
       -- it, is inside that body too.
       let jumpedFromOutlined := jps.any fun (d', _) =>
         outlined.contains d'.fvarId && !(inside.getD d'.fvarId {}).contains d.fvarId &&
-          (jumpsIn d'.value {}).contains d.fvarId
+          (jumpsFrom.getD d'.fvarId {}).contains d.fvarId
       let ok := single || duplicate scope d (counts.getD d.fvarId 0) ||
         (endsInJumps k (({} : FVarIdSet).insert d.fvarId) outlined && !jumpedFromOutlined)
       if !ok then
         outlined := outlined.insert d.fvarId
         inside := inside.insert d.fvarId ((jpBodiesOf d.value).fold (fun s j _ => s.insert j) {})
+        jumpsFrom := jumpsFrom.insert d.fvarId (jumpsIn d.value {})
         changed := true
   return outlined
 

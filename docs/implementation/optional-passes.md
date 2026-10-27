@@ -685,7 +685,17 @@ built-in integers
   the arguments of that call count as whole uses (the wrapper takes them
   whole; the callee's parameters then get existing objects). A
   two-constructor value built behind a join on its tag is matched as the
-  built object, so the alternative's fields are the ones built there. A
+  built object, so the alternative's fields are the ones built there; the
+  alternative knows the value's constructor, with the type and
+  constructors of the value's own node (`xformCases`' `built`: the built
+  object's variable has no type in the pass's facts), so a `match` on the
+  value inside it takes its arm without a second match at run time (test
+  `RtFlattenNestedMatch`, whose arms `flatten-match-check.sh` counts). A
+  known missed simplification: at `xform`'s two other `cases` sites (a
+  value whose node is of another inductive than the `cases`, and a value
+  that is no node, matched through a placeholder) the object matched can
+  be a new variable too, and there the alternatives still learn nothing
+  of it. A
   fresh value (a constructor application the pass leaves unbuilt, a call's
   result) that goes split both to another declaration's worker, which may
   return it as it came in a tuple a caller rebuilds, and to a second place
@@ -719,6 +729,16 @@ built-in integers
   the declaration's name and signature for function values and entry
   points. `L2R_FLATTEN_DEBUG=NAME` prints the decisions about the
   declarations whose names contain NAME.
+
+  **Tasks.** A task field of a split structure is a variable of its own,
+  so Reussir releases it at its last use, and at the start of a path that
+  does not use it (a loop's exit, a join point's body), where natively the
+  structure, and so its task, lives until its last field is read. A pure
+  task that no worker has started is then deleted earlier than natively
+  and never runs (plan
+  [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Release time of pure tasks"; test `RtTaskDropReleaseTime`: `loopJ`'s
+  state at the loop's exit, `viaJp`'s structure built in two branches).
 
   **Resources.** In a program that creates resources (files, child
   processes, promises: `programMakesResources`), lean2rr emulates Lean's
@@ -825,6 +845,8 @@ built-in integers
   `RtFlattenPeelFirst`, `RtFlattenOrder`, `RtFlattenNested`,
   `RtFlattenSumPayload`, `RtFlattenWrapArgs`, `RtFlattenSelfWrap`,
   `RtFlattenEscape` (each with its `.alloc`), `RtFlattenTrace`,
+  `RtFlattenNestedMatch` (with `flatten-match-check.sh`),
+  `RtTaskDropReleaseTime` (with expectation files),
   `RtFlattenResFlow` (with `.alloc` and `.l2r-debug`), `RtFlattenResHeld`,
   `RtFlattenResRef` and `RtFlattenResOwner` (with `.l2r-debug`).
 - **Remove only if:** the pass is off (the structures are then built at

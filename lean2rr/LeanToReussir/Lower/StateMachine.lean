@@ -26,8 +26,9 @@ namespace LeanToReussir
 open Lean Compiler LCNF
 
 /-- Does `c` contain a tail call `let x := f args; return x` of `f` with
-`arity` arguments (outside nested join-point bodies, which are checked on
-their own when outlined)? -/
+`arity` arguments, also in the bodies of the join points `c` declares (not
+in local functions' bodies)? (A nested join point that is outlined is
+one of `outlinedBodies` too, so `stateMachinePlan`'s answer is the same.) -/
 partial def hasSelfTailCall (f : Name) (arity : Nat) : Code .pure → Bool
   | .let d k =>
     match d.value, k with

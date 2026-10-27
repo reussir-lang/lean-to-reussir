@@ -1,0 +1,4 @@
+[typed-arrays,compact-arrays] lean2rr: typed arrays: #[I:Pt, LStr, Nat]
+[typed-arrays,compact-arrays] ! typed arrays: LStr off
+[typed-arrays,compact-arrays] ! typed arrays: I:Pt off
+[typed-arrays,compact-arrays] ! map loop entries in place again

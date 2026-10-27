@@ -1612,7 +1612,7 @@ mutual
       wrapPre pre (.jmp j args')
     | .cases cs =>
       match valOf env cs.discr with
-      | .node _ ind ctors tag fs mat =>
+      | .node nty ind ctors tag fs mat =>
         if ind == cs.typeName then
           let arm (env : Env) (c : Nat) : XM (Code .pure) := do
             let some ci := ctors.cs[c]? | return .unreach ctx.resTy
@@ -1636,8 +1636,11 @@ mutual
             -- Built already, behind a join on its tag (`materialize`): a
             -- `cases` on the object, whose fields are the ones built there
             -- (each alternative's parameters; not built a second time).
+            -- Each alternative knows `cs.discr` as its constructor, with
+            -- the value's own type and constructors: a nested `cases` on
+            -- it needs no second match.
             if let some m := mat then
-              return ← xformCases env ⟨cs.typeName, cs.resultType, m, cs.alts⟩
+              return ← xformCases env ⟨cs.typeName, cs.resultType, m, cs.alts⟩ (some (cs.discr, nty, ctors))
             -- The tag decides: a `cases` on it, each arm knowing it.
             let k0 ← arm { env with tags := env.tags.insert t 0 } 0
             let k1 ← arm { env with tags := env.tags.insert t 1 } 1
@@ -1668,12 +1671,20 @@ mutual
     | .fun .. => return c
 
   /-- A `cases` on a real variable: each alternative knows the matched
-  value as its constructor applied to the alternative's parameters. -/
-  partial def xformCases (env : Env) (cs : Cases .pure) : XM (Code .pure) := do
+  value as its constructor applied to the alternative's parameters.
+  `built`: `cs.discr` is the object `materialize` built for a value whose
+  fields are known, given as its variable, type and constructors (those of
+  its node, not looked up again: `facts.types` does not know the object);
+  each alternative then knows that variable. -/
+  partial def xformCases (env : Env) (cs : Cases .pure) (built : Option (FVarId × Expr × Ctors) := none) :
+      XM (Code .pure) := do
     let ctx ← read
     let ind := cs.typeName
-    let ty := ctx.facts.types.getD cs.discr anyExpr
-    let ctors? := (← indInfo? ty).bind fun (iv, k, _) => if iv.name == ind then some k else none
+    let (orig, ty, ctors?) ← match built with
+      | some (x, t, k) => pure (x, t, some k)
+      | none => do
+        let ty := ctx.facts.types.getD cs.discr anyExpr
+        pure (cs.discr, ty, (← indInfo? ty).bind fun (iv, k, _) => if iv.name == ind then some k else none)
     let alts ← cs.alts.mapM fun
       | .alt c ps k h => do
         let mut env := env
@@ -1686,7 +1697,7 @@ mutual
                 fields := fields.push <|
                   if c' == ci then (match ps[i]? with | some p => VVal.real (.fvar p.fvarId) | none => .irr anyExpr)
                   else .irr anyExpr
-            env := env.insert cs.discr (.node ty ind ctors (.known ci) fields (some cs.discr))
+            env := env.insert orig (.node ty ind ctors (.known ci) fields (some cs.discr))
         return .alt c ps (← xform env k) h
       | .default k => return .default (← xform env k)
       | a => return a

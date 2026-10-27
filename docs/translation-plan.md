@@ -2551,7 +2551,8 @@ resume. lean2rr's part is the task objects and the glue (`leanrt::task`,
   them, and run when needed, polled, at exit, or when nothing else can go
   on (lean-runtime's pure-task rule).
 - *Dropped tasks.* The program's last reference to an unfinished task is
-  its cell's last (the scheduler's job holds no count): its drop calls
+  its cell's last (the scheduler's job holds no count): its drop, at
+  lean2rr's release time (§10, "Release time of pure tasks"), calls
   lean-runtime's `release` (Lean's `deactivate_task`). A pure task that has
   not started is deleted and never runs; dropping its state releases its
   source, so a chain of dropped pure tasks goes, as natively. Any other
@@ -3358,6 +3359,34 @@ Each item says what differs and when.
   creates resources, a value of uniform type (`Box`) passed owned to a
   borrowed parameter is kept until the call returns: one more increment
   and release per such call.
+- *Release time of pure tasks* (§5.14): a pure task (`Task.spawn`,
+  `Task.map`, `Task.bind`) whose last reference the program drops before
+  a worker starts it is deleted and never runs, as natively; but the place
+  of that release is lean2rr's, not native's. A task that natively still
+  has a reference when a worker becomes free, and so runs, can be deleted
+  first through lean2rr, and the reverse. The places differ for four
+  reasons: Reussir releases a value at its last use where Lean borrows a
+  parameter and the caller releases it after the call (`report (j : Job)`
+  reads only `j.n` before a wait: natively the caller keeps `j`, and its
+  task, until `report` returns; the emulation of borrowed parameters does
+  not look into tasks, §5.8 and the item above); `flatten-structs`
+  splits a structure into its fields, and Reussir releases a task field
+  that a path does not use at the start of that path (a loop's exit, a
+  join point's body), where natively the structure lives until its last
+  field is read
+  ([optional-passes.md](implementation/optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs));
+  Lean's own code motion and dead-code elimination move the release
+  natively too (native Lean deletes an unused `Task.spawn`, and moves the
+  creation of a record past a wait); and lean-runtime's pure-task rule
+  decides when a pure task that no IO task waits for runs, so with
+  explicit drop points (references) a dropped task can have run natively
+  and not through lean2rr. Visible only through `dbgTrace`, panics or
+  unsafe effects inside a dropped task, and as time; stdout and results
+  are the same. Lean's documentation allows it: "Unlike pure tasks created
+  by `Task.spawn`, tasks created by this function will run even if the
+  last reference to the task is dropped" (`BaseIO.asTask`, `mapTask`,
+  `bindTask`). Test `RtTaskDropReleaseTime`, with expectation files: on
+  one worker natively three tasks run, through lean2rr none.
 - *Order of panics in pure code*: when several pure computations panic
   (`get!` on a short array, an `assert!`), their messages can come out in
   another order than natively, because Lean's closed-term extraction may

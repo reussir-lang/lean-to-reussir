@@ -33,8 +33,9 @@ optimization:
   of an array of boxes, not under a function type; HCA-02: `rows : Array
   (Array α)` of a `Matrix Float`): the flow class below decides. An
   extern's parameters and result keep the strict comparison. A binder whose
-  value holds no array (`List.nil ◾`, `CAM.holdsNoArray`) is aligned
-  nowhere and joins no class (HCA-01).
+  value holds no array (`List.nil ◾`, `CAM.holdsNoArray`; a constant whose
+  value is one, `CAM.noArrConsts`) is aligned nowhere and joins no class
+  (HCA-01).
 * **Flow classes.** The same places join the binders into classes
   (union-find, as rule 4's `flowAnalysis` follows function values), also
   through containers (a constructor's arguments and its value, a field and
@@ -83,6 +84,9 @@ structure CAState where
   /-- Binders of the declaration being walked whose value holds no array
   (`CAM.holdsNoArray`): they have no node and are aligned nowhere. -/
   noArr : Std.HashSet FVarId := {}
+  /-- The constants whose value holds no array (`CAM.noArrConsts`): a
+  binder bound to one is in `noArr`. -/
+  noArrConsts : NameSet := {}
   holdCache : Std.HashMap Expr Bool := {}
   mentionCache : Std.HashMap Expr (Array String × Bool) := {}
   /-- The element types seen for each pointer kind (`typed-arrays`), for
@@ -408,6 +412,42 @@ def CAM.holdsNoArray (v : LetValue .pure) : CAM Bool := do
     if ← mayHoldArr ((← get).vars.getD x anyExpr) then return false
   return true
 
+/-- Whether let value `v` reads a constant whose value holds no array
+(`CAState.noArrConsts`). -/
+def CAM.readsNoArrConst (v : LetValue .pure) : CAM Bool := do
+  let .const f _ args _ := v | return false
+  return args.isEmpty && (← get).noArrConsts.contains f
+
+/-- Whether straight-line code `c` (`let`s, then `return`) returns a value
+that holds no array (`CAM.holdsNoArray`, `CAM.readsNoArrConst`); its `let`s
+go into `vars` and `noArr`. -/
+partial def CAM.returnsNoArr (c : Code .pure) : CAM Bool := do
+  match c with
+  | .let d k =>
+    modify fun s => { s with vars := s.vars.insert d.fvarId d.type }
+    if (← CAM.holdsNoArray d.value) || (← CAM.readsNoArrConst d.value) then
+      modify fun s => { s with noArr := s.noArr.insert d.fvarId }
+    CAM.returnsNoArr k
+  | .return x => return (← get).noArr.contains x
+  | _ => return false
+
+/-- The constants of `decls` (no parameters; not an `initialize` constant,
+`inits`, whose value its initializer gives) whose code is straight-line and
+returns a value that holds no array (`CAM.returnsNoArr`), into
+`noArrConsts`; one that reads an earlier one counts. Lean caches such a
+value as a closed term typed at its first use: `Except.error "too many"`
+of a `mapM` over `Array lcAny` is a constant of type `Except String (Array
+lcAny)`, which the loop's copy that Stage 3 typed (`Array String`) reads
+too. A binder bound to it holds no array, as one bound to the constructor
+(HCA-01), and the constant's own result goes nowhere: it has no node. -/
+def CAM.noArrConsts (decls : Array (Decl .pure)) (inits : Std.HashMap Name Expr) : CAM Unit := do
+  for d in decls do
+    let .code c := d.value | continue
+    unless d.params.isEmpty && !inits.contains d.name do continue
+    modify fun s => { s with vars := {}, noArr := {} }
+    if ← CAM.returnsNoArr c then
+      modify fun s => { s with noArrConsts := s.noArrConsts.insert d.name }
+
 /-- The flow of declaration `dn`'s code `c`, whose results go to node `res`
 of type `rt`. -/
 partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits : Std.HashMap Name Expr) (dn : Name)
@@ -425,7 +465,7 @@ partial def caCode (boxed : NameSet) (byName : Std.HashMap Name CADecl) (inits :
   match c with
   | .let d k =>
     setTy d.fvarId d.type
-    if ← CAM.holdsNoArray d.value then
+    if (← CAM.holdsNoArray d.value) || (← CAM.readsNoArrConst d.value) then
       modify fun s => { s with noArr := s.noArr.insert d.fvarId }
       return ← caCode boxed byName inits dn res rt k
     let x ← CAM.node dn d.fvarId d.type
@@ -711,6 +751,7 @@ def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (ini
   for (c, _) in inits do
     initTys := initTys.insert c (← toMonoTypeKeep (← getOtherDeclBaseType c []))
   let act : CAM Unit := do
+    CAM.noArrConsts decls initTys
     for d in decls do
       let .code c := d.value | continue
       modify fun s => { s with vars := {}, jps := {}, noArr := {} }
@@ -722,7 +763,7 @@ def compactArrayKindsRun (decls : Array (Decl .pure)) (casts : Option Name) (ini
         -- types; its body sees its parameters' own.
         if let some (_, q) := cd.params[i]? then alignArr q p.type s!"{d.name}"
         let _ ← CAM.node d.name p.fvarId p.type
-      let rn ← CAM.node d.name resultVar cd.ret
+      let rn ← if (← get).noArrConsts.contains d.name then pure none else CAM.node d.name resultVar cd.ret
       caCode boxed byName initTys d.name rn cd.ret c
     -- The startup glue stores an initializer's result into its constant.
     for (c, inst) in inits do

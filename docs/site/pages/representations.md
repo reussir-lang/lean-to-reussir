@@ -148,6 +148,8 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
   them in boxes already. Its arrays can be compact with no change.
 - **Values without arrays.** An empty list or `none` holds no array. One
   such value can go where lists of arrays of different kinds are expected.
+  This is also true for a constant that Lean makes from such a value (for
+  example, the error that a loop throws).
 - **Boxes.** A compact array in a box is one word with the kind's number
   (7 to 12). If generic code ever unboxes it as an array of boxes, the
   runtime converts it (a copy). The check makes this unreachable.

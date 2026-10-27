@@ -77,7 +77,12 @@ runtime.
   resources are only inside such fields gets no `l2r_release_after`: a
   tree of `Task IO.FS.Handle` or `Thunk IO.FS.Handle` fields passed to a
   borrowed parameter is released inside the callee, as one with closure
-  fields; found by the review of the shared drop stack), and the inference
+  fields; found by the review of the shared drop stack; for the same
+  reason a pure task does not make its value kept for a borrowed
+  parameter, so a pure task that no worker has started is deleted at the
+  value's last use inside the callee, where natively the caller's release
+  after the call can come after a worker started it: plan §10, "Release
+  time of pure tasks", test `RtTaskDropReleaseTime`), and the inference
   runs on lean2rr's
   instances (plan
   [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),

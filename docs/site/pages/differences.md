@@ -150,6 +150,18 @@ schedules native Lean can produce. See
   lean2rr's instances. Where Lean infers its own specializations
   differently, the release time follows lean2rr's instance. Resources inside
   closures and thunks are released at their last use.
+- **Release time of pure tasks.** A pure task (`Task.spawn`, `Task.map`,
+  `Task.bind`) that the program drops before a worker starts it is deleted
+  and does not run, as natively. But lean2rr releases the task at another
+  place than native Lean. Reussir releases a value at its last use, also
+  where Lean borrows it until the call returns. `flatten-structs` makes a
+  task field a variable of its own, so a path that does not use it
+  releases it at its start. Native Lean moves releases too, and it deletes
+  a task that the program does not use. So a task that runs natively can
+  be deleted through lean2rr, and the reverse. Only `dbgTrace`, panics and
+  unsafe effects in the task, and time, show this. Lean's documentation
+  allows it: only tasks of `IO.asTask`, `mapTask` and `bindTask` run when
+  their last reference goes.
 - **Promises released inside a free.** When a runtime free releases them,
   their `sync` dependents run when the whole free is over, not when the
   free reaches the promise. So they see the rest of the container released

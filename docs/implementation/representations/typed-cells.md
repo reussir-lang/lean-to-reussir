@@ -115,8 +115,12 @@ box's payload number) after the take.
   operation at `lcAny`: every kind off), `RtTRefMixed` (kinds off for
   their releases beside kinds on), `RtTRefTasks` (a program with tasks:
   `refPoint` at a typed record), `RtTRefInPlace` (`.alloc`: `modify` of a
-  value only the cell holds runs in place); each has an `.l2r-debug` file
+  value only the cell holds runs in place), `RtTRefNested` (references of
+  references and of arrays of references, made at `lcAny`, beside typed
+  references: the other kinds stay typed); each has an `.l2r-debug` file
   whose lines are checked only while the optimization is on.
+  `RtBorrowTypedRef`, without one, checks the release times of borrowed
+  handles in a program with references at precise types (plan §5.8).
 - **Remove only if:** never while references have two representations.
 
 ### `take` stores the placeholder of the element type

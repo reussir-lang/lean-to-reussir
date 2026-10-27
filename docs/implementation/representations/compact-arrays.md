@@ -92,7 +92,17 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
     (typed at its first use) with a use where `List (Array Float)` is
     expected; before, this turned `u8` and `f64` off. A constructor that
     the runtime implements (`Array.mk`: the kind decides its
-    representation) and a `flatten-structs` tuple do not count;
+    representation) and a `flatten-structs` tuple do not count. A binder
+    bound to a constant whose code is straight-line and returns such a
+    value (one that reads such a constant included; not an `initialize`
+    constant, whose initializer gives its value) counts too, and the
+    constant's result gets no node (`CAM.noArrConsts`). Example (arrays
+    hunt): Lean caches the `Except.error "too many"` of a `mapM` in
+    `ExceptT String IO` as a constant typed at the loop over `Array lcAny`
+    (`Except String (Array lcAny)`), and the loop's copy that Stage 3
+    typed (`Array String`) reads it; before, its class reached `Array
+    lcAny` and turned `LStr` off (under `StateT (Array Pt)` also `I:Pt`;
+    test `RtTArrThrowConst`);
   - **a flow class:** the places above join binders into classes
     (union-find, as rule 4's `flowAnalysis`), also through containers (a
     constructor's arguments and its value, a field and the value read),
@@ -158,7 +168,7 @@ that it gets as an `α` is one box (kind 11), which it passes on unread.
   payload), and the classes turn those kinds off; `RtCArrSharedNil` keeps
   every kind on.
 - **Where:** `CompactArrays.lean`: `compactArrayKinds`, `caCode`,
-  `alignArr`, `boxArrayElem`, `CAM.holdsNoArray`, `mentions`,
+  `alignArr`, `boxArrayElem`, `CAM.holdsNoArray`, `CAM.noArrConsts`, `mentions`,
   `mayHoldArr`; `Lower/Conv.lean`: `programCasts`,
   `nativeEvalStatement?`; `Emit/Program.lean`: `lowerProgram`.
 - **Remove only if:** never while arrays have two representations.

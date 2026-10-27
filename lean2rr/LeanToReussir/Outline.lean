@@ -353,8 +353,11 @@ partial def stepify (fc : FnCtx) (b : Block) : M Block := do
   | .block b' => return ⟨b.lets, .block (← stepify fc b')⟩
   | e => return ⟨b.lets, .ctor info.name (some "done") #[e]⟩
 
-/-- The parameters for outlining `b` (its free variables, in binding
-order), or `none` if one of them has no known type. -/
+/-- The parameters for outlining `b`: its free variables, ordered by their
+index in `env` (binding order; but `cutLong` binds the `let`s of the block
+it cuts a second time, which gives all of them one index, after every other
+variable's, so among themselves their order is the one `qsort` gives equal
+keys), or `none` if one of them has no known type. -/
 def partParams (env : Env) (b : Block) : Option (Array (String × Ty)) := Id.run do
   let fv := blockFvs {} b {}
   let mut params : Array (String × Ty × Nat) := #[]
@@ -477,6 +480,8 @@ mutual
     let step := !stepped && hasCycleCall fc.cycle last
     let partRet ← if step then do pure (Ty.named (← stepInfo fc).name) else pure ret
     -- Every variable bound before a part (names are unique in a function).
+    -- (`env` binds `lets` already, `walkBlock`; bound again, each gets the
+    -- same index, `env.size`: see `partParams`.)
     let envAll := lets.foldl (fun e (x, t, _) => e.bind x t) env
     let some ps := partParams envAll last | return none
     let name ← freshName fc.base
