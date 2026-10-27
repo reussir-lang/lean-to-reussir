@@ -12,7 +12,7 @@ under every option.
 
 **Kind:** bug. **Status:** fixed by 23-e
 ([issue 23](23-worklist-drops.md)), applied in `./reussir`'s series since
-2026-10-25 (branch `l2r-base11`, commit `0fef47d1`). lean2rr does not
+2026-10-25 (branch `l2r-base12`, commit `09b68801`). lean2rr does not
 reach the bug: rrc's command line has no TPDE level (`-O` is `none`,
 `default`, `aggressive` or `size`), and lean2rr does not use the JIT.
 
@@ -79,7 +79,7 @@ the separate function.
 
 Inside 23-e
 ([`patches/23-e-worklist-nullable-locked.patch`](patches/23-e-worklist-nullable-locked.patch),
-commit `0fef47d1`): the critical section calls the locked-drop function
+commit `09b68801`): the critical section calls the locked-drop function
 under every option, not only under retcon drops. Inside worklist glue
 it calls a variant marked as glue, `__reussir_locked_drop.worklist`, so
 that the payload's Worklist box is deferred like the glue's other boxes

@@ -1,7 +1,7 @@
-From 6111586ceecb44f26871ac7014dea4f3bcbcb83b Mon Sep 17 00:00:00 2001
+From 0ffbe4c09219d21af30086c18a5550fdac4194e0 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 22:59:33 -0400
-Subject: [PATCH 21/25] l2r-local: entry 23-m: drop stack: steps, depth and
+Subject: [PATCH 21/24] l2r-local: entry 23-m: drop stack: steps, depth and
  drain for a host runtime
 
 A host runtime that frees its own containers shares the thread's stack, so

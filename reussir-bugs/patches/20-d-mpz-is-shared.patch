@@ -1,7 +1,7 @@
-From e69cde106e2649c4de0a6f2b7ab064fcb366c94b Mon Sep 17 00:00:00 2001
+From 90c532693e5db4072cab69e9de4f9edb16080ba0 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:30:35 -0400
-Subject: [PATCH 06/25] l2r-local: step D (R2c): Mpz::is_shared through
+Subject: [PATCH 06/24] l2r-local: step D (R2c): Mpz::is_shared through
  compiler-emitted glue from rcgmp.mpz.is_unique
 
 lean2rr's dbgTraceIfShared (Lean's `lean_dbg_trace_if_shared`, natively
@@ -203,10 +203,10 @@ index 751f9e96..db90a788 100644
  /// `declared`, crosses as the raw rcgmp handle: the signature spells `Nat` or
  /// `Int` itself. A generic instantiated at `Nat` or `Int` crosses as the
 diff --git a/crates/reussir-rt/src/rcgmp.rs b/crates/reussir-rt/src/rcgmp.rs
-index dd0e5a9a..53bb58fe 100644
+index a7600e39..59e62c73 100644
 --- a/crates/reussir-rt/src/rcgmp.rs
 +++ b/crates/reussir-rt/src/rcgmp.rs
-@@ -24,6 +24,9 @@
+@@ -17,6 +17,9 @@
  //! lowering decides the test, as the dialect does not make its tag an ABI.
  //! Runtime code outside the textures that holds an `Mpz` resolves the glue
  //! against the program it is linked into, which uses integers.
@@ -216,7 +216,7 @@ index dd0e5a9a..53bb58fe 100644
  //!
  //! Every method of [`Mpz`] is `#[inline]`, compiled only into the code that
  //! uses it: this crate references neither the glue nor the rcgmp runtime, and
-@@ -35,6 +38,7 @@ use core::ffi::c_void;
+@@ -28,6 +31,7 @@ use core::ffi::c_void;
  unsafe extern "C" {
      fn __reussir_rcgmp_ffi_acquire(value: *mut c_void);
      fn __reussir_rcgmp_ffi_release(value: *mut c_void);
@@ -224,7 +224,7 @@ index dd0e5a9a..53bb58fe 100644
      fn rcgmp_mpz_cmp(lhs: *mut c_void, rhs: *mut c_void) -> i32;
  }
  
-@@ -67,6 +71,17 @@ impl Mpz {
+@@ -60,6 +64,17 @@ impl Mpz {
      pub fn as_ptr(&self) -> *mut c_void {
          self.0
      }

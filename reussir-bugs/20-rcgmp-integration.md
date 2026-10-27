@@ -2,47 +2,55 @@
 
 **Kind:** missing feature. Reussir's built-in `Nat` and `Int` (rcgmp,
 upstream #770 to #803) do not have all that lean2rr needs to put Lean's
-`Nat` and `Int` on them. Five patches, 20-a to 20-e, add it. One of them,
-20-b, also fixes erroneous behaviour (a bug) in the same code; 20-c and
-20-e are optimizations. A sixth, 20-f, moves the commit of mlir-rcgmp
-that Reussir's build fetches to a faster upstream one, until upstream
-Reussir moves its own pin. Each patch is described below with its tests.
+`Nat` and `Int` on them. Five patches, 20-a to 20-e, added it. One of
+them, 20-b, also fixes erroneous behaviour (a bug) in the same code;
+20-c and 20-e are optimizations. A sixth, 20-f, moved the commit of
+mlir-rcgmp that Reussir's build fetches to a faster upstream one. Since
+2026-10-26 upstream has 20-b's code (#824, #843, with the tests of #845)
+and 20-f's pin (#844): 20-f left the series, and 20-b keeps only the
+reviewed patch's tests that the pull requests left out. Each patch is
+described below with its tests.
 
 ## Summary
 
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
-rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a to
-20-e), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base11`, commits `eece8062`, `036ed9f6`, `5e9a39e9`, `e69cde10`,
-`28fdf505`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`, `cb24040e`,
-`729ea9fb`, `e3b96e03`, the same code); not upstream. 20-f (commit
-`a39e59b0`, since 2026-10-26) is a local stand-in for upstream's pin of
-mlir-rcgmp, dropped when upstream moves it.
+rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a,
+20-c to 20-e; 20-b's code upstream, its remaining tests in 20-b),
+applied in `./reussir`'s series since 2026-10-25 (branch `l2r-base12`
+on upstream `95d9a1c8`, commits `a2c2647a`, `b2e70249`, `6471a6de`,
+`90c53269`, `2b2ef6be`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`,
+`cb24040e`, `729ea9fb`, `e3b96e03`, the same code but for 20-b, which
+was the whole R2 there). 20-f (`a39e59b0` on `l2r-base11`) left the
+series: upstream #844 made the same move.
 
-**Upstream (2026-10-25):** Not upstream at 00906e38. Reussir's
-maintainer asked that the Reussir-side changes for lean2rr be made first
-as patches on lean2rr's tree; he takes them from this directory himself.
-This entry is written to be read on its own for that purpose. Under the
-owner's rule of 2026-10-25 (rcgmp-related fixes and optimizations may go
-upstream as pull requests of at most 300 changed lines each), its
-patches are prepared as pull request candidates, not opened. (20-a's
-`nonnegative` part drops if upstream sets the attribute itself.)
+**Upstream (2026-10-26):** At `95d9a1c8` upstream has 20-b's code, as our
+pull requests #824 (`8130286e`: the handle `reussir_rt::rcgmp::Mpz`),
+#843 (`20252b29`: the polymorphic FFI spells `Nat` and `Int` as `Mpz`)
+and #845 (`95d9a1c8`: the tests of std's collections and of the edge
+cases), the reviewed patch split in three with shorter tests and docs
+reworded, and 20-f's pin, as #844 (`5aeb834d`). The other patches are
+not upstream. Reussir's maintainer asked that the Reussir-side changes
+for lean2rr be made first as patches on lean2rr's tree; he takes them
+from this directory himself. This entry is written to be read on its own
+for that purpose. Under the owner's rule of 2026-10-25 (rcgmp-related
+fixes and optimizations may go upstream as pull requests of at most 300
+changed lines each), they are prepared as pull request candidates.
+(20-a's `nonnegative` part drops if upstream sets the attribute itself.)
 
-| Patch | Step D name | `l2r-base11` commit | Kind | What it adds |
+| Patch | Step D name | `l2r-base12` commit | Kind | What it adds |
 |---|---|---|---|---|
-| [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `eece8062` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
-| [20-b](patches/20-b-mpz-polyffi-handle.patch) | R2 | `036ed9f6` | bug fix and feature | `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz` |
-| [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `5e9a39e9` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
-| [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `e69cde10` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
-| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `28fdf505` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
-| [20-f](patches/20-f-rcgmp-pin-cc73b218.patch) | - | `a39e59b0` | optimization (dependency pin) | the build fetches mlir-rcgmp `cc73b218` (upstream #49 and #50) instead of `ca288d5e` |
+| [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `a2c2647a` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
+| [20-b](patches/20-b-mpz-handle-more-tests.patch) | R2 (rest) | `b2e70249` | tests | the reviewed R2's tests that #824, #843 and #845 left out (R2 itself, a bug fix and feature: `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz`, is upstream) |
+| [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `6471a6de` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
+| [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `90c53269` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
+| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `2b2ef6be` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
 
 Step D's notes and the patches' subject lines use the names R1 to R3.
 The patches apply in this order, after 10-a and 07-a (until Phase 2,
 after the 8 of the drop series, 10-a and 07-a), with no change of code;
-20-c and 20-d change 20-b's `Mpz`. 21-a and entry 23's patches come
-after them, and 20-f last (it changes only `cmake/RCGMP.cmake` and also
-applies to `00906e38` alone).
+20-c and 20-d change the `Mpz` that 20-b added, now upstream's (#824;
+upstream's comments are reworded, the code is the same, so 20-c applies
+with one comment merged). 21-a and entry 23's patches come after them.
 
 ## Context
 
@@ -127,6 +135,20 @@ round trip, MLIR spelling).
 Lean's divisions and `floormod2expi` for the mod-2^k rewrite.
 
 ## 20-b (R2): `Nat` and `Int` at polyffi type arguments are an owned handle
+
+**Upstream since 2026-10-26.** The patch described here went upstream
+split in three pull requests: #824 (the handle), #843 (the spelling at
+type arguments and the wrapper's releases) and #845 (the tests of std's
+collections and of the edge cases, whose ASan run of the edge test is
+part of `bigint-ffi-std-asan.rr`). Their code is the patch's; their
+tests are shorter, and #824 rewords the comments of `rcgmp.rs`. The
+series keeps, as 20-b (`b2e70249`), only the reviewed patch's tests that
+none of them has: the reussir-core unit test of the spellings (a type
+argument and a generic instantiated at `Nat` are the owned handle; a
+declared `Nat` stays the raw handle, which the wrapper releases), the two
+more properties of `frontend/bigint_ffi_generic.rr` (six, not four), and
+the membership checks of a Rust set of `Int`s across signs in
+`frontend/bigint_ffi_edge.rr`, with its fuller header.
 
 **The bug.** Upstream #795 lets `Nat` and `Int` cross `#[ffi(import)]` as
 the raw rcgmp handle, `*mut c_void`, which the wrapper releases after the
@@ -348,10 +370,12 @@ computed at run time); the reussir-codegen unit test;
 (a read-only object in the program's data, no parse at run time), so a
 program with a long literal reaches this path.
 
-## 20-f: the mlir-rcgmp pin moves to cc73b218
+## 20-f: the mlir-rcgmp pin moved to cc73b218 (upstream since #844)
 
-Patch file [`patches/20-f-rcgmp-pin-cc73b218.patch`](patches/20-f-rcgmp-pin-cc73b218.patch)
-(commit `a39e59b0`, its subject "rcgmp pin": it names no entry). Not a
+**Upstream since 2026-10-26:** #844 (`5aeb834d`) made the same move, so
+20-f left the series (`l2r-base12`); its file is in git history (commit
+`af521c12`, `reussir-bugs/patches/20-f-rcgmp-pin-cc73b218.patch`). It
+was commit `a39e59b0` on `l2r-base11`, its subject "rcgmp pin". Not a
 Reussir problem: Reussir's build fetches mlir-rcgmp, the dialect and C
 runtime of its built-in integers, at the commit that `cmake/RCGMP.cmake`
 pins (`GIT_TAG`), and upstream moves that pin from time to time (#804
@@ -374,10 +398,8 @@ only the quotient is used.
 same build): the 24 patches before it build unchanged, lean2rr's 28
 `Nat` and `Int` runtime tests and their alloc-checks pass.
 
-**Status.** A local stand-in until upstream Reussir moves its pin to
-`cc73b218` or later (as it did for #48 in #804); 20-f is dropped then.
-The pull-request work may propose the move upstream if the maintainer
-does not make it first.
+**Status.** It was a local stand-in until upstream Reussir moved its pin
+to `cc73b218` (as it did for #48 in #804); upstream did, in #844.
 
 ## Review
 
@@ -388,22 +410,29 @@ local, outside this repository (`stepd-r12/review/`: `r1`, `r1b`, `r2`,
 `r2b`, `r2c`, `r3`).
 
 Reussir's C++ unit tests (`reussir-ut`) build and pass with the tests on
-(82 of 82 on `l2r-base9`): 10-a adds an `FFIObjectType` builder that
+(82 of 82 on `l2r-base9` and on `l2r-base12`): 10-a adds an `FFIObjectType` builder that
 upstream's `record_drop.cpp` uses
 ([issue 10](10-tagged-ffi-objects.md#where-in-reussir)). (On `l2r-stepd`,
 patch 02-b also updated upstream's `glue_symbols.cpp` for its drain
 declaration; 02-b left with Phase 2.)
+
+On `l2r-base12` (2026-10-26) the tests of entry 20's patches and of the
+pull requests pass: every `bigint`, `rcgmp` and `polyffi` lit test of a
+build with the tests and the ASan runtime (`frontend/bigint_ffi_generic.rr`
+and `bigint_ffi_edge.rr` with 20-b's additions, `sanitizer/bigint-ffi-std-asan.rr`
+with #845's run of the edge test; TSan and the builds without rcgmp are
+unsupported there) and reussir-core's unit test of the spellings
+(`bigint_type_arguments_cross_the_ffi_as_owned_handles`).
 
 ## Upstream note
 
 Each patch is self-contained and in the order of the series; its commit
 message has the motivation, the change and its tests. 20-a's
 `nonnegative` marking of `Nat` divisions drops if upstream sets the
-attribute itself. 20-b changes the spelling of `Nat` and `Int` at polyffi
-type arguments and generic positions (an owned `Mpz`), not at positions
-declared `Nat` or `Int` (#795's borrowed raw handle stays). 20-c and 20-d
-add compiler-emitted glue with fixed names, hidden and `weak_odr`; they
-need 20-b. 20-e changes only the text that codegen gives to MLIR's
-parser, not the attributes. 20-f is upstream's own kind of change (a new
-`GIT_TAG` for mlir-rcgmp, as in #804): a pin move that upstream makes
-itself.
+attribute itself. 20-b's change of the spelling of `Nat` and `Int` at
+polyffi type arguments and generic positions (an owned `Mpz`; positions
+declared `Nat` or `Int` keep #795's borrowed raw handle) is upstream
+(#824, #843, #845), and what is left of 20-b is tests; 20-f is upstream
+(#844). 20-c and 20-d add compiler-emitted glue with fixed names, hidden
+and `weak_odr`; they need the `Mpz` of #824. 20-e changes only the text
+that codegen gives to MLIR's parser, not the attributes.

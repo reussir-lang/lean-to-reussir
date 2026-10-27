@@ -1,7 +1,7 @@
-From 0bea9c7d97cc59e7c0a75af2ea8ea27c81824891 Mon Sep 17 00:00:00 2001
+From c1170ff9d09080753d9e0092b0054d0055e8974b Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Mon, 26 Oct 2026 00:18:44 -0400
-Subject: [PATCH 24/25] l2r-local: entry 23-p: drop stack: one function's
+Subject: [PATCH 24/24] l2r-local: entry 23-p: drop stack: one function's
  pending boxes join a run of cells
 
 23-n links every pending box of the glue through its header, which costs

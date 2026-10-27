@@ -2943,7 +2943,7 @@ Probe results (Reussir at the pinned commit):
   moved as that aggregate, so bytes of another arm that fall on the
   representative's padding or on a `bool` field were lost (`enum [value] M { A(u8), B(bool) }` read `A(42)`
   back as 0). Reussir has the fix since `7954a367` (lean2rr's base is
-  `00906e38`), and since 2026-10-19 lean2rr no longer avoids the shape:
+  `95d9a1c8`), and since 2026-10-19 lean2rr no longer avoids the shape:
   `Outline`'s step enums are `[value]` whatever their fields (before, they were shared unless a
   layout model showed that the representative arm carried every byte of
   the other arms), and so is the entry enum of a `state-machines` state

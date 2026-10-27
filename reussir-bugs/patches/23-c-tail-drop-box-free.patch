@@ -1,7 +1,7 @@
-From 752ef7ce83b96c2675ce59ab6dbdb41c0e01b538 Mon Sep 17 00:00:00 2001
+From fff903d392f6e827ba54be7d8242080e2726b171 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:33:35 -0400
-Subject: [PATCH 11/25] l2r-local: entry 23-c: tail drop: the box free as a
+Subject: [PATCH 11/24] l2r-local: entry 23-c: tail drop: the box free as a
  helper
 
 Preparation for worklist drops (23-d), whose release functions free a

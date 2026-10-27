@@ -1,7 +1,7 @@
-From 5e9a39e915b262da003e1d200c8554c36713bd65 Mon Sep 17 00:00:00 2001
+From 6471a6de0d178f52e0afc9744cef06f4646f0dd4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 00:13:21 -0400
-Subject: [PATCH 05/25] l2r-local: step D (R2b): Mpz clones and drops through
+Subject: [PATCH 05/24] l2r-local: step D (R2b): Mpz clones and drops through
  compiler-emitted rcgmp glue that inlines into textures
 
 R2's `reussir_rt::rcgmp::Mpz` retains and releases through the rcgmp
@@ -364,22 +364,22 @@ index f9d41ee3..5341b07c 100644
          );
      }
 diff --git a/crates/reussir-rt/src/rcgmp.rs b/crates/reussir-rt/src/rcgmp.rs
-index 55e69871..dd0e5a9a 100644
+index 821364c8..a7600e39 100644
 --- a/crates/reussir-rt/src/rcgmp.rs
 +++ b/crates/reussir-rt/src/rcgmp.rs
-@@ -9,23 +9,32 @@
- //! borrows, or returns with one reference.
+@@ -2,23 +2,32 @@
+ //! integers as its own values, such as the textures of the polymorphic FFI.
  //!
  //! An [`Mpz`] owns one reference of an rcgmp integer
 -//! (`RCGMP/Runtime/Mpz.h`): cloning retains it and dropping releases it,
--//! through the rcgmp runtime's C entry points, and it crosses the boundary as
--//! the handle itself (`#[repr(transparent)]`). Counting is nonatomic: an `Arc`
--//! coloring never crosses the boundary. Comparisons read the values
--//! (`rcgmp_mpz_cmp`), so ordered and hashed containers keyed by integers
--//! compare them by value.
+-//! through the rcgmp runtime's C entry points, and it has the layout of the
+-//! handle itself (`#[repr(transparent)]`). Counting is nonatomic: an `Arc`
+-//! coloring never crosses the FFI boundary. Comparisons read the values
+-//! (`rcgmp_mpz_cmp`), so ordered containers keyed by integers order them by
+-//! value.
 +//! (`RCGMP/Runtime/Mpz.h`): cloning retains it and dropping releases it, and
-+//! it crosses the boundary as the handle itself (`#[repr(transparent)]`).
-+//! Counting is nonatomic: an `Arc` coloring never crosses the boundary.
++//! it has the layout of the handle itself (`#[repr(transparent)]`). Counting
++//! is nonatomic: an `Arc` coloring never crosses the FFI boundary.
 +//! Comparisons read the values (`rcgmp_mpz_cmp`), so ordered containers keyed
 +//! by integers order them by value.
  //!
@@ -411,7 +411,7 @@ index 55e69871..dd0e5a9a 100644
      fn rcgmp_mpz_cmp(lhs: *mut c_void, rhs: *mut c_void) -> i32;
  }
  
-@@ -63,14 +72,15 @@ impl Mpz {
+@@ -56,14 +65,15 @@ impl Mpz {
  impl Clone for Mpz {
      #[inline]
      fn clone(&self) -> Self {

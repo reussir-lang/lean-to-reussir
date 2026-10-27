@@ -388,7 +388,7 @@ def build_lean_runtime(out):
 # right place: (patch, file of the Reussir checkout, a text the patch adds
 # there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
 # (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
-# 00906e38 plus reussir-bugs/patches/series. Plain upstream fails the first
+# 95d9a1c8 plus reussir-bugs/patches/series. Plain upstream fails the first
 # check. 23-f: rrc's lowering pipeline (through the C API; the C++ bridge
 # has a copy) frees the records of a recursive type that is neither Direct
 # nor TailLoop through the per-thread drop stack of 23-a to 23-e (worklist
@@ -405,8 +405,9 @@ def build_lean_runtime(out):
 # 21-a (entry 21, inc/dec cancellation of integer members of [value]
 # records) is an optimization of code with rcgmp integers, 23-p (one
 # release function's pending records as cells, fewer instructions than
-# links) an optimization of the drops, and 20-f a newer mlir-rcgmp pin
-# (quotient-only division): nothing needs them, so they are not checked.
+# links) an optimization of the drops, and mlir-rcgmp's pin cc73b218
+# (quotient-only division; upstream since #844, before as patch 20-f) a
+# faster dependency: nothing needs them, so they are not checked.
 REQUIRED_REUSSIR_PATCHES = [
     ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
     ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
@@ -421,7 +422,7 @@ REQUIRED_REUSSIR_PATCHES = [
     # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
 ]
-REUSSIR_HELP = ("build with upstream Reussir 00906e38 plus the patches of "
+REUSSIR_HELP = ("build with upstream Reussir 95d9a1c8 plus the patches of "
                 "reussir-bugs/patches/series (reussir-bugs/README.md)")
 
 
@@ -469,10 +470,12 @@ def build_leanrt():
 
 
 # What Nat and Int (rcgmp) need of the Reussir checkout beyond its rcgmp
-# feature: local patches R1 (Lean's division modes and `floormod2expi` as
-# bigint intrinsics, which the prelude calls) and R2 (`Nat`
-# and `Int` at polyffi type arguments as `reussir_rt::rcgmp::Mpz`, which
-# leanrt re-exports): (patch, file, symbol), as REQUIRED_REUSSIR_PATCHES.
+# feature: local patch R1 (20-a: Lean's division modes and `floormod2expi`
+# as bigint intrinsics, which the prelude calls) and R2 (`Nat` and `Int` at
+# polyffi type arguments as `reussir_rt::rcgmp::Mpz`, which leanrt
+# re-exports; upstream since #824 and #843, so its marker is upstream code
+# and refuses only a Reussir from before them): (patch, file, symbol), as
+# REQUIRED_REUSSIR_PATCHES.
 RCGMP_REUSSIR_PATCHES = [
     ("R1", "library/core/src/intrinsic/bigint.rr", "divsi_lean"),
     ("R2", "crates/reussir-rt/src/rcgmp.rs", "pub struct Mpz"),
@@ -481,7 +484,7 @@ RCGMP_REUSSIR_PATCHES = [
 
 def check_rcgmp():
     """Nat and Int (rcgmp) need a Reussir built with its `rcgmp` feature
-    (`rrc --help` lists the features) and the local patches
+    (`rrc --help` lists the features) and the changes of
     RCGMP_REUSSIR_PATCHES."""
     rrc = REUSSIR / "build" / "bin" / "rrc"
     help_text = subprocess.run([str(rrc), "--help"], capture_output=True, text=True).stdout
@@ -491,7 +494,7 @@ def check_rcgmp():
     for patch, rel, symbol in RCGMP_REUSSIR_PATCHES:
         src = REUSSIR / rel
         if not src.is_file() or symbol not in src.read_text():
-            sys.exit(f"l2r: lean2rr needs the local Reussir patch {patch} (Nat and Int) "
+            sys.exit(f"l2r: lean2rr needs the Reussir change {patch} (Nat and Int) "
                      f"(`{symbol}` in {rel}), which the Reussir checkout {REUSSIR} lacks")
 
 

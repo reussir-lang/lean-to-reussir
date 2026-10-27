@@ -1,7 +1,7 @@
-From 6272aed46a70ae8edd44cdad7f6a1a736c403bfa Mon Sep 17 00:00:00 2001
+From f4cd7729fb41c5465bae79c199a8ffd4f2596941 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 01/25] l2r-local: tagged FFI objects: an odd handle is an
+Subject: [PATCH 01/24] l2r-local: tagged FFI objects: an odd handle is an
  immediate, not counted
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
@@ -275,10 +275,10 @@ index fd85b28f..82f68441 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mono.rs b/crates/reussir-core/src/full/mono.rs
-index e26acdc5..2a22487c 100644
+index 242a1872..d7db2d5b 100644
 --- a/crates/reussir-core/src/full/mono.rs
 +++ b/crates/reussir-core/src/full/mono.rs
-@@ -807,6 +807,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+@@ -810,6 +810,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
                      let layout = mir::RecordLayout::Opaque {
                          rust_name: mir::Symbol(driver.symbols.get_or_intern(&rust_name)),
                          drop_hook: mir::Symbol(driver.symbols.get_or_intern(&hook_name)),

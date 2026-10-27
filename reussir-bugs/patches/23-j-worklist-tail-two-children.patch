@@ -1,7 +1,7 @@
-From fc9c1d20591a4fa97511ed67af408b94bf87db83 Mon Sep 17 00:00:00 2001
+From 563a38c21a9737757c3e7de4cd3aac7c93800ab4 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 20:14:44 -0400
-Subject: [PATCH 18/25] l2r-local: entry 23-j: worklist release: the tail call
+Subject: [PATCH 18/24] l2r-local: entry 23-j: worklist release: the tail call
  picks the last dead of two children
 
 Follow-up of 23-i: its tail call took the arm's last deferred member, so

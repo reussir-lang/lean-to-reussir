@@ -12,12 +12,12 @@ longer reaches the bug: since 23-f rrc makes no retcon destructors
 
 **Kind:** bug (rrc runs out of memory on valid input: the code of a drop
 is exponential in type nesting). **Status:** does not affect lean2rr
-since 2026-10-25 (base `l2r-base11`): patch 23-f switches rrc's pipeline
+since 2026-10-25 (base `l2r-base12`): patch 23-f switches rrc's pipeline
 from retcon destructors to worklist drops, so no retcon destructor and no
 direct-arm expansion is made, and patch 19-a is parked
 ([`patches/parked/19-a-retcon-direct-arms.patch`](patches/parked/19-a-retcon-direct-arms.patch)).
 19-a was made for Phase 2's first base, `l2r-base7` (commit `9b6f2915`),
-which used upstream's retcon drops; `l2r-base11` replaced that base
+which used upstream's retcon drops; the series of `l2r-base12` replaced that base
 before it reached lean2rr's dev branch. The bug stays reachable through
 `reussir-opt`'s `retcon-drops` option.
 
@@ -56,7 +56,7 @@ and lean2rr's closure enums with 150 and more arms more than 10 GiB.
   the local patch 02-a, which turned upstream's tail-recursive and retcon
   drops off ([issue 2](02-native-drop-order.md)), so they did not meet
   this bug. Phase 2's first base (`l2r-base7`) used upstream's drop
-  design, retcon drops included, and needed 19-a; `l2r-base11` frees
+  design, retcon drops included, and needed 19-a; `l2r-base12` frees
   Worklist types through 23's worklist instead.
 
 ## Symptom and repro
@@ -100,7 +100,8 @@ Parked patch file
 [`patches/parked/19-a-retcon-direct-arms.patch`](patches/parked/19-a-retcon-direct-arms.patch)
 (commit `9b6f2915` on `l2r-base7`; option (a+) of the issue, measured as
 "a+m2" in our notes). It applies to `00906e38` and to `l2r-base11`
-(`git apply --check`, 2026-10-25). The direct-arm path is emitted once per type, as
+(`git apply --check`, 2026-10-25), and to `95d9a1c8` and `l2r-base12`
+(2026-10-26). The direct-arm path is emitted once per type, as
 `<dtor>.direct`: a plain (not coroutine) `linkonce_odr` function that
 dispatches on the tag, drops a direct arm in place one level deep (a
 nested type's drop is a call to its own `.direct` or destructor) and

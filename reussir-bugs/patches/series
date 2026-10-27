@@ -1,7 +1,7 @@
 10-a-tagged-ffi-objects.patch
 07-a-tagged-top-bits.patch
 20-a-bigint-lean-division.patch
-20-b-mpz-polyffi-handle.patch
+20-b-mpz-handle-more-tests.patch
 20-c-mpz-inline-glue.patch
 20-d-mpz-is-shared.patch
 20-e-hex-bigint-literals.patch
@@ -22,4 +22,3 @@
 23-n-drop-stack-linked-runs.patch
 23-o-defer-wide-headers.patch
 23-p-same-release-cells.patch
-20-f-rcgmp-pin-cc73b218.patch

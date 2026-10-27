@@ -25,7 +25,7 @@ waits, as in Lean's to-do list.
 memory: the patches are optimizations, and 23-k to 23-m the features a
 host runtime needs to share the stack. **Status:** patched (23-a to
 23-p), applied in `./reussir`'s series since 2026-10-25 (branch
-`l2r-base11`, commits `82b3985a` to `0bea9c7d`). `scripts/l2r.py`
+`l2r-base12`, commits `f42c9366` to `c1170ff9`). `scripts/l2r.py`
 requires the patches: it stops with an error when the Reussir checkout
 lacks 23-f (the switch of rrc's pipeline to worklist drops), 23-k (the
 end work), 23-m (steps, depth and drain), 23-n (`defer_wide`) or 23-o
@@ -152,22 +152,22 @@ the JIT front ends select) keeps plain recursive drops, as before.
 
 | Patch | Commit | Kind | What it does |
 |---|---|---|---|
-| [23-a](patches/23-a-drop-stack-runtime.patch) | `82b3985a` | optimization (runtime) | a per-thread stack of pending drops in Reussir's runtime: `drop_stack.rs`, `__reussir_drop_run` and `__reussir_drop_defer` |
-| [23-b](patches/23-b-drop-stack-ops.patch) | `14df94cc` | optimization (IR) | ops `reussir.rc.defer` and `reussir.drop.run`, verified and lowered to the two runtime calls |
-| [23-c](patches/23-c-tail-drop-box-free.patch) | `752ef7ce` | refactor | TailDrop's free of a box as a shared helper, `emitBoxFree` (no change in what TailDrop emits) |
-| [23-d](patches/23-d-worklist-drops-option.patch) | `0e8c4cb0` | optimization | worklist drops behind a new option of the acquire/drop expansion, `worklist-drops` |
-| [23-e](patches/23-e-worklist-nullable-locked.patch) | `0fef47d1` | optimization and bug fix | nullable members and locked cells deferred by the glue too; the locked-drop function under every option, which also fixes [issue 24](24-locked-drop-token-leak.md) |
-| [23-f](patches/23-f-pipelines-worklist-drops.patch) | `1418ad22` | optimization | rrc's pipeline, the C API and the C++ bridge use worklist drops where they used retcon drops |
-| [23-g](patches/23-g-worklist-drop-tests.patch) | `563c1b95` | tests | deep frees on a small stack, under ASan, and the release order |
-| [23-h](patches/23-h-worklist-leaf-arms.patch) | `c7f8015f` | optimization | a leaf arm dropped from user code is released in place, without the drain |
-| [23-i](patches/23-i-worklist-tail-release.patch) | `77ccdcc0` | optimization | the last dead child of a freed cell continues as a `musttail` call |
-| [23-j](patches/23-j-worklist-tail-two-children.patch) | `fc9c1d20` | optimization | the tail call takes the last dead of the arm's last two such members |
-| [23-k](patches/23-k-drop-stack-end-work.patch) | `34df7ac4` | feature (for a host; fixes a regression with leanrt) | end work: one function that the outermost drain calls once it has ended (`set_end_work`, `want_end_work`) |
-| [23-l](patches/23-l-drop-stack-runs.patch) | `f67d389f` | optimization (runtime) | runs of drops with one release function: 8 bytes per pending cell in a run instead of a 16-byte entry |
-| [23-m](patches/23-m-drop-stack-steps.patch) | `6111586c` | feature (for a host) | steps (`defer_step`, `run_step`), `depth()` and `drain()`, so that a host frees its own objects on the same stack |
-| [23-n](patches/23-n-drop-stack-linked-runs.patch) | `8792ae76` | optimization (memory) | `defer_wide` (C: `__reussir_drop_defer_wide`): a box with a wide header waits linked through its header, in a linked run of the stack |
-| [23-o](patches/23-o-defer-wide-headers.patch) | `a5fb6e94` | optimization (memory) | the glue defers boxes with a wide header (variants, compound records aligned to 8) through `defer_wide` |
-| [23-p](patches/23-p-same-release-cells.patch) | `0bea9c7d` | optimization (instructions) | in a linked run, a box after one of the same release function joins the run's cells; only a change of function links; a cache of the release table |
+| [23-a](patches/23-a-drop-stack-runtime.patch) | `f42c9366` | optimization (runtime) | a per-thread stack of pending drops in Reussir's runtime: `drop_stack.rs`, `__reussir_drop_run` and `__reussir_drop_defer` |
+| [23-b](patches/23-b-drop-stack-ops.patch) | `d8161831` | optimization (IR) | ops `reussir.rc.defer` and `reussir.drop.run`, verified and lowered to the two runtime calls |
+| [23-c](patches/23-c-tail-drop-box-free.patch) | `fff903d3` | refactor | TailDrop's free of a box as a shared helper, `emitBoxFree` (no change in what TailDrop emits) |
+| [23-d](patches/23-d-worklist-drops-option.patch) | `8148c05d` | optimization | worklist drops behind a new option of the acquire/drop expansion, `worklist-drops` |
+| [23-e](patches/23-e-worklist-nullable-locked.patch) | `09b68801` | optimization and bug fix | nullable members and locked cells deferred by the glue too; the locked-drop function under every option, which also fixes [issue 24](24-locked-drop-token-leak.md) |
+| [23-f](patches/23-f-pipelines-worklist-drops.patch) | `41b644ab` | optimization | rrc's pipeline, the C API and the C++ bridge use worklist drops where they used retcon drops |
+| [23-g](patches/23-g-worklist-drop-tests.patch) | `75462ca2` | tests | deep frees on a small stack, under ASan, and the release order |
+| [23-h](patches/23-h-worklist-leaf-arms.patch) | `923e9da3` | optimization | a leaf arm dropped from user code is released in place, without the drain |
+| [23-i](patches/23-i-worklist-tail-release.patch) | `a26aaf1f` | optimization | the last dead child of a freed cell continues as a `musttail` call |
+| [23-j](patches/23-j-worklist-tail-two-children.patch) | `563a38c2` | optimization | the tail call takes the last dead of the arm's last two such members |
+| [23-k](patches/23-k-drop-stack-end-work.patch) | `8e061140` | feature (for a host; fixes a regression with leanrt) | end work: one function that the outermost drain calls once it has ended (`set_end_work`, `want_end_work`) |
+| [23-l](patches/23-l-drop-stack-runs.patch) | `bc14bc66` | optimization (runtime) | runs of drops with one release function: 8 bytes per pending cell in a run instead of a 16-byte entry |
+| [23-m](patches/23-m-drop-stack-steps.patch) | `0ffbe4c0` | feature (for a host) | steps (`defer_step`, `run_step`), `depth()` and `drain()`, so that a host frees its own objects on the same stack |
+| [23-n](patches/23-n-drop-stack-linked-runs.patch) | `44f8184f` | optimization (memory) | `defer_wide` (C: `__reussir_drop_defer_wide`): a box with a wide header waits linked through its header, in a linked run of the stack |
+| [23-o](patches/23-o-defer-wide-headers.patch) | `9b326f5d` | optimization (memory) | the glue defers boxes with a wide header (variants, compound records aligned to 8) through `defer_wide` |
+| [23-p](patches/23-p-same-release-cells.patch) | `c1170ff9` | optimization (instructions) | in a linked run, a box after one of the same release function joins the run's cells; only a change of function links; a cache of the release table |
 
 ### The runtime stack (23-a)
 

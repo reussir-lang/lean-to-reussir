@@ -1,7 +1,7 @@
-From eece806239d62e7ea3a6a14a18a59879984472eb Mon Sep 17 00:00:00 2001
+From a2c2647a56ed03943f5a244a2c29da2c6ed13f4c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 24 Oct 2026 23:28:28 -0400
-Subject: [PATCH 03/25] l2r-local: step D (R1): bigint intrinsics for Lean's
+Subject: [PATCH 03/24] l2r-local: step D (R1): bigint intrinsics for Lean's
  division modes and floormod2expi
 
 lean2rr lowers Lean's Nat and Int onto the rcgmp builtin (step D). Lean's

@@ -1,7 +1,7 @@
-From 8792ae760ae6e6aaf5c2cec5cbedefe573d1728e Mon Sep 17 00:00:00 2001
+From 44f8184f2c40c019d3f2425e49b4ba468d90513a Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 23:20:36 -0400
-Subject: [PATCH 22/25] l2r-local: entry 23-n: drop stack: linked runs through
+Subject: [PATCH 22/24] l2r-local: entry 23-n: drop stack: linked runs through
  the boxes' headers
 
 A pending drop of the glue cost memory again with the shared stack: 23-l

@@ -194,7 +194,7 @@ runtime.
     the promise's resolution with `none`
     ([tasks/dependents.md](tasks/dependents.md#no-context-is-ever-suspended-inside-a-free)).
   - Reussir frees records itself, at a bounded stack depth, through that
-    stack (Reussir base l2r-base11 and local patches 23-a to 23-p,
+    stack (Reussir base l2r-base12 and local patches 23-a to 23-p,
     [Reussir issue 23](../../reussir-bugs/23-worklist-drops.md)). A record
     whose last managed member is its one recursive member (a list) is
     freed in a loop. A record type whose drop could recurse otherwise

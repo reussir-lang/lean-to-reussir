@@ -39,14 +39,15 @@ table below.
 
 ## Summary
 
-lean2rr's builds use upstream Reussir `00906e38` (2026-10-25) plus the
-25 patches of the series: `./reussir`'s branch `l2r-base11` (head
-`a39e59b0`): 10-a (tagged opaque handles,
+lean2rr's builds use upstream Reussir `95d9a1c8` (2026-10-26) plus the
+24 patches of the series: `./reussir`'s branch `l2r-base12` (head
+`c1170ff9`): 10-a (tagged opaque handles,
 [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a, 20-a
 to 20-e (the interface for `Nat` and `Int` on rcgmp,
 [issue 20](../../../reussir-bugs/20-rcgmp-integration.md), for step D;
-with 20-f, the build fetches mlir-rcgmp `cc73b218` instead of upstream's
-pin `ca288d5e`),
+20-b's code, the owned handle `Mpz`, is upstream since #824 and #843,
+and 20-b keeps tests only; the mlir-rcgmp pin `cc73b218`, before patch
+20-f, is upstream since #844),
 21-a (inc/dec cancellation of integer members of `[value]` records,
 [issue 21](../../../reussir-bugs/21-value-record-member-retains.md)) and
 23-a to 23-p (worklist drops,
@@ -84,7 +85,7 @@ the move to `0378b744` fixed no open issue and needed no change of a
 workaround. Before that it was `l2r-base2` (head `b2e4a47e`), Reussir
 `943f2195` plus the 35 patches of the old series, whose files are in git
 history and in that branch. The files in `reussir-bugs/` describe the
-state at `00906e38`: `7954a367` fixed 30 of the old entries in full, so
+state at `95d9a1c8`: `7954a367` fixed 30 of the old entries in full, so
 their files are gone and the open entries have new numbers (the mapping
 is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
 owner keeps only bug fixes and major items in the series: the
@@ -96,7 +97,7 @@ bugs lean2rr does not reach, are parked, outside the series
 
 A workaround for an issue that Reussir `7954a367` fixes is marked
 "removable after the move to Reussir 7954a367": lean2rr's builds use a
-later base (`00906e38`), so it can go (one change per workaround, with
+later base (`95d9a1c8`), so it can go (one change per workaround, with
 its test).
 
 Column "Needed with the patch?": whether lean2rr's workaround is still
@@ -117,7 +118,7 @@ either way.
 | [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | every generated tuple (a join point's, J2; a `flatten-structs` result) has its fields in decreasing alignment, as records have (`memberOrder`, `field-order`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [18](../../../reussir-bugs/18-tail-padding-return.md) | missed optimization | the tuple of a `flatten-structs` result keeps a `bool`, `u8`, `u16` or `u32` in a `u64` member and has no member for a unit value, so it has no tail padding (`tupleMemberTy`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [19](../../../reussir-bugs/19-retcon-direct-arms.md) | bug (rrc's memory, reussir#759) | none needed: with 23-f rrc makes no retcon destructors (on `l2r-base7`, which had no 23-f, rrc ran out of memory on `RtSyncSelect` without 19-a) | none (19-a parked) | n/a |
-| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (its patch 20-b also fixes a bug) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a to 20-e, and 20-f (the mlir-rcgmp pin) | n/a: every build needs 20-a and 20-b (`check_rcgmp`); until D8, `--int-backend leanrt` needed none; 20-f is not required |
+| [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (20-b's fix of a bug is upstream) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a to 20-e (20-b: tests; its code upstream) | n/a: every build needs 20-a and 20-b's `Mpz`, upstream since #824 (`check_rcgmp`); until D8, `--int-backend leanrt` needed none |
 | [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: the pairs stay without the patch | 21-a | n/a: an optimization; nothing requires it |
 | [23](../../../reussir-bugs/23-worklist-drops.md) | cost (memory and run time of frees) | none: lean2rr's builds use the patches (`RtDeepTreeFree`, `RtClosureChainFree` and their alloc-check bounds show the cost without them), and leanrt's pending stack is built on 23-a's stack | 23-a to 23-p | n/a: `scripts/l2r.py` requires 23-f, 23-k, 23-m, 23-n and 23-o |
 

@@ -1,7 +1,7 @@
-From 14df94cca2b82c7ae37d8f0d5e6f4da7fc6c65d7 Mon Sep 17 00:00:00 2001
+From d81618318f099df04709be167fdcf58f12f43221 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 16:26:21 -0400
-Subject: [PATCH 10/25] l2r-local: entry 23-b: ir: rc.defer and drop.run,
+Subject: [PATCH 10/24] l2r-local: entry 23-b: ir: rc.defer and drop.run,
  lowered to the drop stack
 
 Second step of the in-place worklist for RecordDropKind::Worklist drops

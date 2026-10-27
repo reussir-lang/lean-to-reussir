@@ -1,0 +1,334 @@
+From b2e70249806a17737a3359a3345cc213f6685516 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Mon, 26 Oct 2026 19:36:23 -0400
+Subject: [PATCH 04/24] l2r-local: step D (R2, rest): the tests of the reviewed
+ patch that the pull requests left out
+
+The owned handle of `Nat` and `Int` at polyffi type arguments (local
+patch R2) went upstream as #824 (the handle, reussir_rt::rcgmp::Mpz),
+#843 (the polymorphic FFI spells `Nat` and `Int` as `Mpz`) and #845 (the
+tests of std's collections and of the edge cases), with shorter tests
+than the reviewed patch. The code is the same. This keeps the reviewed
+patch's tests that none of them has:
+- a reussir-core unit test of the spellings: a type argument and a
+  generic instantiated at `Nat` are the owned handle; a `Nat` the
+  signature declares stays the raw handle, which the wrapper releases
+  after the body (semi.rs);
+- frontend/bigint_ffi_generic.rr's two more properties (six, not four)
+  and its driver;
+- frontend/bigint_ffi_edge.rr's membership checks of a Rust set of
+  `Int`s across signs, and its fuller header (its sanitizer run is
+  #845's sanitizer/bigint-ffi-std-asan.rr).
+---
+ crates/reussir-core/src/semi.rs               |  54 +++++++++
+ tests/integration/frontend/bigint_ffi_edge.rr |  14 ++-
+ .../integration/frontend/bigint_ffi_generic.c |   4 +-
+ .../frontend/bigint_ffi_generic.rr            | 110 ++++++++++++++----
+ 4 files changed, 153 insertions(+), 29 deletions(-)
+
+diff --git a/crates/reussir-core/src/semi.rs b/crates/reussir-core/src/semi.rs
+index a1ee8d00..f9d41ee3 100644
+--- a/crates/reussir-core/src/semi.rs
++++ b/crates/reussir-core/src/semi.rs
+@@ -2895,6 +2895,60 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn bigint_type_arguments_cross_the_ffi_as_owned_handles() {
++        // A type argument and a generic instantiated at `Nat` are the owned
++        // handle, which the body may store; a `Nat` the signature declares
++        // stays the raw handle, which the wrapper releases after the body.
++        check_with_bigint(
++            "#[ffi(rust = \"::reussir_rt::collections::vec::Vec\")]\n\
++             pub struct Vec<T>;\n\
++             #[ffi(import)]\n\
++             pub fn push<T>(v: Vec<T>, x: T) -> Vec<T> [{ v.push(x) }];\n\
++             #[ffi(import)]\n\
++             pub fn store(v: Vec<Nat>, n: Nat) -> Vec<Nat> [{ v }];\n\
++             pub fn f(v: Vec<Nat>, n: Nat) -> Vec<Nat> { store(push(v, n), n) }",
++            |elab, _| {
++                use crate::full::mir::RecordLayout;
++                assert!(!elab.has_errors(), "{:#?}", elab.reports);
++                let (full, reports) = crate::full::mono::monomorphize(&elab.mono_input());
++                assert!(reports.is_empty(), "{reports:#?}");
++                let owned = "::reussir_rt::rcgmp::Mpz";
++                let vec = format!("::reussir_rt::collections::vec::Vec<{owned}>");
++                let texture = |name: &str| {
++                    full.ffi_imports
++                        .iter()
++                        .find(|i| full.symbol(i.boundary).contains(name))
++                        .map(|i| i.texture.as_str())
++                        .unwrap_or_else(|| panic!("no texture for `{name}`"))
++                };
++                let push = texture("4push");
++                assert!(
++                    push.contains(&format!("(r#v: {vec}, r#x: {owned}) -> {vec}")),
++                    "{push}"
++                );
++                assert!(!push.contains("rcgmp_mpz_release"), "{push}");
++                let store = texture("5store");
++                assert!(
++                    store.contains(&format!(
++                        "(r#v: {vec}, r#n: *mut ::std::ffi::c_void) -> {vec}"
++                    )),
++                    "{store}"
++                );
++                assert!(store.contains("rcgmp_mpz_release(r#n, 0)"), "{store}");
++                let opaque: Vec<&str> = full
++                    .records
++                    .iter()
++                    .filter_map(|r| match r.layout {
++                        RecordLayout::Opaque { rust_name, .. } => Some(full.symbol(rust_name)),
++                        _ => None,
++                    })
++                    .collect();
++                assert_eq!(opaque, [vec.as_str()]);
++            },
++        );
++    }
++
+     #[test]
+     fn bigint_enums_build_and_match_the_builtin_integers() {
+         check_with_bigint(
+diff --git a/tests/integration/frontend/bigint_ffi_edge.rr b/tests/integration/frontend/bigint_ffi_edge.rr
+index 52915abd..58485fb0 100644
+--- a/tests/integration/frontend/bigint_ffi_edge.rr
++++ b/tests/integration/frontend/bigint_ffi_edge.rr
+@@ -1,7 +1,12 @@
+ // UNSUPPORTED: darwin
+ // Edge cases of `Nat` and `Int` as polymorphic FFI type arguments (the owned
+-// handle `reussir_rt::rcgmp::Mpz`). Heap values make a missed or doubled
+-// release visible; `sanitizer/bigint-ffi-std-asan.rr` checks the balance.
++// handle `reussir_rt::rcgmp::Mpz`): a nested `Vec<Vec<Nat>>`, a generic
++// parameter the body never uses and one it uses twice, a declared `Nat` among
++// generic parameters in the packed boundary, a declared `Nat` result of a
++// generic texture, a closure moving the handle, one heap value passed twice,
++// a vector that Reussir drops while it holds heap elements, and a Rust set
++// ordering `Int`s across signs. Heap values make a missed or doubled release
++// visible; `sanitizer/bigint-ffi-std-asan.rr` checks the balance.
+ 
+ // REQUIRES: rcgmp
+ // RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
+@@ -76,6 +81,9 @@ fn first<T : Ord>(s : Set<T>) -> T [{ s.first().unwrap() }];
+ #[ffi(import)]
+ fn last<T : Ord>(s : Set<T>) -> T [{ s.last().unwrap() }];
+ 
++#[ffi(import)]
++fn has<T : Ord>(s : Set<T>, x : T) -> bool [{ s.contains(&x) }];
++
+ fn nat(x : u64) -> Nat { x as Nat }
+ fn int(x : i64) -> Int { x as Int }
+ fn digit(ok : bool) -> i64 { if ok { 1 } else { 0 } }
+@@ -105,9 +113,9 @@ fn order_ok(big : Int, one : Int) -> bool {
+     let s = insert(insert(insert(insert(insert(insert(set_new<Int>(), big), negbig - 1), int(-3) * one), int(0) * one), negbig), int(5) * one);
+     let s2 = insert(s, (int(0) - big) * one);
+     size(s) == 6 && size(s2) == 6 && first(s) == -1267650600228229401496703205377 && last(s) == 1267650600228229401496703205376
++        && has(s, int(-3) * one) && has(s, big * one) && !has(s, big + 1)
+ }
+ 
+-// A vector that Reussir drops while it holds heap elements.
+ fn dropped_ok(big : Nat) -> bool {
+     let v = push(push(push(new<Nat>(), big + 1), big * big), nat(2));
+     len(v) == 3
+diff --git a/tests/integration/frontend/bigint_ffi_generic.c b/tests/integration/frontend/bigint_ffi_generic.c
+index 7b53b5c8..790f287b 100644
+--- a/tests/integration/frontend/bigint_ffi_generic.c
++++ b/tests/integration/frontend/bigint_ffi_generic.c
+@@ -7,10 +7,10 @@
+ // SPDX-License-Identifier: Apache-2.0 OR MIT
+ //
+ //===----------------------------------------------------------------------===//
+-// Driver for bigint_ffi_generic.rr: four independent properties, one decimal
++// Driver for bigint_ffi_generic.rr: six independent properties, one decimal
+ // digit each. The one it passes is unknown to the compiled code, so its heap
+ // integers are built at run time.
+ 
+ extern long long reussir_main(unsigned long long one);
+ 
+-int main(void) { return reussir_main(1) == 1111 ? 0 : 1; }
++int main(void) { return reussir_main(1) == 111111 ? 0 : 1; }
+diff --git a/tests/integration/frontend/bigint_ffi_generic.rr b/tests/integration/frontend/bigint_ffi_generic.rr
+index 1c69f300..4a47d0c0 100644
+--- a/tests/integration/frontend/bigint_ffi_generic.rr
++++ b/tests/integration/frontend/bigint_ffi_generic.rr
+@@ -5,9 +5,10 @@
+ // instantiated at `Nat` moves into the body, which may store it, and a
+ // generic result moves out to the caller. A parameter declared `Nat` stays
+ // the borrowed raw handle of `bigint_ffi.rr`. Heap values make a missed or
+-// doubled release visible; `sanitizer/bigint-ffi-generic-asan.rr` checks the
+-// balance.
++// doubled release visible; the sanitizer variant
++// (`sanitizer/bigint-ffi-generic-asan.rr`) checks the balance.
+ 
++// The absent patterns run as their own prefix over the same textures.
+ // REQUIRES: rcgmp
+ // RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
+ // RUN: %rrc %s --package-name bigintffigeneric --extern core=%t.core.rri --emit mlir --no-source-locations -o %t.texture.mlir
+@@ -42,32 +43,48 @@ fn push<T>(v : Vec<T>, x : T) -> Vec<T> [{ v.push(x) }];
+ #[ffi(import)]
+ fn get<T>(v : Vec<T>, i : u64) -> T [{ v.get(i as usize).unwrap() }];
+ 
+-// A clone on the Rust side, then a push onto it: the copy-on-write push
+-// clones every element, and the original drops here.
+ #[ffi(import)]
+-fn duplicate<T>(v : Vec<T>) -> Vec<T> [{ let w = v.clone(); let first = w.get(0).unwrap(); w.push(first) }];
++fn set<T>(v : Vec<T>, i : u64, x : T) -> Vec<T> [{ v.set(i as usize, x) }];
+ 
+-// Returns one argument and drops the others; with four parameters, the
+-// arguments come packed in one struct.
++#[ffi(import)]
++fn len<T>(v : Vec<T>) -> u64 [{ v.len() as u64 }];
++
++// Clones the vector on the Rust side, then pushes its first element onto the
++// clone: the copy-on-write push clones every element, and the original drops
++// here, releasing its reference to each.
++#[ffi(import)]
++fn duplicate<T>(v : Vec<T>) -> Vec<T> [{
++    let w = v.clone();
++    let first = w.get(0).unwrap();
++    w.push(first)
++}];
++
++// Returns one argument and drops the other.
+ #[ffi(import)]
+ fn pick<T>(first : bool, a : T, b : T) -> T [{ if first { a } else { b } }];
+ 
++// Four parameters take the nontrivial boundary: the arguments come packed in
++// one struct.
+ #[ffi(import)]
+-fn pick3<T>(which : u64, a : T, b : T, c : T) -> T [{ match which { 0 => a, 1 => b, _ => c } }];
++fn pick3<T>(which : u64, a : T, b : T, c : T) -> T [{
++    match which { 0 => a, 1 => b, _ => c }
++}];
+ 
+ // A declared `Nat` is the borrowed raw handle: storing it takes a reference.
+ #[ffi(import)]
+-fn push_nat(v : Vec<Nat>, n : Nat) -> Vec<Nat> [{ v.push(unsafe { Mpz::from_raw(rcgmp_mpz_retain(n, 0)) }) }];
++fn push_nat(v : Vec<Nat>, n : Nat) -> Vec<Nat> [{
++    v.push(unsafe { Mpz::from_raw(rcgmp_mpz_retain(n, 0)) })
++}];
+ 
+ // A declared `Nat` result hands over one reference as the raw handle.
+ #[ffi(import)]
+ fn get_nat(v : Vec<Nat>, i : u64) -> Nat [{ v.get(i as usize).unwrap().into_raw() }];
+ 
+ #[ffi(import)]
+-fn insert<T : Ord>(s : Set<T>, x : T) -> Set<T> [{ s.insert(x) }];
++fn set_new<T : Ord>() -> Set<T> [{ RSet::new() }];
+ 
+ #[ffi(import)]
+-fn set_new<T : Ord>() -> Set<T> [{ RSet::new() }];
++fn insert<T : Ord>(s : Set<T>, x : T) -> Set<T> [{ s.insert(x) }];
+ 
+ #[ffi(import)]
+ fn size<T : Ord>(s : Set<T>) -> u64 [{ s.len() as u64 }];
+@@ -75,42 +92,84 @@ fn size<T : Ord>(s : Set<T>) -> u64 [{ s.len() as u64 }];
+ #[ffi(import)]
+ fn first<T : Ord>(s : Set<T>) -> T [{ s.first().unwrap() }];
+ 
++#[ffi(import)]
++fn last<T : Ord>(s : Set<T>) -> T [{ s.last().unwrap() }];
++
+ fn nat(x : u64) -> Nat { x as Nat }
+ 
+ fn int(x : i64) -> Int { x as Int }
+ 
+ fn digit(ok : bool) -> i64 { if ok { 1 } else { 0 } }
+ 
+-fn vec_ok(big : Nat) -> bool {
+-    let v = push(push(new<Nat>(), big), 7);
++// Heap and immediate elements pushed, read back, and replaced; a replaced
++// element is released by the vector.
++fn vec_ok(big : Nat, odd : Nat) -> bool {
++    let v = push(push(push(new<Nat>(), big), 7), odd);
++    let read = len(v) == 3 && get(v, 0) == 1267650600228229401496703205376 && get(v, 1) == 7
++        && get(v, 2) == 147808829414345923316083210206383297601;
++    let w = set(set(v, 1, odd + 7), 0, 5);
++    read && get(w, 0) == 5 && get(w, 1) == 147808829414345923316083210206383297608
++        && get(w, 2) == 147808829414345923316083210206383297601
++}
++
++// The copy-on-write clone on the Rust side shares the elements, and the
++// original vector stays readable.
++fn duplicate_ok(big : Nat) -> bool {
++    let v = push(push(new<Nat>(), big + 1), big);
+     let w = duplicate(v);
+-    get(v, 0) == 1267650600228229401496703205376 && get(v, 1) == 7
+-        && get(w, 2) == 1267650600228229401496703205376
++    len(v) == 2 && len(w) == 3 && get(w, 2) == 1267650600228229401496703205377
++        && get(v, 0) == 1267650600228229401496703205377 && get(w, 1) == 1267650600228229401496703205376
+ }
+ 
++// A generic texture returning one of its `T`s and dropping the other (a
++// uniquely owned heap value, freed there), at `Nat` and at `Int`; a vector of
++// `Int`s holding negative heap values.
+ fn generic_ok(big : Nat, one : Int) -> bool {
+     let negative = int(0) - (big as Int) * one;
++    let ints = push(push(new<Int>(), negative), int(-3) * one);
+     pick(true, big, nat(9)) == 1267650600228229401496703205376 && pick(false, big + 2, nat(9)) == 9
++        && pick(true, nat(9), big + 2) == 9
+         && pick3(2, big + 2, nat(5), big + 4) == 1267650600228229401496703205380
++        && pick3(1, big + 2, nat(5), big + 4) == 5
+         && pick(false, int(4) * one, negative) == -1267650600228229401496703205376
+-        && get(push(new<Int>(), negative), 0) == -1267650600228229401496703205376
++        && get(ints, 0) == -1267650600228229401496703205376 && get(ints, 1) == -3
+ }
+ 
++// A declared `Nat` parameter stored by the body, and a declared `Nat` result.
+ fn declared_ok(big : Nat) -> bool {
+     let v = push_nat(push_nat(new<Nat>(), big), 11);
+-    get_nat(v, 0) == 1267650600228229401496703205376 && get_nat(v, 1) == 11
++    get_nat(v, 0) == 1267650600228229401496703205376 && get_nat(v, 1) == 11 && get(v, 0) == get_nat(v, 0)
+ }
+ 
+-// Two equal heap values built apart are one element of a Rust set.
++// A Rust set orders the integers by value: two equal heap values built apart
++// are one element.
+ fn set_ok(big : Nat, two : Nat) -> bool {
+-    let s = insert(insert(insert(set_new<Nat>(), big), 7), core::intrinsic::bigint::ipowi(two * 2, 50));
+-    size(s) == 2 && first(s) == 7
++    let other = core::intrinsic::bigint::ipowi(two * 2, 50);
++    let s = insert(insert(insert(insert(set_new<Nat>(), big), 7), other), 5);
++    size(s) == 3 && first(s) == 5 && last(s) == 1267650600228229401496703205376
++}
++
++// Many elements through repeated growth.
++fn fill(v : Vec<Nat>, x : Nat, n : u64) -> Vec<Nat> {
++    if n == 0 { v } else { fill(push(v, x), x * 3, n - 1) }
++}
++
++fn total(v : Vec<Nat>, i : u64, acc : Nat) -> Nat {
++    if i == len(v) { acc } else { total(v, i + 1, acc + get(v, i)) }
++}
++
++fn growth_ok(one : u64) -> bool {
++    // 1 + 3 + ... + 3^99 = (3^100 - 1) / 2
++    let v = fill(new<Nat>(), nat(one), 100);
++    total(v, 0, 0) == (core::intrinsic::bigint::ipowi(nat(3 * one), 100) - 1) / 2
+ }
+ 
+ pub fn main(one : u64) -> i64 {
+     let big = core::intrinsic::bigint::ipowi(nat(2 * one), 100);
+-    digit(vec_ok(big)) + digit(generic_ok(big, one as Int)) * 10 + digit(declared_ok(big)) * 100
+-        + digit(set_ok(big, nat(2 * one))) * 1000
++    let odd = core::intrinsic::bigint::ipowi(nat(3 * one), 80);
++    digit(vec_ok(big, odd)) + digit(duplicate_ok(big)) * 10
++        + digit(generic_ok(big, one as Int)) * 100 + digit(declared_ok(big)) * 1000
++        + digit(set_ok(big, nat(2 * one))) * 10000 + digit(growth_ok(one)) * 100000
+ }
+ 
+ extern "C" trampoline "reussir_main" = main;
+@@ -127,7 +186,10 @@ extern "C" trampoline "reussir_main" = main;
+ // TEXTURE-DAG: rcgmp_mpz_release(r#n, 0)
+ // TEXTURE-DAG: r#i: u64) -> *mut ::std::ffi::c_void
+ 
+-// Only `push_nat`'s wrapper releases a handle, and no type argument is raw.
+-// ABSENT-NOT: rcgmp_mpz_release(r#{{[^n]}}
++// Only `push_nat`'s wrapper releases a handle; no other spells one.
++// ABSENT-NOT: rcgmp_mpz_release(r#x
++// ABSENT-NOT: rcgmp_mpz_release(r#a
++// ABSENT-NOT: rcgmp_mpz_release(r#b
++// ABSENT-NOT: rcgmp_mpz_release(r#v
+ // ABSENT-NOT: Vec<*mut ::std::ffi::c_void>
+ // ABSENT-NOT: BTreeSet<*mut ::std::ffi::c_void>

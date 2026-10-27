@@ -90,7 +90,8 @@ Patch file:
 (on `7954a367`; it applies to `0378b744` and the `l2r-base5` of then
 too, checked 2026-10-24, and to `ea240b19`, `00906e38`, and
 `l2r-base5`, `l2r-stepd`, `l2r-base9`, `l2r-base9-shared`, `l2r-base10` and `l2r-base11` on
-`00906e38`, checked 2026-10-25). No build applies it.
+`00906e38`, checked 2026-10-25, and to `95d9a1c8` and `l2r-base12` on
+it, checked 2026-10-26). No build applies it.
 
 The patch changes #686's code in `crates/reussir-compiler/src/main.rs`:
 
