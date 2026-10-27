@@ -783,26 +783,65 @@ built-in integers
   not `EST.Out ε σ Unit`, whose state field is `Void σ`; it is the type
   rule `mayHoldRelease` below, one reachability memoized for the run:
   [translator.md](translator.md#questions-about-types-are-answered-once-per-run)). In a program
-  that can cast (`programCasts`), the type rule stays (`mayHoldRelease`:
-  every `lcAny` may be a handle, and every function type, thunk and task
-  may have captured one, as `mayCarry` counts them; with closures left out,
-  a record of closures over handles was split, and the worker's unused
-  closure field, a parameter Lean borrows, was kept until the call returned
-  where natively the record dies whole at the projection: judge
-  2026-10-27, test `RtBorrowClosureCast`). An accepted cost: in a program
-  that casts and makes resources, the pass leaves alone every declaration
-  with a closure, thunk or task parameter or result (RtMarkPersistentHandle,
-  RtMarkPersistentRefHandle, RtMarkPersistentPromise, RtPersistConstRef,
-  RtPersistInitHandleDirect and RtCastViewFewer lose workers, such as
-  `String.Slice.contains`' loop with its predicate; no benchmark program
-  casts). The borrow emulation and the release order at a branch's start
+  that can cast (`programCasts`), the type rule stays (`resourceExcluded`):
+  - a parameter or result that may hold a resource outside closures,
+    thunks and tasks (`mayHoldResource`: every `lcAny` may be a handle)
+    leaves its declaration alone, with the callees whose flags decide the
+    parameter's;
+  - a parameter that may hold one only through a closure, a thunk or a
+    task (`mayHoldRelease`, as `mayCarry` counts them) leaves it alone
+    unless native Lean owns the parameter (Lean's inference run on the
+    pass' input, `inferBorrowedParams`, before anything is rewritten) and,
+    where the pass may split it, the declaration reads the structure's
+    fields that may hold one at its start, in field order (a run of
+    projections or a `cases` with one alternative, `leadingReads`), uses
+    it nowhere else, and no nested structure of it holds one
+    (`castParamFree`): natively the structure dies there and each field
+    lives until its own last use, as in the worker. The callees whose flags
+    decide the parameter's keep their code (`flagSources` without its
+    roots). With closures left out entirely, a record of closures over
+    handles was split, and the worker's unused closure field, a parameter
+    Lean borrows, was kept until the call returned where natively the
+    record dies whole at the projection (judge 2026-10-27, test
+    `RtBorrowClosureCast`: it reads one of its two closures, so it stays
+    whole);
+  - a result that the pass may return as a tuple (no variable of a
+    function type) leaves it alone when a variable may hold a closure, a
+    thunk or a task (`castResultHolds`); a join point parameter stays
+    whole when it may hold one (`mayHoldRelease`).
+  From 2026-10-27 (gate38) to the fix, every declaration with a closure,
+  thunk or task parameter or result was left alone there. The descriptors
+  that the `Lean` package's `initialize` blocks pass to
+  `registerSimplePersistentEnvExtension`, `registerSimpleScopedEnvExtension`
+  and their kin are structures of callbacks that the callee reads at its
+  start; left whole, the callee read a callback at the uniform type
+  (`Box → Box`) and applied it at its own, and `conv-liveness` reached the
+  uniform type's application function, with an arm for every callback that
+  an `initialize` block converted to it: a program importing `Cslib.Init`
+  with a one-line `main` went from 18,138 to 198,768 live functions (helpers
+  0.3 s to 90 s, 27 MB of `.rr` to 358 MB). Test `RtFlattenCastCallbacks`
+  (`flatten-cast-check.sh`: its stored callbacks are not generated). The
+  extra inference costs 7 s there (only in a program that casts and makes
+  resources; no benchmark program casts). An accepted cost remains: such a
+  declaration whose parameter Lean borrows, or whose structure it reads
+  later, stays whole (RtMarkPersistentHandle, RtMarkPersistentRefHandle,
+  RtMarkPersistentPromise, RtPersistConstRef, RtPersistInitHandleDirect
+  and RtCastViewFewer keep no worker of `String.Slice.contains`' loop with
+  its predicate, as since gate38). The borrow emulation and the
+  release order at a branch's start
   ask the same analysis, run again on the lowered declarations (by type in
   a program that casts: Lower/Borrow's `keepsAt`, `armReleaseVars`,
   through `mayHoldAt`), so it keeps an argument only for a parameter whose
   code the pass left as Lean's; `keepsAt` checks this (an internal error
   for a kept parameter of a declaration the pass rewrote: its workers,
   their wrappers and the declarations whose code it changed, which `run`
-  records in `flattenRewritten`). Example: lean-regex's driver reads its
+  records in `flattenRewritten`); in a program that casts it keeps no
+  argument of such a declaration, whose parameters that may hold a
+  resource through a closure, a thunk or a task native Lean owns, and
+  inside it those parameters count as owned (`borrowInfo`; its other
+  parameters keep the inference's flags), so what it passes on to a
+  borrowed parameter is kept until that call returns, when the argument's
+  own type may hold a resource (`borrowKeeps`). Example: lean-regex's driver reads its
   input with `IO.FS.readFile`. The handle goes to `Handle.read` and to
   `readBinToEndInto.loop` only, so only that class holds a resource, and
   `εClosure`'s `SearchState` (`Vector σ.Update n`, an `Array lcAny`) is
@@ -883,7 +922,8 @@ built-in integers
   `RtFlattenNestedMatch` (with `flatten-match-check.sh`),
   `RtTaskDropReleaseTime` (with expectation files),
   `RtFlattenResFlow` (with `.alloc` and `.l2r-debug`), `RtFlattenResHeld`,
-  `RtFlattenResRef` and `RtFlattenResOwner` (with `.l2r-debug`).
+  `RtFlattenResRef` and `RtFlattenResOwner` (with `.l2r-debug`),
+  `RtFlattenCastCallbacks` (with `flatten-cast-check.sh`).
 - **Remove only if:** the pass is off (the structures are then built at
   every step, with boxed fields, as rule 1 lays them out).
 

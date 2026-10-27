@@ -42,11 +42,35 @@ runtime.
   declaration with a parameter or a result that may hold one, and each
   declaration whose borrow flags decide the flag of such a parameter (a
   callee that gets a field of it), and keeps whole each join point
-  parameter that may hold one; the same analysis decides which (by type,
-  with closures, thunks and tasks counted, in a program that casts;
+  parameter that may hold one; the same analysis decides which (by type in
+  a program that casts;
   [optional-passes.md](optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)).
   So where an argument is kept, the inference saw Lean's code and infers
-  what native Lean infers. That rests on the two runs of the analysis
+  what native Lean infers. In a program that casts, the pass also rewrites
+  a declaration whose parameter may hold a resource only through a
+  closure, a thunk or a task, when native Lean owns that parameter (Lean's
+  inference on the pass' input) and the pass cannot change when its parts
+  are released (`Flatten.castParamFree`); `keepsAt` keeps no argument of a
+  declaration the pass rewrote there, as native Lean keeps none, and does
+  not ask the inference on lean2rr's code, which can differ there (a
+  parameter of such a declaration that may hold a resource otherwise,
+  `mayHoldResource`, is an internal error). Inside such a declaration its
+  parameters whose type may hold one (`mayHoldRelease`) count as owned
+  (`borrowInfo` takes them out of the borrowed parameters it starts its
+  lent variables from), as natively: the inference on the worker took a
+  field that it only passes to a borrowed parameter as borrowed, so a
+  `Thunk IO.FS.Handle` field passed to a helper that reads it with
+  `Thunk.get` was released inside the helper (`T1`, native `1T`: review of
+  xlate-regress, test `RtFlattenCastCallbacks`); so the release order at a
+  branch's start records them too. Its other parameters keep the
+  inference's flags (with all of them owned, a `Nat` that the declaration
+  passes on to a borrowed `lcAny` parameter in a cycle of tail calls was
+  kept, and the cycle overflowed the stack: round 2 of the review, test
+  `RtBorrowCycleFlattenCast`). And in a program that casts, an argument is
+  kept only when its own mono type may hold a resource too (`borrowKeeps`,
+  through `armVars`): a `Nat` passed to an `lcAny` parameter holds nothing
+  whose release shows, as far as flatten-structs' type rule trusts
+  types. That rests on the two runs of the analysis
   agreeing (flatten-structs' on its input, the lowering's on its output):
   every parameter that the second run finds holding a resource belongs to
   a declaration that `flatten-structs` left alone. `keepsAt` checks it: a
@@ -300,8 +324,12 @@ runtime.
   plan §10, "Release time of pure tasks"). A
   structure that `flatten-structs` splits into its fields holds nothing
   whose release shows (the flow analysis follows closures, thunks and
-  tasks, and so does the type rule of a program that casts,
-  `mayHoldRelease`), so releasing it field by field shows nothing.
+  tasks), so releasing it field by field shows nothing; in a program that
+  casts, it can hold closures, thunks or tasks, but only one that native
+  Lean owns and whose fields that may hold one the declaration reads at
+  its start, in field order (`Flatten.castParamFree`): natively it dies
+  there, so each such field dies at its own last use and is bound in the
+  same order as the worker's parameter.
 
 ### Reference sets store the new value before releasing the old one
 

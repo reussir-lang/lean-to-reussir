@@ -93,7 +93,11 @@ alternatives `simpCase` folds into a default alternative only after
 lean2rr places under a `match` (J1, J1′) counts the scrutinee as bound
 there. (A structure that `flatten-structs` splits into its fields holds
 nothing whose release shows: the flow analysis follows closures, thunks and
-tasks, and so does the type rule of a program that casts.)
+tasks. In a program that casts, it can hold closures, thunks or tasks, but
+only one that native Lean owns and whose fields that may hold one the
+declaration reads at its start, in field order (`Flatten.castParamFree`),
+where natively it dies: each such field then dies at its own last use, and
+the worker's parameters have the fields' binding order.)
 -/
 
 namespace LeanToReussir.ArmRelease

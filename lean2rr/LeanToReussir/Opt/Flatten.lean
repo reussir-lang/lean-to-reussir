@@ -83,8 +83,11 @@ may hold one, every declaration whose borrow flags decide the flag of such
 a parameter (`flagSources`), and every join point parameter that may hold
 one (`resourceExcluded`): lean2rr emulates native release times by Lean's
 borrow inference on that code. Which binders may hold one, the whole-program flow analysis
-`ResourceFlow` decides (by type, `mayHoldRelease`, in a program that casts:
-closures, thunks and tasks count, as in the flow analysis).
+`ResourceFlow` decides; in a program that casts, the type: a value that may
+hold a resource only through a closure, a thunk or a task leaves its
+declaration alone unless native Lean owns it and the pass cannot change
+when its parts are released (`castParamFree`; a join point parameter by
+`mayHoldRelease`, closures, thunks and tasks counted).
 
 Only pure steps move: a constructor application not built, a projection
 read from a known field, a value rebuilt, a match on a tag instead of on a
@@ -1788,10 +1791,11 @@ inductive Resources where
   | absent
   /-- `ResourceFlow`'s answer. -/
   | flow (info : ResourceFlow.Info)
-  /-- By type (`mayHoldRelease`: closures, thunks and tasks count, as in
-  the flow analysis and in the borrow emulation): the program can read a
-  value as another type (`programCasts`), which the flow analysis cannot
-  follow. -/
+  /-- By type: the program can read a value as another type
+  (`programCasts`), which the flow analysis cannot follow. A join point
+  parameter by `mayHoldRelease` (closures, thunks and tasks count, as in
+  the borrow emulation); a declaration's parameters and result by the rules
+  of `resourceExcluded`. -/
   | types
 
 /-- Whether binder `x` (of type `t`) of declaration `decl` may hold a
@@ -1877,9 +1881,11 @@ application (Lean's `ownArgsUsingParams`: an owned callee parameter makes
 the argument owned), and so on. The flag of `report (ctx : Ctx)` that
 passes `ctx.cfg` to `loopE (c : Config)` is owned natively because
 `loopE`'s is; with `loopE` split, its wrapper only projects `c`, and `ctx`
-was inferred borrowed (test `RtFlattenResOwner`). -/
-partial def flagSources (keys : NameMap InstKey) (byName : Std.HashMap Name (Decl .pure)) (held : Array (Name × Nat)) :
-    NameSet := Id.run do
+was inferred borrowed (test `RtFlattenResOwner`). With `roots` false, the
+declarations of `held` themselves are not included (only as callees of
+another). -/
+partial def flagSources (keys : NameMap InstKey) (byName : Std.HashMap Name (Decl .pure)) (held : Array (Name × Nat))
+    (roots : Bool := true) : NameSet := Id.run do
   -- The array reads whose element Lean's inference owns with its parents
   -- (as `borrowedVars`' `arrayRead`): `getInternal` and `uget` take
   -- `α a i h`, `get!Internal` takes `α inst a i`.
@@ -1899,9 +1905,11 @@ partial def flagSources (keys : NameMap InstKey) (byName : Std.HashMap Name (Dec
     let some d := byName[f]? | continue
     let .code c := d.value | continue
     let some p := d.params[i]? | continue
-    out := out.insert f
+    if roots then out := out.insert f
     let src := ownershipSources arrayRead d c (({} : Std.HashSet FVarId).insert p.fvarId)
     for (g, j) in calls c src #[] do
+      -- Without `roots`, a declaration is in only as such a callee.
+      unless roots do out := out.insert g
       unless seen.contains (g, j) do work := (g, j) :: work
   return out
 where
@@ -1924,6 +1932,86 @@ where
     | .cases cs => cs.alts.foldl (fun acc alt => calls alt.getCode src acc) acc
     | _ => acc
 
+/-- The fields of parameter `p` that the start of code `c` reads, in their
+order: a run of projections (`let x := p.i`; projections of other
+variables may come between them), possibly ended by a `cases` on `p` with
+one alternative (the fields its code uses); and whether `p` occurs anywhere
+else in `c`. -/
+partial def leadingReads (p : FVarId) (c : Code .pure) (acc : Array Nat := #[]) : Array Nat × Bool :=
+  match c with
+  | .let d k =>
+    match d.value with
+    | .proj _ i y => leadingReads p k (if y == p then acc.push i else acc)
+    | _ => (acc, (c.collectUsed {}).contains p)
+  | .cases cs =>
+    match cs.alts with
+    | #[.alt _ ps k _] =>
+      if cs.discr != p then (acc, (c.collectUsed {}).contains p) else
+      let used := k.collectUsed {}
+      (ps.zipIdx.foldl (fun acc (q, i) => if used.contains q.fvarId then acc.push i else acc) acc, used.contains p)
+    | _ => (acc, (c.collectUsed {}).contains p)
+  | _ => (acc, (c.collectUsed {}).contains p)
+
+/-- In a program that casts, whether parameter `i` of declaration `d`, whose
+type may hold a closure, a thunk or a task but no other value that may hold
+a resource (`mayHoldRelease` but not `mayHoldResource`), lets the pass
+rewrite `d`:
+- native Lean owns it (`native`: Lean's borrow flags of the pass' input,
+  inferred before anything is rewritten): the borrow emulation keeps no
+  argument of a declaration the pass rewrote (Lower/Borrow, `keepsAt`),
+  which is native Lean's behavior only where the parameter is owned (the
+  callee releases it, the caller keeps nothing);
+- if it is a structure the pass may split (`maxShape`), `d` reads every
+  field of it that may hold a closure, a thunk or a task at its start, in
+  field order (a run of projections, or a `cases` with one alternative:
+  `leadingReads`), and uses the structure nowhere else, and no nested
+  structure of it holds one. Natively the structure then dies there
+  (`explicitRC` puts its `dec` after its last use, and each field read
+  takes its own reference), so each field lives from the call to its last
+  use, as the worker's parameter does, and is bound in the same order
+  (Emit/ArmRelease); a field not read holds nothing whose release shows.
+  (Lean's `pushProj` can move the projections of a `cases` into the
+  branches of a `cases` that follows at once; the structure then dies at
+  the start of each branch, where a field the branch does not use dies in
+  lean2rr too: the documented difference of the scrutinee's place among
+  the values released at a branch's start, plan §10.)
+(The callees whose flags decide this parameter's keep their code:
+`resourceExcluded`.) Otherwise `d` is left alone, as every declaration with
+such a parameter was until 2026-10-27: the descriptors that the `Lean`
+package's `initialize` blocks pass to `registerSimplePersistentEnvExtension`
+and its kin are structures of closures that the callee reads at its start,
+and left whole, the callee reads their callbacks at `Box → Box` and applies
+them at their own type, through the uniform type's application function,
+which `conv-liveness` then reaches with an arm for every callback the
+program's `initialize` blocks store (a program importing `Cslib.Init` with
+a one-line `main` went from 18,138 to 198,768 live functions). -/
+def castParamFree (native : NameMap (Array Bool)) (d : Decl .pure) (i : Nat) : CoreM Bool := do
+  let some p := d.params[i]? | return false
+  if ((native.find? d.name).bind (·[i]?)).getD true then return false
+  let .node _ _ _ fs ← maxShape p.type | return true
+  let .code c := d.value | return false
+  let (reads, elsewhere) := leadingReads p.fvarId c
+  if elsewhere then return false
+  for h : k in [1:reads.size] do
+    unless reads[k - 1]! < reads[k] do return false
+  for h : j in [:fs.size] do
+    match fs[j] with
+    | .irr _ => pure ()
+    | .leaf t => if (← mayHoldRelease t) && !reads.contains j then return false
+    | .node t .. => if ← mayHoldRelease t then return false
+  return true
+
+/-- In a program that casts, whether the result of type `t` keeps a
+declaration whole: it may hold a resource (`mayHoldResource`), or the pass
+may return it as a tuple (no variable of a function type, `mentionsFn`)
+with a variable that may hold a closure, a thunk or a task, whose release
+would then follow its own last use in the caller instead of the result's. -/
+def castResultHolds (t : Expr) : CoreM Bool := do
+  if ← mayHoldResource t then return true
+  let s ← maxShape t (sums := true)
+  unless s.isNode && !s.leafTypes.any mentionsFn do return false
+  s.leafTypes.anyM mayHoldRelease
+
 /-- In a program that creates resources whose release is observable (files,
 child processes, promises: `programMakesResources`), lean2rr emulates native Lean's
 release times by running Lean's own borrow inference on its declarations
@@ -1933,9 +2021,14 @@ parameter owned), so the pass leaves alone every declaration with a
 parameter or a result that may hold such a resource: their code, and so
 their inferred borrows, stay Lean's. Which binders may hold one, the
 whole-program flow analysis decides (`ResourceFlow`: a record whose
-`lcAny` fields only ever get regex data is no resource holder); in a
-program that casts, the type (`mayHoldRelease`: every `lcAny` may be a
-handle, every closure, thunk or task may have captured one). -/
+`lcAny` fields only ever get regex data is no resource holder). In a
+program that casts, the type: a parameter or result that may hold a
+resource outside closures, thunks and tasks (`mayHoldResource`: every
+`lcAny` may be a handle) keeps the declaration whole; one that may hold one
+only through a closure, a thunk or a task (`mayHoldRelease`) unless native
+Lean owns it and the pass cannot change when its parts are released
+(`castParamFree`, `castResultHolds`), and the callees whose flags decide
+its flag keep their code. -/
 def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Resources × NameSet) := do
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : NameMap (Decl .pure))
   unless ← programMakesResources byName keys do return (.absent, {})
@@ -1951,6 +2044,12 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
     | .absent => pure ()
   let mut out : NameSet := {}
   let mut held : Array (Name × Nat) := #[]
+  -- In a program that casts: the parameters that may hold a resource only
+  -- through a closure, a thunk or a task, and Lean's borrow flags of the
+  -- input (`castParamFree`; if the inference fails, every such parameter
+  -- counts as borrowed and keeps its declaration whole).
+  let mut closureHeld : Array (Name × Nat) := #[]
+  let native ← if r matches .types then (try inferBorrowedParams decls keys catch _ => pure {}) else pure {}
   let shown (d : Name) : Bool := debug || dbg.any (fun pat => (d.toString.splitOn pat).length > 1)
   let origOf (d : Name) : Name := (keys.find? d).map (·.decl) |>.getD d
   for d in decls do
@@ -1958,10 +2057,19 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
     let res := (splitArrows d.type d.params.size).2
     let mut holds := false
     for h : i in [:d.params.size] do
-      if ← r.holds d.name d.params[i].fvarId d.params[i].type then
+      let p := d.params[i]
+      if r matches .types then
+        if ← mayHoldResource p.type then
+          holds := true
+          held := held.push (d.name, i)
+        else if ← mayHoldRelease p.type then
+          closureHeld := closureHeld.push (d.name, i)
+          unless ← castParamFree native d i do holds := true
+      else if ← r.holds d.name p.fvarId p.type then
         holds := true
         held := held.push (d.name, i)
-    if holds || (← r.holds d.name ResourceFlow.resultKey res) then
+    let resHolds ← if r matches .types then castResultHolds res else r.holds d.name ResourceFlow.resultKey res
+    if holds || resHolds then
       out := out.insert d.name
       if shown d.name then
         IO.eprintln s!"lean2rr: flatten-structs: left alone (a parameter or the result may hold a resource): \
@@ -1969,7 +2077,7 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
   -- The callees whose parameters' flags decide those of the parameters
   -- that may hold a resource keep their code too.
   let byName' := decls.foldl (fun m d => m.insert d.name d) ({} : Std.HashMap Name (Decl .pure))
-  for f in (flagSources keys byName' held).toList do
+  for f in (flagSources keys byName' held).toList ++ (flagSources keys byName' closureHeld (roots := false)).toList do
     unless out.contains f do
       out := out.insert f
       if shown f then

@@ -442,7 +442,9 @@ structure LowerState where
   declaration being lowered (`CodeCtx.decl`): a pass can copy a
   declaration's code without new variables (Opt/SplitMapLoops' typed
   instances of a `map` loop keep the loop's), so two declarations can have
-  the same variable. -/
+  the same variable. `borrowKeeps` also reads it: in a program that casts,
+  an argument is kept only if it is here (its own type may hold a
+  resource), so a narrower rule for this record must keep that test. -/
   armVars : Std.HashMap (Name × FVarId) Nat := {}
   /-- The Reussir names of the uses of `armVars` in the generated code, with
   their types and their variables' binding order (`noteVarUse`). Names are

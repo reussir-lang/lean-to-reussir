@@ -2033,14 +2033,24 @@ Rules:
   Reussir type holds `Box`es). `flatten-structs` leaves alone the
   declarations whose parameters may hold one, so there the inference sees
   Lean's code (checked: a kept parameter of a declaration that the pass
-  rewrote is an internal error); elsewhere lean2rr's code can differ (a
+  rewrote is an internal error). In a program that casts, the pass also
+  rewrites a declaration whose parameter may hold a resource only through
+  a closure, a thunk or a task when native Lean owns that parameter (Lean's
+  inference on the pass' input) and, for a structure it splits, the
+  declaration reads the structure's fields that may hold one at its start,
+  in field order, so that natively the structure dies there and each field
+  lives until its own last use, as in the worker; no argument of a
+  declaration it rewrote is kept, as natively none is (the callees whose
+  flags decide such a parameter's keep their code); elsewhere lean2rr's code can differ (a
   split structure has no constructor) and the inference can take borrowed a parameter that
   native Lean takes owned, so keeping such an argument would only break a
   tail call that native Lean makes (a cycle of tail calls that passes a
   new value stored in a structure whose reader is split):
   - a direct call keeps an argument passed to a borrowed parameter until
     the call returns (`l2r_release_after`, an effectful FFI call after the
-    call, as Lean's `dec`), when the caller owns it; an argument the caller
+    call, as Lean's `dec`), when the caller owns it (in a program that
+    casts, also when the argument's own mono type may hold a resource: a
+    `Nat` passed to an `lcAny` parameter is not kept); an argument the caller
     itself borrows (a borrowed parameter, a field or array element of one,
     an `a[i]!` whose array and `Inhabited` instance are both such values,
     the value of a constant, a constructor applied to no variable such as
@@ -3466,7 +3476,15 @@ Each item says what differs and when.
   scrutinee and the first field projected in a constructor's alternative
   get one index (`withCtorAlt` and the first `let`), so when both die at
   the start of a nested branch their order is not specified (it depends
-  on a hash set); lean2rr releases the field first.
+  on a hash set); lean2rr releases the field first. In a program that
+  casts, a structure parameter that `flatten-structs` splits
+  (`Flatten.castParamFree`: its fields read at the start) is the same
+  shape when a `cases` follows those reads at once: natively `pushProj`
+  moves the projections into its branches, so in a branch that does not
+  use a field the field dies with the structure after the branch's own
+  projections, where lean2rr releases it at the branch's start with the
+  other values that die there (nothing runs in between: an order
+  difference only).
 - *Release time of pure tasks* (§5.14): a pure task (`Task.spawn`,
   `Task.map`, `Task.bind`) whose last reference the program drops before
   a worker starts it is deleted and never runs, as natively; but the place

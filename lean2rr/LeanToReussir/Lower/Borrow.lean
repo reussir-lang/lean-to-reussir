@@ -22,7 +22,8 @@ calls where it matters:
 - a direct call whose parameter is borrowed, with an argument the caller
   owns that may hold a resource, also inside a closure, a thunk or a task
   (`keepsAt`: by the flow analysis of Opt/ResourceFlow, in a program that
-  casts by the mono type, `mayHoldRelease`), keeps the
+  casts by the mono type, `mayHoldRelease`, and never in a declaration that
+  flatten-structs rewrote there), keeps the
   argument until the call returns (`l2r_release_after`), as Lean's
   `explicitRC` puts the caller's `dec` after the call; an argument the
   caller only borrows itself (a borrowed parameter, a field or array
@@ -246,31 +247,6 @@ where
     | .fun d k _ => go k (go d.value s)
     | _ => s
 
-/-- Lean's borrow results for the program (computed once, when the program
-creates resources), and the variables each declaration borrows, by
-declaration and variable (`LowerState.armVars` says why). -/
-def borrowInfo : LowerM (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) := do
-  if let some r := (← get).borrowInfo then return r
-  let ctx ← read
-  let r ← if ← programMakesResources ctx.decls ctx.keys then
-      let flags ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
-      let initSlots := (← get).initSlots
-      let isConst (f : Name) : Bool :=
-        initSlots.contains f || (ctx.decls.find? f).any (·.params.isEmpty)
-      -- A constructor that is not a call (constructors that Lean's runtime
-      -- implements, `Int.ofNat`, are externs).
-      let env ← getEnv
-      let isCtor (f : Name) : Bool :=
-        (match env.find? f with | some (.ctorInfo _) => true | _ => false) && !isExtern env f
-      let lent := ctx.decls.foldl (init := ({} : Std.HashSet (Name × FVarId))) fun s n d =>
-        match flags.find? n with
-        | some b => (borrowedVars ctx.keys isConst isCtor d b).foldl (fun s x => s.insert (d.name, x)) s
-        | none => s
-      pure (flags, lent)
-    else pure ({}, {})
-  modify fun s => { s with borrowInfo := some r }
-  return r
-
 /-- The answers of `mayHoldResource`, by mono type (after
 `consumeMData.headBeta`), for the rest of the process: Opt/UnreadFields asks
 it before Stage 4. An answer depends only on the type and on the
@@ -372,6 +348,71 @@ shows: a resource (`mayHoldResource`), or a closure, a thunk or a task, which
 may hold one (`mayHoldResource` does not look into them). -/
 def mayHoldRelease (e : Expr) : CoreM Bool := mayHoldResource e (closures := true)
 
+/-- The declarations that flatten-structs (Opt/Flatten, `Flatten.run`)
+rewrote in this process' program (one program per process: `Main.lean`,
+`run`): its workers (`f._l2r_flat`), their wrappers and every other
+declaration whose code it changed; empty when the pass is off. `keepsAt`
+keeps no argument passed to one of their parameters (and checks why); in a
+program that casts, `borrowInfo` counts none of their parameters that may
+hold a resource as lent. -/
+initialize flattenRewritten : IO.Ref NameSet ← IO.mkRef {}
+
+/-- Lean's borrow results for the program (computed once, when the program
+creates resources), and the variables each declaration borrows, by
+declaration and variable (`LowerState.armVars` says why). In a program
+that casts, in a declaration that flatten-structs rewrote, a parameter
+whose type may hold a resource (`mayHoldRelease`) is not borrowed: there
+Lean's inference saw lean2rr's code, not Lean's, and every such parameter
+is one that native Lean owns (`Flatten.castParamFree`: a parameter that may
+hold one only through a closure, a thunk or a task, owned natively, or a
+field of such a structure, which natively is a projection of an owned value
+and so owned too). So such a parameter, or a field of it, passed on to a
+parameter that a callee borrows is kept until that call returns, as native
+Lean's `dec` after the call does (a worker's thunk field passed to
+`Thunk.get`'s callee: test `RtFlattenCastCallbacks`), where the inference on
+the worker took it as borrowed and lent. It adds a release after a call
+only where native Lean's release is after the call too, so it breaks no
+native tail call; a call of the rewritten declaration itself keeps nothing
+(`keepsAt`). The other parameters keep the inference's flags:
+`castParamFree` vouches for nothing about them (a `Nat` parameter that the
+inference borrows, passed on to a borrowed `lcAny` parameter in a cycle of
+tail calls, stays lent, and the calls stay tail calls: test
+`RtBorrowCycleFlattenCast`). Such owned parameters are also recorded for
+the release order at a branch's start (`armReleaseVars`). -/
+def borrowInfo : LowerM (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) := do
+  if let some r := (← get).borrowInfo then return r
+  let ctx ← read
+  let r ← if ← programMakesResources ctx.decls ctx.keys then
+      let flags ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
+      let initSlots := (← get).initSlots
+      let isConst (f : Name) : Bool :=
+        initSlots.contains f || (ctx.decls.find? f).any (·.params.isEmpty)
+      -- A constructor that is not a call (constructors that Lean's runtime
+      -- implements, `Int.ofNat`, are externs).
+      let env ← getEnv
+      let isCtor (f : Name) : Bool :=
+        (match env.find? f with | some (.ctorInfo _) => true | _ => false) && !isExtern env f
+      -- A program that casts: in a rewritten declaration, a parameter that
+      -- may hold a resource is not lent (see above).
+      let mut owned : NameMap (Array Bool) := {}
+      if ctx.resourceHeld?.isNone then
+        for f in (← flattenRewritten.get).toList do
+          let (some d, some b) := (ctx.decls.find? f, flags.find? f) | continue
+          owned := owned.insert f (← b.mapIdxM fun i bi => do
+            match d.params[i]? with
+            | some p => return if ← mayHoldRelease p.type then false else bi
+            | none => return bi)
+      let lent := ctx.decls.foldl (init := ({} : Std.HashSet (Name × FVarId))) fun s n d =>
+        match flags.find? n with
+        | some b =>
+          let b := (owned.find? n).getD b
+          (borrowedVars ctx.keys isConst isCtor d b).foldl (fun s x => s.insert (d.name, x)) s
+        | none => s
+      pure (flags, lent)
+    else pure ({}, {})
+  modify fun s => { s with borrowInfo := some r }
+  return r
+
 /-- Whether binder `x` (of mono type `ty`) of declaration `decl`, a
 declaration that is lowered, may hold a resource whose release shows: the
 rule of the borrow emulation (`keepsAt`) and of the release order at the
@@ -389,13 +430,6 @@ def mayHoldAt (decl : Name) (x : FVarId) (ty : Expr) : LowerM Bool := do
   match (← read).resourceHeld? with
   | some held => return held.contains (decl, x)
   | none => mayHoldRelease ty
-
-/-- The declarations that flatten-structs (Opt/Flatten, `Flatten.run`)
-rewrote in this process' program (one program per process: `Main.lean`,
-`run`): its workers (`f._l2r_flat`), their wrappers and every other
-declaration whose code it changed; empty when the pass is off. `keepsAt`
-checks that it keeps no argument passed to one of their parameters. -/
-initialize flattenRewritten : IO.Ref NameSet ← IO.mkRef {}
 
 /-- The binders of code `c` with their mono types, in binding order: a
 `let` before its continuation, the fields a `cases` binds before its
@@ -488,17 +522,29 @@ task or `lcAny` value, which the callee stores in a structure whose
 reader flatten-structs splits, overflowed the stack: test
 `RtBorrowCycleFlatten`); not keeping it releases a value that holds no
 resource, which nobody can tell, but a pure task: its release time is
-lean2rr's (plan §10, "Release time of pure tasks"). In a program that casts
-(no flow analysis), by type (`mayHoldRelease`), as flatten-structs decides
-there: what it may split holds nothing that the type rule counts.
+lean2rr's (plan §10, "Release time of pure tasks").
 
-This relies on an assumption that the two flow runs (flatten-structs' on
-its input, this one on its output) agree: every parameter that this run
-finds holding a resource belongs to a declaration that flatten-structs left
-alone, so Lean's inference saw Lean's code there. It is checked here: a
-kept parameter of a declaration that flatten-structs rewrote (a worker, a
-wrapper, a declaration whose code it changed: `flattenRewritten`) is an
-internal error.
+In a program that casts (no flow analysis), by type (`mayHoldRelease`),
+except in a declaration that flatten-structs rewrote (a worker, a wrapper,
+a declaration whose code it changed: `flattenRewritten`), where no
+argument is kept. flatten-structs rewrites a declaration there only when
+none of its parameters may hold a resource other than through a closure, a
+thunk or a task (`mayHoldResource`), and Lean borrows none of those
+natively (Lean's inference on the pass' input, before any rewriting:
+`Flatten.castParamFree`): so native Lean keeps no argument there either,
+and Lean's inference on lean2rr's code, which may differ there, is not
+asked. A parameter of a rewritten declaration that may hold a resource
+otherwise (`mayHoldResource`) is an internal error. Inside such a
+declaration its parameters that may hold one count as owned
+(`borrowInfo`), so what it passes on to a parameter that a callee borrows
+is kept as natively.
+
+In a program that does not cast, this relies on an assumption that the two
+flow runs (flatten-structs' on its input, this one on its output) agree:
+every parameter that this run finds holding a resource belongs to a
+declaration that flatten-structs left alone, so Lean's inference saw Lean's
+code there. It is checked here: a kept parameter of a declaration that
+flatten-structs rewrote is an internal error.
 
 `f` is always a lowered declaration: the callers ask only about callees
 with borrow flags (`borrowInfo`), which the inference computed on the
@@ -508,6 +554,12 @@ unreachable; it stays as a safe default. -/
 def keepsAt (f : Name) (p : Param .pure) : LowerM Bool := do
   -- Unreachable (see above): a safe default.
   unless (← read).decls.contains f do return ← mayHoldRelease p.type
+  -- A program that casts: none in a rewritten declaration (see above).
+  if (← read).resourceHeld?.isNone && (← flattenRewritten.get).contains f then
+    if ← mayHoldResource p.type then
+      throwError "lean2rr: flatten-structs rewrote {f}, whose parameter {p.binderName} may hold a resource \
+        (Lower/Borrow, keepsAt; Opt/Flatten, resourceExcluded); internal error"
+    return false
   let keep ← mayHoldAt f p.fvarId p.type
   if keep && (← flattenRewritten.get).contains f then
     throwError "lean2rr: the borrow emulation would keep the argument of parameter {p.binderName} of {f}, \
@@ -521,7 +573,8 @@ variables (name, type) the caller owns (not lent to its declaration,
 `CodeCtx.decl`: `borrowInfo`) that are passed to a parameter Lean
 borrows (at any position: `f x x` with the second parameter borrowed keeps
 `x`) that may hold a resource (`keepsAt` of the first borrowed parameter it
-is passed to). In the order of their first occurrence in
+is passed to; in a program that casts, also by the argument's own mono type,
+`armVars`). In the order of their first occurrence in
 `args`, as Lean's `addDecAfterFullApp` visits them (`releaseAfter`
 releases them in reverse). -/
 def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) :
@@ -540,6 +593,11 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     let some j := args.zipIdx.findSome? (fun (a, j) => if a == .fvar x && bs[j]?.getD false then some j else none)
       | continue
     if lent.contains (ctx.decl, x) then continue
+    -- In a program that casts, only an argument whose own mono type may
+    -- hold a resource (`mayHoldRelease`; owned and so recorded in
+    -- `armVars`): a `Nat` passed to an `lcAny` parameter holds nothing whose
+    -- release shows, as far as flatten-structs' type rule trusts types.
+    if (← read).resourceHeld?.isNone && !(← getPart (·.armVars.contains (ctx.decl, x))) then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
     -- The borrowed parameter it is passed to.

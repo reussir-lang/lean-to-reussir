@@ -92,6 +92,7 @@ The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/runtime/paynothing-check.sh`, `tests/runtime/determinism-check.sh`,
 `tests/runtime/int-backend-check.sh`, `tests/runtime/int-match-check.sh`,
 `tests/runtime/flatten-match-check.sh`,
+`tests/runtime/flatten-cast-check.sh`,
 `tests/runtime/inline-anchors-check.sh`,
 `tests/runtime/box-leaf-check.sh`, `tests/reussir-benchmark/run.sh`,
 `reussir-bugs/repros/run.sh`) and
@@ -336,6 +337,32 @@ call is a tail call): 10^6 steps on an 8 MB stack. The borrow emulation
 decided by type kept each value until the call returned, and the stack
 overflowed (the `lcAny` cycle on dev too); it now asks the flow analysis
 that guards flatten-structs.
+`RtBorrowCycleFlattenCast`: the same in a program that casts, where the
+borrow emulation decides by type: a cycle of tail calls passes a `Nat` on
+to an `lcAny` parameter that the other declaration only compares (Lean
+borrows both), and flatten-structs rewrites the first declaration (its base
+case passes a pair to a split helper); 10^6 steps on an 8 MB stack, the
+inputs from the arguments. With every parameter of a rewritten declaration
+counted as owned the `Nat` was kept until the call returned and the stack
+overflowed (round 2 of the review of xlate-regress); now only a parameter
+whose own type may hold a resource counts as owned there, and only an
+argument whose own type may hold one is kept.
+`RtFlattenCastCallbacks`: in a program that casts and makes a resource,
+`register` takes a descriptor (a name and a callback), reads both at its
+start and applies the callback; `initialize` blocks store callbacks of
+other types that nothing applies. flatten-structs splits the descriptor
+(Lean owns it natively), so the caller passes the callback at its own type;
+`tests/runtime/flatten-cast-check.sh` checks that the stored callbacks are
+not generated. Left whole, the callback came back from `Box → Box`, and
+`conv-liveness` reached every callback stored at that type (with the
+`Lean` package's environment extensions: 198,768 live functions for a
+one-line `main` importing `Cslib.Init`, 18,138 with the split). Split
+structures holding a handle through a thunk (`g1t`) or an optional
+callback (`g1o`) whose field goes to a parameter the helper borrows: the
+handle closes after the helper returns, as natively (`1T`, `1O`; with the
+worker's field taken as lent it closed inside the helper, `T1`, `O1`:
+review of xlate-regress); a callback read at the start and called late
+(`g2`), and fields read just before a `cases` (`g3`, Lean's `pushProj`).
 
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run), in one build, as
@@ -907,6 +934,9 @@ it draws on, with their copyright notices (Apache 2.0):
 | review of fix-view-binders (2026-10-27), views that held up: `S.a` holding a string and an array and `S.b` a reference, a handle and a number that `T` does not read: a view in IO of a value still used afterwards (natively released later with `S`'s own layout: the handle closes, its text flushed, when `tagS` is done), a view inside a `for` loop before a join point, a view in a self tail-recursive walk over a list of both constructors, a structure read as a one-field inductive that Lean keeps (the `.struct` path) | RtCastViewFewer (`Rev`) |
 | review of fix-view-binders (2026-10-27), a documented difference (plan §10, "Fields of a cast value that native code reuses"): a unique `S.b` matched as `T.b`, which reads only its first field: natively the cell is reused for `scoreImpl`'s result and the reset releases only `T.b`'s unread fields, so the handle in field 1 stays open and the file reads empty (`.native.out`); lean2rr releases every field at the view, so the file holds the text (`.l2r.out`) | RtCastViewUnique |
 | hunt of unread-fields (2026-10-27, S1; Cleanup, a hardening): in a program that creates tasks, the pass replaced an argument at a parameter the callee does not use also in a partial application, so the closure `adder t` lost the task `t` it captured, which natively the persist walk of the initializer's value reaches; now such an argument stays unless it cannot hold a task (`keepCaptured`, the test `replaceable` makes at a field); the output was native's either way (before `main` every task runs when it is made), so `.l2r-debug` checks the count of arguments kept so | RtUnreadFieldsTaskParam |
+| translation time (2026-10-27; Performance): in a program that casts and makes resources, flatten-structs left alone every declaration with a closure, thunk or task parameter or result (gate38), so the `Lean` package's environment extension registrations read the callbacks of their descriptors at `Box → Box`, and `conv-liveness` reached every callback that an `initialize` block stores (a one-line `main` importing `Cslib.Init`: 198,768 live functions instead of 18,138, 185 s instead of 73 s); now such a parameter is split when native Lean owns it and the declaration reads its fields that may hold one at its start, in field order (`castParamFree`), and no argument of a declaration the pass rewrote is kept | RtFlattenCastCallbacks, `tests/runtime/flatten-cast-check.sh` |
+| review of xlate-regress (2026-10-27; Bug of the branch, before its merge): a declaration the pass split in a program that casts kept nothing inside: Lean's inference on the worker took a field that it only passes to a borrowed parameter as borrowed (lent), so a `Thunk IO.FS.Handle` field passed to a helper that reads it with `Thunk.get`, and an optional callback the helper only asks `isNone`, were released inside the helper (`T1`, `O1`; native `1T`, `1O`); now its parameters whose type may hold a resource count as owned (`borrowInfo`) | RtFlattenCastCallbacks (`g1t`, `g1o`) |
+| review of xlate-regress, round 2 (2026-10-27; Bug of the branch, before its merge): counting every parameter of a rewritten declaration as owned kept a `Nat` passed on to a borrowed `lcAny` parameter in a cycle of tail calls, so each step was a call and 10^6 steps overflowed an 8 MB stack (native: constant stack); now only parameters whose type may hold a resource count as owned, and in a program that casts only an argument whose own type may hold one is kept (`borrowKeeps`) | RtBorrowCycleFlattenCast |
 
 Findings without a test here: costs (time, memory, build time or code
 size), Reussir-only bugs (lit tests in their patches), documentation

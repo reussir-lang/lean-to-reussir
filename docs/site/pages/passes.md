@@ -327,6 +327,13 @@ reference or a task. A record whose fields get only numbers holds no
 resource, also when the type of a field depends on a value (`lcAny`). For
 example, a regex engine that reads its input from a file has its search
 state split: the handle goes only to the functions that read the file.
+A program that can cast can move a value through a type that the analysis
+does not follow. Then the pass uses the types: every value of an unknown
+type can hold a resource, and so can every closure, thunk and task. The
+pass changes a function that takes a closure, a thunk or a task (or a
+record that holds one) only when native Lean gives the value to the
+function, so that the caller keeps no reference, and when the function
+reads the parts of the record at its start, in their order.
 
 - **Effect.** Against the same build with the pass off (cachegrind): Sieve
   −54 %, MonadicInterp −51 %, Unionfind −51 %, HigherOrder −4 %,
