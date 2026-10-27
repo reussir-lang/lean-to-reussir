@@ -1,11 +1,11 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50260
-bytes 2214120
-native-allocs 64913
-native-bytes 2546211
-items 288
-functions 222
+allocs 50261
+bytes 2214160
+native-allocs 64901
+native-bytes 2546035
+items 285
+functions 220
 conversion-fns 0
 conversion-sites 0
 box-sites 112
@@ -77,7 +77,6 @@ item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
 item extern "C" trampoline "l2r_main_body" = l2r_main_body; 398932703e9e
 item extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put; 539822ee00dd
 item extern "C" trampoline "l2r_task_run_one_c" = l2r_task_run_one; 7efa4a35bf26
-item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
 item jp_# e43d6ffedbfe
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 0119670e1a65
@@ -117,13 +116,12 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body 08ff061c2ae1
+item l2r_main_body 9573a64f2027
 item l2r_main_on_thread 4f4adafe091e
 item l2r_nullary_of_index_«T_List_#~aeda86a38d96» 94aed60e17ee
 item l2r_nullary_of_index_«T_T_#~88c57bff0e39» f990d51b2718
 item l2r_nullary_of_index_«T_U_#~609bf7c14fef» b0e0e75b46b8
 item l2r_run_main d750382a583f
-item l2r_run_pending_tasks 39049c3ac015
 item l2r_std_enter 4b0c46b9332b
 item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave d244ab8bf689
@@ -133,7 +131,6 @@ item l2r_str_lit 22ee89d10f1f
 item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
-item l2r_task_walk 9c19386ba6fa
 item l2r_unbox_rest_4aRVec1_«T_T_#~88c57bff0e39» 4f804230e278
 item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
 item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» f0e19419da5a

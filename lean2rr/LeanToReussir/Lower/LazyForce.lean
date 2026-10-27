@@ -36,8 +36,9 @@ def taskAddr (z : String) (c : RR.Expr) : RR.Expr :=
 
 /-- `l2r_task_bindstep_S(c, g)`: a `bind` task (`IO.bindTask`, `Task.bind`)
 runs `f` (`g(())` gives the task it continues as). If that task has
-finished, so has this one, with its value (`task_bind_fn1`), and its
-dependents are walked on its thread; otherwise it waits for that task,
+finished, so has this one, with its value (`task_bind_fn1`), and
+lean-runtime walks its dependents on its thread once the job has
+returned; otherwise it waits for that task,
 keeping its priority and flags, and finishes as it (`l2r_task_bind_wait`;
 Lean re-adds it as a dependent). That task may finish after the test (the
 continuation's store is a publication, a writers point where other contexts
@@ -58,7 +59,7 @@ def taskBindStepFn (z get : String) : LowerM String := do
     let cont := rawFnValue (.fn .unit t) u (.ofExpr (.call get #[] #[.var "t2"]))
     let finish : RR.Block := ⟨#[("v", some t, .call get #[] #[.var "t2"]),
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]]),
-      ("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"])], .atom "0"⟩
+      ("e", some u64, onCell "l2r_task_end")], .atom "0"⟩
     let wait : RR.Block := ⟨#[
       ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "pending") #[cont]]),
       ("w", some u64, .call "l2r_task_bind_wait" #[zt] #[.var "c", taskAddr z (.var "t2")])], .atom "0"⟩
@@ -77,18 +78,21 @@ closure out before calling it. Forcing a `busy` thunk means the value is
 needed by its own computation: native Lean then waits forever, and so do
 we; a `busy` task runs on another (blocked) context of the runtime's
 scheduler and is waited for, unless it is the running context's own
-(translation plan §5.14). A pending task is
-also registered as running for the duration (`IO.checkCanceled`, and it leaves the queue of
-pending tasks), and runs with its own standard streams,
-as a native task runs on a worker thread (`l2r_std_enter_if`, and the
-runtime's `task_end` closes the context: `leanrt::sched`, `l2r_std_leave_c`),
-unless the runtime runs it on the current thread (a `sync` dependent). When
-it has finished, its dependents are walked on its thread, with its streams
-(`l2r_task_walk_if`), before the caller's streams are back. The context
-closes only once the job has returned and the runtime has dropped what the
-task left (its value, a deleted bind task's continuation), whose frees run
-natively on the task's thread before its finalizers drop its streams
-(review RS15-01). -/
+(translation plan §5.14). A pending task runs only through its job, which
+lean-runtime runs on the context it chooses and which hands the cell to
+the program's dispatcher (`taskStepFn`); any other forcer waits for it
+(`l2r_task_source_next_at`, lean-runtime's `wait`, which may run the job
+on the forcer's stack) and looks again. Run by its job, the task tells the
+runtime it begins (`l2r_task_begin`) and runs with its own standard
+streams when it is a dedicated task, as a native task on a thread of its
+own (`l2r_std_enter_if`, and the runtime's `task_end` closes the context:
+`leanrt::sched`, `l2r_std_leave_c`); a pool task has its emulated worker's
+streams, a `sync` dependent the current thread's. When it has stored its
+value (`l2r_task_end`), lean-runtime walks its dependents once the job has
+returned, on its thread, with its streams. The context closes only after
+that walk, once the runtime has dropped what the task left (its value, a
+deleted bind task's continuation), whose frees run natively on the task's
+thread before its finalizers drop its streams (review RS15-01). -/
 def lazyGetFn (z : String) : LowerM String := do
   let task ← lazyIsTask z
   let t := RR.Ty.box
@@ -118,11 +122,13 @@ def lazyGetFn (z : String) : LowerM String := do
       lazyArm z "done" #[some "v"] (.ofExpr (.var "v")),
       lazyArm z "busy" #[] busy,
       { ty := z, ctor := none, binders := #[], body := other }])
-    -- A task first runs the chain of pending tasks it waits for, deepest
-    -- first (`l2r_task_force_sources`), then looks again (one of them may
-    -- have run it, as a `sync` dependent).
+    -- A pending task is waited for first (`l2r_task_source_next_at`,
+    -- lean-runtime's `wait`, which may run its job on this stack), then the
+    -- cell is looked at again (`_now`): it holds the value then, unless the
+    -- task is the one the running job is about to run (the wait returns at
+    -- once for it: `leanrt::task`'s `run_cell`), which `_now` runs.
     let getBody : RR.Block := if task then
-        getWith ⟨#[("fs", some u64, .call "l2r_task_force_sources" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
+        getWith ⟨#[("fs", some u64, .call "l2r_task_source_next_at" #[] #[.call "l2r_lcell_addr" #[zt] #[.var "c"]])],
           .call (get ++ "_now") #[] #[.var "c"]⟩
       else getWith (.ofExpr (.call run #[] #[.var "c"]))
     let nowBody : RR.Block := getWith (.ofExpr (.call run #[] #[.var "c"]))
@@ -132,7 +138,7 @@ def lazyGetFn (z : String) : LowerM String := do
         else #[]) ++
       #[("v", some t, force),
         ("s", some u64, .call "l2r_lcell_set" #[zt] #[.var "c", .ctor z (some "done") #[.var "v"]])] ++
-      (if task then #[("e", some u64, onCell "l2r_task_end"), ("wk", some u64, .call "l2r_task_walk_if" #[] #[.var "e"])]
+      (if task then #[("e", some u64, onCell "l2r_task_end")]
         else #[("td", some u64, .call "l2r_thunk_done" #[] #[onCell "l2r_lcell_addr"])])
     -- A `bind` task runs `f` (`taskBindStepFn`): it has then finished, or
     -- waits for the task it continues as; either way it is needed now.

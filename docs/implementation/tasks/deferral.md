@@ -8,34 +8,50 @@ which task a free worker takes, the pure-task rule, priorities, cancellation
 and the final run are lean-runtime's rules (its `docs/sched.md`); the
 entries here are how lean2rr's generated code reaches them.
 
-### The generated code is unchanged; its primitives call lean-runtime
+### The generated code's primitives call lean-runtime
 
 - **What:** The generated task code (creation `l2r_task_{defer,lazy,bind,
-  lazybind}_S`, forcing `l2r_task_get_S`, the bind step, the dispatchers
-  `l2r_task_run_one`, `l2r_task_force_sources`, `l2r_task_walk`,
-  `l2r_run_pending_tasks`) is the one lean2rr generated for its own
-  scheduler; its primitives (`l2r_task_*` in the prelude, `leanrt::task`)
-  now map it onto lean-runtime's API: `register` is `spawn` (or, for a
-  dependent, records the task until `depend_at`, which is `depend`);
-  `source_next` and `wait_running` are `await_task` (`wait`, after
-  `Task.get`'s panic in a `sync` task); `query` is `state`; `cancel`
-  (`l2r_task_cancel<S>`, which takes the task's cell: the one change of the
-  generated code, hunt HTG-02),
-  `check_canceled`, `sleep_ms`, `shutdown` (`finish`) and `promise_new` are the calls of the
-  same names; `deferring` is `manager_running`, read from the numbers
-  `main`'s start read (lean-runtime starts at the first task:
+  lazybind}_S`, forcing `l2r_task_get_S`, the bind step, the dispatcher
+  `l2r_task_run_one`) was written for leanrt's own scheduler; its
+  primitives (`l2r_task_*` in the prelude, `leanrt::task`) map it onto
+  lean-runtime's API: `register` is `spawn` (or, for a dependent, records
+  the task until `depend_at`, which is `depend`); `source_next` (a forcer's
+  wait for a pending task) and `wait_running` (for a `busy` one) are
+  `await_task` (`wait`, after `Task.get`'s panic in a `sync` task); `query`
+  is `state`; `cancel` (`l2r_task_cancel<S>`, which takes the task's cell,
+  hunt HTG-02), `check_canceled`, `sleep_ms`, `shutdown` (`finish`) and
+  `promise_new` are the calls of the same names; `deferring` is
+  `manager_running`, read from the numbers `main`'s start read
+  (lean-runtime starts at the first task:
   [scheduler.md](scheduler.md#lean-runtimes-scheduler-starts-at-the-first-task)).
-  Answers the generated code
-  no longer needs are constant: `register` and `depend` never ask it to run
-  a task now (lean-runtime runs it inside the call), `end` never asks it to
-  walk dependents, `walk_next` and, after `finish`, `next_tag` hand nothing.
+  The answers that only leanrt's own scheduler gave are gone from the
+  generated code: `register` and `depend` answer 0 (lean-runtime runs
+  nothing inside `spawn`, and runs a `sync` dependent inside `depend`
+  itself), `end` answers 0 (lean-runtime walks the dependents once the job
+  has returned), `source_next` answers `u64::MAX` (lean-runtime's `wait`
+  runs what the task needs), and none of these answers is read. The
+  generated code has one dispatcher, `l2r_task_run_one`; the walk
+  (`l2r_task_walk`, `l2r_task_walk_if`, the trampoline `l2r_task_walk_c`),
+  the run of a task's sources (`l2r_task_force_sources`, now a direct call
+  of `l2r_task_source_next_at`), the final run after `main`
+  (`l2r_run_pending_tasks`), the "run it now" branches after `register`
+  and `depend`, and the prelude's `l2r_task_walk_next` and
+  `l2r_task_handed` were removed (task glue cleanup, 2026-10-27; they ran
+  nothing on lean-runtime). Two never-taken branches stay as fallbacks:
+  `IO.getTaskState`'s branch for an answer other than 0, 1 or 2, which
+  holds the task's cell across the query
+  ([the program's last reference](#the-programs-last-reference-releases-a-task)),
+  and `IO.waitAny`'s second pass, which only collects
+  ([below](#iowaitanys-generated-loop-is-mapped-onto-lean-runtimes-wait_any)).
 - **Why:** One runtime (switch step 4): the scheduler is lean-runtime's.
-  Keeping the generated code lets a program's code stay the same, task
-  code included (the step's condition; the corpus's `.rr` outside the
-  prelude is unchanged).
+  The switch kept the generated code (the step's condition: the corpus's
+  `.rr` outside the prelude was unchanged); the parts that only leanrt's
+  own scheduler used went later.
 - **Where:** `runtime/leanrt/src/task.rs`; `runtime/prelude.rr` (the
-  `l2r_task_*` textures); `Lower/LazyGlue.lean`, `Lower/LazyForce.lean`,
-  `Lower/Promises.lean` (the generated code, unchanged).
+  `l2r_task_*` textures); `Lower/LazyGlue.lean` (`taskNewFn`,
+  `taskDepend`, `taskStateFn`, `taskWaitAnyFn`), `Lower/LazyForce.lean`
+  (`lazyGetFn`, `taskBindStepFn`), `Lower/Promises.lean`
+  (`taskDispatchFns`).
 - **Remove only if:** lean2rr generates code for lean-runtime's API
   directly (fewer calls; a change of every task program's code).
 
@@ -48,8 +64,8 @@ entries here are how lean2rr's generated code reaches them.
   (the glue's own when it holds the last one, `OWNED`, else a new one),
   hands it with its tag (`handed`, `next_tag`) to the program's
   dispatcher `l2r_task_run_one_c`, which runs the task as a worker would
-  (`l2r_task_step_S`): the forcing code's question for the task's own
-  sources (`source_next`) gets "none" (`run_cell`), `l2r_task_begin`
+  (`l2r_task_step_S`): the forcing code's wait for the task
+  (`source_next`) returns at once for it (`run_cell`), `l2r_task_begin`
   answers whether it runs as on a worker thread (lean-runtime's
   `Glue::task_begin`), and `l2r_task_end` marks it finished for lean2rr
   (`DONE`). A bind task whose function returned an unfinished task reports
@@ -126,13 +142,15 @@ entries here are how lean2rr's generated code reaches them.
   `l2r_task_wait_progress` and starts over. The glue answers 1 to both
   passes while it collects the list (both passes: twice the list), then
   `wait_progress` calls lean-runtime's `wait_any` on it and the next first
-  pass is answered 2 at the position lean-runtime chose. Positions, not
+  pass is answered 2 at the position lean-runtime chose. The glue never
+  answers 0, so the second pass only collects; it stays because
+  `wait_progress` takes the list as its two equal halves. Positions, not
   addresses, are counted (a list may name a task twice). No context switch
   happens inside a pass; the state is set aside during lean-runtime's wait,
   where other contexts run their own `IO.waitAny`.
 - **Why:** lean-runtime's `wait_any` takes the whole list and decides
   alone (its notification rule, RS2-06; what runs on the waiter's stack,
-  AR-10); the generated code asks per task (unchanged, see the first entry).
+  AR-10); the generated code asks per task (see the first entry).
 - **Where:** `runtime/leanrt/src/task.rs`: `wait_status`,
   `wait_progress`, `WaitAny`; `Lower/LazyGlue.lean`: `taskWaitAnyFn`.
 - **Remove only if:** lean2rr generates a call with the list.
@@ -186,7 +204,7 @@ entries here are how lean2rr's generated code reaches them.
 
 ### `Task.get` in a `sync := true` task prints Lean's panic
 
-- **What:** A wait for an unfinished task (`l2r_task_force_sources`,
+- **What:** A wait for an unfinished task (`l2r_task_source_next_at`,
   `l2r_task_wait_running`) from a `sync := true` task first reports the
   Lean panic native `Task.get` prints (`GET_IN_SYNC_TASK`, through Lean's
   current stderr, or the process's under `LEAN_ABORT_ON_PANIC`:

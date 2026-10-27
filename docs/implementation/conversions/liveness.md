@@ -67,8 +67,8 @@ are relative to `lean2rr/LeanToReussir/`. Plan
 - **What:** Every identifier of a raw item (the entry point and the
   startup chain, which call `main`, the initializers and the constants;
   the trampolines the runtime calls: `l2r_init_body`, `l2r_main_body`,
-  `l2r_stderr_put`, `l2r_task_run_one`, `l2r_task_walk`,
-  `l2r_promise_drop`; the conversion counter) and of the prelude is a
+  `l2r_stderr_put`, `l2r_task_run_one`, `l2r_promise_drop`; the
+  conversion counter) and of the prelude is a
   name reached. So are the identifiers of every atom of a function reached
   (`Lower/Process` renders expressions into atoms), and every `T::v` of a
   function-value enum (`L2RFn_…`, `liveTracked`) that text names counts

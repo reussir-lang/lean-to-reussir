@@ -3,10 +3,12 @@ import LeanToReussir.Lower.Externs
 /-! # Thunks and tasks: extern glue
 
 Translation plan §5.14. Thunks are memoized cells. Tasks created after
-`main` has started are deferred: they run when they are needed, on the stack
-of whoever needs them, or when `main` returns, as Lean's task manager
-finishes all queued tasks before the process exits (`leanrt::task` keeps the
-queues); a pure task the program drops before it has started never runs. -/
+`main` has started are deferred: they are given to lean-runtime's
+scheduler (through `leanrt::task`), which decides when each runs (when it
+is needed, when the running code blocks, at an effect point, when it is
+polled, or when `main` returns, as Lean's task manager finishes all queued
+tasks before the process exits); a pure task the program drops before it
+has started never runs. -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -50,8 +52,11 @@ def taskKind (pure dep : Bool) : Nat := (if pure then 1 else 0) + (if dep then 2
 initialization Lean has no task manager and runs it at once
 (`lean_task_spawn_core`); afterwards it is pending, and the runtime queues
 it (`kind`, see `taskKind`: a dependent is queued or made to wait by
-`l2r_task_depend_at` instead). The runtime never answers 1 (run it now):
-no priority runs a task on the current thread (lean-runtime's LB-39). -/
+`l2r_task_depend_at` instead). The register's answer is not read: it is
+always 0, since lean-runtime's `spawn` never runs a task inside the call
+(no priority runs one on the current thread: lean-runtime's LB-39). The
+cell is used after the call (returned), so the call never takes its last
+reference. -/
 def taskNewFn (z : String) (pure : Bool) (bind : Bool := false) : LowerM String := do
   let t := RR.Ty.box
   let tag ← taskTag
@@ -64,11 +69,10 @@ def taskNewFn (z : String) (pure : Bool) (bind : Bool := false) : LowerM String 
     let u64 := RR.Ty.named "u64"
     -- `bind`: `g` yields the task this one continues as (`IO.bindTask`).
     let gTy := RR.Ty.fn .unit (if bind then cellTy else t)
-    let runNow : RR.Block := ⟨#[("v", some t, .call get #[] #[.var "c"])], .var "c"⟩
     let deferred : RR.Block := ⟨#[
         ("c", some cellTy, .call "l2r_lcell_new" #[zt] #[.ctor z (some (if bind then "bind" else "pending")) #[.var "g"]]),
-        ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag), .var "prio", .var "k"]),
-        ("one", some u64, .atom "1")], .ite (.atom "r == one") runNow (.ofExpr (.var "c"))⟩
+        ("r", some u64, .call "l2r_task_register" #[zt] #[.var "c", .atom (toString tag), .var "prio", .var "k"])],
+      .var "c"⟩
     let call ← applyCall (.var "g") gTy #[.unitVal]
     let force := if bind then RR.Expr.block ⟨#[("t2", some cellTy, call)], .call get #[] #[.var "t2"]⟩ else call
     let eager : RR.Block := ⟨#[("v", some t, force)], lazyDone z (.var "v")⟩
@@ -103,28 +107,25 @@ def newTask (taskTy : RR.Ty) (pure : Bool) (prio : RR.Expr) (body : RR.Expr → 
 
 /-- The new dependent task `c : taskTy` (of the task state type `z`) of
 task `src`, with `sync` (a `Bool` expression): recorded with
-`l2r_task_depend_at` (Lean's `add_dep`). The runtime never answers 1 (run
-it now): only `sync := true` runs a dependent on the current thread
-(lean-runtime's walk, or the generated code when `src` has finished). The
-caller tests `src` before the call, and the call's writers point may let
-`src` finish after that test: lean-runtime then runs a `sync` dependent
-inside the call (lean-runtime's review HR-02), and the answer is 0 still
-(nothing is run twice, and no `sync` task is queued). A map then holds its
-value on return; a bind whose function returned an unfinished task waits
-for that task, as after any run of its function. -/
+`l2r_task_depend_at` (Lean's `add_dep`). Only `sync := true` runs a
+dependent on the current thread (lean-runtime's walk, or the generated
+code when `src` has finished). The caller tests `src` before the call, and
+the call's writers point may let `src` finish after that test:
+lean-runtime then runs a `sync` dependent inside the call (lean-runtime's
+review HR-02), so nothing is run twice and no `sync` task is queued. A map
+then holds its value on return; a bind whose function returned an
+unfinished task waits for that task, as after any run of its function.
+The answer is not read: it is always 0 (lean-runtime's `depend` never asks
+the caller to run the dependent). The new task's cell is used after the
+call (returned), so the address taken for it never frees it. -/
 def taskDepend (z : String) (taskTy : RR.Ty) (c : RR.Expr) (src sync : RR.Expr) :
     LowerM RR.Block := do
-  let get ← lazyGetFn z
   let x ← fresh "tn"
   let dp ← fresh "dp"
-  let one ← fresh "one"
-  let v ← fresh "tv"
-  let t := RR.Ty.box
   return ⟨#[(x, some taskTy, c),
     (dp, some (.named "u64"), .call "l2r_task_depend_at" #[]
-      #[taskAddr z src, .call "l2r_lcell_addr" #[.named z] #[.var x], sync]),
-    (one, some (.named "u64"), .atom "1")],
-    .ite (.atom s!"{dp} == {one}") ⟨#[(v, some t, .call get #[] #[.var x])], .var x⟩ (.ofExpr (.var x))⟩
+      #[taskAddr z src, .call "l2r_lcell_addr" #[.named z] #[.var x], sync])],
+    .var x⟩
 
 /-- `l2r_task_step_S(c)`: run task `c`, handed over by the runtime, as a
 worker would: a `bind` task (`IO.bindTask`) only runs `f`
@@ -149,13 +150,14 @@ def taskStepFn (z : String) : LowerM String := do
     return #[.fn (name ++ "_bind") #[("c", cellTy)] u64 stepBind, .fn name #[("c", cellTy)] u64 body]
 
 /-- `IO.getTaskState` glue (`leanrt::task::query`, lean-runtime's `state`):
-the runtime answers 0 (waiting), 1 (running) or 2 (finished). The branches
-for 3 (run the task, then report it finished) and for other answers (run the
-task's sources, then report its status) are never taken; the one for 3
-uses the cell `c` after the query, so the program's reference stays alive
-across it when `IO.getTaskState` is the task's last use (natively it
-borrows the task, and the caller's decrement comes after it); the other
-branches release it after the query. -/
+the runtime answers 0 (waiting), 1 (running) or 2 (finished), as
+lean-runtime's `TaskState` has those three states only. The last branch,
+for any other answer, is a kept fallback that is never taken (it waits for
+the task's value, then reports it finished): it uses the cell `c` after
+the query, so the program's reference stays alive across the query when
+`IO.getTaskState` is the task's last use (natively it borrows the task,
+and the caller's decrement comes after it; `l2r_lcell_addr` releases the
+reference it is given); the other branches release it after the query. -/
 def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
   let name := s!"l2r_task_state_{z}"
   let t := RR.Ty.box
@@ -169,23 +171,29 @@ def taskStateFn (z : String) (stateTy : RR.Ty) : LowerM String := do
     let u8 := RR.Ty.named "u8"
     let isQ (k : Nat) (yes no : RR.Block) : RR.Block :=
       ⟨#[(s!"k{k}", some u8, .atom (toString k))], .ite (.atom s!"q == k{k}") yes no⟩
-    let promise : RR.Block := ⟨#[("fs", some (.named "u64"), .call "l2r_task_force_sources" #[] #[.var "a"]),
-        ("st", some u8, .call "l2r_task_status_at" #[] #[.var "a"]), ("fin", some u8, .atom "2")],
-      .ite (.atom "st == fin") (.ofExpr finished) (.ofExpr running)⟩
+    -- The kept fallback (see above): it holds `c` across the query.
+    let other : RR.Block := ⟨#[("v", some t, .call get #[] #[.var "c"])], finished⟩
     let body : RR.Block := ⟨#[("a", some (.named "u64"), taskAddr z (.var "c")),
         ("q", some u8, .call "l2r_task_query_at" #[] #[.var "a"])],
-      .block (isQ 0 (.ofExpr waiting) (isQ 1 (.ofExpr running) (isQ 2 (.ofExpr finished)
-        (isQ 3 ⟨#[("v", some t, .call get #[] #[.var "c"])], finished⟩ promise))))⟩
+      .block (isQ 0 (.ofExpr waiting) (isQ 1 (.ofExpr running) (isQ 2 (.ofExpr finished) other)))⟩
     return #[.fn name #[("c", .app "LCell" #[zt])] stateTy body]
 
 /-- `IO.waitAny` glue over a list of tasks of type `listTy`: the value of the
-first task of the list that has finished; if none has, the first pending
-one is run (it finished first), unless it waits for an unresolved promise.
-If every task is running (or waits for a promise), the caller waits until
-some task finishes (`l2r_task_wait_progress`: other contexts and queued
-tasks run meanwhile, as workers would) and looks at the list again; when
-nothing can make progress any more, they all wait for the caller: native
-Lean deadlocks. -/
+task that lean-runtime's `wait_any` chooses (the first task of the list
+that has finished). The generated loop asks `l2r_task_wait_status_at`
+about each task of the list in a first pass, which takes a task answered 2,
+then in a second pass, which runs a task answered 0, then calls
+`l2r_task_wait_progress` and starts over. leanrt answers 1 to both passes
+while it collects the list; `l2r_task_wait_progress` hands the list to
+lean-runtime's `wait_any`, which waits until a task of it has finished
+(other contexts and queued tasks run meanwhile, as workers would), and the
+next first pass is answered 2 at the position `wait_any` chose. The second
+pass only collects: leanrt never answers 0, so its test for 0 is a kept
+fallback that is never taken, but leanrt counts both passes
+(`wait_progress` takes the list as two equal halves), so the pass stays.
+A list whose tasks can never finish waits forever, as native Lean
+deadlocks; `l2r_task_wait_progress` answers 0 (then `l2r_lazy_cycle`) only
+for an empty list, which Lean rules out. -/
 def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
   let z ← lazyOf taskTy
   let t := RR.Ty.box
@@ -215,6 +223,7 @@ def taskWaitAnyFn (listTy : RR.Ty) (taskTy : RR.Ty) : LowerM String := do
         ("one", some (.named "u64"), .atom "1")],
       .ite (.atom "r1 == one") (.ofExpr (.call name #[] #[.var "all", .var "all"]))
         (.ofExpr (.call "l2r_lazy_cycle" #[t] #[]))⟩
+    -- The second pass: it only collects (leanrt never answers 0; see above).
     let firstPending : RR.Block := .ofExpr (.mtch (.var "l") #[
       listArm nil.variant #[] again,
       listArm cons.variant consBinders (pick 0 (.call run #[] #[.var "rest", .var "all"]))])

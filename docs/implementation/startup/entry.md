@@ -132,17 +132,19 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 
 - **What:** After `main` returns, whatever its result, the entry calls
   `l2r_task_shutdown`: lean-runtime's `finish` sets Lean's shutdown flag,
-  runs the tasks still pending and waits for them (and for the io layer's
-  dedicated tasks); the generated final run (`l2r_run_pending_tasks`) then
-  finds nothing. Then it reports an uncaught exception (`uncaught
+  runs the tasks still pending, through the program's dispatcher, and
+  waits for them (and for the io layer's dedicated tasks). Then it reports
+  an uncaught exception (`uncaught
   exception: <message>`, exit 1) or exits with the returned `UInt32` (0 for
   `IO Unit`).
 - **Why:** `lean_finalize_task_manager` waits for the tasks before the
   result is looked at (lean-runtime's glue item 2; LB-13 not reproduced:
   a pool task enqueued after `main` still runs).
 - **Where:** `Emit/Entry.lean`: `lowerEntry`; `runtime/leanrt/src/task.rs`:
-  `shutdown`, `next_tag`; `Lower/Promises.lean`: `taskDispatchFns`. See
-  [../tasks/deferral.md](../tasks/deferral.md).
+  `shutdown`; `Lower/Promises.lean`: `taskDispatchFns`. See
+  [../tasks/deferral.md](../tasks/deferral.md). (Until the task glue
+  cleanup of 2026-10-27 the entry then called a generated final run,
+  `l2r_run_pending_tasks`, which found nothing.)
 - **Remove only if:** never.
 
 ### `main`'s argument list reads `argv` once
@@ -247,11 +249,12 @@ Plan [§5.11](../../translation-plan.md#511-program-entry).
 
 - **What:** Every program defines `extern "C"` trampolines:
   `l2r_init_body`, `l2r_main_body`, `l2r_stderr_put_c` (the runtime's own
-  diagnostics), `l2r_task_run_one_c` (a task's job runs the task through
-  it) and `l2r_task_walk_c` (no longer called: lean-runtime walks
-  dependents); programs that create promises also define
+  diagnostics) and `l2r_task_run_one_c` (a task's job runs the task
+  through it); programs that create promises also define
   `l2r_promise_drop_c` (a promise's last release). The runtime links some
-  of them weakly.
+  of them weakly. (`l2r_task_walk_c`, which nothing called once
+  lean-runtime walked dependents, was removed in the task glue cleanup of
+  2026-10-27.)
 - **Why:** The runtime cannot name generated code; calling through Rust
   also removes a Reussir-level call cycle through the stream code that
   crashed rrc (a Reussir bug, fixed upstream in #655).

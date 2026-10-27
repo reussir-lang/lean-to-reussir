@@ -88,8 +88,9 @@ def lowerEntry (mainInst errStr : Name) (startup : Array StartupStep) : LowerM R
   -- `main` returns, whatever its result, the tasks still pending run, as
   -- `lean_finalize_task_manager` waits for them before the exception is
   -- reported or the process exits; they see Lean's shutdown flag (§5.14).
-  -- (`l2r_run_pending_tasks` is generated at the end, `taskDispatchFns`.)
-  let drain := "let sd : u64 = l2r_task_shutdown();\nlet pt : u64 = l2r_run_pending_tasks();\n"
+  -- lean-runtime's `finish` runs them (`l2r_task_shutdown`), through the
+  -- program's dispatcher (`taskDispatchFns`).
+  let drain := "let sd : u64 = l2r_task_shutdown();\n"
   -- `main` gets standard streams of its own (a fresh stream context,
   -- `l2r_std_enter`) only when it runs on a thread of its own: with
   -- `LEAN_MAIN_USE_THREAD=0` it runs on the initializers' thread and keeps

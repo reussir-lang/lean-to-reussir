@@ -2572,7 +2572,7 @@ fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
 // dependent, see `leanrt::task::register`), given to lean-runtime's
 // scheduler, which never runs it inside the call (LB-39). Its job holds no
 // reference: the program's last one releases the task (`leanrt::task`).
-// Returns 0 (1, the caller runs it now, is never answered).
+// Returns 0, which the generated code does not read.
 #[ffi(import)]
 fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64, kind : u64) -> u64 [{
     {
@@ -2583,20 +2583,13 @@ fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64, kind : u64) -> u64 
     }
 }];
 
-// The walk of a finished task's dependents: the tag of the next `sync`
-// dependent to run (`u64::MAX`: the walk is over), which
-// `l2r_task_handed<S>()` then gives (with the runtime's reference; to be
-// dropped instead when `l2r_task_deleting()`).
-#[ffi(import)]
-fn l2r_task_walk_next() -> u64 [{ leanrt::task::walk_next() }];
-
-// Before task `a` runs: the tag of the deepest pending task of the chain of
-// tasks it waits for (`u64::MAX`: none), given by `l2r_task_handed<S>()`.
+// The wait for the pending task `a` that a forcer needs
+// (`leanrt::task::source_next`): lean-runtime's `wait`, after the Lean panic
+// of `Task.get` in a `sync := true` task; the wait may run the task's job on
+// this stack. No wait for the task the running job is about to run.
+// Returns `u64::MAX`, which the generated code does not read.
 #[ffi(import)]
 fn l2r_task_source_next_at(a : u64) -> u64 [{ leanrt::task::source_next(a as usize) }];
-
-#[ffi(import)]
-fn l2r_task_handed<S>() -> LCell<S> [{ unsafe { ::std::mem::transmute_copy(&leanrt::task::handed()) } }];
 
 #[ffi(import)]
 fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
@@ -2637,11 +2630,9 @@ fn l2r_task_bind_wait<S>(c : LCell<S>, src : u64) -> u64 [{
 // The running task has stored its value (`leanrt::task::end`); then the
 // reference passed, the job's, is released: if the program dropped its own
 // while the task ran, this is the last, and the task is released before
-// lean-runtime ends it, so its finish wakes no waiter, as natively. Returns
-// 0: lean-runtime ends the task and walks its dependents once the job has
-// returned (the task walk helper of Lower/Promises.lean does nothing; it is
-// not named here: conv-liveness takes every name in this file, comments
-// included, as a root, and would keep the helper in every program).
+// lean-runtime ends it, so its finish wakes no waiter, as natively.
+// lean-runtime ends the task and walks its dependents once the job has
+// returned. Returns 0, which the generated code does not read.
 #[ffi(import)]
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
@@ -2687,8 +2678,8 @@ fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
 // `src`, with `sync := true` or not (for its start and its cancellation).
 // A `sync` dependent whose source finished during the call (lean-runtime's
 // writers point, after the caller's test of `src`) has run inside it, its
-// value stored (lean-runtime's review HR-02). Returns 0 (1, the caller runs
-// it now, is never answered).
+// value stored (lean-runtime's review HR-02). Returns 0, which the
+// generated code does not read.
 #[ffi(import)]
 fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
 
@@ -2704,7 +2695,7 @@ fn l2r_task_status_at(a : u64) -> u8 [{ leanrt::task::status(a as usize) }];
 fn l2r_task_wait_status_at(a : u64) -> u8 [{ leanrt::task::wait_status(a as usize) }];
 
 // `IO.getTaskState`: lean-runtime's `state`, 0 waiting, 1 running, 2
-// finished (the generated branches for 3 and 4 are never taken; see
+// finished (the generated branch for any other answer is never taken; see
 // lean2rr's `taskStateFn`).
 #[ffi(import)]
 fn l2r_task_query_at(a : u64) -> u8 [{ leanrt::task::query(a as usize) }];
@@ -2734,8 +2725,8 @@ fn l2r_task_manager_start() -> u64 [{ { leanrt::task::start(); 0 } }];
 #[ffi(import)]
 fn l2r_task_shutdown() -> u64 [{ { leanrt::task::shutdown(); 0 } }];
 
-// The next queued task to run (when `main` has returned, or for a waiting
-// `main`): its tag (`u64::MAX` if none), then the cell itself (with the
+// The task a job hands to the program's dispatcher (`leanrt::task`'s
+// `dispatch`): its tag (`u64::MAX` if none), then the cell itself (with the
 // runtime's reference; to be dropped instead when `l2r_task_deleting()`).
 #[ffi(import)]
 fn l2r_task_next_tag() -> u64 [{ leanrt::task::next_tag() }];

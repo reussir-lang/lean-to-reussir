@@ -21,7 +21,7 @@ With the pass, the helpers follow a type-based reachability (rapid type
 analysis), computed here while they are generated (`Finish.finishLive`):
 - the roots are the identifiers of raw text (the entry point, the startup
   chain, the trampolines the runtime calls: `l2r_init_body`,
-  `l2r_main_body`, `l2r_stderr_put`, `l2r_task_run_one`, `l2r_task_walk`,
+  `l2r_main_body`, `l2r_stderr_put`, `l2r_task_run_one`,
   `l2r_promise_drop`) and of the prelude;
 - a function reached is looked at (`liveFollow`): the functions it calls and
   the identifiers of its atoms are reached, and the variants of `Box` and of

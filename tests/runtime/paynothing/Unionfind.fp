@@ -4,8 +4,8 @@ allocs 175033
 bytes 6301288
 native-allocs 2956306
 native-bytes 61730385
-items 169
-functions 127
+items 166
+functions 125
 conversion-fns 0
 conversion-sites 0
 box-sites 48
@@ -53,7 +53,6 @@ item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
 item extern "C" trampoline "l2r_main_body" = l2r_main_body; 398932703e9e
 item extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put; 539822ee00dd
 item extern "C" trampoline "l2r_task_run_one_c" = l2r_task_run_one; 7efa4a35bf26
-item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 088dffee5ccf
 item l2r_any_rel_# 2d121af0e1bc
@@ -78,12 +77,11 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body e98ee5e6a95c
+item l2r_main_body ec71e24a769e
 item l2r_main_code e46a87bef8ed
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
-item l2r_run_pending_tasks 39049c3ac015
 item l2r_std_enter 99c66edbb869
 item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave abe082bbec3b
@@ -93,7 +91,6 @@ item l2r_str_lit 98db391f5672
 item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
-item l2r_task_walk 9c19386ba6fa
 item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
 item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» f0e19419da5a
 item l2r_unbox_rest_«T_Option_#~b05d6063b715» f7fe3f06511b

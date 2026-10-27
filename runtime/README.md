@@ -794,8 +794,8 @@ address (`Tasks::by_cell`; a new cell drops a stale mapping in
 once its cell holds `done` its id is never given out again
 (`TaskId::FINISHED`). A task's job (lean-runtime's `Job`) holds the cell's
 address and tag, not a count: run, it gives the generated code a counted
-reference (`l2r_task_handed<S>()` / `l2r_task_take<S>()`, with the tag
-`l2r_task_next_tag()`) through the program's dispatcher
+reference (`l2r_task_take<S>()`, with the tag `l2r_task_next_tag()`)
+through the program's dispatcher
 (`l2r_task_run_one_c`, lean2rr's `l2r_task_run_one`), which runs the task as
 a worker would; when lean-runtime drops a job unrun, the glue's reference,
 if it holds one, is dropped the same way (`l2r_task_deleting()`). The
@@ -808,9 +808,8 @@ returned, so a task whose program reference went while it ran is released
 before its end, which then wakes no waiter, as natively (hunt HTG-01). A
 primitive that takes a task's address (`l2r_lcell_addr` releases the
 reference passed) gets a cell the generated code uses again after the
-call. The generated code's primitives
-(unchanged from leanrt's own scheduler but for `IO.cancel`'s, so the
-program's code is the same):
+call. The generated code's primitives (from leanrt's own scheduler; an
+answer that only that scheduler used is constant now and not read):
 `l2r_task_register<S>(c, tag, prio, kind)` (a new task: lean-runtime's
 `spawn`; `prio` the whole priority, one of 2^64 or more passed as
 `u64::MAX`, every priority above 8 a dedicated task: LB-39; `kind` 1 pure
@@ -825,9 +824,10 @@ the job's reference goes; 0: lean-runtime walks its dependents once the job
 has returned),
 `l2r_task_bind_wait<S>(c, src)` (a `bind` task whose function returned the
 unfinished task `src`: its job returns `Outcome::Continue`),
-`l2r_task_source_next_at(a)` and `l2r_task_wait_running(a)` (lean-runtime's
-`wait`, after the Lean panic of `Task.get` in a `sync := true` task; none
-for the task a job is about to run), `l2r_task_status_at(a)` (2 finished, 1
+`l2r_task_source_next_at(a)` (a forcer's wait for a pending task) and
+`l2r_task_wait_running(a)` (for a `busy` one): lean-runtime's `wait`,
+after the Lean panic of `Task.get` in a `sync := true` task; none for the
+task a job is about to run; `l2r_task_status_at(a)` (2 finished, 1
 not), `l2r_task_query_at(a)` (`IO.getTaskState`: lean-runtime's `state`),
 `l2r_task_wait_status_at(a)` and `l2r_task_wait_progress()` (`IO.waitAny`:
 the generated loop's two passes collect the list, then lean-runtime's
@@ -844,9 +844,9 @@ glue, at the first task, promise, `Std.Sync` object, timer, signal watcher
 or socket: lean-runtime's lazy start, `sched::start_lazy`, whose entry
 points call `ensure_started`) and `l2r_task_shutdown()` (after `main`:
 lean-runtime's `finish`, the final run, then the io layer's dedicated
-tasks; without a built scheduler, the same without the run). The generated walks
-(`l2r_task_walk_next()`, `l2r_task_walk_if`) and the generated final run
-(`l2r_run_pending_tasks`) find nothing: lean-runtime does them.
+tasks; without a built scheduler, the same without the run). lean-runtime
+walks dependents and does the final run; the generated code has only the
+dispatcher.
 `l2r_sleep_ms` is lean-runtime's `sleep_ms`. Standard streams are per task,
 as they are per thread natively: `l2r_std_push(base)` / `l2r_std_pop(base)`
 set the stream cells aside and put them back

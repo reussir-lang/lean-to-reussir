@@ -1,11 +1,11 @@
 # Pay-nothing baseline of Qsort (tests/classic/Qsort.lean), arguments '80'.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 9538
-bytes 3223216
+allocs 9537
+bytes 3223176
 native-allocs 299433
 native-bytes 12739762
-items 151
-functions 115
+items 148
+functions 113
 conversion-fns 0
 conversion-sites 0
 box-sites 43
@@ -47,7 +47,6 @@ item extern "C" trampoline "l2r_init_body" = l2r_init_body; 1a20ba858821
 item extern "C" trampoline "l2r_main_body" = l2r_main_body; 398932703e9e
 item extern "C" trampoline "l2r_stderr_put_c" = l2r_stderr_put; 539822ee00dd
 item extern "C" trampoline "l2r_task_run_one_c" = l2r_task_run_one; 7efa4a35bf26
-item extern "C" trampoline "l2r_task_walk_c" = l2r_task_walk; 409416745cb3
 item l2r_any_init e46e2d58cfdd
 item l2r_any_rel_# 088dffee5ccf
 item l2r_any_rel_# 2d121af0e1bc
@@ -70,11 +69,10 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body b89b8e4a694d
+item l2r_main_body 00aa9541c798
 item l2r_main_on_thread 4f4adafe091e
 item l2r_mk_args 2dbae516abaf
 item l2r_run_main d750382a583f
-item l2r_run_pending_tasks 39049c3ac015
 item l2r_std_enter d4004cbb4abc
 item l2r_std_enter_if 5de670c1226b
 item l2r_std_leave b45fb276decb
@@ -84,7 +82,6 @@ item l2r_str_lit 9ba68870a61a
 item l2r_str_lit_cached 8c89f8820a26
 item l2r_str_lit_fill 1b8397330b80
 item l2r_task_run_one d033008890b9
-item l2r_task_walk 9c19386ba6fa
 item l2r_unbox_rest_«L2RRef#~62539236c267» 96806dc82bf2
 item l2r_unbox_rest_«T_IO_Error_#~9355e6117fd3» e516aaa2c94b
 item l2r_unbox_rest_«T_IO_FS_Stream_#~ced0cb52ded6» f0e19419da5a

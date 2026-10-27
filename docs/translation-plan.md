@@ -3739,11 +3739,7 @@ Each item says what differs and when.
   suspended in the middle of its write, which only that thread resumes
   (review RS8-01: a hang ranks above the place of a line in an error
   path).
-- Child processes (§5.8): code that reads one of a child's pipes in a task
-  while it reads the other (as `IO.Process.output` does natively, stdout
-  in the task; its glue here reads both together) deadlocks if the child
-  writes more than a pipe holds to the task's pipe before closing the
-  other one, since the task runs only when its value is needed. Natively `Child.pid` leaks the child, so its pipes stay open
+- Child processes (§5.8): natively `Child.pid` leaks the child, so its pipes stay open
   forever (a child waiting for end of file on stdin then hangs); here they
   are closed as usual. Natively the `Child` from `takeStdin` loses the
   `setsid` flag (LB-14, below); here it keeps it. `output` is

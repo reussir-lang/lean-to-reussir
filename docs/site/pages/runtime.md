@@ -138,8 +138,11 @@ blocks, the scheduler chooses:
 glue: the task objects (cells with a generated state), the code that
 connects them to the crate's task ids, the one `unsafe` step of a context
 switch (with its written proof), and the current standard streams of each
-context and of each emulated worker. The generated task code did not
-change (later, only the call for `IO.cancel` changed).
+context and of each emulated worker. The generated task code stayed the
+same at the switch. Later, the call for `IO.cancel` changed, and the
+generated parts that only the old scheduler used were removed. The
+program has one dispatcher, which runs the task that a job of the crate
+gives to it.
 
 **A task that the program drops.** When the program drops its last
 reference to a task that runs, the task runs to its end. Its end wakes no

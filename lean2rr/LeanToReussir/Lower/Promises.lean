@@ -6,9 +6,13 @@ import LeanToReussir.Lower.Process
 runtime `LPromise` holding the cell of its task (the one task type, whose
 value, an `Option α`, is boxed), whatever `α` is (translation plan
 §5.14). The task is pending, without a computation the runtime would run,
-until the promise is resolved; forcing it while unresolved runs queued
-tasks until one resolves it (`l2r_task_force_sources`), and otherwise
-waits forever (its `pending` closure), as natively. -/
+until the promise is resolved; forcing it while unresolved waits for it in
+lean-runtime's `wait` (`l2r_task_source_next_at`: other contexts and
+queued tasks run meanwhile, as other threads would), as natively, until
+the promise is resolved, by the program or with `none` when its last
+reference goes (the resolution stores the value before the wait returns).
+Its `pending` closure waits forever: a fallback, run only if the wait
+returned with the promise still unresolved. -/
 
 namespace LeanToReussir
 open Lean Compiler LCNF
@@ -97,48 +101,35 @@ def promiseExtern (sym : String) (params : Array Expr) (ret : Expr) (args : Arra
       (.call "l2r_option_get_or_block_none" #[rt] #[])⟩)
   | _ => return none
 
-/-- The functions that run tasks handed over by the runtime, dispatching on
-the state type's tag (`taskTag`): `l2r_task_run_one()` (the next queued task: 1 if
-there was one), `l2r_run_pending_tasks()` (the final run of queued tasks
-when `main` has returned), `l2r_task_walk()` (the `sync` dependents of a
-task that just finished, in Lean's walk order; `l2r_task_walk_if(e)` when
-`l2r_task_end` said so) and `l2r_task_force_sources(a)` (the chain of
-pending tasks that task `a` waits for, deepest first, or queued tasks while
-it waits for a promise). Each runs its task as a worker would
-(`taskStepFn`), or drops it when the runtime says it is deleted (a pure
-task the program has dropped), then asks again. Generated once every task
-is registered. -/
+/-- `l2r_task_run_one()`, the program's dispatcher, which lean-runtime
+reaches through the trampoline `l2r_task_run_one_c`: a task's job
+(`leanrt::task`'s `run_job`, or `unrun` for a job lean-runtime drops
+unrun) hands it one counted reference to the task's cell, with the state
+type's tag (`taskTag`), and it runs the task as a worker would
+(`taskStepFn`), or drops the reference when the runtime says the task is
+deleted (`l2r_task_deleting`). It answers 1, or 0 when nothing is handed
+over (the runtime ignores the answer). lean-runtime walks dependents,
+waits for tasks and runs what is left after `main` itself: the generated
+code has no other dispatcher. Generated once every task is registered;
+every program has it, with no arm if it registers no task. -/
 def taskDispatchFns : LowerM (Array RR.Item) := do
   -- The task state type, tag 0 (`taskTag`), once a task is registered.
   let tags ← if ← getPart (·.taskTagged) then pure #[← lazyState true] else pure #[]
   let u64 := RR.Ty.named "u64"
-  let mk (name : String) (params : Array (String × RR.Ty)) (first : RR.Expr) (take : String) (again : RR.Expr) :
-      LowerM RR.Item := do
-    let mut chain : RR.Block := ⟨#[("none", some u64, .atom "0")], .var "none"⟩
-    for i in [:tags.size] do
-      let j := tags.size - 1 - i
-      let z := tags[j]!
-      let step ← taskStepFn z
-      chain := ⟨#[(s!"k{j}", some u64, .atom (toString j))], .ite (.atom s!"tag == k{j}")
-        ⟨#[("c", some (.app "LCell" #[.named z]), .call take #[.named z] #[]),
-          ("d", some .bool, .call "l2r_task_deleting" #[] #[]),
-          ("v", some u64, .ite (.var "d") ⟨#[("z", some u64, .atom "0")], .var "z"⟩
-            (.ofExpr (.call step #[] #[.var "c"])))], again⟩ chain⟩
-    return .fn name params u64 ⟨#[("tag", some u64, first)], .block chain⟩
-  let ifOne (x : String) (yes : RR.Expr) : RR.Block :=
-    ⟨#[("one", some u64, .atom "1")], .ite (.atom s!"{x} == one") (.ofExpr yes) ⟨#[("z", some u64, .atom "0")], .var "z"⟩⟩
+  let mut chain : RR.Block := ⟨#[("none", some u64, .atom "0")], .var "none"⟩
+  for i in [:tags.size] do
+    let j := tags.size - 1 - i
+    let z := tags[j]!
+    let step ← taskStepFn z
+    chain := ⟨#[(s!"k{j}", some u64, .atom (toString j))], .ite (.atom s!"tag == k{j}")
+      ⟨#[("c", some (.app "LCell" #[.named z]), .call "l2r_task_take" #[.named z] #[]),
+        ("d", some .bool, .call "l2r_task_deleting" #[] #[]),
+        ("v", some u64, .ite (.var "d") ⟨#[("z", some u64, .atom "0")], .var "z"⟩
+          (.ofExpr (.call step #[] #[.var "c"])))], .atom "1"⟩ chain⟩
   return #[
-    ← mk "l2r_task_run_one" #[] (.call "l2r_task_next_tag" #[] #[]) "l2r_task_take" (.atom "1"),
-    .fn "l2r_run_pending_tasks" #[] u64 ⟨#[("r", some u64, .call "l2r_task_run_one" #[] #[])],
-      .block (ifOne "r" (.call "l2r_run_pending_tasks" #[] #[]))⟩,
-    ← mk "l2r_task_walk" #[] (.call "l2r_task_walk_next" #[] #[]) "l2r_task_handed" (.call "l2r_task_walk" #[] #[]),
-    .fn "l2r_task_walk_if" #[("e", u64)] u64 (ifOne "e" (.call "l2r_task_walk" #[] #[])),
-    ← mk "l2r_task_force_sources" #[("a", u64)] (.call "l2r_task_source_next_at" #[] #[.var "a"]) "l2r_task_handed"
-      (.call "l2r_task_force_sources" #[] #[.var "a"]),
-    -- The runtime's scheduler starts queued tasks on contexts of their own
-    -- (`leanrt::sched`) through this entry point, and walks the dependents
-    -- of promises dropped inside a free once it is over through the next.
-    .raw "extern \"C\" trampoline \"l2r_task_run_one_c\" = l2r_task_run_one;\n",
-    .raw "extern \"C\" trampoline \"l2r_task_walk_c\" = l2r_task_walk;\n"]
+    .fn "l2r_task_run_one" #[] u64 ⟨#[("tag", some u64, .call "l2r_task_next_tag" #[] #[])], .block chain⟩,
+    -- The runtime's scheduler runs a task's job, on the context it chooses
+    -- (`leanrt::sched`), through this entry point.
+    .raw "extern \"C\" trampoline \"l2r_task_run_one_c\" = l2r_task_run_one;\n"]
 
 end LeanToReussir
