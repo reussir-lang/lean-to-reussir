@@ -1,11 +1,13 @@
-/-! Runtime test (a refusal): the program defines `L2RNat.truncateBits`,
-the name of the extern that the optimization `mod-pow2` adds for its
-rewritten `x % 2 ^ w` (`l2r_nat_truncate_bits`). The `L2R*` namespaces
-are lean2rr's: the pass must not call the program's definition in place
-of the extern (it computes `x + w` here), so lean2rr ends with an internal
-error that names the declaration and its module (before the check, the
-pass reused the name and lean2rr failed later, calling it an unknown
-extern of Lean's library). Natively the program is valid Lean. -/
+/-! Runtime test: the program defines `L2RNat.truncateBits`, the name of
+the extern that the optimization `mod-pow2` adds for its rewritten
+`x % 2 ^ w` (`l2r_nat_truncate_bits`) had. The pass must not call the
+program's definition in place of the extern (it computes `x + w` here),
+nor the program's calls the extern. Before the check, the pass reused the
+name and lean2rr failed later, calling it an unknown extern of Lean's
+library; then lean2rr refused the program (the `L2R*` namespaces were
+lean2rr's). Since a bug hunt of the names lean2rr recognizes (2026-10-27)
+the extern is `L2RNat.truncateBits.0`, a name no program can declare (a
+number as its last part), and the program runs as natively. -/
 
 def L2RNat.truncateBits (x w : Nat) : Nat := x + w
 

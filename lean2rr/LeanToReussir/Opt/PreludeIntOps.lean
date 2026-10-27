@@ -31,11 +31,12 @@ which folds `Float.ofNat` of a literal to its bits):
 - each full call `let x := D a b` of an instance of definition `D` to
   `let x := L2R… a b` (the extern of `D`'s prelude function);
 - the instance's own code to that one call (`Nat.testBit._l2r.0 m n :=
-  L2RNat.testBit m n`), so that a partial application or a function value of
+  L2RNat.testBit.0 m n`), so that a partial application or a function value of
   `D`, which calls the instance, runs the prelude function too; and so does
   `Float.ofInt`'s code, whose `Float.ofNat` calls would otherwise be
   rewritten one by one.
-The externs (`L2RNat.testBit`, `L2RFloat.ofNat`, `L2RFloat.ofInt`) are
+The externs (`L2RNat.testBit.0`, `L2RFloat.ofNat.0`, `L2RFloat.ofInt.0`:
+names no program declares, as `ModPow2.truncName`) are
 added as `Opt/ModPow2` adds its own: a definition in the environment whose
 value is the Lean definition itself (never an axiom: `programCasts` reads
 one as a possible cast), with `@[extern]` naming the prelude function, and
@@ -59,15 +60,15 @@ structure Op where
   result : Expr
 
 def testBit : Op :=
-  { orig := ``Nat.testBit, name := `L2RNat.testBit, sym := "l2r_nat_test_bit",
+  { orig := ``Nat.testBit, name := .num `L2RNat.testBit 0, sym := "l2r_nat_test_bit",
     params := #[(`m, mkConst ``Nat), (`n, mkConst ``Nat)], result := mkConst ``Bool }
 
 def floatOfNat : Op :=
-  { orig := ``Float.ofNat, name := `L2RFloat.ofNat, sym := "l2r_float_of_nat",
+  { orig := ``Float.ofNat, name := .num `L2RFloat.ofNat 0, sym := "l2r_float_of_nat",
     params := #[(`n, mkConst ``Nat)], result := mkConst ``Float }
 
 def floatOfInt : Op :=
-  { orig := ``Float.ofInt, name := `L2RFloat.ofInt, sym := "l2r_float_of_int",
+  { orig := ``Float.ofInt, name := .num `L2RFloat.ofInt 0, sym := "l2r_float_of_int",
     params := #[(`i, mkConst ``Int)], result := mkConst ``Float }
 
 /-- The rewrites. -/
@@ -124,9 +125,9 @@ def instanceOp? (os : Array Op) (keys : NameMap InstKey) (d : Decl .pure) : Opti
 
 /-- The extern `o` in the environment (the lowering reads its type and its
 extern symbol) and as a declaration of the program, as `ModPow2.truncDecl`
-does: in the environment a definition whose value is `o.orig` itself. The
-`L2R*` namespaces are lean2rr's: an `o.name` already in the environment
-must be that extern at that type; another one is an internal error. -/
+does: in the environment a definition whose value is `o.orig` itself. No
+program declares `o.name`: one already in the environment must be that
+extern at that type; another one is an internal error. -/
 def externDecl (o : Op) : CoreM (Decl .pure) := do
   let ty := o.type
   let env ← getEnv
@@ -136,7 +137,7 @@ def externDecl (o : Op) : CoreM (Decl .pure) := do
         | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: prelude-int-ops: {o.name}{src} is not the extern {o.sym} : {ty} \
-        that the pass adds; the L2R* namespaces are lean2rr's (internal error)"
+        that the pass adds (internal error)"
   else
     let n := o.params.size
     let body := o.params.foldr (fun (x, t) b => mkLambda x .default t b)

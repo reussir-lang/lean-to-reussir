@@ -145,12 +145,13 @@ Nothing (`#[]`) unless `valTy` is the constructor's inductive applied to
 (at least) its parameters: for a value whose type is `lcAny` (a type that
 depends on a value, an existential payload) the field types are unknown.
 A constructor of a type with computed fields, `T.c._impl`, belongs to
-`T._impl` and matches values of type `T`. -/
+`T._impl` (`computedImpl?`) and matches values of type `T`. -/
 def ctorFieldTypes (ctor : Name) (valTy : Expr) : CoreM (Array Expr) := do
-  let some (.ctorInfo c) := (← getEnv).find? ctor | return #[]
+  let env ← getEnv
+  let some (.ctorInfo c) := env.find? ctor | return #[]
   let valTy := valTy.consumeMData.headBeta
   let .const ind _ := valTy.getAppFn | return #[]
-  unless ind == c.induct || ind ++ `_impl == c.induct do return #[]
+  unless ind == c.induct || (computedImpl? env ind).any (·.name == c.induct) do return #[]
   let args := valTy.getAppArgs
   unless args.size ≥ c.numParams do return #[]
   let mut ty ← instantiateForall (← getOtherDeclBaseType ctor []) args[:c.numParams].toArray

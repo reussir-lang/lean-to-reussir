@@ -94,7 +94,7 @@ Paths: `runtime/prelude.rr`, `runtime/leanrt/src/string.rs`, and
   functions, a program's own `p + c.utf8Size`. The optimization
   `utf8-size-add` (`Opt/Utf8SizeAdd`, a pass over the mono code after
   Stage 3) rewrites each `Nat.add p s` or `Nat.add s p` whose `s` is such a
-  call in the same declaration to `L2RNat.addUtf8Size p c`, an extern that
+  call in the same declaration to `L2RNat.addUtf8Size.0 p c`, an extern that
   the pass adds (as `mod-pow2` adds its own), which calls the prelude's
   `l2r_nat_add_utf8_size`:
 

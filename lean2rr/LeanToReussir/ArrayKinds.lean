@@ -32,17 +32,14 @@ def notEnumTypes : List Name :=
   [``Unit, ``PUnit, ``lcVoid, ``lcErased, ``lcAny, ``Nat, ``Int, ``String, ``Thunk, ``Task,
    ``ByteArray, ``FloatArray, ``Array, ``IO.FS.Handle]
 
-/-- The number of constructors of inductive `n` (its `_impl`, as
-`lowerTypeApp`), if it is an enumeration: not a proposition, and every
-field of every constructor erased (a type, a proof, the world), with the
-parameters at `lcAny`, as `nominalType` computes the fields. -/
+/-- The number of constructors of inductive `n` (its implementation for a
+type with computed fields, `reprInductive?`, as `lowerTypeApp`), if it is
+an enumeration: not a proposition, and every field of every constructor
+erased (a type, a proof, the world), with the parameters at `lcAny`, as
+`nominalType` computes the fields. -/
 def enumCtorCount? (n : Name) : CoreM (Option Nat) := do
   if notEnumTypes.contains n then return none
-  let env ← getEnv
-  let ival ← match env.find? (n ++ `_impl), env.find? n with
-    | some (.inductInfo iv), _ => pure iv
-    | _, some (.inductInfo iv) => pure iv
-    | _, _ => return none
+  let some ival := reprInductive? (← getEnv) n | return none
   if ival.type.getForallBody.isProp then return none
   let params := Array.replicate ival.numParams anyExpr
   for ctorName in ival.ctors do
@@ -108,8 +105,9 @@ def noPtrKindTypes : List Name :=
 
 /-- The name that stands for inductive type head `n` in its pointer kind, if
 the lowering (`lowerTypeApp`, `nominalType`) makes the values of `n` a
-shared record or enum (one pointer): an inductive (its `_impl` for a type
-with computed fields; `n` and `n._impl` have one kind) that is not a
+shared record or enum (one pointer): an inductive (its implementation for
+a type with computed fields, `reprInductive?`; the type and its
+implementation have one kind, keyed by the type, `implOf?`) that is not a
 proposition, with a relevant field in some constructor (else it is an
 enumeration, a `[value]` enum), and not one constructor with exactly one
 relevant field (a `[value]` struct under `value-structs`; such a structure
@@ -117,10 +115,8 @@ is never typed, whether or not the pass is on). -/
 def sharedInductive? (n : Name) : CoreM (Option Name) := do
   if noPtrKindTypes.contains n then return none
   let env ← getEnv
-  let (key, ival) ← match env.find? (n ++ `_impl), env.find? n with
-    | some (.inductInfo iv), _ => pure (n, iv)
-    | _, some (.inductInfo iv) => pure ((match n with | .str p "_impl" => p | _ => n), iv)
-    | _, _ => return none
+  let some ival := reprInductive? env n | return none
+  let key := (implOf? env n).getD n
   if ival.type.getForallBody.isProp then return none
   let params := Array.replicate ival.numParams anyExpr
   let mut fieldsPerCtor : Array Nat := #[]
@@ -141,8 +137,13 @@ def sharedInductive? (n : Name) : CoreM (Option Name) := do
   return some key
 
 /-- The key of inductive `n`'s pointer kind in the cache that `scalarKind?`
-uses for storage kinds (the one cache holds both). -/
-def ptrKindCacheKey (n : Name) : Name := .str n "_l2r_ptrkind"
+uses for storage kinds (the one cache holds both, the storage kinds keyed
+by the inductive's own name). Its last part is a number after a plain
+string, which no identifier has (a hygienic name's number follows `_hyg`;
+as `splitSrcName`), so the key is never a type's name: with
+`.str n "_l2r_ptrkind"`, a program's type `Foo._l2r_ptrkind` shared its
+entry with `Foo`'s pointer kind. -/
+def ptrKindCacheKey (n : Name) : Name := .num (.str n "_l2r_ptrkind") 0
 
 mutual
   /-- The kind of array element type `t`: its storage kind (`scalarKind?`)

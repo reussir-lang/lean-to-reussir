@@ -281,19 +281,23 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
 
 ### Extern calls are redirected to Lean definitions where Lean has them
 
-- **What:** Stage 1 redirects a call of an extern whose C symbol some
-  Lean definition exports (`@[export sym]`) to that definition, and a call
+- **What:** Stage 1 redirects a call of an extern of Lean's library or the
+  shim whose C symbol a Lean definition of the library or the shim exports
+  (`@[export sym]`; `libraryExportMap`, a program's export does not count)
+  to that definition, and a call
   of any definition that lean2rr's shim replaces (`l2r_override_<mangled
-  name>`) to the shim's.
+  name>`, exported by a module of the shim; `overrideMap`) to the shim's.
 - **Why:** See [../externs-ffi/dispatch.md](../externs-ffi/dispatch.md).
-- **Where:** `Mono.lean`: `redirectTarget`, `exportMap`.
+- **Where:** `Mono.lean`: `redirectTarget`, `libraryExportMap`,
+  `overrideMap`.
 - **Remove only if:** see the linked entries.
 
 ### The `IO.Error` builders become roots on demand
 
 - **What:** When the program reaches a fallible IO extern (files,
   processes, the standard streams), Stage 1 instantiates Lean's exported
-  `lean_mk_io_error_*` builders. The standard streams count through all
+  `lean_mk_io_error_*` builders (the exports of Lean's library only,
+  `libraryExportMap`, as every later pass and the lowering find them). The standard streams count through all
   six of their externs: `IO.getStdout` & co. and `IO.setStdout` & co.
   (`lean_get_set_stdout`, ...), because a setter gives the previous
   stream back, whose operations can fail.
@@ -305,7 +309,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   only through the setters had no builders, and its stream errors ended
   in `l2r_unreachable` (hunt r7 B, test `RtSetStdBuilders`). Since then a
   missing builder stops the build (`ioErrorFn`).
-- **Where:** `Mono.lean`: `ensureIOErrorBuilders`, `ioErrorBuilderSyms`,
+- **Where:** `Mono.lean`: `ensureIOErrorBuilders`, `ioErrorBuilderSyms`, `libraryExportMap`,
   `isFallibleIOSym`, `processIOSyms`; `Lower/Externs.lean`: `ioErrorFn`
   (the build check). Test `RtSetStdBuilders`.
 - **Remove only if:** never.

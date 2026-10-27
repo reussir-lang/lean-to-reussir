@@ -254,7 +254,9 @@ Other rules:
   `UInt8` has alignment 1, and goes after the 8-byte fields.
 - **Recursive and mutual types** refer to each other's types.
 - **Computed fields** (`Lean.Name`): the implementation type `T._impl`, as
-  in Lean's runtime.
+  in Lean's runtime. Lean marks such a type with an `implemented_by` on its
+  `casesOn`. lean2rr reads this mark, not the name, so a program's own type
+  `T._impl` is a different type.
 - **Proofs** have no representation.
 
 ### An example

@@ -58,7 +58,7 @@ a join point's body) keep that level whole (`constrainDecl`).
 
 **Results.** A declaration whose result type is such a node with at least
 two variables, none of them of a type with a function type in it, returns
-the variables as a `[value]` tuple (`L2RFlat.Tuple<k>`, lowered by
+the variables as a `[value]` tuple (`_l2r_flat_tuple.<k>`, lowered by
 `tupleType`) when every `return` returns a value whose fields are known.
 Every saturated call reads the variables from the tuple: a caller that
 matches the result follows the tag, one that uses it whole rebuilds it. A
@@ -239,7 +239,7 @@ where
     let .const n _ := ty.getAppFn | return none
     if builtinTypeNames.contains n || (flatTupleArity? n).isSome || n == ``IO.Process.Child then return none
     let env ← getEnv
-    if env.contains (n ++ `_impl) then return none
+    if (computedImpl? env n).isSome then return none
     let some (.inductInfo iv) := env.find? n | return none
     if iv.isRec || iv.numIndices != 0 || iv.all.length != 1 || iv.numNested != 0 || iv.isUnsafe then return none
     if iv.type.getForallBody.isProp then return none
@@ -1269,7 +1269,7 @@ def tupleTyOf (s : Shape) : Expr :=
   let ts := s.leafTypes
   mkAppN (mkConst (flatTupleName ts.size)) ts
 
-/-- Add `L2RFlat.Tuple<k>` to the environment (once). -/
+/-- Add `_l2r_flat_tuple.<k>` (`flatTupleName`) to the environment (once). -/
 def ensureTuple (k : Nat) : CoreM Unit := do
   let n := flatTupleName k
   if (← getEnv).contains n then return

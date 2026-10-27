@@ -129,13 +129,27 @@ def pureExterns : Std.HashSet Name := Id.run do
   return s
 
 /-- Whether `n` is a computed-field implementation that Lean makes
-(`Lean.Elab.ComputedFields`: `C._override` for a constructor `C`, `f._override`
-for a computed field `f`, each the `implemented_by` of its declaration): an
-`unsafe` definition only because it casts between a type and its
-implementation type, which have one representation. -/
+(`Lean.Elab.ComputedFields`: `C._override` for a constructor `C`,
+`T.casesOn._override` for the type `T`, `f._override` for a computed field
+`f`, each the `implemented_by` of its declaration): an `unsafe` definition
+only because it casts between a type and its implementation type, which
+have one representation. The name and the `implemented_by` alone do not
+decide, since a program can name its own implementation `p._override`
+(test `RtNameOverrideUnreadConst`): `p` must also be a constructor or the
+`casesOn` of a type with computed fields (`computedImpl?`), or a function
+tagged `@[computed_field]`, an attribute Lean allows only in the
+`with` block of an inductive. -/
 def isComputedFieldImpl (env : Environment) (n : Name) : Bool :=
   match n with
-  | .str p "_override" => Compiler.getImplementedBy? env p == some n
+  | .str p "_override" =>
+    Compiler.getImplementedBy? env p == some n &&
+      (Elab.ComputedFields.computedFieldAttr.hasTag env p ||
+        (match env.find? p with
+         | some (.ctorInfo c) => (computedImpl? env c.induct).isSome
+         | _ => false) ||
+        (match p with
+         | .str t "casesOn" => (computedImpl? env t).isSome
+         | _ => false))
   | _ => false
 
 /-- What the pass looks at: the instances with code of Stage 1, by name,
@@ -476,9 +490,9 @@ def prune (st : MonoState) (mainInst errStr : Name) (startup : Array StartupStep
   -- an init function is a root through its `.init` step.
   let byDecl : NameMap Name := st.keys.foldl (init := {}) fun m inst k =>
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
-  let exports ← match st.exports with
+  let exports ← match st.libExports with
     | some m => pure m
-    | none => (exportMap.run' { config := {} } : CoreM _)
+    | none => (libraryExportMap.run' { config := {} } : CoreM _)
   let builders := ioErrorBuilderSyms.filterMap fun sym => (exports.get? sym).bind byDecl.find?
   let roots := #[mainInst, errStr] ++ builders ++ startup.filterMap fun
     | .caf i => if quietSet.contains i then none else some i

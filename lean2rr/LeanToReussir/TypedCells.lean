@@ -84,7 +84,7 @@ partial def cellBaseApart (a b : Expr) (fuel : Nat := 32) : CoreM Bool := do
   let .const m _ := a.getAppFn | return false
   let .const n _ := b.getAppFn | return false
   unless rigid m && rigid n do return false
-  if !sameInductive m n then
+  if !sameInductive env m n then
     -- Apart when mono loses one of the two types.
     let lost (t : Expr) : CoreM Bool := do
       let mt := keyTy (← toMonoTypeKeep t)

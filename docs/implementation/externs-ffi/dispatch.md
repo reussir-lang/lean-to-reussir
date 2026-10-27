@@ -24,35 +24,51 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 ### Externs that Lean implements in Lean are compiled from Lean
 
-- **What:** Stage 1 redirects a call of an extern of Lean's library whose
-  C symbol some Lean
-  definition exports (`@[export sym]`: the `lean_string_*` and
+- **What:** Stage 1 redirects a call of an extern of Lean's library (or
+  the shim) whose C symbol a Lean definition of the library (or the shim)
+  exports (`@[export sym]`: the `lean_string_*` and
   `lean_substring_*` symbols of `String.Internal.*` and
   `Substring.Raw.Internal.*`, `lean_string_intercalate`, …) to that
   definition, which is then compiled like any other (an extern of the
-  program only when the binding's tests pass,
+  program goes to the program's own `@[export]` only when the binding's
+  tests pass,
   [program-externs.md](program-externs.md#a-binding-needs-one-type-and-one-compiled-signature)). (Lean's other
   `@[export]`s, such as the `IO.Error` builders its C runtime calls, are
   used by lean2rr's glue directly:
   [glue.md](glue.md#fallible-io-uses-a-last-error-slot-and-leans-own-error-builders).)
+  Only the exports of the modules of Lean's library and the shim count
+  (`libraryExportMap`): a program's `@[export lean_shim_promise_is_resolved]`
+  only names a C symbol, as natively, and the shim's extern of that symbol
+  stays the runtime's.
 - **Why:** Lean's runtime calls back into compiled Lean code there; calling
   the definition directly gives exactly Lean's semantics (runtime request
   10, b9b3375). This takes precedence over a hand-written prelude version.
-- **Where:** `Mono.lean`: `redirectTarget`, `exportMap`.
-- **Remove only if:** never. It makes a program that declares its own
-  `@[export]` able to cast
-  ([../types/uniform-types.md](../types/uniform-types.md#whether-the-program-can-cast-at-all-is-a-whole-program-fact)).
+  When every module's exports counted, the program's definition replaced
+  the shim's extern (`IO.Promise.isResolved` answered `true` on an
+  unresolved promise; review of a bug hunt of the names lean2rr
+  recognizes, test `RtNameShimSymExport`). Natively, a program's export
+  under a symbol of Lean's library conflicts with it when linked, and no
+  native runtime has the shim's symbols.
+- **Where:** `Mono.lean`: `redirectTarget`, `libraryExportMap`.
+- **Remove only if:** never.
 
 ### The shim can replace any definition
 
 - **What:** A definition `L2RShim` exports as `l2r_override_<mangled
   name>` is called instead of the definition of that name, wherever the
-  program calls it.
+  program calls it. Only the exports of the shim's modules (`L2RShim.*`,
+  which `Env.loadEnvironment` checks are the shim's own) count
+  (`overrideMap`): a program's `@[export l2r_override_Nat_toDigitsCore]`
+  only names a C symbol, as natively, and `Nat.toDigitsCore` stays Lean's.
 - **Why:** For definitions whose native behaviour depends on Lean's
   reference counting in a way the translation does not reproduce
   ([shim.md](shim.md#iopromiseisresolved-is-replaced-borrow-dependent-behaviour)).
-- **Where:** `Mono.lean`: `redirectTarget`; `lean2rr/L2RShim/Core.lean`
-  (the end).
+  When the symbol was looked up among every module's exports, a program's
+  export of that form replaced every call of the definition it names
+  (`42` for `Nat.toDigitsCore 10 … 1234`; a bug hunt of the names lean2rr
+  recognizes, test `RtNameOverrideExport`).
+- **Where:** `Mono.lean`: `redirectTarget`, `overrideMap`;
+  `lean2rr/L2RShim/Core.lean` (the end).
 - **Remove only if:** no definition needs replacing.
 
 ### The order an extern call takes

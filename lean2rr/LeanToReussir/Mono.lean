@@ -133,6 +133,12 @@ structure MonoState where
   unsafeImpls : Option (NameMap Name) := none
   /-- Export symbol ↦ declaration (lazily computed). -/
   exports : Option (Std.HashMap String Name) := none
+  /-- Export symbol ↦ declaration of Lean's library or the shim
+  (`libraryExportMap`, lazily computed). -/
+  libExports : Option (Std.HashMap String Name) := none
+  /-- The shim's replacements: symbol `l2r_override_…` ↦ the shim's
+  definition (`overrideMap`, lazily computed). -/
+  overrides : Option (Std.HashMap String Name) := none
   /-- Constants defined by `initialize`/`builtin_initialize` that the
   program references, with their init functions (in discovery order). -/
   initConsts : Array (Name × Name) := #[]
@@ -301,6 +307,45 @@ def exportMap : MonoM (Std.HashMap String Name) := do
     for (decl, sym) in exportAttr.ext.getModuleEntries env i do
       m := m.insert (sym.toString (escape := false)) decl
   modify fun s => { s with exports := some m }
+  return m
+
+/-- C symbol ↦ the Lean definition of Lean's library or lean2rr's shim
+(`isToolchainModule`) exported under it. lean2rr calls
+such a definition where Lean's runtime would: for an extern of the library
+or the shim whose C symbol it is (`redirectTarget`), and as an `IO.Error`
+builder (`ensureIOErrorBuilders`, `ioErrorBuilderSyms`). A program's
+`@[export]` only names a C symbol, as natively (natively, one under a
+symbol of Lean's library conflicts with it at link time; no native runtime
+has the shim's symbols); before, a program's
+`@[export lean_shim_promise_is_resolved]` replaced the shim's extern of
+that symbol (test `RtNameShimSymExport`). -/
+def libraryExportMap : MonoM (Std.HashMap String Name) := do
+  if let some m := (← get).libExports then return m
+  let env ← getEnv
+  let mut m : Std.HashMap String Name := {}
+  for i in [:env.header.modules.size] do
+    unless isToolchainModule (moduleNameAt env i) do continue
+    for (decl, sym) in exportAttr.ext.getModuleEntries env i do
+      m := m.insert (sym.toString (escape := false)) decl
+  modify fun s => { s with libExports := some m }
+  return m
+
+/-- The definitions lean2rr's shim exports as `l2r_override_<mangled name>`
+(`redirectTarget`), by symbol: only the shim's modules (`L2RShim.*`, which
+`Env.loadEnvironment` checks are the shim's own) count. A program's
+`@[export l2r_override_…]` only names a C symbol, as natively (test
+`RtNameOverrideExport`: before, it replaced every call of the definition
+its symbol names). -/
+def overrideMap : MonoM (Std.HashMap String Name) := do
+  if let some m := (← get).overrides then return m
+  let env ← getEnv
+  let mut m : Std.HashMap String Name := {}
+  for i in [:env.header.modules.size] do
+    unless (moduleNameAt env i).getRoot == `L2RShim do continue
+    for (decl, sym) in exportAttr.ext.getModuleEntries env i do
+      let sym := sym.toString (escape := false)
+      if sym.startsWith "l2r_override_" then m := m.insert sym decl
+  modify fun s => { s with overrides := some m }
   return m
 
 /-- Whether a constant's definition casts through `unsafeCast`/`NonScalar`. -/
@@ -789,7 +834,7 @@ imported or not (the source scan, `librarySourceExternSyms`, only for a
 symbol the prelude defines: it is cached but reads Lean's whole source, so
 it does not run for the program's own symbols; reviews REB-08, REB-13). -/
 def nativeLibraryFunction? (sym : String) : MonoM (Option String) := do
-  if let some g := (← exportMap).get? sym then
+  if let some g := (← libraryExportMap).get? sym then
     if ← isToolchainDecl g then return some "Lean's library function"
   if (← toolchainExternSyms).contains sym then return some "Lean's runtime function"
   if (← get).config.preludeFns.contains sym then
@@ -853,7 +898,7 @@ def computeExternRoute (n : Name) : MonoM ExternRoute := do
     -- call runs it; an extern of the program is not bound to it, review
     -- REB-14).
     else if let some g ← (do
-        match (← exportMap).get? sym with
+        match (← libraryExportMap).get? sym with
         | some g => if ← isToolchainDecl g then pure (some g) else pure none
         | none => pure none : MonoM (Option Name)) then
       failed := failed.push s!"its C symbol {sym} is {← libraryDeclAdvice g "the @[export] of"}"
@@ -947,7 +992,7 @@ def ensureIOErrorBuilders (f : Name) : MonoM Unit := do
   let some sym := getExternNameFor (← getEnv) `c f | return
   unless isFallibleIOSym sym || processIOSyms.contains sym do return
   for b in ioErrorBuilderSyms do
-    if let some d := (← exportMap).get? b then
+    if let some d := (← libraryExportMap).get? b then
       discard <| instanceName { decl := d, typeArgs := #[] }
 
 /-- Redirect a call target: an extern implemented by an exported Lean
@@ -956,18 +1001,21 @@ replaces; with `safeSources`, a type-unsafe
 implementation becomes the safe declaration it implements. -/
 def redirectTarget (f : Name) : MonoM Name := do
   -- A definition the shim replaces (`L2RShim`, exported as
-  -- `l2r_override_<f mangled>`) is that definition.
-  if let some d := (← exportMap).get? (f.mangle "l2r_override_") then
+  -- `l2r_override_<f mangled>`; a program's export of that form does not
+  -- count, `overrideMap`) is that definition.
+  if let some d := (← overrideMap).get? (f.mangle "l2r_override_") then
     if d != f then return d
-  -- An extern of Lean's library whose C symbol is provided by an
-  -- `@[export]` Lean definition is that definition (Lean's runtime calls
-  -- it; we compile it). An extern of the program follows its route: its
+  -- An extern of Lean's library (or the shim) whose C symbol is provided
+  -- by an `@[export]` Lean definition of the library (or the shim) is that
+  -- definition (Lean's runtime calls it; we compile it); a program's
+  -- `@[export]` under that symbol does not count (`libraryExportMap`).
+  -- An extern of the program follows its route: its
   -- `@[implemented_by]` target, or the `@[export]` definition its C symbol
   -- binds to (`externRoute`).
   if isExtern (← getEnv) f then
     if ← isToolchainDecl f then
       if let some sym := getExternNameFor (← getEnv) `c f then
-        if let some d := (← exportMap).get? sym then
+        if let some d := (← libraryExportMap).get? sym then
           if d != f then return d
     else match ← externRoute f with
       | .implementedBy g => return g

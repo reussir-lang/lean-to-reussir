@@ -1155,22 +1155,6 @@ def sourceDecls (env : Environment) (n : Name) : Array Name := Id.run do
       out := add out site
   return out
 
-/-- The C symbols of Lean's library and lean2rr's shim (`isToolchainModule`):
-those of their externs and of their `@[export]` definitions. lean2rr calls
-a program's `@[export]` definition under such a symbol where the library's
-function would run, without comparing types: an extern of the library whose
-C symbol it is (`Mono.redirectTarget`), an `IO.Error` builder the runtime
-calls (`ioErrorBuilderSyms`, `@[export]`s of `Init`). -/
-def librarySymbols (env : Environment) : Std.HashSet String := Id.run do
-  let mut s : Std.HashSet String := {}
-  for i in [:env.header.modules.size] do
-    unless isToolchainModule (moduleNameAt env i) do continue
-    for (n, _) in externAttr.ext.getModuleEntries env i do
-      if let some sym := getExternNameFor env `c n then s := s.insert sym
-    for (_, sym) in exportAttr.ext.getModuleEntries env i do
-      s := s.insert (sym.toString (escape := false))
-  return s
-
 /-- Every declaration exported under each C symbol (`@[export sym]`), of any
 module. -/
 def exportsBySymbol (env : Environment) : Std.HashMap String (Array Name) := Id.run do
@@ -1368,13 +1352,19 @@ declaration it reaches, outside Lean's own library (`Init`, `Std`, `Lean`,
 `unsafeCast`, build a `TypeName` for `Dynamic`, or be the `implemented_by`
 target of another type's code; the `_unsafe_rec` code Lean (4.33, 4.34) generates
 for a `partial def` is not `unsafe`), is an axiom (but see below), uses
-`sorry` (a cast through an equality proved by either), is implemented by an `unsafe`
+`sorry` (a cast through an equality proved by either), or is implemented by an `unsafe`
 declaration (`implemented_by` is type-checked, but an `unsafe`
-implementation, even one of the library's, can be applied to any type), or
-is an `@[export]` definition under a C symbol of the library or one that
-starts with `l2r_` (`librarySymbols`; `l2r_override_…` replaces a
-function, `Mono.redirectTarget`): lean2rr calls such a definition in place
-of another declaration without comparing their types.
+implementation, even one of the library's, can be applied to any type).
+An `@[export]` definition of the program does not count by itself: it
+only names a C symbol, as natively. lean2rr calls it in place of another
+declaration only for an extern of the program, after the binding tests
+(below); the externs and `IO.Error` builders of Lean's library and the
+shim go to their own modules' `@[export]`s (`Mono.libraryExportMap`, test
+`RtNameShimSymExport`), and only the shim's `l2r_override_…` exports
+replace a definition (`Mono.overrideMap`, test `RtNameOverrideExport`).
+Before, an `@[export]` of the program under a symbol of the library or the
+shim, or one starting with `l2r_`, counted, since lean2rr called it there
+without comparing types.
 
 An axiom that Lean adds for a proof by native evaluation, `e = true` for
 a closed `Bool` term `e` that Lean ran and saw `true`
@@ -1436,7 +1426,6 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
   -- Built on first use (most programs have no axiom of native evaluation).
   let mut exempt : Option NameSet := none
   -- Built on first use (most programs have no `@[export]` or extern).
-  let mut libSyms : Option (Std.HashSet String) := none
   let mut exports : Option (Std.HashMap String (Array Name)) := none
   -- The roots: the program's `@[csimp]` replacements (a replacement that
   -- is a library declaration is not walked), and the sources of its
@@ -1465,11 +1454,6 @@ def programCasts (env : Environment) (keys : NameMap InstKey) (decls : Array (De
     -- proof `rfl` does not show it.)
     if ci.type.foldConsts false (fun k b => b || isKernelEvalConst k) then return some n
     if ci.isUnsafe then return some n
-    if let some sym := getExportNameFor? env n then
-      let sym := sym.toString (escape := false)
-      let lib := libSyms.getD (librarySymbols env)
-      libSyms := some lib
-      if sym.startsWith "l2r_" || lib.contains sym then return some n
     if isExtern env n then
       if let some sym := getExternNameFor env `c n then
         let m := exports.getD (exportsBySymbol env)

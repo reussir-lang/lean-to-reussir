@@ -16,12 +16,12 @@ its instructions zeroing these powers.
 The pass rewrites, in the mono code after Stage 3, each `Nat.mod x p`
 whose divisor is bound in the same declaration to
 - `Nat.pow b w` with `b` the literal 2, or `Nat.shiftLeft o w` with `o`
-  the literal 1: `L2RNat.truncateBits x w`;
+  the literal 1: `L2RNat.truncateBits.0 x w`;
 - the literal `2^k`, `k ≥ 61` (`minLitExp`), or a read of a constant
   whose code is that literal (Lean folds `2 ^ 64` to a literal, which
-  Stage 2 extracts as a closed term): `L2RNat.truncateBits x k`, with a
+  Stage 2 extracts as a closed term): `L2RNat.truncateBits.0 x k`, with a
   `let` of the literal `k`.
-`L2RNat.truncateBits` is an extern (`l2r_nat_truncate_bits`) that the pass
+`L2RNat.truncateBits.0` is an extern (`l2r_nat_truncate_bits`) that the pass
 adds to the environment (a definition whose value is the rule, never an
 axiom: `programCasts` would read one as a possible cast) and to the
 declarations; the prelude computes it (rcgmp's `floormod2expi`, which
@@ -42,8 +42,12 @@ natively.
 namespace LeanToReussir.Opt.ModPow2
 open Lean Compiler LCNF
 
-/-- The declaration the rewritten code calls (an extern the pass adds). -/
-def truncName : Name := `L2RNat.truncateBits
+/-- The declaration the rewritten code calls (an extern the pass adds),
+`L2RNat.truncateBits.0`. Its last part is a number, which no identifier has
+(a hygienic name's number follows `_hyg`), so no declaration of the program
+has the name: a program's own `L2RNat.truncateBits` is another declaration
+(test `RtModPow2Reserved`; before, lean2rr refused it). -/
+def truncName : Name := .num `L2RNat.truncateBits 0
 
 /-- Its C symbol: the prelude's function. -/
 def truncSym : String := "l2r_nat_truncate_bits"
@@ -187,18 +191,17 @@ def literalPows (minExp : Nat) (decls : Array (Decl .pure)) : NameMap Nat :=
       | none => m
     | _, _ => m
 
-/-- The extern `L2RNat.truncateBits : Nat → Nat → Nat`
+/-- The extern `L2RNat.truncateBits.0 : Nat → Nat → Nat`
 (`@[extern "l2r_nat_truncate_bits"]`), in the environment (the lowering
 reads its type and its extern symbol) and as a declaration of the program.
 In the environment it is a definition whose value is the rule itself,
 `fun x w => Nat.mod x (Nat.pow 2 w)`, not an axiom: the whole-program
 check `programCasts` reads an axiom of the program as a possible cast
 (Cedar, Z06g, then got 701 conversion functions instead of 26 and ran 1%
-more instructions). The `L2R*` namespaces are lean2rr's: a
-`L2RNat.truncateBits` already in the environment must be that extern at
-that type (the rewritten calls go to the prelude's function through it);
-another one (a program's own definition of the name) is an internal error,
-never called in its place. -/
+more instructions). No program declares the name (`truncName`): one
+already in the environment must be that extern at that type (the
+rewritten calls go to the prelude's function through it); another one is
+an internal error, never called in its place. -/
 def truncDecl : CoreM (Decl .pure) := do
   let nat := mkConst ``Nat
   let ty := mkForall `x .default nat (mkForall `w .default nat nat)
@@ -209,7 +212,7 @@ def truncDecl : CoreM (Decl .pure) := do
         | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: mod-pow2: {truncName}{src} is not the extern {truncSym} : Nat → Nat → Nat \
-        that the pass adds; the L2R* namespaces are lean2rr's (internal error)"
+        that the pass adds (internal error)"
   else
     let body := mkLambda `x .default nat (mkLambda `w .default nat
       (mkApp2 (mkConst ``Nat.mod) (.bvar 1) (mkApp2 (mkConst ``Nat.pow) (mkRawNatLit 2) (.bvar 0))))

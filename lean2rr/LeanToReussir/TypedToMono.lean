@@ -440,10 +440,11 @@ partial def Code.toMonoK (code : Code .pure) : ToMonoKM (Code .pure) := do
       let resultType ← toMonoTypeKeep c.resultType
       let env ← getEnv
       let some (.inductInfo inductInfo) := env.find? c.typeName | panic! "expected inductive type"
-      let casesOnName := mkCasesOnName inductInfo.name
-      if (getImplementedBy? env casesOnName).isSome then
-        -- TODO: Enforce that this is only used for computed fields.
-        let typeName := c.typeName ++ `_impl
+      -- A type with computed fields: matched as its implementation
+      -- (`computedImpl?`, which every other place that maps a type to its
+      -- implementation asks too).
+      if let some implInfo := computedImpl? env inductInfo.name then
+        let typeName := implInfo.name
         let alts ← c.alts.mapM fun alt => do
           match alt with
           | .default k => return alt.updateCode (← k.toMonoK)

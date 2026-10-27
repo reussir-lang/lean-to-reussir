@@ -64,7 +64,7 @@ members (but see [entry 17](17-padded-member-widening.md)).
 
 ## What lean2rr does
 
-- The tuple of a `flatten-structs` result (`L2RFlat.Tuple<k>`, lowered by
+- The tuple of a `flatten-structs` result (`_l2r_flat_tuple.<k>`, lowered by
   `tupleType` with `flat`) keeps a `bool`, `u8`, `u16` or `u32` value in
   a `u64` member (a `bool` as 1 or 0, the others zero-extended;
   `toTupleMember`, `ofTupleMember`) and has no member for a unit value

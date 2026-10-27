@@ -158,7 +158,7 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   member packing off. Every tuple that lean2rr generates (`tupleType`: a
   J2 join point's tuple,
   [join points](../control-flow/join-points.md#a-j2-join-point-with-several-parameters-yields-a-value-tuple);
-  a `flatten-structs` result `L2RFlat.Tuple<k>`,
+  a `flatten-structs` result `_l2r_flat_tuple.<k>`,
   [optional passes](../optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)) orders its
   members the same way, through the same function (`memberOrder`).
   `tupleType` finds a tuple type by its value types in the values' order
@@ -241,10 +241,25 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
 
 - **What:** A type with computed fields (`Lean.Name`) is translated as its
   `T._impl` inductive, whose constructors also store the computed fields;
-  variant names are relative to the type (`T.c._impl`).
+  variant names are relative to the type (`T.c._impl`). A type has
+  computed fields when `T.casesOn` has an `implemented_by`, as Lean's
+  `ToMono` and lean2rr's `TypedToMono` decide (`computedImpl?`), not when a
+  constant `T._impl` exists. Every place that maps a type to its
+  implementation asks the same function: the lowering of types and
+  variant names, the compact and typed array kinds, the erased-domain flow
+  (`inductiveOf`, `sameInductive`, `mayBeBox`), the reference kinds, a
+  cast's match (`castCases`), the borrow emulation's resource search,
+  `MonoRetype`'s field types, `unread-fields` and `flatten-structs`'
+  guard. Example: a program's `structure Foo` (no computed fields) and
+  `structure Foo._impl` are two types with two records.
 - **Why:** Lean's runtime does the same, and mono code uses both names
-  for the same values.
-- **Where:** `LowerBase.lean`: `lowerTypeApp`, `nominalType`.
+  for the same values. A program can declare a type named `T._impl`: when
+  the name alone decided, `Foo` was lowered as the program's `Foo._impl`
+  and the build failed (`constructor Foo.mk not in type T_Foo__impl_…`;
+  a bug hunt of the names lean2rr recognizes, test `RtNameImplCollide`).
+- **Where:** `MonoTypesKeep.lean`: `computedImpl?`, `implOf?`,
+  `reprInductive?`, `sameInductive`; `TypedToMono.lean`: `Code.toMonoK`'s
+  computed-field case; `LowerBase.lean`: `lowerTypeApp`, `nominalType`.
 - **Remove only if:** never.
 
 ### Propositions have no representation
@@ -277,8 +292,9 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   `c_<constructor>` with the constructor's name relative to the type,
   mangled with Lean's own name mangling (`c_…`, as declarations are
   `l_…`), which has a demangler and so never maps two names to one; other
-  generated identifiers escape injectively (`identEscape`: `_` → `__`,
-  other non-alphanumerics → `_<hex>_`).
+  generated identifiers are a prefix and a counter (`fresh`), with at most
+  a readable hint from a Lean name (`nameHint`), never relied on for
+  uniqueness.
 - **Why:** Names must be valid Reussir identifiers that never clash with
   runtime or `std` names; uniqueness comes from the counter (constructor
   names once clashed: adv round 1, 3f59239). Printed and escaped,
@@ -286,6 +302,6 @@ Plan [§5.1](../../translation-plan.md#51-type-translation).
   (review RV9L-01, test `RtCtorNameClash`); Lean also prints pseudo-syntax
   roots (`«?a.b»`), inaccessible names (`✝`) and macro scopes unescaped
   (RV9L-01a), so only mangling is injective.
-- **Where:** `LowerBase.lean`: `identEscape`, `nameHint`, `fnName`,
+- **Where:** `LowerBase.lean`: `fresh`, `nameHint`, `fnName`,
   `nominalType`; plan [§5.13](../../translation-plan.md#513-names).
 - **Remove only if:** never.

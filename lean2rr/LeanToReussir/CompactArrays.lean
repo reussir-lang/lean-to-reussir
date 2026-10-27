@@ -248,7 +248,7 @@ partial def alignArr (a b : Expr) (why : String) (fuel : Nat := 16) (inBox : Boo
   | _, _ =>
     if a.isApp && b.isApp && a.getAppNumArgs == b.getAppNumArgs then
       if let (.const m _, .const n _) := (a.getAppFn, b.getAppFn) then
-        if sameInductive m n then
+        if sameInductive (← getEnv) m n then
           -- One layout per inductive (rule 1): what its type arguments
           -- stand for is in boxes, except in `flatten-structs`' tuples,
           -- whose fields are at their own types.

@@ -91,4 +91,47 @@ where
         return result
     | _ => return anyExpr
 
+/-! ## Types with computed fields
+
+A type `T` with computed fields (`Lean.Name`) has an implementation
+inductive `T._impl`, whose constructors `T.c._impl` also store the computed
+fields; `T.casesOn` is `implemented_by` a match on `T._impl`
+(`Lean.Elab.ComputedFields`). Lean's `ToMono` (and lean2rr's `TypedToMono`)
+decide by that `implemented_by`, not by the name: a program can declare a
+type named `T._impl` of its own next to a `T` without computed fields
+(test `RtNameImplCollide`). Every place that maps a type to its
+implementation asks these functions, so they all agree with `TypedToMono`. -/
+
+/-- The implementation inductive `n._impl` of `n`, if `n` is a type with
+computed fields (`n.casesOn` has an `implemented_by`). -/
+def computedImpl? (env : Environment) (n : Name) : Option InductiveVal :=
+  if (getImplementedBy? env (mkCasesOnName n)).isSome then
+    match env.find? (n ++ `_impl) with
+    | some (.inductInfo iv) => some iv
+    | _ => none
+  else none
+
+/-- The type with computed fields that `n` implements, if `n` is such an
+implementation (`computedImpl?`). -/
+def implOf? (env : Environment) (n : Name) : Option Name :=
+  match n with
+  | .str p "_impl" => if (computedImpl? env p).any (·.name == n) then some p else none
+  | _ => none
+
+/-- The inductive whose constructors build the values of type head `n`:
+its implementation for a type with computed fields (`computedImpl?`), else
+`n` itself if it is an inductive. -/
+def reprInductive? (env : Environment) (n : Name) : Option InductiveVal :=
+  match computedImpl? env n with
+  | some iv => some iv
+  | none =>
+    match env.find? n with
+    | some (.inductInfo iv) => some iv
+    | _ => none
+
+/-- Whether `m` and `n` name one inductive: the same name, or a type with
+computed fields and its implementation (`computedImpl?`). -/
+def sameInductive (env : Environment) (m n : Name) : Bool :=
+  m == n || implOf? env m == some n || implOf? env n == some m
+
 end LeanToReussir

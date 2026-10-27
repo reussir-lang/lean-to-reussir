@@ -613,8 +613,11 @@ built-in integers
   - a result whose type is a structure or a type of two constructors
     (`EST.Out`, `Except`, `Option`, `ForInStep`), nested in each other:
     the declaration returns the variables as a `[value]` tuple
-    (`L2RFlat.Tuple<k>`, a structure the pass adds to the environment, which
-    `lowerType` lowers to `tupleType` of its fields' types: its members in
+    (`_l2r_flat_tuple.<k>`, a structure the pass adds to the environment,
+    named with a number as its last part so that no type of the program
+    has its name: a program's `structure L2RFlat.Tuple2`, the old name,
+    was taken for it, test `RtNameFlatCollide`; `lowerType` lowers it to
+    `tupleType` of its fields' types: its members in
     decreasing alignment, as a record's fields, a `bool`, `u8`, `u16` or
     `u32` in a whole `u64` and no member for a unit value, so that the
     tuple has no padding to return,

@@ -52,7 +52,13 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
     `Array.foldlMUnsafe`); never a `partial` definition, never the
     program's own recursion. The program's own `unsafe` code keeps the
     constant, except Lean's computed-field implementations
-    (`BVExpr.const._override`). A constant whose type mentions a task,
+    (`BVExpr.const._override`; `isComputedFieldImpl`: `p._override`, the
+    `implemented_by` of `p`, where `p` is a constructor or the `casesOn`
+    of a type with computed fields, `computedImpl?`, or a function tagged
+    `@[computed_field]`, which Lean allows only in an inductive's `with`
+    block; the name alone counted before, so a program's own
+    `unsafe def stepI._override` passed, test
+    `RtNameOverrideUnreadConst`). A constant whose type mentions a task,
     thunk, reference or promise stays (the persistence walk at its first
     evaluation, constants.md). An instance whose declaration rests on a
     claim that Lean did not check keeps the constant (`axiomTaints`):

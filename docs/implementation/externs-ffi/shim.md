@@ -128,7 +128,7 @@ compiles it with the program. Plan
   last use answered `true` (470425c).
 - **Where:** `lean2rr/L2RShim/Core.lean`: `promiseIsResolved`,
   `primPromiseIsResolved`; `runtime/leanrt/src/task.rs`:
-  `promise_is_resolved`; `Mono.lean`: `redirectTarget`.
+  `promise_is_resolved`; `Mono.lean`: `redirectTarget`, `overrideMap`.
 - **Remove only if:** Reussir gets borrowed parameters (or Lower/Borrow
   covers promises).
 

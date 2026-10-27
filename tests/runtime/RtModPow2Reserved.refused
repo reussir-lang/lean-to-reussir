@@ -1,2 +1,0 @@
-mod-pow2: L2RNat.truncateBits (declared in module RtModPow2Reserved) is not the extern l2r_nat_truncate_bits : Nat → Nat → Nat that the pass adds
-! not implemented by lean2rr's runtime

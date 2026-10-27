@@ -84,8 +84,9 @@ partial def cellKind? (cache : IO.Ref (Std.HashMap Name (Option String))) (compa
 (mono types) can be one reference, as far as the types tell: they can be
 one type up to `lcAny`. A type that `Box` represents (`lcAny`, a type whose
 head is no inductive: a definition that unfolds to anything) can be any
-type; two inductives of different names never are one type (`T` and its
-implementation `T._impl` are one); a function type and an inductive are
+type; two inductives of different names never are one type (a type with
+computed fields and its implementation `T._impl` are one,
+`sameInductive`); a function type and an inductive are
 not one type; arguments are compared in turn. Says `true` when unsure. -/
 partial def cellTypesMeet (env : Environment) (a b : Expr) (fuel : Nat := 32) : Bool :=
   let a := keyTy a
@@ -102,7 +103,7 @@ partial def cellTypesMeet (env : Environment) (a b : Expr) (fuel : Nat := 32) : 
     | _, _ =>
       match a.getAppFn, b.getAppFn with
       | .const m _, .const n _ =>
-        if !sameInductive m n then false
+        if !sameInductive env m n then false
         else if a.getAppNumArgs != b.getAppNumArgs then true
         else (a.getAppArgs.zip b.getAppArgs).all fun (x, y) => cellTypesMeet env x y fuel'
       | _, _ => true

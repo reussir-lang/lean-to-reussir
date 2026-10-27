@@ -611,15 +611,6 @@ def noteVarUse (decl : Name) (x : FVarId) (n : String) (t : RR.Ty) : LowerM Unit
     if let some k := (← getPart (·.armVars[(decl, x)]?)) then
       modify fun s => { s with armNames := s.armNames.insert n (t, k) }
 
-/-- An injective, identifier-safe encoding of a string: ASCII letters and
-digits are kept, `_` becomes `__`, and any other character `c` becomes
-`_<hex code point>_`. -/
-def identEscape (s : String) : String :=
-  s.foldl (init := "") fun acc c =>
-    if c.isAlphanum && c.toNat < 128 then acc.push c
-    else if c == '_' then acc ++ "__"
-    else acc ++ "_" ++ (Nat.toDigits 16 c.toNat).asString ++ "_"
-
 /-- An identifier-safe rendering of a Lean name, for readable hints in
 generated names (uniqueness always comes from a numeric component). -/
 def nameHint (n : Name) : String :=
@@ -1913,25 +1904,28 @@ def tupleType (tys : Array RR.Ty) (flat : Bool := false) : LowerM (String × Arr
     typeItems := s.typeItems.push (.struct n true (order.map (mtys[·]!))) }
   return (n, order)
 
-/-- The structure `L2RFlat.Tuple<k>` (`k` type parameters, one field of
+/-- The structure `_l2r_flat_tuple.<k>` (`k` type parameters, one field of
 each) that optimization `flatten-structs` (Opt/Flatten) adds to the
 environment for a function that returns the fields of a structure instead
 of the structure. Unlike every other inductive, its values are a `[value]`
 struct of its fields at their own types (`tupleType`): it is lean2rr's own
-type, built and projected only by the code of that pass, never boxed. -/
-def flatTupleName (k : Nat) : Name := .str `L2RFlat s!"Tuple{k}"
+type, built and projected only by the code of that pass, never boxed. Its
+name ends in a number after a plain string, which no identifier has (a
+hygienic name's number follows `_hyg`; as `splitSrcName`), so no type of
+the program has it (before, a program's structure `L2RFlat.Tuple2` was
+taken for it: test `RtNameFlatCollide`). -/
+def flatTupleName (k : Nat) : Name := .num (.str .anonymous "_l2r_flat_tuple") k
 
 /-- Its constructor. -/
 def flatTupleCtor (k : Nat) : Name := .str (flatTupleName k) "mk"
 
-/-- The `k` of `L2RFlat.Tuple<k>`, if `n` is one. -/
+/-- The `k` of `_l2r_flat_tuple.<k>`, if `n` is one. -/
 def flatTupleArity? (n : Name) : Option Nat :=
   match n with
-  | .str `L2RFlat s =>
-    if s.startsWith "Tuple" then (List.range 257).find? (fun k => s == s!"Tuple{k}") else none
+  | .num (.str .anonymous "_l2r_flat_tuple") k => some k
   | _ => none
 
-/-- The `k` of `L2RFlat.Tuple<k>.mk`, if `n` is that constructor. -/
+/-- The `k` of `_l2r_flat_tuple.<k>.mk`, if `n` is that constructor. -/
 def flatTupleCtorArity? : Name → Option Nat
   | .str p "mk" => flatTupleArity? p
   | _ => none
@@ -2058,7 +2052,8 @@ mutual
       -- An inductive with computed fields is represented by its
       -- implementation inductive `T._impl` (whose constructors also store
       -- the computed fields); mono code uses both names for the same values.
-      if let some (.inductInfo ival) := (← getEnv).find? (n ++ `_impl) then
+      -- Recognized as `TypedToMono` does (`computedImpl?`), not by the name.
+      if let some ival := computedImpl? (← getEnv) n then
         return ← nominalType ival
       match (← getEnv).find? n with
       | some (.inductInfo ival) =>
@@ -2125,7 +2120,7 @@ mutual
           rrFields := rrFields.push t
       -- The constructor's name relative to its type (`T.c._impl` for the
       -- constructors of a computed-field implementation `T._impl`).
-      let base := match ival.name with | .str p "_impl" => p | n => n
+      let base := (implOf? (← getEnv) ival.name).getD ival.name
       -- Lean's name mangling (as for declarations, `fnName`) has a
       -- demangler, so distinct constructor names give distinct variants:
       -- `«a.b»` (one component) and `a.b` (two) printed alike (review

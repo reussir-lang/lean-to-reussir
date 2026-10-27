@@ -74,7 +74,7 @@ a store of the field zero-extended to the widened integer.
   in Strings' `charStats` loop `(bool, Nat)` instead of `(Nat, bool)`, and
   the program ran 3.0% more instructions (cachegrind, 13.97 → 14.39
   billion; `docs/implementation/control-flow/join-points.md`).
-- The tuples of `flatten-structs` (`L2RFlat.Tuple<k>`, the same
+- The tuples of `flatten-structs` (`_l2r_flat_tuple.<k>`, the same
   `tupleType` and `memberOrder`): the same order since the change that
   follows the fix of the run-7 regressions. Before it, they kept the
   order of the structure's fields; an `Option` result is flattened to

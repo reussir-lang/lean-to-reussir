@@ -325,10 +325,7 @@ where
         | none => pure true
     if n == ``lcErased || n == ``lcVoid || builtinTypeNames.contains n then return false
     let env ← getEnv
-    let some ival := (match env.find? (n ++ `_impl), env.find? n with
-        | some (.inductInfo iv), _ => some iv
-        | _, some (.inductInfo iv) => some iv
-        | _, _ => none) | return true
+    let some ival := reprInductive? env n | return true
     if ival.type.getForallBody.isProp then return false
     let params := (List.range ival.numParams).toArray.map fun i => (args[i]?.getD anyExpr).consumeMData
     for c in ival.ctors do

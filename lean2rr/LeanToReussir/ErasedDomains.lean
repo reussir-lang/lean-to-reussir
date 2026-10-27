@@ -83,9 +83,7 @@ def mayBeBox (env : Environment) (e : Expr) : Bool :=
     | .const n _ =>
       if n == ``lcAny then true
       else if n == ``lcErased || n == ``lcVoid then false
-      else match env.find? (n ++ `_impl), env.find? n with
-        | some (.inductInfo _), _ | _, some (.inductInfo _) => false
-        | _, _ => true
+      else (reprInductive? env n).isNone
     | _ => true
 
 /-- The tag of domain type `d`. -/
@@ -253,20 +251,18 @@ structure FlowState where
 
 abbrev FlowM := StateRefT FlowState CoreM
 
-/-- Whether `m` and `n` name one inductive (`T` and its implementation
-`T._impl` alike). -/
-def sameInductive (m n : Name) : Bool := m == n || m == n ++ `_impl || n == m ++ `_impl
-
 /-- The inductive whose constructors build values of type `t` (`T._impl`
-for a type with computed fields, as `lowerTypeApp`), if `t` is one (not a
-proposition). -/
+for a type with computed fields, `computedImpl?`, as `lowerTypeApp`), if
+`t` is one (not a proposition). -/
 def inductiveOf (env : Environment) (t : Expr) : Option InductiveVal :=
   match t.getAppFn with
   | .const n _ =>
-    match env.find? (n ++ `_impl), env.find? n with
-    | some (.inductInfo iv), _ => some iv
-    | _, some (.inductInfo iv) => if iv.type.getForallBody.isProp then none else some iv
-    | _, _ => none
+    match computedImpl? env n with
+    | some iv => some iv
+    | none =>
+      match env.find? n with
+      | some (.inductInfo iv) => if iv.type.getForallBody.isProp then none else some iv
+      | _ => none
   | _ => none
 
 /-- Whether a value of type `t` (normalized) can hold a function value:
@@ -366,7 +362,7 @@ partial def flowLinkK (x y : Expr) : FlowM Unit := do
   | _, _ =>
     match x.getAppFn, y.getAppFn with
     | .const m _, .const n _ =>
-      if sameInductive m n && x.getAppNumArgs == y.getAppNumArgs then
+      if sameInductive (← getEnv) m n && x.getAppNumArgs == y.getAppNumArgs then
         for (a, b) in x.getAppArgs.zip y.getAppArgs do
           flowLink a b
           flowLink b a
@@ -410,13 +406,15 @@ def boxCompat (env : Environment) (casts : Bool) (b u : Expr) : Bool :=
   | _, _ =>
     match b.getAppFn, u.getAppFn with
     | .const m _, .const n _ =>
-      (sameInductive m n && b.getAppNumArgs == u.getAppNumArgs) ||
+      (sameInductive env m n && b.getAppNumArgs == u.getAppNumArgs) ||
         (casts && (inductiveOf env b).isSome && (inductiveOf env u).isSome)
     | _, _ => false
 
 /-- What `boxCompat` reads of a type: a function type's skeleton, or the
-head constant of an application with its number of arguments and whether
-`inductiveOf` finds an inductive for it (`other`: neither). -/
+head constant of an application (a computed-field implementation as the
+type it implements, `implOf?`, so that equal heads are `sameInductive`)
+with its number of arguments and whether `inductiveOf` finds an inductive
+for it (`other`: neither). -/
 inductive BoxShape where
   | fn (k : Skel)
   | app (head : Name) (nargs : Nat) (ind : Bool)
@@ -429,14 +427,14 @@ def boxShape (env : Environment) (t : Expr) : BoxShape :=
   | .forallE .. => .fn (skelOf env t)
   | _ =>
     match t.getAppFn with
-    | .const m _ => .app m t.getAppNumArgs (inductiveOf env t).isSome
+    | .const m _ => .app ((implOf? env m).getD m) t.getAppNumArgs (inductiveOf env t).isSome
     | _ => .other
 
 /-- `boxCompat` from the two types' shapes (`boxShape`). -/
 def boxShapeCompat (casts : Bool) : BoxShape → BoxShape → Bool
   | .fn a, .fn b => a.unify b
   | .fn _, _ | _, .fn _ => false
-  | .app m na ia, .app n nb ib => (sameInductive m n && na == nb) || (casts && ia && ib)
+  | .app m na ia, .app n nb ib => (m == n && na == nb) || (casts && ia && ib)
   | _, _ => false
 
 /-- Link every boxed type with every type a `Box` is unboxed at that it can
@@ -544,7 +542,7 @@ def flowFieldUses (typeName ctor : Name) (ty : Expr) (uses : Array (Nat × Expr)
     for (i, t) in uses do flowLink (fs[i]?.getD anyExpr) t
   match ty.getAppFn with
   | .const n _ =>
-    if sameInductive n typeName then return ← toUses ty
+    if sameInductive env n typeName then return ← toUses ty
     if let some iv := inductiveOf env ty then
       -- A cast: the value's own constructor at the same position.
       let some iT := inductiveOf env (mkConst typeName) | return

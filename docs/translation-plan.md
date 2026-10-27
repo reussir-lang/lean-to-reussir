@@ -787,7 +787,9 @@ handles. D8 removed the representation
 A type with computed fields (`Lean.Name`) is represented by its
 implementation inductive `T._impl`, whose constructors also store the
 computed fields. Lean's runtime does the same, and mono code uses both names
-for the same values.
+for the same values. A type has computed fields when its `casesOn` has an
+`implemented_by`, as Lean's `ToMono` decides (`computedImpl?`), not when a
+constant `T._impl` exists: a program may declare a type of that name.
 
 **`◾` (erased)** values have the unit representation. Erased parameters are
 removed, except a function's last parameter, which stays one unit parameter
@@ -896,12 +898,12 @@ its value is stored as `Box`.
   types that an `unsafeCast` can read (below). A program can cast when
   some declaration it reaches outside Lean's library (`Init`, `Std`,
   `Lean`, `Lake`) and lean2rr's shim (`L2RShim`, §5.8) is `unsafe`, is an
-  axiom, uses `sorry`, or is an `@[export]` definition that lean2rr calls
-  without comparing types (one under a C symbol of Lean's library or one
-  that starts with `l2r_`): `unsafeCast` needs `unsafe` code, a `cast`
+  axiom, or uses `sorry`: `unsafeCast` needs `unsafe` code, and a `cast`
   between types lean2rr represents differently needs an equality that only
-  `sorry` or an axiom proves, and an extern of Lean's library goes to the
-  `@[export]` of its symbol unchecked. An axiom that Lean adds for a proof
+  `sorry` or an axiom proves. An `@[export]` of the program only names a C
+  symbol: an extern of Lean's library or the shim goes to the `@[export]`
+  of its symbol in the library or the shim only, and an extern of the
+  program to the program's own only after the binding tests. An axiom that Lean adds for a proof
   by native evaluation (`native_decide`, `bv_decide`: `e = true`, where
   Lean compiled the closed `Bool` term `e`, ran it and saw `true`) is no
   cast when the code that ran is the code of the definitions: no
@@ -1761,7 +1763,9 @@ Rules:
   `Substring.Raw.Internal.*`, `lean_string_intercalate`, …): Lean's runtime
   calls back into compiled Lean code. lean2rr calls that definition
   directly (`Mono.redirectTarget`) and compiles it like any other, so its
-  semantics are exactly Lean's. Lean's other exports are not externs of the
+  semantics are exactly Lean's. Only the exports of Lean's library and the
+  shim count (`Mono.libraryExportMap`): a program's `@[export]` under such
+  a symbol only names a C symbol, as natively. Lean's other exports are not externs of the
   program: the `IO.Error` builders `lean_mk_io_error_*`, which Lean's C
   runtime calls, are reached through lean2rr's own glue
   (`ensureIOErrorBuilders`, `ioErrorFn`; fallible IO, below).
@@ -1972,9 +1976,11 @@ Rules:
   queries' libuv codes are decoded by lean-runtime as
   `lean_decode_uv_error` does).
   The shim also replaces Lean definitions whose native behaviour depends
-  on Lean's borrow inference: a definition exported as
+  on Lean's borrow inference: a definition the shim exports as
   `l2r_override_<mangled name>` is called instead of the definition of
-  that name (`Mono.redirectTarget`). `IO.Promise.isResolved` is one:
+  that name (`Mono.redirectTarget`; only the shim's modules count,
+  `Mono.overrideMap`: a program's export of that form only names a C
+  symbol, as natively). `IO.Promise.isResolved` is one:
   natively it borrows the promise (`result?` does), so the caller releases
   it after the question, and a last reference resolves the promise with
   `none` only then; compiled as written, the release would come inside

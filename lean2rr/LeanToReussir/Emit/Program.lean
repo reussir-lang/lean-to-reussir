@@ -490,7 +490,7 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- The `IO.Error` builders' instances (monomorphic, so keyed by declaration).
   let byDecl : NameMap Name := keys.foldl (init := {}) fun m inst k =>
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
-  let exports ← (exportMap.run' {config := {}} : CoreM _)
+  let exports ← (libraryExportMap.run' {config := {}} : CoreM _)
   let ioErrorBuilders := ioErrorBuilderSyms.map fun sym => (exports.get? sym).bind byDecl.find?
   let valueGenericFns := valueGenericPreludeFns prelude
   let preludeRetArg := genericRetParams prelude

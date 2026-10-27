@@ -301,12 +301,18 @@ lowering at the library extern's type arguments, was removed).
   that runs for the extern, whatever the route: the `implemented_by`
   target, every `@[export]` definition of the extern's C symbol, the
   extern's own definition (its value, and its `_unsafe_rec` copy when Lean
-  made one). An `@[export]` definition of the program counts only when its
-  C symbol is one of Lean's library (an extern's or an `@[export]`'s,
-  `librarySymbols`) or starts with `l2r_`: lean2rr calls such a definition
-  in place of the library's function without comparing types
-  (`redirectTarget`; the `IO.Error` builders; `l2r_override_…`). The
-  externs of Lean's library are the library's, as before.
+  made one). An `@[export]` definition of the program does not count
+  either: it only names a C symbol, as natively. lean2rr calls it in place
+  of another declaration only for an extern of the program, after the
+  binding tests; the externs and `IO.Error` builders of Lean's library and
+  the shim go to their own modules' `@[export]`s (`Mono.libraryExportMap`;
+  test `RtNameShimSymExport`), and only the shim's `l2r_override_…`
+  exports replace a definition (`Mono.overrideMap`; test
+  `RtNameOverrideExport`). Until a bug hunt of the names lean2rr
+  recognizes (2026-10-27) a program's export under a symbol of the library
+  or the shim, or one starting with `l2r_`, counted, since lean2rr called
+  it there without comparing types. The externs of Lean's library are the
+  library's, as before.
 - **Why:** Every route runs Lean code, which the walk sees as it sees the
   rest of the program, or nothing: `implementedBy` runs its target;
   `export` runs the definition, bound only when the extern's type is an
@@ -327,8 +333,8 @@ lowering at the library extern's type arguments, was removed).
   stays on, checked under `L2R_DEBUG=1` by `RtCArrExtern.l2r-debug`),
   `RtCastExternBody` (a `partial` extern whose definition casts through an
   axiom of the program: every kind is off).
-- **Where:** `Lower/Conv.lean`: `programCasts`, `librarySymbols`,
-  `exportsBySymbol`.
+- **Where:** `Lower/Conv.lean`: `programCasts`, `exportsBySymbol`;
+  `Mono.lean`: `libraryExportMap`, `overrideMap`.
 - **Remove only if:** an extern of the program can again run code that
   lean2rr does not compile (linked C), or be bound without the binding
   tests.

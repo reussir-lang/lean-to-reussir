@@ -22,7 +22,7 @@ loops 3 times slower than under the old representation).
 
 The pass rewrites, in the mono code after Stage 3, each `Nat.add p s`
 or `Nat.add s p` whose `s` is bound in the same declaration to a call
-`Char.utf8Size c` to `L2RNat.addUtf8Size p c`, an extern (the prelude's
+`Char.utf8Size c` to `L2RNat.addUtf8Size.0 p c`, an extern (the prelude's
 `l2r_nat_add_utf8_size`: `p + 1` when `c ≤ 127`, in a branch of its own,
 else `p` plus 2, 3 or 4 by the same tests). The ASCII case is then a
 predicted branch whose next position is one add on `p`. The `let` of
@@ -34,7 +34,7 @@ code is exactly that rule (`isLeanRule`: the three tests `UInt32.decLe c
 k` of the literals 127, 2047 and 65535, with the results 1, 2, 3 and 4);
 the calls of any other instance stay (`L2R_DEBUG=1` names it).
 
-`L2RNat.addUtf8Size` is added as `Opt/ModPow2` adds its extern: a
+`L2RNat.addUtf8Size.0` is added as `Opt/ModPow2` adds its extern: a
 definition in the environment whose value is the rule
 (`fun p c => p + c.utf8Size`, never an axiom: `programCasts` reads one as
 a possible cast), with `@[extern]` naming the prelude function, and an
@@ -48,8 +48,10 @@ code.
 namespace LeanToReussir.Opt.Utf8SizeAdd
 open Lean Compiler LCNF
 
-/-- The declaration the rewritten code calls (an extern the pass adds). -/
-def addName : Name := `L2RNat.addUtf8Size
+/-- The declaration the rewritten code calls (an extern the pass adds),
+`L2RNat.addUtf8Size.0`: a name no program declares, as
+`ModPow2.truncName`. -/
+def addName : Name := .num `L2RNat.addUtf8Size 0
 
 /-- Its C symbol: the prelude's function. -/
 def addSym : String := "l2r_nat_add_utf8_size"
@@ -139,14 +141,13 @@ def rewriteCode (keys : NameMap InstKey) (rule : NameSet) (c : Code .pure) : Cod
   if st.rewritten == 0 then (c, 0) else
   ((ModPow2.dropUnused st.sizes c.collectUsed c).1, st.rewritten)
 
-/-- The extern `L2RNat.addUtf8Size`, in the environment (the lowering
+/-- The extern `L2RNat.addUtf8Size.0`, in the environment (the lowering
 reads its extern symbol) and as a declaration of the program, as
 `ModPow2.truncDecl` does: in the environment a definition at
 `Nat → Char → Nat` whose value is the rule itself, the declaration at the
-mono types `Nat → UInt32 → Nat` (the lowering reads those). The `L2R*`
-namespaces are lean2rr's: an `L2RNat.addUtf8Size` already in the
-environment must be that extern at that type; another one is an internal
-error. -/
+mono types `Nat → UInt32 → Nat` (the lowering reads those). No program
+declares the name (`addName`): one already in the environment must be
+that extern at that type; another one is an internal error. -/
 def addDecl' : CoreM (Decl .pure) := do
   let nat := mkConst ``Nat
   let ty := mkForall `p .default nat (mkForall `c .default (mkConst ``Char) nat)
@@ -157,7 +158,7 @@ def addDecl' : CoreM (Decl .pure) := do
         | some idx => s!" (declared in module {moduleNameAt env idx})"
         | none => ""
       throwError "lean2rr: utf8-size-add: {addName}{src} is not the extern {addSym} : Nat → Char → Nat \
-        that the pass adds; the L2R* namespaces are lean2rr's (internal error)"
+        that the pass adds (internal error)"
   else
     let body := mkLambda `p .default nat (mkLambda `c .default (mkConst ``Char)
       (mkApp2 (mkConst ``Nat.add) (.bvar 1) (mkApp (mkConst ``Char.utf8Size) (.bvar 0))))

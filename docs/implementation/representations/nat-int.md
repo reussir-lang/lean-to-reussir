@@ -520,7 +520,7 @@ accepted and does nothing, `--int-backend leanrt` and
   | `Float.ofInt i`, `Int.toFloat i` | `Float.ofNat` of `i.natAbs`, negated | `l2r_float_of_int`: `sitofp` |
 
   Example (`x.testBit i`, a `BitVec`'s `getLsbD`): Lean's mono code
-  `let b := Nat.testBit._l2r.0 x i` becomes `let b := L2RNat.testBit x i`,
+  `let b := Nat.testBit._l2r.0 x i` becomes `let b := L2RNat.testBit.0 x i`,
   and the `.rr` has `l2r_nat_test_bit(x, i)` instead of a call of the
   translated `Nat.testBit` (`lean_nat_shiftr`, `lean_nat_land`,
   `lean_nat_dec_eq`).
@@ -536,11 +536,12 @@ accepted and does nothing, `--int-backend leanrt` and
     probe program and on Z03b's `.rr`, where `Regex.Data.BitMatrix.get`
     calls `Nat.testBit`). The pass rewrites each full call to the extern
     and replaces the instance's own code by one call of it
-    (`Nat.testBit._l2r.0 m n := L2RNat.testBit m n`), so a function value
+    (`Nat.testBit._l2r.0 m n := L2RNat.testBit.0 m n`), so a function value
     runs the prelude function too; `Float.ofInt`'s code (with its own
     `Float.ofNat` calls) goes the same way.
-  - **Externs.** `L2RNat.testBit`, `L2RFloat.ofNat`, `L2RFloat.ofInt` are
-    added as `mod-pow2` adds `L2RNat.truncateBits`: a definition in the
+  - **Externs.** `L2RNat.testBit.0`, `L2RFloat.ofNat.0`, `L2RFloat.ofInt.0`
+    are added as `mod-pow2` adds `L2RNat.truncateBits.0` (names no program
+    declares: a number as the last part): a definition in the
     environment whose value is the Lean definition (not an axiom:
     `programCasts` reads one as a possible cast) with `@[extern]` naming
     the prelude function, and an extern declaration of the program, only
@@ -696,22 +697,25 @@ accepted and does nothing, `--int-backend leanrt` and
   also a read of a constant whose
   code is that literal: Lean folds `2 ^ 64` to a literal, which Stage 2
   extracts as a closed term).
-  The call becomes `L2RNat.truncateBits x w` (with a `let` of the literal
+  The call becomes `L2RNat.truncateBits.0 x w` (with a `let` of the literal
   `k`), an extern the pass adds (`@[extern "l2r_nat_truncate_bits"]`, in
   the environment a definition whose value is the rule,
   `fun x w => Nat.mod x (Nat.pow 2 w)`, and a declaration of the program;
   not an axiom: the whole-program check `programCasts` reads an axiom of
-  the program as a possible cast, which turned Cedar's casts on). The
-  `L2R*` namespaces are lean2rr's: a `L2RNat.truncateBits` already in the
-  environment that is not that extern at `Nat → Nat → Nat` (a program's
-  own definition of the name) is an internal error, never called in its
-  place. The `let` of `p`, and that of the literal 2 or 1 it took,
+  the program as a possible cast, which turned Cedar's casts on). Its
+  name ends in a number, which no identifier has, so a program's own
+  `L2RNat.truncateBits` is another declaration (test `RtModPow2Reserved`;
+  until a bug hunt of the names lean2rr recognizes, 2026-10-27, the extern
+  was `L2RNat.truncateBits` and lean2rr refused such a program, a valid
+  one). One already in the environment that is not that extern at
+  `Nat → Nat → Nat` is an internal error, never called in its place. The
+  `let` of `p`, and that of the literal 2 or 1 it took,
   go when nothing else uses them. The prelude's `l2r_nat_truncate_bits`
   is rcgmp's `floormod2expi` (local Reussir patch R1: immediates in line,
   the low limb of a big `x` for `w` below 62), and a `w` of 2^64 or more
   keeps `x`. Example: `BitVec.ofNat w x` (every `BitVec` `+`, `*`,
   `<<<`, `1#w`) was `let p := Nat.pow 2 w; Nat.mod x p` and is now
-  `L2RNat.truncateBits x w`.
+  `L2RNat.truncateBits.0 x w`.
 - **Why:** `Nat.pow 2 w` made a number of `w / 64 + 1` limbs on every wide
   `BitVec` operation (zeroed, then the top bit set), and the division then
   compared it with `x`. lean-regex's backtracker (Z03b) sets one bit of a

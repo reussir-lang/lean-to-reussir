@@ -103,7 +103,7 @@ def run (keys : NameMap InstKey) (keep : Array Name) (inits : Array (Name × Nam
   -- (`lowerProgram`: monomorphic instances by declaration).
   let byDecl : NameMap Name := keys.foldl (init := {}) fun m inst k =>
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
-  let exports ← (exportMap.run' { config := {} } : CoreM _)
+  let exports ← (libraryExportMap.run' { config := {} } : CoreM _)
   let builders := ioErrorBuilderSyms.filterMap fun sym => (exports.get? sym).bind byDecl.find?
   let roots := keep ++ inits.map (·.2.1) ++ builders
   let mut seen : Std.HashSet Name := {}

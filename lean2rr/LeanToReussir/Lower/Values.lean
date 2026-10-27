@@ -190,7 +190,8 @@ inductive CastCases where
   | unit
 
 def castCases (sty : RR.Ty) (typeName : Name) : LowerM CastCases := do
-  let sameHead (h : Name) := h == typeName || h == typeName ++ `_impl || typeName == h ++ `_impl
+  let env ← getEnv
+  let sameHead (h : Name) := sameInductive env h typeName
   let tn := match sty with | .named n => n | _ => ""
   let infos ← getPart (·.typeInfos)
   let nominal := infos.contains tn

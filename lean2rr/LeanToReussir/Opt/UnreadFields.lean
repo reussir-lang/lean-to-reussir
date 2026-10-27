@@ -395,8 +395,8 @@ partial def markAllRead (ind : Name) : M Unit := do
   if (← get).facts.allRead.contains ind then return
   modify fun s => { s with facts := { s.facts with allRead := s.facts.allRead.insert ind, changed := true } }
   -- An inductive with computed fields (`Lean.Expr`) is built and matched
-  -- through its implementation `ind._impl`.
-  if let some (.inductInfo _) := (← getEnv).find? (ind ++ `_impl) then markAllRead (ind ++ `_impl)
+  -- through its implementation `ind._impl` (`computedImpl?`).
+  if let some iv := computedImpl? (← getEnv) ind then markAllRead iv.name
   let some (.inductInfo iv) := (← getEnv).find? ind | return
   for c in iv.ctors do
     if let some ci := (← getEnv).find? c then
@@ -841,7 +841,7 @@ def run (keys : NameMap InstKey) (roots : Array Name) (inits : Array (Name × Na
   -- primitives (`LowerCtx.ioErrorBuilders`), are roots too.
   let byDecl : NameMap Name := keys.foldl (init := {}) fun m inst k =>
     if k.typeArgs.isEmpty && k.dicts.isEmpty then m.insert k.decl inst else m
-  let exports ← (exportMap.run' {config := {}} : CoreM _)
+  let exports ← (libraryExportMap.run' {config := {}} : CoreM _)
   let builders := ioErrorBuilderSyms.filterMap fun sym => (exports.get? sym).bind byDecl.find?
   let roots := (roots ++ builders).foldl (fun s r => s.insert r) ({} : NameSet)
   let usedInits := inits.foldl (fun m (d, i, c) => if c then m.insert d i else m) {}

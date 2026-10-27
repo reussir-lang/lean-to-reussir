@@ -69,9 +69,13 @@ to `lean2rr/LeanToReussir/`.
   `_unsafe_rec` code Lean (4.33, 4.34) generates for a `partial def` is not
   `unsafe`, so `partial` alone does not count), is an axiom (not one of
   Lean's axioms of native evaluation, next entry), uses `sorry`,
-  is `implemented_by` an `unsafe` function (even a library one), or is an
-  `@[export]` definition under a C symbol of Lean's library or one that
-  starts with `l2r_` (`librarySymbols`). An extern of the program does
+  or is `implemented_by` an `unsafe` function (even a library one). An
+  `@[export]` of the program does not count: it only names a C symbol, as
+  natively (lean2rr calls it only for an extern of the program, after the
+  binding tests; the externs and `IO.Error` builders of Lean's library and
+  the shim go to their own `@[export]`s, `Mono.libraryExportMap`, and only
+  the shim's `l2r_override_…` exports replace a definition,
+  `Mono.overrideMap`). An extern of the program does
   not count by itself: the walk goes into the code that runs for it
   ([../externs-ffi/program-externs.md](../externs-ffi/program-externs.md#an-extern-of-the-program-is-not-a-cast-by-itself)).
   The declarations reached are those the program's code comes from
@@ -120,7 +124,7 @@ to `lean2rr/LeanToReussir/`.
   `@[macro_inline]` body mentions, `RtCastCsimpMacroInline`).
   Lean's own library casts only where lean2rr's representations agree.
 - **Where:** `Lower/Conv.lean`: `programCasts`, `sourceDecls`,
-  `librarySymbols`, `exportsBySymbol`, `boxCastable`;
+  `exportsBySymbol`, `boxCastable`;
   `CompileRecord.lean`: `programCsimps`; `LowerBase.lean`:
   `LowerCtx.programCasts`; `Emit/Program.lean`: `lowerProgram`
   (`L2R_DEBUG` prints the deciding declaration); plan [§5.1](../../translation-plan.md#51-type-translation).
