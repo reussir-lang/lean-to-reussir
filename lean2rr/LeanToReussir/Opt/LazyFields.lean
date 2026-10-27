@@ -325,7 +325,7 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
         else need
       if now.isEmpty then continue
       let scrut ← match ctx.vars[l.discr]? with
-        | some (n, t) => do noteVarUse l.discr n t; pure n
+        | some (n, t) => do noteVarUse ctx.decl l.discr n t; pure n
         | none => pure l.scrut
       let mut lets := #[]
       let mut ctx' := ctx
@@ -350,7 +350,7 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
     -- The value's current name: the match of an enclosing lazy value may
     -- have bound it again (it is a field of that value).
     let scrut ← match ctx.vars[l.discr]? with
-      | some (n, t) => do noteVarUse l.discr n t; pure n
+      | some (n, t) => do noteVarUse ctx.decl l.discr n t; pure n
       | none => pure l.scrut
     let mut binders := Array.replicate l.nbinders (none : Option String)
     let mut ctx' := ctx

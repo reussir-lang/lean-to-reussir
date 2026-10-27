@@ -429,15 +429,21 @@ structure LowerState where
   body is `l2r_unreachable`. -/
   convsCalledEarly : Std.HashSet String := {}
   /-- Lean's borrowed parameters of the program's declarations, and the
-  variables they lend (`Lower/Borrow`), once computed. -/
-  borrowInfo : Option (NameMap (Array Bool) × FVarIdSet) := none
+  variables they lend (`Lower/Borrow`), once computed. The variables by
+  declaration and variable, as `armVars`. -/
+  borrowInfo : Option (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) := none
   /-- The variables of the program that may hold a resource (`mayHoldAt`:
   by the flow analysis, or by type in a program that casts, where every
   closure, thunk and task may) and that their code owns, not only borrows,
   with their binding order (`armReleaseVars`; for the release order at the
   start of a branch, Emit/ArmRelease); empty in a program that makes no
-  resources. -/
-  armVars : Std.HashMap FVarId Nat := {}
+  resources. By declaration and variable, as the flow analysis keys its
+  binders (`ResourceFlow`, `LowerCtx.resourceHeld?`), read with the
+  declaration being lowered (`CodeCtx.decl`): a pass can copy a
+  declaration's code without new variables (Opt/SplitMapLoops' typed
+  instances of a `map` loop keep the loop's), so two declarations can have
+  the same variable. -/
+  armVars : Std.HashMap (Name × FVarId) Nat := {}
   /-- The Reussir names of the uses of `armVars` in the generated code, with
   their types and their variables' binding order (`noteVarUse`). Names are
   unique in the program. -/
@@ -577,17 +583,18 @@ def fresh (pre : String) : LowerM String := do
   modify fun s => { s with counter := n + 1 }
   return s!"{pre}{n}"
 
-/-- The code being lowered uses Lean variable `x` by the Reussir name `n`
-of type `t`: recorded with `x`'s binding order (`LowerState.armNames`)
-when `x` may hold a resource (`armVars`), for the
+/-- The code of declaration `decl` (`CodeCtx.decl`) being lowered uses
+Lean variable `x` by the Reussir name `n` of type `t`: recorded with `x`'s
+binding order (`LowerState.armNames`) when `x` may hold a resource
+(`armVars`), for the
 release order at the start of a branch (Emit/ArmRelease). Every lookup of a
 variable whose name the generated code then uses calls it (`lowerArg`,
 `applyChain`, a projection, a `return`, the scrutinee of a `cases`, ...), so
 every name lean2rr gives the variable (a conversion, a later binding of a
 field) gets its order. -/
-def noteVarUse (x : FVarId) (n : String) (t : RR.Ty) : LowerM Unit := do
+def noteVarUse (decl : Name) (x : FVarId) (n : String) (t : RR.Ty) : LowerM Unit := do
   if t != .unit then
-    if let some k := (← getPart (·.armVars[x]?)) then
+    if let some k := (← getPart (·.armVars[(decl, x)]?)) then
       modify fun s => { s with armNames := s.armNames.insert n (t, k) }
 
 /-- An injective, identifier-safe encoding of a string: ASCII letters and

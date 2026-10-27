@@ -205,7 +205,14 @@ runtime.
   every binder of the lowered declarations; the type rule `mayHoldRelease`,
   `mayHoldResource` with closures, thunks and tasks counted, in one that
   casts) and that are not lent
-  (`borrowInfo`: whoever lent them releases them); every lookup of such a
+  (`borrowInfo`: whoever lent them releases them). The numbers and the
+  lent variables are kept by declaration and variable, as the flow
+  analysis keys its binders, and read with the declaration being lowered
+  (`CodeCtx.decl`): a pass can copy a declaration's code without new
+  variables (`Opt/SplitMapLoops.lean`'s typed instances of a `map` loop
+  keep the loop's); by variable alone, one copy's numbers would replace
+  the other's and a variable lent in one copy would count as lent in both
+  (bug hunt hunt-resflow, C2; no program showed it). Every lookup of such a
   variable records the Reussir name it gives, with the variable's order
   (`noteVarUse`), so the names lean2rr gives a variable later (a field
   converted to its own type, a field `lazy-fields` binds where it is

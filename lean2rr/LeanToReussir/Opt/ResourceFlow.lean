@@ -2,16 +2,30 @@ import Lean
 import LeanToReussir.PassConfig
 
 /-!
-# Which binders can hold a resource (for `flatten-structs`)
+# Which binders can hold a resource
 
 In a program that creates resources whose release is observable (files,
-child processes, promises: `programMakesResources`), `flatten-structs`
-leaves alone every declaration with a parameter or a result that can hold
-one (see `Flatten.resourceExcluded`). By type alone, every value of type
-`lcAny` can be a handle (a handle's mono type in generic code is `lcAny`),
-so a loop over a record with an `lcAny` field (lean-regex's `SearchState`,
-whose `Vector σ.Update n` is `Array lcAny`) stays a heap record in every
-program that reads a file. This analysis follows the values instead.
+child processes, promises: `programMakesResources`), three parts of
+lean2rr ask which binders can hold one:
+- `flatten-structs` leaves alone every declaration with a parameter or a
+  result that can hold one (`Flatten.resourceExcluded`, `run` on the pass'
+  input);
+- the borrow emulation keeps an argument passed to a parameter that Lean
+  borrows until the call returns when the parameter can hold one
+  (Lower/Borrow's `keepsAt`);
+- the release order at the start of a branch orders the values that can
+  hold one (Emit/ArmRelease; Lower/Borrow's `armReleaseVars`,
+  `noteArmFields`).
+The last two ask through Lower/Borrow's `mayHoldAt`, for which the analysis
+runs again on the declarations that are lowered, after `flatten-structs`
+and the other passes (`runNoCasts`, called by Emit/Program;
+`LowerCtx.resourceHeld?`).
+
+By type alone, every value of type `lcAny` can be a handle (a handle's
+mono type is `lcAny`), so a loop over a record with an `lcAny` field
+(lean-regex's `SearchState`, whose `Vector σ.Update n` is `Array lcAny`)
+stays a heap record in every program that reads a file. This analysis
+follows the values instead.
 
 Every resource comes from a call of an extern of `resourceExterns`. A value
 moves only along the program's flows, and each flow joins two binders into
@@ -43,7 +57,14 @@ field is `Void σ`) holds no resource. A class *holds a resource*
 - the result of a call (or a function value) of an extern of
   `resourceExterns`;
 - a binder whose type holds a handle or a child process outside function
-  types (`mentionsResource`);
+  types (`mentionsResource`). In practice a child process only:
+  `IO.FS.Handle` is opaque (`opaque FS.Handle : Type := Unit`), so its
+  mono type is `lcAny`, and no binder's type names it; a handle is found
+  only through the externs that make it (the first seed:
+  `IO.FS.Handle.mk`, `IO.FS.createTempFile`). `IO.Process.Child cfg` is a
+  structure, whose mono type keeps its name (`IO.Process.Child lcAny`), so
+  a binder of that type is a seed (as is the result of
+  `IO.Process.spawn`);
 - the value of an `initialize` constant whose initializer is not found,
   and of any other constant that is neither a declaration of the program
   nor an extern (the analysis cannot see where its value comes from).
@@ -67,13 +88,9 @@ node, so the caller falls back to the type rule (`run` returns `none`).
 namespace LeanToReussir.Opt.ResourceFlow
 open Lean Compiler LCNF
 
-/-- Types whose values hold no other value, so no resource. -/
-def leafTypeNames : List Name :=
-  [``lcErased, ``lcVoid, ``Nat, ``Int, ``String, ``ByteArray, ``FloatArray, ``Unit, ``PUnit,
-   ``UInt8, ``UInt16, ``UInt32, ``UInt64, ``USize, ``Float, ``Float32, ``Bool]
-
 /-- Whether mono type `t` holds a file handle or a child process (its pipes)
-outside function types. -/
+outside function types. Only a child process shows in a mono type: a
+handle's is `lcAny` (see the module comment). -/
 partial def mentionsResource (t : Expr) : Bool :=
   match t.consumeMData with
   | .const n _ => n == ``IO.FS.Handle || n == ``IO.Process.Child
@@ -100,7 +117,6 @@ structure RFState where
   vars : Std.HashMap FVarId Expr := {}
   /-- Join point parameters of the declaration being walked. -/
   jps : Std.HashMap FVarId (Array (FVarId × Expr)) := {}
-  carry : Std.HashMap Expr Bool := {}
 
 abbrev RFM := StateRefT RFState CoreM
 
@@ -111,45 +127,13 @@ def resultKey (f : Name := .anonymous) : FVarId := ⟨`_l2r_rf_result ++ f⟩
 /-- Whether a value of mono type `t` can hold a resource or give one: an
 `lcAny`, a handle, a function type (a closure may capture one), a thunk or a
 task (they hold a closure), an array of such elements, an inductive with a
-field (`ctorFieldTypes`, at `t`'s type arguments) that can, a type the
-analysis does not know. A plain reachability with one visited set: a `false` holds for
-every type visited, and is cached for all of them. -/
-partial def mayCarry (t : Expr) : RFM Bool := do
-  let t := keyTy t
-  if let some b := (← get).carry[t]? then return b
-  let visited ← IO.mkRef ({} : Std.HashSet Expr)
-  let r ← go t visited
-  unless r do
-    for v in (← visited.get) do modify fun s => { s with carry := s.carry.insert v false }
-  modify fun s => { s with carry := s.carry.insert t r }
-  return r
-where
-  go (t : Expr) (visited : IO.Ref (Std.HashSet Expr)) : RFM Bool := do
-    if let some b := (← get).carry[t]? then return b
-    if (← visited.get).contains t then return false
-    visited.modify (·.insert t)
-    match t with
-    | .forallE .. => return true
-    | .sort _ => return false
-    | _ =>
-      let .const n _ := t.getAppFn | return true
-      if n == ``lcAny || n == ``IO.FS.Handle || n == ``Thunk || n == ``Task then return true
-      if leafTypeNames.contains n then return false
-      if n == ``Array then
-        return ← match t.getAppArgs[0]? with
-          | some a => go (keyTy a) visited
-          | none => pure true
-      -- An inductive's value holds what its fields hold (a type argument
-      -- no field mentions is a phantom: `EST.Out`'s state is `Void σ`).
-      let env ← getEnv
-      let some iv := inductiveOf env t | return true
-      for c in iv.ctors do
-        let some (.ctorInfo ci) := env.find? c | return true
-        let fs ← ctorFieldTypes c t
-        if fs.size != ci.numFields then return true
-        for f in fs do
-          if ← go (keyTy f) visited then return true
-      return false
+field (at `t`'s type arguments) that can, a type the analysis does not
+know. A type argument that no field mentions is a phantom (`EST.Out`'s
+state is `Void σ`). This is Lower/Borrow's type rule with closures, thunks
+and tasks counted (`mayHoldRelease`): one reachability through array
+elements and constructor fields, memoized for the run
+(`releaseTypeCache`). -/
+def mayCarry (t : Expr) : CoreM Bool := mayHoldRelease t
 
 def seed (i : Option Nat) (why : String) : RFM Unit := do
   if let some i := i then modify fun s => { s with seeds := s.seeds.push (i, why) }
@@ -324,7 +308,11 @@ partial def walk (ctx : RFCtx) (dn : Name) (res : Option Nat) (c : Code .pure) :
 /-- The analysis' answer: the binders that can hold a resource. -/
 structure Info where
   held : Std.HashSet (Name × FVarId) := {}
-  /-- Nodes and classes, seeded classes (for `L2R_FLATTEN_DEBUG`). -/
+  /-- The numbers of nodes, classes and classes that hold a resource, and
+  of binders that hold one: printed with `L2R_DEBUG` (by `flatten-structs`
+  and by the lowering, Emit/Program) and with `L2R_FLATTEN_DEBUG` (by
+  `flatten-structs`). `L2R_RESFLOW_DEBUG` prints each run's seeds and the
+  binders of the classes that hold a resource (`runNoCasts`). -/
   stats : String := ""
 
 /-- Whether binder `x` of declaration `decl` can hold a resource. -/

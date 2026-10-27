@@ -121,7 +121,7 @@ def lowerConstApp (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (resTy :
       if (← externSymbol orig) == "lean_ptr_addr" then
         if let some (.fvar x) := args.back? then
           if let some (vn, vt) := ctx.vars[x]? then
-            noteVarUse x vn vt
+            noteVarUse ctx.decl x vn vt
             return ← coerce (← addrOf (.var vn) vt) (.named "u64") rty
       let as ← (args.zip ptys).mapM fun (a, t) => lowerArg ctx a t
       coerce (← lowerExternCall orig typeArgs params ret as) retTy rty
@@ -239,14 +239,14 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
     -- whole word, `ofTupleMember`), or the unit value, which has no member.
     if (flatTupleArity? sn).isSome then
       let some (n, .named tn) := ctx.vars[x]? | throwError "lean2rr: projection of a flat tuple from an unbound variable (internal error)"
-      noteVarUse x n (.named tn)
+      noteVarUse ctx.decl x n (.named tn)
       let some (tys, order) ← tupleLayout? tn | throwError "lean2rr: projection of a flat tuple from {tn} (internal error)"
       let some ft := tys[i]? | throwError "lean2rr: field {i} of the flat tuple {tn} (internal error)"
       let some k := order.findIdx? (· == i) | return ← coerce .unitVal ft rty
       return ← coerce (← ofTupleMember ft (.field (.var n) k)) ft rty
     match ctx.vars[x]? with
     | some (n, st) =>
-      noteVarUse x n st
+      noteVarUse ctx.decl x n st
       -- A projection of a cast value: as a `cases` (see `castCases`).
       let (e, tn, layout?) ← match ← castCases st sn with
         | .view src dst =>
@@ -295,7 +295,7 @@ def lowerLetValue (ctx : CodeCtx) (v : LetValue .pure) (ty : Expr) (rty : RR.Ty)
   | .fvar g args =>
     match ctx.vars[g]? with
     | some (n, t) =>
-      noteVarUse g n t
+      noteVarUse ctx.decl g n t
       let (e, t') ← applyChain (.var n) t ctx args
       coerce e t' rty
     | none => throwError "lean2rr: unbound function variable (internal error)"

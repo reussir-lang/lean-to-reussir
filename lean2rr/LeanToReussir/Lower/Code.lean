@@ -461,7 +461,7 @@ mutual
     | .return x =>
       if let some (e, t) := ctx.rebuild[x]? then return .ofExpr (← coerce e t retTy)
       match ctx.vars[x]? with
-      | some (n, t) => noteVarUse x n t; return .ofExpr (← coerce (.var n) t retTy)
+      | some (n, t) => noteVarUse ctx.decl x n t; return .ofExpr (← coerce (.var n) t retTy)
       | none => throwError "lean2rr: return of unbound variable (internal error)"
     | .unreach _ => return .ofExpr (.call "l2r_unreachable" #[retTy] #[])
     | .cases cs => return .ofExpr (← lowerCases ctx outlined retTy cs)
@@ -615,7 +615,7 @@ mutual
   partial def lowerCases (ctx : CodeCtx) (outlined : FVarIdSet) (retTy : RR.Ty) (cs : Cases .pure) :
       LowerM RR.Expr := do
     let some (scrut0, sty0) := ctx.vars[cs.discr]? | throwError "lean2rr: cases on unbound variable"
-    noteVarUse cs.discr scrut0 sty0
+    noteVarUse ctx.decl cs.discr scrut0 sty0
     -- A `cases` on a value of statically unknown type: unbox it to the
     -- inductive's one type first (`uniformType`).
     if sty0 == RR.Ty.box then

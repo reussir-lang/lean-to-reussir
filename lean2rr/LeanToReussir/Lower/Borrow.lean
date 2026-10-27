@@ -247,8 +247,9 @@ where
     | _ => s
 
 /-- Lean's borrow results for the program (computed once, when the program
-creates resources), and the variables each declaration borrows. -/
-def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
+creates resources), and the variables each declaration borrows, by
+declaration and variable (`LowerState.armVars` says why). -/
+def borrowInfo : LowerM (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) := do
   if let some r := (← get).borrowInfo then return r
   let ctx ← read
   let r ← if ← programMakesResources ctx.decls ctx.keys then
@@ -261,9 +262,9 @@ def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
       let env ← getEnv
       let isCtor (f : Name) : Bool :=
         (match env.find? f with | some (.ctorInfo _) => true | _ => false) && !isExtern env f
-      let lent := ctx.decls.foldl (init := ({} : FVarIdSet)) fun s n d =>
+      let lent := ctx.decls.foldl (init := ({} : Std.HashSet (Name × FVarId))) fun s n d =>
         match flags.find? n with
-        | some b => (borrowedVars ctx.keys isConst isCtor d b).foldl (fun s x => s.insert x) s
+        | some b => (borrowedVars ctx.keys isConst isCtor d b).foldl (fun s x => s.insert (d.name, x)) s
         | none => s
       pure (flags, lent)
     else pure ({}, {})
@@ -281,9 +282,11 @@ mixes two environments. -/
 initialize resourceTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
 /-- The answers of `mayHoldResource` with `closures` (`mayHoldRelease`), as
-`resourceTypeCache`'s: in a program that casts, flatten-structs' type rule,
-the lowering of borrowed arguments (`keepsAt`) and the release order at a
-branch's start (`armReleaseVars`, `noteArmFields`), the last two through
+`resourceTypeCache`'s: in a program that does not cast, the flow analysis,
+for which binders get a node (`ResourceFlow.mayCarry`, in both of its
+runs); in a program that casts, flatten-structs' type rule, the lowering
+of borrowed arguments (`keepsAt`) and the release order at a branch's
+start (`armReleaseVars`, `noteArmFields`), the last two through
 `mayHoldAt`, ask it. -/
 initialize releaseTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
@@ -298,7 +301,10 @@ inductive), which would make every container look like a handle's.
 Closures, thunks and tasks are not looked into: with `closures`
 (`mayHoldRelease`) each of them counts as one that may hold a resource. So:
 whether a type that holds a resource is reachable from `e` through array
-elements and constructor fields.
+elements and constructor fields. With `closures` it is also the flow
+analysis' rule for which binders get a node (`ResourceFlow.mayCarry`); a
+proposition's inductive holds nothing (no mono binder has one: a proof is
+erased).
 
 A plain reachability with one visited set per question (linear in the
 types it reaches), memoized (`resourceTypeCache`, with `closures` `releaseTypeCache`) as rule 4's `mayHoldFn`:
@@ -422,7 +428,8 @@ with its binding order: its position in `armBinders` of its declaration
 (after the declaration's parameters), the order of native Lean's binding
 indices (`ExplicitRC`), on which the variables that lean2rr binds again (a
 field converted to its own type, a field a `lazy-fields` match binds later,
-a join point's parameter at an inlined jump) keep their place. The release
+a join point's parameter at an inlined jump) keep their place. By
+declaration and variable (`LowerState.armVars` says why). The release
 order of a value that holds no resource does not show, but for a pure task
 (dropped before it ran, it is deleted where lean2rr releases it, plan §10,
 "Release time of pure tasks"), which is ordered only in a program that
@@ -431,16 +438,16 @@ resources (`programMakesResources`: `borrowInfo` then has no borrow flags,
 while it has them for every declaration with code, `main` included, in one
 that does). Computed once, before the declarations are lowered
 (`LowerState.armVars`). -/
-def armReleaseVars : LowerM (Std.HashMap FVarId Nat) := do
+def armReleaseVars : LowerM (Std.HashMap (Name × FVarId) Nat) := do
   let (flags, lent) ← borrowInfo
   if flags.isEmpty then return {}
-  let mut out : Std.HashMap FVarId Nat := {}
+  let mut out : Std.HashMap (Name × FVarId) Nat := {}
   let mut k := 0
   for (_, d) in (← read).decls do
     let .code c := d.value | continue
     for (x, ty) in armBinders c (d.params.map fun p => (p.fvarId, p.type)) do
       k := k + 1
-      if !lent.contains x && (← mayHoldAt d.name x ty) then out := out.insert x k
+      if !lent.contains (d.name, x) && (← mayHoldAt d.name x ty) then out := out.insert (d.name, x) k
   return out
 
 /-- For the release order at the start of a branch (Emit/ArmRelease):
@@ -453,7 +460,7 @@ The arm's fields are `ps`, at the binder positions `fields` gives
 `IO.Process.Child`'s) counts as one that may. -/
 def noteArmFields (decl : Name) (discr : FVarId) (scrut variant : String) (ps : Array (Param .pure))
     (fields : Array (Option (Nat × RR.Ty))) (nbinders : Nat) : LowerM Unit := do
-  unless (← getPart (·.armVars.contains discr)) do return
+  unless (← getPart (·.armVars.contains (decl, discr))) do return
   let mut flags := Array.replicate nbinders false
   for h : i in [:fields.size] do
     if let some (j, _) := fields[i] then
@@ -510,7 +517,8 @@ def keepsAt (f : Name) (p : Param .pure) : LowerM Bool := do
 
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the
-variables (name, type) the caller owns that are passed to a parameter Lean
+variables (name, type) the caller owns (not lent to its declaration,
+`CodeCtx.decl`: `borrowInfo`) that are passed to a parameter Lean
 borrows (at any position: `f x x` with the second parameter borrowed keeps
 `x`) that may hold a resource (`keepsAt` of the first borrowed parameter it
 is passed to). In the order of their first occurrence in
@@ -531,7 +539,7 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     -- the first such position.
     let some j := args.zipIdx.findSome? (fun (a, j) => if a == .fvar x && bs[j]?.getD false then some j else none)
       | continue
-    if lent.contains x then continue
+    if lent.contains (ctx.decl, x) then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
     -- The borrowed parameter it is passed to.

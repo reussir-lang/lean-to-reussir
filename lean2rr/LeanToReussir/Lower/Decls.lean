@@ -82,7 +82,7 @@ def lowerArg (ctx : CodeCtx) (a : Arg .pure) (expected : RR.Ty) : LowerM RR.Expr
   match a with
   | .fvar x =>
     match ctx.vars[x]? with
-    | some (n, t) => noteVarUse x n t; coerce (.var n) t expected
+    | some (n, t) => noteVarUse ctx.decl x n t; coerce (.var n) t expected
     | none => throwError "lean2rr: unbound variable {x.name} (internal error)"
   -- `◾` (type arguments, proofs, or `box(0)` at a relevant type)
   | _ => zeroValue expected
@@ -151,7 +151,7 @@ def applyChain (f : RR.Expr) (fty : RR.Ty) (ctx : CodeCtx) (args : Array (Arg .p
     match a with
     | .fvar x =>
       match ctx.vars[x]? with
-      | some (n, t) => noteVarUse x n t; pure (LArg.val (.var n) t)
+      | some (n, t) => noteVarUse ctx.decl x n t; pure (LArg.val (.var n) t)
       | none => throwError "lean2rr: unbound variable {x.name} (internal error)"
     | _ => pure .erased
   applyLean f fty largs

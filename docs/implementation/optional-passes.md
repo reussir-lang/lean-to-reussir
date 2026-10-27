@@ -773,10 +773,16 @@ built-in integers
   initializer's result. A class holds a resource when it has the result
   of an extern of `resourceExterns`, a binder whose type holds a handle
   or a child process, or the value of a constant that the analysis cannot
-  follow. Only binders whose type can carry a resource have a node
+  follow. The rule by type finds child processes only (`IO.Process.Child
+  lcAny`): `IO.FS.Handle` is opaque, so a handle's mono type is `lcAny`,
+  and handles are found through the externs that make them
+  (`IO.FS.Handle.mk`, `IO.FS.createTempFile`). Only binders whose type can
+  carry a resource have a node
   (`mayCarry`: `lcAny`, a handle, a function type, a thunk, a task, an
   array or an inductive with such an element or field; not `List Nat`,
-  not `EST.Out ε σ Unit`, whose state field is `Void σ`). In a program
+  not `EST.Out ε σ Unit`, whose state field is `Void σ`; it is the type
+  rule `mayHoldRelease` below, one reachability memoized for the run:
+  [translator.md](translator.md#questions-about-types-are-answered-once-per-run)). In a program
   that can cast (`programCasts`), the type rule stays (`mayHoldRelease`:
   every `lcAny` may be a handle, and every function type, thunk and task
   may have captured one, as `mayCarry` counts them; with closures left out,

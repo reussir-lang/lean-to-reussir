@@ -221,7 +221,12 @@ relative to `lean2rr/` unless they start with `scripts/`.
     through closures, thunks and tasks (`mayHoldRelease`, one function with
     a table of its own, `releaseTypeCache`, for `flatten-structs`' type
     rule, the lowering of borrowed arguments, `keepsAt`, and the release
-    order at a branch's start, all in a program that can cast). It
+    order at a branch's start, all in a program that can cast, and for the
+    resource flow analysis' question of which binders get a node,
+    `ResourceFlow.mayCarry`, in a program that cannot; until 2026-10-27
+    that was a copy with a table per run, which differed only on a
+    proposition's inductive, which no mono binder has: bug hunt
+    hunt-resflow, C3). It
     is a reachability through array elements and
     constructor fields with one visited set per question, as rule 4's
     `mayHoldFn`: each type is looked at once per question, a `true` is
@@ -268,7 +273,8 @@ relative to `lean2rr/` unless they start with `scripts/`.
   so the output is byte-identical: all 714 programs of the runtime tests
   and the classic corpus that translate, and the programs above.
 - **Where:** `Lower/Borrow.lean`: `resourceTypeCache`, `mayHoldResource`
-  (test `RtResDenseMutual`);
+  (test `RtResDenseMutual`), `releaseTypeCache`; `Opt/ResourceFlow.lean`:
+  `mayCarry`;
   `Opt/Flatten.lean`: `Resources.holds`, `resourceExcluded`;
   `Opt/UnreadFields.lean`: `mayHoldRes`; `ErasedDomains.lean`:
   `layoutFieldCache`, `layoutFieldTypes`, `layoutFieldKeys`,
