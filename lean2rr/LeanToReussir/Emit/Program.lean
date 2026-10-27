@@ -7,6 +7,7 @@ import LeanToReussir.CompactArrays
 import LeanToReussir.TypedCells
 import LeanToReussir.PreludePrune
 import LeanToReussir.Timings
+import LeanToReussir.Opt.ResourceFlow
 
 /-!
 # Program assembly
@@ -540,6 +541,13 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
   let erased ← flowAnalysis decls casts.isSome inits
+  -- The borrow emulation's question, in a program that makes resources and
+  -- does not cast: which binders may hold a resource, by the flow analysis
+  -- that guards flatten-structs, run on the declarations lowered here
+  -- (after flatten-structs and the other passes; `LowerCtx.resourceHeld?`).
+  let resInfo? ← if casts.isNone && (← programMakesResources (decls.foldl (fun m d => m.insert d.name d) {}) keys) then
+      pure (some (← Opt.ResourceFlow.runNoCasts keys decls))
+    else pure none
   let (compactKindsOn, compactOff, boxedArrayFields) := (ca.on, ca.off, ca.boxed)
   let typedKindsOn : Std.HashSet String := ca.ptrOn.foldl (·.insert ·) {}
   -- `typed-cells`: the cell kinds whose references hold their own type.
@@ -549,6 +557,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let refKindsOn : Std.HashSet String := tc.refOn.foldl (·.insert ·) {}
   if (← IO.getEnv "L2R_DEBUG").isSome then
     IO.eprintln s!"lean2rr: program casts: {match casts with | some n => s!"yes ({n})" | none => "no"}"
+    if let some info := resInfo? then
+      IO.eprintln s!"lean2rr: borrowed parameters: resources by flow: {info.stats}"
     if cfg.compactArrays then
       IO.eprintln s!"lean2rr: compact arrays: {compactKindsOn}"
       for (k, why) in compactOff do IO.eprintln s!"lean2rr: compact arrays: {k} off: {why}"
@@ -571,7 +581,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
                           preludeReplacements := cfg.preludeReplacements,
                           valueStructs := cfg.valueStructs, fieldOrder := cfg.fieldOrder,
                           cachePlaceholders := cfg.cachePlaceholders, boxedConsts := cfg.boxedConsts,
-                          programCasts := casts.isSome, createsTasks, callCycles := callCycles decls,
+                          programCasts := casts.isSome, resourceHeld? := resInfo?.map (·.held),
+                          createsTasks, callCycles := callCycles decls,
                           convLiveness := cfg.convLiveness, erased, compactKindsOn, typedKindsOn, boxedArrayFields,
                           refKindsOn, intMatch := cfg.intMatch }
   timingMark "lowering: program analyses" s!"{ctx.decls.size} declarations"

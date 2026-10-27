@@ -143,6 +143,14 @@ structure LowerCtx where
   never read as another, and an unboxing reads only its own type's payload,
   in line (`boxCastable`, `tryCoerce`). -/
   programCasts : Bool := true
+  /-- In a program that makes resources and does not cast, the binders
+  (declaration, variable) of the lowered declarations that may hold a
+  resource, by the whole-program flow analysis (Opt/ResourceFlow, run on
+  these declarations: `Emit/Program`); `none` otherwise, where the type
+  rule decides (`mayHoldRelease`). The borrow emulation keeps an argument
+  for a borrowed parameter only where it may hold one (`keepsAt`,
+  Lower/Borrow). -/
+  resourceHeld? : Option (Std.HashSet (Name × FVarId)) := none
   /-- Whether the program creates tasks (`programCreatesTasks`): then its
   reference operations are the task-aware ones (`refCellOp`), and it has
   `l2r_std_drop_workers` (`stdContextFns`). lean-runtime's scheduler itself

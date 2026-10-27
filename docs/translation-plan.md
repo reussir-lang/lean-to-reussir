@@ -2022,10 +2022,21 @@ Rules:
   declaration, `@[export]` or `main`, are marked exported, so their
   parameters stay owned, as Lean's `isExport` keeps the declaration's) and
   emulates Lean's reference counting
-  where a value may hold a resource, decided on the mono type of the
-  parameter it is passed to (a handle, which mono types `lcAny`, so any
-  `lcAny`; an inductive or array with such a field at its type arguments,
-  so not a `List Nat`, although its one Reussir type holds `Box`es):
+  where a value may hold a resource, decided for the parameter it is
+  passed to: by the whole-program flow analysis that guards
+  `flatten-structs` (Opt/ResourceFlow, run on the lowered declarations; it
+  follows closures, thunks and tasks, which may have captured a resource),
+  or, in a program that casts, which the analysis cannot follow, by the
+  parameter's mono type (a handle, which mono types `lcAny`, so any
+  `lcAny`; a closure, a thunk or a task; an inductive or array with such a
+  field at its type arguments, so not a `List Nat`, although its one
+  Reussir type holds `Box`es). `flatten-structs` leaves alone the
+  declarations whose parameters may hold one, so there the inference sees
+  Lean's code; elsewhere lean2rr's code can differ (a split structure has
+  no constructor) and the inference can take borrowed a parameter that
+  native Lean takes owned, so keeping such an argument would only break a
+  tail call that native Lean makes (a cycle of tail calls that passes a
+  new value stored in a structure whose reader is split):
   - a direct call keeps an argument passed to a borrowed parameter until
     the call returns (`l2r_release_after`, an effectful FFI call after the
     call, as Lean's `dec`), when the caller owns it; an argument the caller
@@ -3419,11 +3430,16 @@ Each item says what differs and when.
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
   specializations differently from lean2rr's instance of it, the release
-  time follows the instance. A resource captured in a closure, or held by a thunk or a task,
-  is not looked into (released at its last use). In a program that
-  creates resources, a value of uniform type (`Box`) passed owned to a
-  borrowed parameter is kept until the call returns: one more increment
-  and release per such call.
+  time follows the instance. A value that holds no resource (by the flow
+  analysis; by type in a program that casts) is not kept: it is released
+  at its last use, which nobody can tell, but a pure task (the next item).
+  In a program that creates resources and casts, a value of uniform type
+  (`Box`) passed owned to a borrowed parameter is kept until the call
+  returns: one more increment and release per such call. A cycle of tail
+  calls that passes a new value to a parameter Lean borrows (natively the
+  caller's release after the call makes it recurse) is a state machine
+  when the value holds no resource: the same results with less stack
+  (test `RtBorrowThunkCycle`).
 - *Release order at the start of a branch* (§5.8): emulated for values
   that may hold a resource, by the place of their Lean variables in the
   code and where lean2rr's generated code releases them, which follow
@@ -3447,13 +3463,7 @@ Each item says what differs and when.
   scrutinee and the first field projected in a constructor's alternative
   get one index (`withCtorAlt` and the first `let`), so when both die at
   the start of a nested branch their order is not specified (it depends
-  on a hash set); lean2rr releases the field first. A structure that
-  `flatten-structs` splits into its fields (it keeps whole the values that
-  may hold a resource, decided without closures, so a structure holding a
-  closure can be split) is released field by field: each field by its own
-  binding order at an arm's start, and at its own last use where it dies
-  inside a block, where natively the structure is released whole at its
-  last use.
+  on a hash set); lean2rr releases the field first.
 - *Release time of pure tasks* (§5.14): a pure task (`Task.spawn`,
   `Task.map`, `Task.bind`) whose last reference the program drops before
   a worker starts it is deleted and never runs, as natively; but the place
@@ -3463,8 +3473,10 @@ Each item says what differs and when.
   reasons: Reussir releases a value at its last use where Lean borrows a
   parameter and the caller releases it after the call (`report (j : Job)`
   reads only `j.n` before a wait: natively the caller keeps `j`, and its
-  task, until `report` returns; the emulation of borrowed parameters does
-  not look into tasks, §5.8 and the item above); `flatten-structs`
+  task, until `report` returns; the emulation of borrowed parameters keeps
+  only values that may hold a resource, a pure task only in a program that
+  makes resources and casts, by type, §5.8 and the item above);
+  `flatten-structs`
   splits a structure into its fields, and Reussir releases a task field
   that a path does not use at the start of that path (a loop's exit, a
   join point's body), where natively the structure lives until its last

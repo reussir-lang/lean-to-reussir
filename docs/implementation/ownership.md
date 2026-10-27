@@ -15,25 +15,59 @@ runtime.
   resource, passed to a borrowed parameter, alive until the call returns
   (`l2r_release_after`); arguments the caller only borrows itself are left
   alone, so loops keep their tail calls, and function values go through
-  `<fn>_boxed` variants. Whether a value may hold a resource is decided
-  on the mono type of the parameter it is passed to (`mayHoldResource`:
-  an `lcAny`, a handle, or an inductive, array or reference with such a
-  field at its type arguments), not on its Reussir type: with one type
-  per inductive, a `List Nat` holds `Box`es, as a list of handles does.
-  Lean takes every parameter of an exported declaration (`@[export]`, and
-  `main`) owned, and decides that by name (`isExport`): the instances of
-  such a declaration (`helper._l2r_0`) are marked exported in the copy of
-  the environment that the inference uses. The rules are in plan §5.8,
-  "Borrowing". The inference runs on lean2rr's code after the optional
-  passes, so a pass that changes code keeps Lean's code where a value may
-  hold a resource: `flatten-structs` leaves alone each declaration with a
-  parameter or a result that may hold one, and each declaration whose
-  borrow flags decide the flag of such a parameter (a callee that gets a
-  field of it), and keeps whole each join point parameter that may hold
-  one; a whole-program flow analysis of the values decides which
-  (`Opt/ResourceFlow.lean`;
+  `<fn>_boxed` variants. Whether an argument may hold a resource is decided
+  for the borrowed parameter it is passed to (`keepsAt`): in a program
+  that does not cast, by the whole-program flow analysis that guards
+  `flatten-structs` (`Opt/ResourceFlow.lean`), run again on the declarations
+  that are lowered (`Emit/Program.lean`, `LowerCtx.resourceHeld?`); in a
+  program that casts, which the analysis cannot follow, by the mono type of
+  the parameter (`mayHoldRelease`: an `lcAny`, a handle, a function type, a
+  thunk or a task, or an inductive, array or reference with such a field at
+  its type arguments), not by its Reussir type: with one type per
+  inductive, a `List Nat` holds `Box`es, as a list of handles does. Both
+  look into closures, thunks and tasks, which may have captured a handle:
+  an `IO.FS.Stream` over a file in a record whose other fields a helper
+  reads, a `Thunk IO.FS.Handle` that a helper reads with `Thunk.get` (which
+  borrows), a task holding a handle that a helper only asks
+  `IO.hasFinished` about. Natively calling a closure makes Lean's inference
+  take the parameter owned (unless it is marked `@&`), so a borrowed one is
+  a value the callee passes on to borrowed parameters, ignores, or reads
+  other fields of. Lean takes every parameter of an exported declaration
+  (`@[export]`, and `main`) owned, and decides that by name (`isExport`):
+  the instances of such a declaration (`helper._l2r_0`) are marked exported
+  in the copy of the environment that the inference uses. The rules are in
+  plan §5.8, "Borrowing". The inference runs on lean2rr's code after the
+  optional passes, so a pass that changes code keeps Lean's code where a
+  value may hold a resource: `flatten-structs` leaves alone each
+  declaration with a parameter or a result that may hold one, and each
+  declaration whose borrow flags decide the flag of such a parameter (a
+  callee that gets a field of it), and keeps whole each join point
+  parameter that may hold one; the same analysis decides which (by type,
+  with closures, thunks and tasks counted, in a program that casts;
   [optional-passes.md](optional-passes.md#structure-arguments-and-results-are-spread-into-their-fields-flatten-structs)).
-- **Why:** Natively the caller releases a borrowed argument after the
+  So where an argument is kept, the inference saw Lean's code and infers
+  what native Lean infers. Elsewhere lean2rr's code can differ (a structure
+  that `flatten-structs` split no longer has its constructor), and the
+  inference can take borrowed a parameter that native Lean takes owned;
+  the argument is then not kept, which nobody can tell: it holds no
+  resource.
+- **Why:** The rule by type looked at any parameter that the inference
+  took borrowed. A cycle of tail calls that passes a new value to a
+  parameter the callee stores in a structure (natively owned: a
+  constructor's argument, so a tail call) whose reader `flatten-structs`
+  splits kept the value until the call returned, so each call stayed a
+  call, and 10^6 steps overflowed an 8 MB stack where native runs: with an
+  `lcAny` value since the rule existed, with a closure, a thunk or a task
+  once the rule counted them (review of the change for closures, test
+  `RtBorrowCycleFlatten`). Before that change the type rule did not look
+  into closures, thunks and tasks at all, and such a value was released at
+  its last use inside the callee: a helper read `T1` from its file where
+  native reads `1` (judge 2026-10-27, tests `RtBorrowClosure`,
+  `RtBorrowClosureCast`). A cycle of tail calls that passes a new thunk,
+  which holds no resource, to a parameter Lean borrows stays a state
+  machine, where natively the caller's release after each call makes it
+  recurse: the same results with less stack (test `RtBorrowThunkCycle`).
+  Natively the caller releases a borrowed argument after the
   call; Reussir releases at the last use, inside the callee. Only resources
   can tell: a handle written by a helper that then reads the file again
   (natively still buffered), a child's stdin pipe a helper writes and then
@@ -64,26 +98,23 @@ runtime.
   `RtBorrowTailNone`, `RtBorrowTailNoneH`).
 - **Where:** `Lower/Borrow.lean`: `resourceExterns`,
   `programMakesResources`, `inferBorrowedParams`, `borrowedVars`,
-  `borrowInfo`, `mayHoldResource` (memoized for the run, `resourceTypeCache`:
+  `borrowInfo`, `keepsAt`, `mayHoldRelease` (memoized for the run,
+  `releaseTypeCache`:
   [translator.md](translator.md#questions-about-types-are-answered-once-per-run)),
   `borrowKeeps`, `releaseAfter`,
-  `boxedTarget`; `Lower/Values.lean`: `lowerConstApp`;
+  `boxedTarget`; `Emit/Program.lean` (the flow analysis on the lowered
+  declarations, `LowerCtx.resourceHeld?`); `Opt/ResourceFlow.lean`:
+  `runNoCasts`; `Lower/Values.lean`: `lowerConstApp`;
   `runtime/prelude.rr`: `l2r_release_after`; plan
   [§5.8](../translation-plan.md#58-externs-and-runtime-calls)
   ("Borrowing").
-- **Remove only if:** Reussir gets borrowed parameters. Limits: closures,
-  thunks and tasks are not looked into (`mayHoldResource` answers false
-  for a function type and for `Thunk` and `Task`, so a record whose
-  resources are only inside such fields gets no `l2r_release_after`: a
-  tree of `Task IO.FS.Handle` or `Thunk IO.FS.Handle` fields passed to a
-  borrowed parameter is released inside the callee, as one with closure
-  fields; found by the review of the shared drop stack; for the same
-  reason a pure task does not make its value kept for a borrowed
-  parameter, so a pure task that no worker has started is deleted at the
-  value's last use inside the callee, where natively the caller's release
-  after the call can come after a worker started it: plan §10, "Release
-  time of pure tasks", test `RtTaskDropReleaseTime`), and the inference
-  runs on lean2rr's
+- **Remove only if:** Reussir gets borrowed parameters. Limits: a pure
+  task that holds no resource is not kept for a borrowed parameter (kept
+  only in a program that makes resources and casts, by type), so a pure
+  task that no worker has started is deleted at the value's last use
+  inside the callee, where natively the caller's release after the call
+  can come after a worker started it (plan §10, "Release time of pure
+  tasks", test `RtTaskDropReleaseTime`); and the inference runs on lean2rr's
   instances (plan
   [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Release time of borrowed parameters"). `IO.Promise.isResolved` is
@@ -98,9 +129,8 @@ runtime.
   releases `h2`, `h1`, `w`; in `own3 x y x` with the first parameter owned,
   `x` counts from its first (owned) position, so `y` goes first. A variable
   is kept when it is passed to a borrowed parameter at any position and
-  the type of the first such parameter may hold a resource
-  (`mayHoldResource`; in `own3 x y x` the type of the third parameter,
-  not of the first). The `_boxed` wrappers (`boxedTarget`) release last
+  the first such parameter may hold a resource (`keepsAt`; in `own3 x y x`
+  the third parameter, not the first). The `_boxed` wrappers (`boxedTarget`) release last
   parameter first.
 - **Why:** Lean's `ExplicitRC.addDecAfterFullApp` visits the arguments in
   order, takes each variable at its first occurrence (`isFirstOcc`) when
@@ -228,13 +258,11 @@ runtime.
   the scrutinee as bound there, natively its index at the join point;
   natively the scrutinee and the first field projected in a constructor's
   alternative have one index, so their order when both die at a nested
-  branch's start is not specified (lean2rr: the field first); a structure
-  that `flatten-structs` splits into its fields (it keeps whole the values
-  that `mayHoldResource` says may hold a resource, which counts no
-  closure, so a structure holding a closure can be split) is released
-  field by field: each field by its own binding order at an arm's start,
-  and at its own last use where it dies inside a block, where natively the
-  structure is released whole at its last use.
+  branch's start is not specified (lean2rr: the field first). A
+  structure that `flatten-structs` splits into its fields holds nothing
+  whose release shows (the flow analysis follows closures, thunks and
+  tasks, and so does the type rule of a program that casts,
+  `mayHoldRelease`), so releasing it field by field shows nothing.
 
 ### Reference sets store the new value before releasing the old one
 

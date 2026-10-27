@@ -83,7 +83,8 @@ may hold one, every declaration whose borrow flags decide the flag of such
 a parameter (`flagSources`), and every join point parameter that may hold
 one (`resourceExcluded`): lean2rr emulates native release times by Lean's
 borrow inference on that code. Which binders may hold one, the whole-program flow analysis
-`ResourceFlow` decides (by type, `mayHoldResource`, in a program that casts).
+`ResourceFlow` decides (by type, `mayHoldRelease`, in a program that casts:
+closures, thunks and tasks count, as in the flow analysis).
 
 Only pure steps move: a constructor application not built, a projection
 read from a known field, a value rebuilt, a match on a tag instead of on a
@@ -213,8 +214,8 @@ def mentionsFn (t : Expr) : Bool :=
 
 /-- Memo tables of the type questions (`indInfo?`, `placeholderOk`), keyed
 by mono type. The environment only grows by the pass's tuples meanwhile.
-(Whether a type may hold a resource is Lower/Borrow's `mayHoldResource`,
-memoized there.) -/
+(Whether a type may hold a resource, for the type rule of a program that
+casts, is Lower/Borrow's `mayHoldRelease`, memoized there.) -/
 initialize indInfoCache : IO.Ref (Std.HashMap Expr (Option (InductiveVal × Ctors × Array (Array Expr)))) ← IO.mkRef {}
 initialize placeholderCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
@@ -1787,8 +1788,10 @@ inductive Resources where
   | absent
   /-- `ResourceFlow`'s answer. -/
   | flow (info : ResourceFlow.Info)
-  /-- By type (`mayHoldResource`): the program can read a value as another
-  type (`programCasts`), which the flow analysis cannot follow. -/
+  /-- By type (`mayHoldRelease`: closures, thunks and tasks count, as in
+  the flow analysis and in the borrow emulation): the program can read a
+  value as another type (`programCasts`), which the flow analysis cannot
+  follow. -/
   | types
 
 /-- Whether binder `x` (of type `t`) of declaration `decl` may hold a
@@ -1797,7 +1800,7 @@ def Resources.holds (r : Resources) (decl : Name) (x : FVarId) (t : Expr) : Core
   match r with
   | .absent => pure false
   | .flow info => pure (info.holds decl x)
-  | .types => mayHoldResource t
+  | .types => mayHoldRelease t
 
 /-- The variables of declaration `d`'s code connected with `start` by the
 edges along which Lean's borrow inference (`InferBorrow`) passes ownership,
@@ -1931,8 +1934,8 @@ parameter or a result that may hold such a resource: their code, and so
 their inferred borrows, stay Lean's. Which binders may hold one, the
 whole-program flow analysis decides (`ResourceFlow`: a record whose
 `lcAny` fields only ever get regex data is no resource holder); in a
-program that casts, the type (`mayHoldResource`: every `lcAny` may be a
-handle). -/
+program that casts, the type (`mayHoldRelease`: every `lcAny` may be a
+handle, every closure, thunk or task may have captured one). -/
 def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Resources × NameSet) := do
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : NameMap (Decl .pure))
   unless ← programMakesResources byName keys do return (.absent, {})
@@ -1977,7 +1980,7 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
     let mut byType := 0
     for d in decls do
       unless d.value matches .code _ do continue
-      if (← d.params.anyM (mayHoldResource ·.type)) || (← mayHoldResource (splitArrows d.type d.params.size).2) then
+      if (← d.params.anyM (mayHoldRelease ·.type)) || (← mayHoldRelease (splitArrows d.type d.params.size).2) then
         byType := byType + 1
     IO.eprintln s!"flatten: resources: {out.size} declarations left alone (by type: {byType})"
   return (r, out)

@@ -87,12 +87,9 @@ the others, where lean2rr releases it at the arm's start; a `cases` whose
 alternatives `simpCase` folds into a default alternative only after
 `toImpure` keeps its scrutinee's index there; a join point's body that
 lean2rr places under a `match` (J1, J1′) counts the scrutinee as bound
-there; a structure that `flatten-structs` splits into its fields (it keeps
-whole the values that `mayHoldResource` says may hold a resource, which
-counts no closure, so a structure holding a closure can be split) is
-released field by field: each field by its own binding order at an arm's
-start, and at its own last use where it dies inside a block, where natively
-the structure is released whole at its last use.
+there. (A structure that `flatten-structs` splits into its fields holds
+nothing whose release shows: the flow analysis follows closures, thunks and
+tasks, and so does the type rule of a program that casts.)
 -/
 
 namespace LeanToReussir.ArmRelease

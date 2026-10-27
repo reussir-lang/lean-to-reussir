@@ -20,8 +20,9 @@ runs Lean's own borrow inference on its mono declarations
 (`inferBorrowedParams`) and emulates Lean's reference counting at the
 calls where it matters:
 - a direct call whose parameter is borrowed, with an argument the caller
-  owns of a type that may hold a resource (`mayHoldResource`, on mono
-  types), keeps the
+  owns that may hold a resource, also inside a closure, a thunk or a task
+  (`keepsAt`: by the flow analysis of Opt/ResourceFlow, in a program that
+  casts by the mono type, `mayHoldRelease`), keeps the
   argument until the call returns (`l2r_release_after`), as Lean's
   `explicitRC` puts the caller's `dec` after the call; an argument the
   caller only borrows itself (a borrowed parameter, a field or array
@@ -270,10 +271,8 @@ def borrowInfo : LowerM (NameMap (Array Bool) × FVarIdSet) := do
   return r
 
 /-- The answers of `mayHoldResource`, by mono type (after
-`consumeMData.headBeta`), for the rest of the process: Opt/UnreadFields and
-Opt/Flatten ask it before Stage 4, the lowering of borrowed arguments
-(`borrowKeeps`, `boxedTarget`) at every call of a declaration with a
-borrowed parameter. An answer depends only on the type and on the
+`consumeMData.headBeta`), for the rest of the process: Opt/UnreadFields asks
+it before Stage 4. An answer depends only on the type and on the
 inductives of the environment, which only grows meanwhile: Opt/Flatten adds
 its tuples, Opt/ModPow2, Opt/PreludeIntOps and Opt/Utf8SizeAdd add their
 externs, and none of these changes an inductive that exists. One lean2rr
@@ -282,7 +281,10 @@ mixes two environments. -/
 initialize resourceTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
 /-- The answers of `mayHoldResource` with `closures` (`mayHoldRelease`), as
-`resourceTypeCache`'s. -/
+`resourceTypeCache`'s: flatten-structs' type rule (in a program that casts),
+the release order at a branch's start (`armReleaseVars`, `noteArmFields`)
+and, in a program that casts, the lowering of borrowed arguments
+(`keepsAt`) ask it. -/
 initialize releaseTypeCache : IO.Ref (Std.HashMap Expr Bool) ← IO.mkRef {}
 
 /-- Whether a value of mono type `e` may hold a resource with an
@@ -430,12 +432,41 @@ def noteArmFields (discr : FVarId) (scrut variant : String) (ps : Array (Param .
       if may then flags := flags.set! j true
   modify fun s => { s with armFields := s.armFields.insert (scrut, variant) flags }
 
+/-- Whether an argument passed to parameter `p` of declaration `f`, which
+Lean borrows, is kept until the call returns: when the parameter may hold
+a resource. In a program that does not cast, by the flow analysis that
+guards flatten-structs, run on the lowered declarations
+(`LowerCtx.resourceHeld?`): it follows closures, thunks and tasks, so a
+`Thunk IO.FS.Handle`, an `IO.FS.Stream` over a file or a callback that
+captured a handle is kept, as natively, and a value that holds none is
+not. Only for such parameters is lean2rr's code Lean's: flatten-structs
+leaves alone the declarations whose parameters may hold one (and the
+callees whose flags decide theirs), so the inference infers there what
+native Lean infers. Elsewhere lean2rr's code differs (a split structure's
+constructor is gone), and the inference can take a parameter borrowed that
+native Lean takes owned: keeping its argument then broke a tail call that
+native Lean makes (a cycle of tail calls that passes a new closure, thunk,
+task or `lcAny` value, which the callee stores in a structure whose
+reader flatten-structs splits, overflowed the stack: test
+`RtBorrowCycleFlatten`); not keeping it releases a value that holds no
+resource, which nobody can tell, but a pure task: its release time is
+lean2rr's (plan §10, "Release time of pure tasks"). In a program that casts
+(no flow analysis), by type (`mayHoldRelease`), as flatten-structs decides
+there: what it may split holds nothing that the type rule counts. A
+declaration the analysis did not see (none at present: it runs on the
+declarations that are lowered) falls back to the type rule. -/
+def keepsAt (f : Name) (p : Param .pure) : LowerM Bool := do
+  let ctx ← read
+  match ctx.resourceHeld? with
+  | some held => if ctx.decls.contains f then return held.contains (f, p.fvarId) else mayHoldRelease p.type
+  | none => mayHoldRelease p.type
+
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the
 variables (name, type) the caller owns that are passed to a parameter Lean
 borrows (at any position: `f x x` with the second parameter borrowed keeps
-`x`), of a type that may hold a resource (the type of the first borrowed
-parameter it is passed to). In the order of their first occurrence in
+`x`) that may hold a resource (`keepsAt` of the first borrowed parameter it
+is passed to). In the order of their first occurrence in
 `args`, as Lean's `addDecAfterFullApp` visits them (`releaseAfter`
 releases them in reverse). -/
 def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) :
@@ -456,9 +487,9 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     if lent.contains x then continue
     let some (v, t) := ctx.vars[x]? | continue
     if out.any (·.1 == v) then continue
-    -- The type of the borrowed parameter it is passed to.
+    -- The borrowed parameter it is passed to.
     let some p := (d?.bind (·.params[j]?)) | continue
-    if ← mayHoldResource p.type then out := out.push (v, t)
+    if ← keepsAt f p then out := out.push (v, t)
   return out
 
 /-- `call` (of type `ret`) followed by the release of `keeps`: the value of
@@ -480,7 +511,8 @@ def releaseAfter (call : RR.Expr) (ret : RR.Ty) (keeps : Array (String × RR.Ty)
 /-- The function a function value of declaration `f` (Reussir function
 `fn`, parameter types `params` by Lean position, of which it takes those
 `keep` marks (rule 4a; empty: all), result `ret`) calls: `fn` itself, or,
-when Lean borrows a parameter that may hold a resource, `fn_boxed`, which
+when Lean borrows a parameter that may hold a resource (`keepsAt`, as
+`borrowKeeps`), `fn_boxed`, which
 releases the borrowed arguments after the call (Lean's `_boxed`). Lean's
 borrow flags are by Lean position. -/
 def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (keep : Array Bool) (ret : RR.Ty) :
@@ -495,7 +527,7 @@ def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (keep : Array Bo
     let (_, i) := taken[k]
     if bs[i]?.getD false then
       let some p := d.params[i]? | continue
-      if ← mayHoldResource p.type then kept := kept.push k
+      if ← keepsAt f p then kept := kept.push k
   if kept.isEmpty then return fn
   let name := fn ++ "_boxed"
   unless (← hasFn name) do

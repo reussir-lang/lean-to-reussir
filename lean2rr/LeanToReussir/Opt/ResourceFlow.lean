@@ -330,10 +330,10 @@ structure Info where
 /-- Whether binder `x` of declaration `decl` can hold a resource. -/
 def Info.holds (info : Info) (decl : Name) (x : FVarId) : Bool := info.held.contains (decl, x)
 
-/-- The analysis of program `decls` (see the module comment); `none` when
-the program can read a value as another type (`programCasts`). -/
-def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Option Info) := do
-  if (programCasts (← getEnv) keys decls).isSome then return none
+/-- The analysis of program `decls` (see the module comment), for a program
+that cannot read a value as another type (the caller checks
+`programCasts`). -/
+def runNoCasts (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM Info := do
   let mut byName : Std.HashMap Name RFDecl := {}
   for d in decls do
     let (_, r) := splitArrows d.type d.params.size
@@ -373,6 +373,12 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Option In
       ({held.size} binders)"
     return { held, stats }
   let (info, _) ← act.run {}
-  return some info
+  return info
+
+/-- The analysis of program `decls` (see the module comment); `none` when
+the program can read a value as another type (`programCasts`). -/
+def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Option Info) := do
+  if (programCasts (← getEnv) keys decls).isSome then return none
+  return some (← runNoCasts keys decls)
 
 end LeanToReussir.Opt.ResourceFlow

@@ -777,8 +777,22 @@ built-in integers
   (`mayCarry`: `lcAny`, a handle, a function type, a thunk, a task, an
   array or an inductive with such an element or field; not `List Nat`,
   not `EST.Out ε σ Unit`, whose state field is `Void σ`). In a program
-  that can cast (`programCasts`), the type rule stays (`mayHoldResource`:
-  every `lcAny` may be a handle). Example: lean-regex's driver reads its
+  that can cast (`programCasts`), the type rule stays (`mayHoldRelease`:
+  every `lcAny` may be a handle, and every function type, thunk and task
+  may have captured one, as `mayCarry` counts them; with closures left out,
+  a record of closures over handles was split, and the worker's unused
+  closure field, a parameter Lean borrows, was kept until the call returned
+  where natively the record dies whole at the projection: judge
+  2026-10-27, test `RtBorrowClosureCast`). An accepted cost: in a program
+  that casts and makes resources, the pass leaves alone every declaration
+  with a closure, thunk or task parameter or result (RtMarkPersistentHandle,
+  RtMarkPersistentRefHandle, RtMarkPersistentPromise, RtPersistConstRef,
+  RtPersistInitHandleDirect and RtCastViewFewer lose workers, such as
+  `String.Slice.contains`' loop with its predicate; no benchmark program
+  casts). The borrow emulation asks the same analysis, run again on the
+  lowered declarations (by type in a program that casts: Lower/Borrow's
+  `keepsAt`), so it keeps an argument only for a parameter whose code the
+  pass left as Lean's. Example: lean-regex's driver reads its
   input with `IO.FS.readFile`. The handle goes to `Handle.read` and to
   `readBinToEndInto.loop` only, so only that class holds a resource, and
   `εClosure`'s `SearchState` (`Vector σ.Update n`, an `Array lcAny`) is
@@ -847,8 +861,8 @@ built-in integers
   tuple types, `tupleType`); `Lower/Values.lean`: `lowerLetValue` (tuple
   constructor and projections, through `tupleLayout?`); the type rule, for
   a program that can cast, is
-  `Lower/Borrow.lean`'s `mayHoldResource` (memoized for the run, shared with
-  `unread-fields` and the lowering: [translator.md](translator.md#questions-about-types-are-answered-once-per-run)); hook `PassConfig.monoPassesCore`
+  `Lower/Borrow.lean`'s `mayHoldRelease` (memoized for the run, shared with
+  the lowering: [translator.md](translator.md#questions-about-types-are-answered-once-per-run)); hook `PassConfig.monoPassesCore`
   (run by `Main.lean` after `monoPasses`; `--emit opt` prints the result).
   Tests `RtFlattenLoops`, `RtFlattenResults`, `RtFlattenSums`,
   `RtFlattenAlloc` (with `RtFlattenAlloc.alloc`), `RtFlattenShared` (with

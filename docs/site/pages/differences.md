@@ -148,8 +148,7 @@ schedules native Lean can produce. See
 - **Release time of borrowed parameters.** lean2rr emulates Lean's borrowing
   for values that can hold a resource, with Lean's inference run on
   lean2rr's instances. Where Lean infers its own specializations
-  differently, the release time follows lean2rr's instance. Resources inside
-  closures and thunks are released at their last use.
+  differently, the release time follows lean2rr's instance.
 - **Release order at the start of a branch.** lean2rr releases the values
   that die at the start of a branch in Lean's order, the newest first.
   Three shapes stay different. When an `if` or a `match` comes directly

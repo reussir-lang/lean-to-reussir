@@ -310,6 +310,33 @@ files): natively Lean's `pushProj` keeps a scrutinee alive into the `if`
 that follows the arm's start, where the field is read (`1S`); lean2rr
 releases it at the arm's start (`S1`).
 
+`RtBorrowClosure` checks the borrow emulation for values that hold a
+handle only through a closure, a thunk or a task (plan §5.8, "Borrowing"):
+passed to a parameter Lean borrows, each is kept until the call returns,
+so the helper reads its file before the handle is flushed (`1`, then `1T`
+once the caller releases it): a thunk (`Thunk.get` borrows), a record
+holding an `IO.FS.Stream` over the file whose flag only is read, an
+optional callback, a stream at an unused parameter, a `ReaderT` context, the
+record's helper as a function value (its `_boxed` variant) and a task
+asked `IO.hasFinished`. Before the fix lean2rr released them at their last
+use inside the helper (`T1`). `RtBorrowClosureCast` is the same in a
+program that casts, where flatten-structs decides by type which values may
+hold a resource: a record of two closures over different handles is not
+split (natively it dies whole at the projection, `B`; split, its unused
+closure was a borrowed parameter of the worker, kept until the call
+returned), and the borrowed record is kept as in `RtBorrowClosure`.
+`RtBorrowThunkCycle`: a cycle of tail calls that passes a new thunk, which
+holds no resource, to a parameter the other declaration borrows: natively
+it recurses (the caller's release after the call), through lean2rr it is a
+state machine; 10^5 steps on an 8 MB stack, the same result.
+`RtBorrowCycleFlatten`: cycles of tail calls that pass a new closure,
+thunk, task or `lcAny` value, which the callee stores in a structure whose
+reader flatten-structs splits (natively the parameter is owned, so each
+call is a tail call): 10^6 steps on an 8 MB stack. The borrow emulation
+decided by type kept each value until the call returned, and the stack
+overflowed (the `lcAny` cycle on dev too); it now asks the flow analysis
+that guards flatten-structs.
+
 `tests/runtime/leanrt-unit.sh` runs the runtime crate's unit tests, with
 debug assertions on (so leanrt's invariant checks run), in one build, as
 scripts/l2r.py builds leanrt, linked with the Reussir checkout's rcgmp

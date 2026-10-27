@@ -217,10 +217,12 @@ relative to `lean2rr/` unless they start with `scripts/`.
 - **What:** The questions that the passes ask about a mono type or a
   constructor again and again keep their answers for the whole run:
   - whether a type may hold a resource with an observable release
-    (`mayHoldResource`, `resourceTypeCache`): one function and one table
-    for `unread-fields`, `flatten-structs` (the type rule of a program that
-    can cast) and the lowering of borrowed arguments (`borrowKeeps`,
-    `boxedTarget`). It is a reachability through array elements and
+    (`mayHoldResource`, `resourceTypeCache`, for `unread-fields`), also
+    through closures, thunks and tasks (`mayHoldRelease`, one function with
+    a table of its own, `releaseTypeCache`, for `flatten-structs`' type
+    rule and the lowering of borrowed arguments, `keepsAt`, both in a
+    program that can cast, and the release order at a branch's start). It
+    is a reachability through array elements and
     constructor fields with one visited set per question, as rule 4's
     `mayHoldFn`: each type is looked at once per question, a `true` is
     kept for the types on the path that found it, a `false` for every type
