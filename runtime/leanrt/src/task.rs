@@ -10,8 +10,8 @@
 //! `busy`, `done(v)`, `bind(g)`; translation plan §5.14), with
 //! functions that force it (`l2r_task_get_S`, ...). This module connects
 //! the two through the primitives that generated code calls (`l2r_task_*`,
-//! unchanged from leanrt's own scheduler), so the generated code is the
-//! same:
+//! first written for leanrt's own scheduler; the generated code has since
+//! lost the parts that only that scheduler used: tasks/deferral.md):
 //!
 //! - **A task's id.** A cell that is a task lean-runtime has not finished
 //!   has an entry here, which holds its `TaskId`; a map from the cell's
@@ -132,7 +132,7 @@ struct Tasks {
     handed_tag: u64,
     deleting: bool,
     /// The cell a job is running, until it begins (`begin`): its forcing
-    /// code asks for its own sources (`source_next`) before it runs.
+    /// code waits for its own task first (`wait`), which returns at once.
     run_cell: usize,
     wait_any: WaitAny,
     /// The entry of each cell that has one, by the cell's address. A cell
@@ -454,11 +454,10 @@ pub fn sleep_ms(ms: u32) {
 /// A new deferred task at priority `prio` (Lean's `Task.Priority`, the
 /// whole value; a big `Nat` is `u64::MAX`): `Task.spawn`/`IO.asTask`
 /// (lean-runtime's `spawn`), or a dependent (`K_DEP`: `depend` follows).
-/// Every priority above 8 is a dedicated task (lean-runtime's LB-39).
-/// Returns 0 (the generated code's "run it now" answer, 1, is
-/// lean-runtime's now).
+/// Every priority above 8 is a dedicated task (lean-runtime's LB-39);
+/// lean-runtime never runs it inside the call.
 #[inline(never)]
-pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
+pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) {
     let mut flags = 0;
     if kind & K_PURE != 0 {
         flags |= PURE;
@@ -468,12 +467,11 @@ pub fn register(cell: usize, tag: u64, prio: u64, kind: u64) -> u64 {
     }
     let i = alloc(cell, tag as u32, flags, u32::try_from(prio).unwrap_or(u32::MAX));
     if kind & K_DEP != 0 {
-        return 0;
+        return;
     }
     let serial = ent(i).serial;
     let id = ls::spawn(make_job(i), prio, kind & K_PURE == 0);
     set_id(i, serial, id);
-    0
 }
 
 /// The task of entry `i` (if still there and unfinished) has id `id`.
@@ -497,22 +495,19 @@ fn set_id(i: u32, serial: u32, id: TaskId) {
 /// fast path, the caller's code (`lean_task_map_core` applies the function
 /// at once when the source has finished; lean-runtime's reviews HR-02 and
 /// RF14-03). No reference into the entries is held
-/// across the call: the job may add entries. Returns 0 (the generated
-/// code's "run it now" answer, 1, is never given: such a dependent has run
-/// already).
+/// across the call: the job may add entries.
 #[inline(never)]
-pub fn depend(src: usize, dep: usize, sync: bool) -> u64 {
-    let Some(d) = find(dep) else { return 0 };
+pub fn depend(src: usize, dep: usize, sync: bool) {
+    let Some(d) = find(dep) else { return };
     let e = ent(d);
     if e.flags & DEP == 0 {
-        return 0;
+        return;
     }
     e.flags &= !DEP;
     let (prio, keep_alive, serial) = (e.prio, e.flags & PURE == 0, e.serial);
     let src = id_of(src);
     let id = ls::depend(src, make_job(d), u64::from(prio), sync, keep_alive);
     set_id(d, serial, id);
-    0
 }
 
 /// The running `bind` task `cell` has run its function, which returned the
@@ -563,20 +558,19 @@ pub fn begin(cell: usize) -> u64 {
 /// lean-runtime's walk, with what the task left installed: a pool task's
 /// worker cells, a dedicated task's fresh stream context (closed at
 /// `Glue::task_end`, after the walk; review RS15-01), a `sync` task's
-/// thread. Returns 0.
+/// thread.
 #[inline(never)]
-pub fn end(cell: usize) -> u64 {
+pub fn end(cell: usize) {
     if let Some(i) = find(cell) {
         ent(i).flags |= DONE;
     }
-    0
 }
 
 /// The generated code's wait for task `a` (`Task.get`, `IO.wait`), whose
 /// cell does not hold its value yet: lean-runtime's `await_task` (in a
 /// `sync := true` task, the Lean panic native `Task.get` prints,
 /// `GET_IN_SYNC_TASK`, then `wait(id)`). Nothing for the task a job is
-/// about to run (its forcing code first asks for its own sources).
+/// about to run (its forcing code waits for its own task first).
 fn await_task(a: usize) {
     // First: between a job's hand-over and its `begin` nothing else may run
     // (a nested job would take `run_cell`).
@@ -586,21 +580,13 @@ fn await_task(a: usize) {
     ls::await_task(id_of(a), |msg| crate::lean_panic(msg.as_bytes(), false));
 }
 
-/// Before pending task `a` runs (`l2r_task_force_sources`): it is waited
-/// for (lean-runtime runs it, or what it waits for, once a worker would);
-/// then nothing is left for the generated code to run (`u64::MAX`).
+/// The forcing code's wait for task `a`, pending (`l2r_task_source_next_at`:
+/// lean-runtime runs it, or what it waits for, once a worker would) or
+/// `busy` (`l2r_task_wait_running`: running on another context, or on this
+/// one, which needs itself and waits forever, as natively): `await_task`.
 #[inline(never)]
-pub fn source_next(a: usize) -> u64 {
+pub fn wait(a: usize) {
     await_task(a);
-    u64::MAX
-}
-
-/// `Task.get` of a `busy` task `a` (running on another context, or on this
-/// one: it needs itself, and waits forever, as natively).
-#[inline(never)]
-pub fn wait_running(a: usize) -> u64 {
-    await_task(a);
-    1
 }
 
 /// The task handed over (`dispatch`), with its reference.
@@ -620,18 +606,10 @@ pub fn deleting() -> bool {
 }
 
 /// The tag of the cell handed over (`dispatch`), once; `u64::MAX` when none
-/// is (the generated final run, `l2r_run_pending_tasks`, after
-/// lean-runtime's `finish`, finds none).
+/// is.
 #[inline(never)]
 pub fn next_tag() -> u64 {
     std::mem::replace(&mut tasks().handed_tag, u64::MAX)
-}
-
-/// The generated walk of a finished task's dependents (`l2r_task_walk`):
-/// lean-runtime walks them; nothing is ever handed here.
-#[inline]
-pub fn walk_next() -> u64 {
-    u64::MAX
 }
 
 /// Whether task `a` has finished for lean2rr: 2; otherwise 1 (only "has

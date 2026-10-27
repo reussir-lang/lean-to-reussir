@@ -15,21 +15,22 @@ entries here are how lean2rr's generated code reaches them.
   `l2r_task_run_one`) was written for leanrt's own scheduler; its
   primitives (`l2r_task_*` in the prelude, `leanrt::task`) map it onto
   lean-runtime's API: `register` is `spawn` (or, for a dependent, records
-  the task until `depend_at`, which is `depend`); `source_next` (a forcer's
-  wait for a pending task) and `wait_running` (for a `busy` one) are
-  `await_task` (`wait`, after `Task.get`'s panic in a `sync` task); `query`
+  the task until `depend_at`, which is `depend`); `wait` (a forcer's wait
+  for a pending task, `l2r_task_source_next_at`, and for a `busy` one,
+  `l2r_task_wait_running`) is `await_task` (lean-runtime's `wait`, after
+  `Task.get`'s panic in a `sync` task); `query`
   is `state`; `cancel` (`l2r_task_cancel<S>`, which takes the task's cell,
   hunt HTG-02), `check_canceled`, `sleep_ms`, `shutdown` (`finish`) and
   `promise_new` are the calls of the same names; `deferring` is
   `manager_running`, read from the numbers `main`'s start read
   (lean-runtime starts at the first task:
   [scheduler.md](scheduler.md#lean-runtimes-scheduler-starts-at-the-first-task)).
-  The answers that only leanrt's own scheduler gave are gone from the
-  generated code: `register` and `depend` answer 0 (lean-runtime runs
-  nothing inside `spawn`, and runs a `sync` dependent inside `depend`
-  itself), `end` answers 0 (lean-runtime walks the dependents once the job
-  has returned), `source_next` answers `u64::MAX` (lean-runtime's `wait`
-  runs what the task needs), and none of these answers is read. The
+  The answers that only leanrt's own scheduler gave are gone:
+  `register`, `depend`, `end` and `wait` answer nothing (lean-runtime runs
+  nothing inside `spawn` and runs a `sync` dependent inside `depend`
+  itself, walks the dependents once the job has returned, and its `wait`
+  runs what the task needs), and their prelude primitives answer 0, which
+  the generated code does not read. The
   generated code has one dispatcher, `l2r_task_run_one`; the walk
   (`l2r_task_walk`, `l2r_task_walk_if`, the trampoline `l2r_task_walk_c`),
   the run of a task's sources (`l2r_task_force_sources`, now a direct call
@@ -37,7 +38,8 @@ entries here are how lean2rr's generated code reaches them.
   (`l2r_run_pending_tasks`), the "run it now" branches after `register`
   and `depend`, and the prelude's `l2r_task_walk_next` and
   `l2r_task_handed` were removed (task glue cleanup, 2026-10-27; they ran
-  nothing on lean-runtime). Two never-taken branches stay as fallbacks:
+  nothing on lean-runtime), and with them leanrt's `walk_next`. Two
+  never-taken branches stay as fallbacks:
   `IO.getTaskState`'s branch for an answer other than 0, 1 or 2, which
   holds the task's cell across the query
   ([the program's last reference](#the-programs-last-reference-releases-a-task)),
@@ -65,7 +67,7 @@ entries here are how lean2rr's generated code reaches them.
   hands it with its tag (`handed`, `next_tag`) to the program's
   dispatcher `l2r_task_run_one_c`, which runs the task as a worker would
   (`l2r_task_step_S`): the forcing code's wait for the task
-  (`source_next`) returns at once for it (`run_cell`), `l2r_task_begin`
+  (`wait`) returns at once for it (`run_cell`), `l2r_task_begin`
   answers whether it runs as on a worker thread (lean-runtime's
   `Glue::task_begin`), and `l2r_task_end` marks it finished for lean2rr
   (`DONE`). A bind task whose function returned an unfinished task reports

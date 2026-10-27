@@ -2577,19 +2577,19 @@ fn l2r_lcell_swap<T>(c : LCell<T>, v : T) -> T [{
 fn l2r_task_register<S>(c : LCell<S>, tag : u64, prio : u64, kind : u64) -> u64 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let r = leanrt::task::register(p, tag, prio, kind);
+        leanrt::task::register(p, tag, prio, kind);
         drop(c);
-        r
+        0
     }
 }];
 
 // The wait for the pending task `a` that a forcer needs
-// (`leanrt::task::source_next`): lean-runtime's `wait`, after the Lean panic
-// of `Task.get` in a `sync := true` task; the wait may run the task's job on
+// (`leanrt::task::wait`): lean-runtime's `wait`, after the Lean panic of
+// `Task.get` in a `sync := true` task; the wait may run the task's job on
 // this stack. No wait for the task the running job is about to run.
-// Returns `u64::MAX`, which the generated code does not read.
+// Returns 0, which the generated code does not read.
 #[ffi(import)]
-fn l2r_task_source_next_at(a : u64) -> u64 [{ leanrt::task::source_next(a as usize) }];
+fn l2r_task_source_next_at(a : u64) -> u64 [{ { leanrt::task::wait(a as usize); 0 } }];
 
 #[ffi(import)]
 fn l2r_task_deleting() -> bool [{ leanrt::task::deleting() }];
@@ -2637,9 +2637,9 @@ fn l2r_task_bind_wait<S>(c : LCell<S>, src : u64) -> u64 [{
 fn l2r_task_end<S>(c : LCell<S>) -> u64 [{
     {
         let p: usize = unsafe { ::std::mem::transmute_copy(&c) };
-        let r = leanrt::task::end(p);
+        leanrt::task::end(p);
         drop(c);
-        r
+        0
     }
 }];
 
@@ -2681,7 +2681,7 @@ fn l2r_task_cancel<S>(c : LCell<S>) -> u64 [{
 // value stored (lean-runtime's review HR-02). Returns 0, which the
 // generated code does not read.
 #[ffi(import)]
-fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ leanrt::task::depend(src as usize, dep as usize, sync) }];
+fn l2r_task_depend_at(src : u64, dep : u64, sync : bool) -> u64 [{ { leanrt::task::depend(src as usize, dep as usize, sync); 0 } }];
 
 // 2 finished, else 1 (`leanrt::task::status`).
 #[ffi(import)]
@@ -2749,10 +2749,11 @@ fn l2r_lazy_cycle<T>() -> T {
 
 // `Task.get` of a `busy` task `a`: it runs on another context of the
 // runtime's scheduler, which has blocked (`leanrt::sched`); wait until it
-// has finished (1), then the caller looks again. On the running context it
-// needs itself, and this waits forever.
+// has finished (`leanrt::task::wait`), then the caller looks again. On the
+// running context it needs itself, and this waits forever. Returns 0, which
+// the generated code does not read.
 #[ffi(import)]
-fn l2r_task_wait_running(a : u64) -> u64 [{ leanrt::task::wait_running(a as usize) }];
+fn l2r_task_wait_running(a : u64) -> u64 [{ { leanrt::task::wait(a as usize); 0 } }];
 
 // `IO.waitAny` when every task of the list is running or waits for a
 // promise: wait until some task finishes (1), then the list is looked at
