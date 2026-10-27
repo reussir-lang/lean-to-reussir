@@ -89,12 +89,15 @@ a release counts as such a use (its projection comes first, then the
 releases in their order); `merge-fns` merges only functions whose code,
 releases included, is the same up to names. Programs that make no
 resources come out unchanged, and so do arms where fewer than two such
-values die. Arms that only reach `l2r_unreachable` are left alone. Not
-emulated (plan §10, "Release order at the start of a branch"): natively
-Lean's `pushProj` moves the projections at an alternative's start into the
-branches of a `cases` that follows at once, so the scrutinee dies in the
-branches that read no field (at their start) and after the projection in
-the others, where lean2rr releases it at the arm's start; a `cases` whose
+values die. Arms that only reach `l2r_unreachable` are left alone.
+Natively Lean's `pushProj` moves the projections at an alternative's start
+into the branches of a `cases` that follows at once, so the scrutinee dies
+in the branches that read no field (at their start) and after the
+projection in the others; where `lazy-fields` keeps a scrutinee that may
+hold a resource live and binds a field later (matching it again), it does
+so only there. Not emulated (plan §10, "Release order at the start of a
+branch"): elsewhere, lean2rr releases the scrutinee at the arm's start; a
+`cases` whose
 alternatives `simpCase` folds into a default alternative only after
 `toImpure` keeps its scrutinee's index there; a join point's body that
 lean2rr places under a `match` that natively does not hold its

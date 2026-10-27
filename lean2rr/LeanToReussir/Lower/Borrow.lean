@@ -439,7 +439,11 @@ structure ArmOrders where
   /-- For a constructor's alternative of a `cases` with two or more
   alternatives that can run (natively a `cases`, `simpCase`), by its first
   field: the order at which its scrutinee counts as bound anew there
-  (`withCtorAlt`), before the alternative's fields. -/
+  (`withCtorAlt`), before the alternative's fields. The first field names
+  one alternative (binders are unique), where a scrutinee and a
+  constructor can name two (`cases` on one value in two branches); an
+  alternative without fields gets none, and needs none: its value holds
+  nothing. -/
   alts : Std.HashMap (Name × FVarId) Nat := {}
   /-- For a join point: the scrutinees renumbered where it is declared (the
   recorded scrutinees of the alternatives around its declaration, in

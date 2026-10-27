@@ -72,7 +72,20 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   a new constructor, returned whole, or passed whole to a call), the match
   binds only the fields used while the value is live; an inner alternative
   that no longer uses the value matches it again (a structure: projects
-  it) and binds the fields it uses there.
+  it) and binds the fields it uses there. For a matched value that may
+  hold a resource (in a program that makes resources: `LowerState.armVars`,
+  `pushOnlyScrut`), a field is bound later only where Lean's `pushProj`
+  would move its projection: into the branches of a `cases` that is the
+  alternative's code itself (no `let` first; not a split of a `Nat` or an
+  `Int`, natively `let`s; seen through a `cases` with one alternative,
+  which is a structure's projection in lean2rr's mono code, natively a
+  projection in `pushProj`'s run: `pushCases?`), and on through each
+  branch whose code is again such a `cases`; where the code is not, the
+  fields it uses are bound there, as without the pass. It sees the code
+  after `jp-sink`, which moves a join point into the one branch that jumps
+  to it: a `cases` that Lean's code has such a join point before (natively
+  it stops `pushProj`) then looks as if it came at once; no program shows
+  that shape.
 - **Why:** Reussir projects every bound field at the match with an
   increment; the field's later release looks like a reusable cell to token
   reuse, which prefers it to the cell actually freed
@@ -82,10 +95,20 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   per insertion → 2.2, bc951a4); BST inserts with `Nat`/`String` keys
   (9f35c6c); `List.mergeSort`'s merge allocated a cell per step, and the
   result's memory order then depended on allocator state (5-9x native at
-  some lengths; round 6 S6-02, 26515ee).
+  some lengths; round 6 S6-02, 26515ee). The rule for values that may hold
+  a resource keeps native's release order at a branch's start
+  ([ownership.md](../ownership.md#values-that-die-at-the-start-of-an-arm-are-released-newest-first)):
+  binding a field in a branch after a `let` (`if n == 0`, natively
+  `Nat.decEq`, where `pushProj` stops) released the value after that
+  branch's own releases, natively at its start with them, newest first
+  (`1T`, natively `T1`; review of the arm release order; test
+  `RtDropArmOrder`); and a structure's field read first (a `cases` on the
+  structure in mono code) was taken for the branch, so a field stayed
+  pending past a call that follows (`1T`, natively `T1`, where the call
+  stops `pushProj`; its review, test `RtDropArmOrder`'s `projLetRef`).
 - **Where:** `Opt/LazyFields.lean`: `lazyStructFields`, `lazyEnumFields`,
   `lazyLowerAlt`, `usesWhileLive`, `liveScan`, `usedAsArg`,
-  `returnedWhole`, `LazyFieldsState`.
+  `returnedWhole`, `LazyFieldsState`, `pushCases?`, `pushOnlyScrut`.
 - **Remove only if:** the pass is off (correct, slower), or Reussir's token
   reuse stops preferring decrements that never free in the
   call-before-branch case (the parked patch 01-a did not cover it).

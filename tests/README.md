@@ -313,6 +313,12 @@ loop's state machine running one, a part `Outline` cut out of the arm's
 long path (`S1`, `1xSk0`). Each shape writes its tags to a file of its own
 and prints it. `RtDropArmOrderJp` runs join points declared in such an arm
 with `jp-small` off (`.opts`), so that a small one is outlined too (`S1`).
+From its review: `lazy-fields` binds a field of a value that may hold a
+resource only where Lean's `pushProj` would move its projection (after a
+`let`, at the arm: `T1`, `T21`; into the branches of an `if` right at the
+arm's start: `1T`; and in a state machine's variant, `1xTkSk0`; a
+structure's field read first, a projection natively, then a call that stops
+`pushProj`: `T1`, and the structure's field tested right away: `1T`).
 `RtDropArmPushProj` is a documented difference (plan §10, with expectation
 files): natively Lean's `pushProj` keeps a scrutinee alive into the `if`
 that follows the arm's start, where the field is read (`1S`); lean2rr

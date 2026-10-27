@@ -202,6 +202,10 @@ structure LazyMatch where
   /-- A structure: its pending fields are projected where they are used
   (Reussir has no structure patterns). -/
   struct : Bool := false
+  /-- The value may hold a resource (`pushOnlyScrut`): a field stays
+  pending only where native Lean's `pushProj` would move its projection
+  (`pushCases?`). -/
+  pushOnly : Bool := false
 
 /-- The pass's state in the code-lowering context (`CodeCtx.ext`): the
 matched values whose fields are bound lazily, outermost first. -/
@@ -221,6 +225,54 @@ def CodeCtx.lazyMatches (ctx : CodeCtx) : Array LazyMatch :=
 def CodeCtx.withLazyMatches (ctx : CodeCtx) (ms : Array LazyMatch) : CodeCtx :=
   ctx.setExt lazyFieldsKey ({ values := ms } : LazyFieldsState)
 
+/-! ## Values that may hold a resource
+
+Natively the projections of an alternative's fields stay at its start,
+except that Lean's `pushProj` (before `explicitRc`) moves them into the
+branches of a `cases` that follows them at once, into those that use them,
+and on through each branch whose code is again such a `cases`. Where the
+projections are decides where the matched value dies, and so the release
+order at the start of a branch (Emit/ArmRelease, plan §5.8). For a matched
+value that may hold a resource (in a program that makes resources), this
+pass binds a field later only as `pushProj` would move its projection: into
+the branches of a `cases` that follows the alternative's start at once
+(`pushCases?`: also past a structure's projection, a `cases` with one
+alternative in mono code; on through a branch where the value is not live
+too, while its code is again such a `cases`), and binds it where the code
+is not such a `cases`; it
+matches the value again where the value is no longer live only to bind
+such a pending field (elsewhere the value dies at the branch's start, as
+natively). Elsewhere its rule is unchanged. (Where the value does not stay
+live, the pass binds every field at the match, also for such a value: plan
+§10.) -/
+
+/-- The `cases` that code `k` is, when native Lean's `pushProj` would move
+projections before it into its branches: `k` is that `cases` itself (no
+`let`, join point or local function first), not a split of a `Nat` or an
+`Int`, which native Lean tests with `Nat.decEq` and friends (`let`s:
+`casesNatToMono`) where lean2rr keeps the `cases` (`int-match`), and seen
+through a `cases` with one alternative (a structure's projection is one in
+lean2rr's mono code, `structProjCases`, natively a projection that joins
+`pushProj`'s run; a `cases` whose other alternatives Lean removed lets the
+projections into its one alternative). Not seen: `jp-sink`, a lowering
+hook, moves a join point into the one branch that jumps to it, so a `cases`
+that Lean's code has a join point before can look as if it came at once;
+natively the join point stops `pushProj` (no program shows it: Lean's own
+passes leave such a join point after `floatLetIn` rarely). -/
+partial def pushCases? (k : Code .pure) : Option (Cases .pure) :=
+  match k with
+  | .cases cs =>
+    if cs.typeName == ``Nat || cs.typeName == ``Int then none
+    else if let #[alt] := cs.alts then pushCases? alt.getCode
+    else some cs
+  | _ => none
+
+/-- Whether the matched value `discr` of the declaration being lowered may
+hold a resource and its code owns it (`LowerState.armVars`; empty in a
+program that makes no resources). -/
+def pushOnlyScrut (ctx : CodeCtx) (discr : FVarId) : LowerM Bool :=
+  getPart (·.armVars.contains (ctx.decl, discr))
+
 /-! ## The hooks -/
 
 /-- The binding of a structure alternative's fields: when the structure is a
@@ -234,10 +286,14 @@ def lazyStructFields (prev : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx
   let lazyOk := arm.shared &&
     (usedAsArg ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k)
   if !lazyOk then return ← prev ctx arm
+  let pushOnly ← pushOnlyScrut ctx arm.discr
   let mut ctx' := ctx
   let mut lets := #[]
-  let early := usesWhileLive ctx.jpBodies arm.discr k {}
   let used := codeUses k {}
+  -- A value that may hold a resource: a field is bound later only as
+  -- `pushProj` moves projections (`pushCases?`); otherwise every field the
+  -- code uses is bound here.
+  let early := if pushOnly && (pushCases? k).isNone then used else usesWhileLive ctx.jpBodies arm.discr k {}
   let mut pending := #[]
   for h : i in [:arm.params.size] do
     let p := arm.params[i]
@@ -255,7 +311,7 @@ def lazyStructFields (prev : CodeCtx → CasesArm → LowerM (ArmLets × CodeCtx
     | _ => ctx' := { ctx' with vars := ctx'.vars.insert p.fvarId ("L2RUnit::u{}", .unit) }
   if !pending.isEmpty then
     let l : LazyMatch := { discr := arm.discr, scrut := arm.scrut, ty := arm.ty, variant := arm.layout.variant,
-                           nbinders := 0, fields := pending, pending, struct := true }
+                           nbinders := 0, fields := pending, pending, struct := true, pushOnly }
     ctx' := ctx'.withLazyMatches (ctx'.lazyMatches.push l)
   return (lets, ctx')
 
@@ -272,10 +328,14 @@ def lazyEnumFields (prev : CodeCtx → CasesArm → Array (Option String) → Lo
   unless !binders.isEmpty && arm.shared &&
       (usedAsArg ctx.jpBodies arm.discr k || returnedWhole ctx.jpBodies arm.discr k) do
     return (binders, ctx)
+  let pushOnly ← pushOnlyScrut ctx arm.discr
   let mut binders := binders
   let mut ctx' := ctx
-  let early := usesWhileLive ctx.jpBodies arm.discr k {}
   let used := codeUses k {}
+  -- A value that may hold a resource: a field is bound later only as
+  -- `pushProj` moves projections (`pushCases?`); otherwise every field the
+  -- code uses is bound here.
+  let early := if pushOnly && (pushCases? k).isNone then used else usesWhileLive ctx.jpBodies arm.discr k {}
   let mut fields := #[]
   let mut pending := #[]
   for h : i in [:arm.params.size] do
@@ -290,7 +350,7 @@ def lazyEnumFields (prev : CodeCtx → CasesArm → Array (Option String) → Lo
   if !fields.isEmpty then
     let l : LazyMatch :=
       { discr := arm.discr, scrut := arm.scrut, ty := arm.ty, variant := arm.layout.variant,
-        nbinders := binders.size, fields, pending }
+        nbinders := binders.size, fields, pending, pushOnly }
     ctx' := ctx'.withLazyMatches (ctx'.lazyMatches.push l)
   return (binders, ctx')
 
@@ -312,6 +372,9 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
   -- Code uses of the fields, except of variables another hook bound again
   -- here (`CodeCtx.pinned`), which keep that binding.
   let used := (codeUses k {}).filter (!ctx.pinned.contains ·)
+  -- Whether native `pushProj` would move projections on into `k`'s
+  -- branches (for the values that may hold a resource).
+  let pushHere := (pushCases? k).isSome
   for h : i in [:lazy.size] do
     let l := lazy[i]
     let live := usesVar ctx.jpBodies l.discr k
@@ -319,7 +382,11 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
       -- A structure: project the pending fields this code uses (while
       -- the structure is live, only those needed before it dies).
       let need := l.pending.filter (used.contains ·.1)
-      let now := if live && !need.isEmpty then
+      -- A value that may hold a resource: on into the branches of a
+      -- `cases` that follows here at once, whether live or not; here
+      -- where the code is not such a `cases` (`pushCases?`).
+      let defer := if l.pushOnly then pushHere else live
+      let now := if defer && !need.isEmpty then
           let early := usesWhileLive ctx.jpBodies l.discr k {}
           need.filter (early.contains ·.1)
         else need
@@ -340,11 +407,20 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
       ctx' := ctx'.withLazyMatches (if rest.isEmpty then lazy.eraseIdx! i else lazy.set! i { l with pending := rest })
       let body ← self ctx' k
       return { body with lets := dropUnusedConvs lets convs body ++ body.lets }
-    let now := if live then
+    -- A value that may hold a resource: its pending fields go on into the
+    -- branches of a `cases` that follows here at once (`pushCases?`),
+    -- where the value, live or not, is matched again; where the code is
+    -- not such a `cases`, the pending fields it uses are bound here, and
+    -- where it no longer uses the value it is matched again only to bind
+    -- pending fields (it dies here otherwise, as natively).
+    let push := l.pushOnly && pushHere
+    let now := if live || push then
         let need := l.pending.filter (used.contains ·.1)
         if need.isEmpty then need else
+        if l.pushOnly && !push then need else
           let early := usesWhileLive ctx.jpBodies l.discr k {}
           need.filter (early.contains ·.1)
+      else if l.pushOnly then l.pending.filter (used.contains ·.1)
       else l.fields.filter (used.contains ·.1)
     if now.isEmpty then continue
     -- The value's current name: the match of an enclosing lazy value may
@@ -366,7 +442,7 @@ def lazyLowerAlt (prev : (self code : CodeCtx → Code .pure → LowerM RR.Block
       conv := conv ++ c
       ctx' := ctx2
     let rest := l.pending.filter fun q => !now.any (·.1 == q.1)
-    ctx' := ctx'.withLazyMatches (if live then lazy.set! i { l with pending := rest } else lazy.eraseIdx! i)
+    ctx' := ctx'.withLazyMatches (if live || push then lazy.set! i { l with pending := rest } else lazy.eraseIdx! i)
     let body ← self ctx' k
     conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
     return .ofExpr (.mtch (.var scrut) #[

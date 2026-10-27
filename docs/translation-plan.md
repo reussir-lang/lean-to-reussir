@@ -3464,11 +3464,13 @@ Each item says what differs and when.
   projections at the start of an alternative into the branches of a
   `cases` that follows at once, so the scrutinee stays live into that
   `cases`: it dies at the start of the branches that read none of the
-  projected fields, and after the projection in the others; lean2rr
-  releases it at the arm's start, after it takes the fields (`match r |
-  .two _ n => if c then …n… else …h1…`: `1S` natively in the `then`
-  branch, where `h1` dies, `S1` through lean2rr; test
-  `RtDropArmPushProj`, with expectation files). Natively a `cases` whose
+  projected fields, and after the projection in the others. Where
+  `lazy-fields` keeps a scrutinee that may hold a resource live, it binds
+  a field later only there; elsewhere lean2rr releases the scrutinee at
+  the arm's start, after it takes the fields (`match r | .two _ n => if c
+  then …n… else …h1…`: `1S` natively in the `then` branch, where `h1`
+  dies, `S1` through lean2rr; test `RtDropArmPushProj`, with expectation
+  files). Natively a `cases` whose
   alternatives Lean's `simpCase` folds into a default alternative only
   after `toImpure` (bodies that become equal there) keeps its scrutinee's
   index in that alternative, where lean2rr counts the scrutinee as bound

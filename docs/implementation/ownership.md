@@ -314,7 +314,17 @@ runtime.
   arm, the scrutinee went by its own binding (`1S`, natively `S1`, which
   Reussir's order had given before). Hence an order for each
   renumbering, from the declaration's code, and the seeds of cut-out code
-  (tests in `RtDropArmOrder` and `RtDropArmOrderJp`).
+  (tests in `RtDropArmOrder` and `RtDropArmOrderJp`). Its review found that
+  `lazy-fields` bound a field in a branch after a `let` (`if n == 0`), where
+  native Lean's `pushProj` stops and the projection stays at the arm's
+  start, so the value died after that branch's own releases (`1T`,
+  natively `T1`; also in a state machine's variant, `1xSk0Tk`, natively
+  `1xTkSk0`): `lazy-fields` now binds a field of a value that may hold a
+  resource only where `pushProj` would move its projection, as without the
+  pass elsewhere (seen through a structure's projection, which mono code
+  writes as a `cases` with one alternative: taken for the branch, it let a
+  field stay pending past a following call, `1T`, natively `T1`)
+  ([control-flow/cases.md](control-flow/cases.md#fields-of-a-live-matched-value-are-bound-where-they-are-used-lazy-fields)).
 - **Where:** `Emit/ArmRelease.lean` (`goBlock`, `goMatch`, `Pos`,
   `Info.key`, `LoweredProgram.armRelease`); `Lower/Borrow.lean`:
   `armReleaseVars`, `armWalk`, `ArmOrders`, `mayHoldAt`,
@@ -336,7 +346,8 @@ runtime.
   alternative's start into the branches of a `cases` that follows at
   once, so the scrutinee dies at the start of the branches that read no
   field and after the projection in the others, where lean2rr releases it
-  at the arm's start (test `RtDropArmPushProj`, with expectation files);
+  at the arm's start, but where `lazy-fields` keeps it live (test
+  `RtDropArmPushProj`, with expectation files);
   a `cases` whose alternatives `simpCase` folds into a default
   alternative only after `toImpure` keeps its scrutinee's index there; a
   join point's body that lean2rr places under a `match` that natively does

@@ -154,7 +154,9 @@ schedules native Lean can produce. See
   Three shapes stay different. When an `if` or a `match` comes directly
   after the start of an arm, Lean reads the matched value's fields in the
   branches that use them: the matched value stays alive into those
-  branches. lean2rr releases it at the start of the arm. Lean can fold the
+  branches. lean2rr releases it at the start of the arm, except where the
+  arm also keeps the value whole (the optional pass `lazy-fields`). Lean
+  can fold the
   alternatives of a `cases` into a default alternative after a late pass:
   there the matched value keeps its place in the order, and lean2rr counts
   it as the newest. And when lean2rr copies a join point's body to a jump

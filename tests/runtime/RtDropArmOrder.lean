@@ -500,6 +500,120 @@ state machine running such a join point (J4), and inside a part that
     else IO.println s!"  partCut else: {← IO.FS.readFile p}"
   | .none => h1.putStr "n"
 
+/-- `lazy-fields` binds a field where it is used when the matched value
+stays live (`q` passed whole in the `else` branch); for a value that may
+hold a resource only as Lean's `pushProj` moves projections: with a `let`
+(the test of `n`) between the arm's start and the branch, natively the
+projection stays at the arm's start, so `q` dies at the `then` branch's
+start with the other handles, `q` the newest (`T1`, `T21`); with the branch
+right at the arm's start (a test of a `Bool` parameter), natively the
+projection moves into the `then` branch and `q` dies after the branch's
+own releases (`1T`). -/
+@[noinline] def lazyLet (p : System.FilePath) (b : Bool) (n : Nat) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  IO.println "  lazyLet"
+  match q with
+  | .two _ m =>
+    if n == 0 then IO.println s!"  lazyLet {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"
+  | .none => h1.putStr "n"
+
+@[noinline] def lazyLet2 (p : System.FilePath) (b : Bool) (n : Nat) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  let h2 ← hnd p "2"
+  IO.println "  lazyLet2"
+  match q with
+  | .two _ m =>
+    if n == 0 then IO.println s!"  lazyLet2 {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"; h2.putStr "y"
+  | .none => h1.putStr "n"; h2.putStr "m"
+
+@[noinline] def lazyBool (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  IO.println "  lazyBool"
+  match q with
+  | .two _ m =>
+    if c then IO.println s!"  lazyBool {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"
+  | .none => h1.putStr "n"
+
+/-- A loop's state machine (J4) whose variant runs a join point declared in
+`r`'s arm, holding a match on `q`: at the loop's end `h1` closes first, then
+`q` (`T`), then `r` (`S`): `1xTkSk0`. -/
+@[noinline] partial def machineNested (p : System.FilePath) (n : Nat) (r q : R) : IO Unit := do
+  let h1 ← hnd p s!"{n}"
+  IO.println s!"  machineNested {n}"
+  match r with
+  | .two _ a =>
+    let tag ← if n % 2 == 0 then do IO.print ""; pure "e" else pure "o"
+    IO.println s!"  machineNested {tag} {n} {a}"
+    IO.println s!"  machineNested {tag} {n + 1} {n * 3}"
+    IO.println s!"  machineNested {tag} {n + 2} {n * 4} {n * n}"
+    IO.println s!"  machineNested {tag} {n + 3} {n * 5} {n * n * n}"
+    match q with
+    | .two _ bb =>
+      if n == 0 then
+        IO.println s!"  machineNested end {bb}: {← IO.FS.readFile p}"
+      else
+        keepR r
+        keepR q
+        h1.putStr "x"
+        machineNested p (n - 1) r q
+    | .none => h1.putStr "q"
+  | .none => h1.putStr "r"
+
+/-- A structure's field read in the arm (lean2rr's mono code matches the
+structure, `structProjCases`; natively a projection), then a call, then the
+branch: natively the call stops `pushProj`, `m` is projected at the arm's
+start and `q` dies at the `then` branch's start with `h1`, `q` the newer
+(`T1`); with the branch testing the structure's field right away,
+`pushProj` moves `m` into the branch (`1T`). The structure is read from a
+reference, so `flatten-structs` does not split it. -/
+structure Cfg where
+  verbose : Bool
+  n : Nat
+
+@[noinline] def projLetRef (p : System.FilePath) (b c : Bool) (ref : IO.Ref Cfg) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  let cfg ← ref.get
+  IO.println "  projLetRef"
+  match q with
+  | .two _ m =>
+    IO.println s!"  projLetRef n={cfg.n}"
+    if c then IO.println s!"  projLetRef {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"
+  | .none => h1.putStr "n"
+
+@[noinline] def projDiscrRef (p : System.FilePath) (b : Bool) (ref : IO.Ref Cfg) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  let cfg ← ref.get
+  IO.println "  projDiscrRef"
+  match q with
+  | .two _ m =>
+    if cfg.verbose then IO.println s!"  projDiscrRef {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"
+  | .none => h1.putStr "n"
+
+/-- The arm's `if c` tests a variable that an earlier `if c` already
+tested (`let tag ← if c …` makes a join point and a `cases c` before the
+match): the arm's own `cases c` comes at once, so `pushProj` moves `m` into
+its `then` branch (`1T`). -/
+@[noinline] def sharedDiscr (p : System.FilePath) (b c : Bool) : IO Unit := do
+  let q ← mkRt p "T" b
+  let h1 ← hnd p "1"
+  let tag ← if c then do IO.print ""; pure "x" else pure "y"
+  IO.println s!"  sharedDiscr {tag}"
+  match q with
+  | .two _ m =>
+    if c then IO.println s!"  sharedDiscr {m}: {← IO.FS.readFile p}"
+    else keepR q; h1.putStr "x"
+  | .none => h1.putStr "n"
+
 def fresh (name : String) : IO System.FilePath := do
   let p : System.FilePath := s!"droparm-{name}.txt"
   IO.FS.writeFile p ""
@@ -551,3 +665,12 @@ def main (args : List String) : IO Unit := do
   let p ← fresh "mc"
   machineCut p 1 (← mkRt p "S" b); report "mc"
   partCut (← fresh "pc") b (!b); report "pc"
+  lazyLet (← fresh "ll") b (if b then 0 else 1); report "ll"
+  lazyLet2 (← fresh "ll2") b (if b then 0 else 1); report "ll2"
+  lazyBool (← fresh "lb") b b; report "lb"
+  let p ← fresh "mn"
+  machineNested p 1 (← mkRt p "S" b) (← mkRt p "T" b); report "mn"
+  let ref ← IO.mkRef ({ verbose := b, n := 7 } : Cfg)
+  projLetRef (← fresh "plr") b b ref; report "plr"
+  projDiscrRef (← fresh "pdr") b ref; report "pdr"
+  sharedDiscr (← fresh "shd") b b; report "shd"
