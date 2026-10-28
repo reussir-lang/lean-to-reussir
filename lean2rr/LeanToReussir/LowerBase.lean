@@ -461,6 +461,17 @@ structure LowerState where
   /-- `armReleaseVars`' renumbered scrutinees where each join point is
   declared (`ArmOrders.jps`), by declaration and join point. -/
   armJps : Std.HashMap (Name × FVarId) (Array (Nat × Nat)) := {}
+  /-- Where Lean's `insertResetReuse` resets a matched value (`ResetSites`,
+  Lower/Borrow's `inferBorrowedParams`; by declaration, the `cases` and
+  constructor of the alternative that holds the `reset`): the values reset
+  there; empty in a program that makes no resources. -/
+  armResets : Std.HashMap (Name × (FVarId × Option FVarId) × Name) (Array FVarId) := {}
+  /-- For an `if` on a `Bool` by the Reussir name of its condition and the
+  branch (`true`/`false`): the names of the values that a `reset` of
+  `armResets` releases there, in their order; `none` where two `if`s on the
+  name disagree (`noteIteResets`). A `match` arm carries its own
+  (`RR.Arm.lasts`). -/
+  armIteLasts : Std.HashMap (String × String) (Option (Array String)) := {}
   /-- The renumbered scrutinees in an outlined join point's function (J3,
   by the function's name) and in a state machine's variant that runs one
   (J4, by the variant's name): those where the join point is declared
@@ -1523,7 +1534,8 @@ def boxSink (b : RR.Expr) : String × Option RR.Ty × RR.Expr :=
 word (`l2r_any_addr`). -/
 def boxAddr (b : RR.Expr) : RR.Expr := .call "l2r_any_addr" #[] #[b]
 
-/-- `ptrAddrUnsafe` (and `ptrEq`, `ST.Ref.ptrEq`) of `e`, a shared Reussir
+/-- `ptrAddrUnsafe` (and `ptrEq`; `ST.Ref.ptrEq` takes the same steps for
+both references, Lower/Externs' `refGlue`) of `e`, a shared Reussir
 record of type `t` (a generated struct or enum, a function value, the
 reference record): its handle's word. `l2r_ptr_pass` notes the word and
 gives the value back, and Reussir's own release drops it (`l2r_consume`,

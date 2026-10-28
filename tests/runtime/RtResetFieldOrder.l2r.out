@@ -1,0 +1,5 @@
+struct: AB n=1
+  struct end: ABC
+  in arm: AB
+inductive: ABC n=1
+  inductive end: ABC

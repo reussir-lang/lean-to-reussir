@@ -59,8 +59,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 
 - **What:** `ST.Ref.ptrEq` compares the addresses of the two references'
   records (each unboxed first, at the record type of the instance's
-  element type).
+  element type). Both words are read first (`l2r_ptr_pass`,
+  `l2r_ptr_passed` for `r1`, then for `r2`), then the references are
+  released, `r2` first, then `r1` (`l2r_consume`), as natively: the call
+  borrows both and `explicitRc` adds the `dec`s of the dying arguments
+  after it, the last argument first. A reference that holds a handle or an
+  unresolved promise shows the order (test `RtRefPtrEqOrder`).
 - **Why:** All aliases share one record.
-- **Where:** `Lower/Externs.lean`: `refGlue` (the `addr` operation);
-  `LowerBase.lean`: `recordAddr` (`l2r_ptr_pass`, `l2r_ptr_passed`).
+- **Where:** `Lower/Externs.lean`: `refGlue` (`ST.Prim.Ref.ptrEq`);
+  `LowerBase.lean`: `recordAddr` (the same steps for one value).
 - **Remove only if:** never.

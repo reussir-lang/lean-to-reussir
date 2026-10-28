@@ -153,7 +153,9 @@ and several optional passes help token reuse (see
   hold a resource, by the same rule as for borrowed parameters. The step
   runs after <code>Outline</code>, on the generated code, with Reussir's liveness:
   two handles that die at the start of a branch close <code>21</code>, as natively,
-  not <code>12</code>.</li>
+  not <code>12</code>. When Lean uses the cell of the matched value again for a new
+  value, it releases the matched value after the other values. lean2rr
+  gets these places from Lean's own passes and does the same.</li>
 <li><strong><code>Runtime.forget</code>.</strong> The value is never released, as natively: the
   call keeps its reference until the process ends (<code>std::mem::forget</code>). So
   a forgotten promise stays unresolved, a forgotten task still runs, and a

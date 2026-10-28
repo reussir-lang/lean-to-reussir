@@ -155,7 +155,10 @@ schedules native Lean can produce. See
   constructor, else `L7 … L0`). A structure
   `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` of handles closes
   `a b d c e` (natively `e d c b a`). Unresolved promises are resolved in
-  the same order.
+  the same order. When a cell is used again for a new value, it releases
+  the fields that the code does not read. Lean releases them the last
+  first, and lean2rr in field order: a structure of the handles `A` and
+  `B` closes `AB` (natively `BA`).
 - **A value shared by two fields of one freed cell.** Inside a runtime
   free, such a value can come out at another place. Reussir releases a
   field completely before the next one. Lean first decrements all fields

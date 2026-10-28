@@ -795,11 +795,19 @@ def refGlue (orig : Name) (typeArgs : Array Expr) (params : Array Expr) (ret : E
   | ``ST.Prim.Ref.swap =>
     return some (← wrapIOResult resTy (← onHandle "swap" 0 (some (← value 1))) box)
   | ``ST.Prim.Ref.ptrEq =>
-    let (x, y) := (← fresh "ra", ← fresh "ra")
+    -- Each reference's word as `recordAddr` reads it, both kept until both
+    -- are read; then released as natively (`lean_st_ref_ptr_eq(r1, r2)`,
+    -- then `explicitRc`'s `dec`s of the dying arguments, the last argument
+    -- first): `r2`, then `r1` (a promise's dependents can tell).
     let u64 := RR.Ty.named "u64"
-    let addr (i : Nat) : LowerM RR.Expr := handle i fun h => recordAddr rt h
-    return some (← wrapIOResult resTy
-      (.block ⟨#[(x, some u64, ← addr 0), (y, some u64, ← addr 1)], .atom s!"{x} == {y}"⟩) .bool)
+    let (p1, w1, p2, w2) := (← fresh "pp", ← fresh "pw", ← fresh "pp", ← fresh "pw")
+    let (k2, k1) := (← fresh "pk", ← fresh "pk")
+    let cmp ← handle 0 fun h1 => handle 1 fun h2 => return .block ⟨#[
+        (p1, some rt, .call "l2r_ptr_pass" #[rt] #[h1]), (w1, some u64, .call "l2r_ptr_passed" #[] #[]),
+        (p2, some rt, .call "l2r_ptr_pass" #[rt] #[h2]), (w2, some u64, .call "l2r_ptr_passed" #[] #[]),
+        (k2, some u64, .call "l2r_consume" #[rt] #[.var p2]),
+        (k1, some u64, .call "l2r_consume" #[rt] #[.var p1])], .atom s!"{w1} == {w2}"⟩
+    return some (← wrapIOResult resTy cmp .bool)
   | _ => return none
 
 /-- Externs over Lean-defined types, whose results the runtime cannot

@@ -74,6 +74,144 @@ partial def impureCalls (c : Code .impure) (acc : Array (Name × Nat)) : Array (
   | .oset _ _ _ k _ | .setTag _ _ k _ | .del _ k _ => impureCalls k acc
   | _ => acc
 
+/-- Which `cases` of a declaration an alternative is in (`ResetSites`): its
+scrutinee and the first field parameter of its alternatives, a binder of
+that `cases` only; `none` where no alternative has a field (a `Bool`, an
+enumeration). -/
+abbrev CasesKey := FVarId × Option FVarId
+
+/-- The key of `cases` `cs` (`CasesKey`). -/
+def casesKey (cs : Cases .pure) : CasesKey :=
+  (cs.discr, cs.alts.findSome? fun
+    | .alt _ ps _ _ => ps[0]?.map (·.fvarId)
+    | _ => none)
+
+/-- An alternative's constructor (`Name.anonymous` for the default one). -/
+def altCtor : Alt pu → Name
+  | .alt c .. => c
+  | .ctorAlt info .. => info.name
+  | .default _ => .anonymous
+
+/-- Where Lean's `insertResetReuse` resets a matched value (`reset x`, which
+releases it after the values that die at the start of the alternative it
+is in: `explicitRc` puts their releases first, the alternative's prolog):
+by declaration, the `cases` whose alternative holds the `reset`
+(`CasesKey`) and the alternative's constructor (`Name.anonymous` for the
+default alternative), the values reset there; in the declaration's own
+variables. Read from the copies that `inferBorrowedParams` takes through
+Lean's impure passes, right after `insertResetReuse` (pass `resetReuse`).
+Left out, so the release order there stays Reussir's: a `reset` outside
+any alternative, or at the top of a join point's body (outside the body's
+own `cases`); one whose `cases` or value the copy does not lead back to
+(`impureTags`, `alignCases`); and one in a `cases` without fields
+(`CasesKey` `none`) when the declaration has more than one such `cases`
+on that variable. -/
+abbrev ResetSites := Std.HashMap (Name × CasesKey × Name) (Array FVarId)
+
+/-- The binder name that tags variable `x` (`tagBinders`): `x`'s id with
+`l2rv` appended, a name that `internalize` keeps (it renumbers only names
+that end in a number). -/
+def tagName (x : FVarId) : Name := .str x.name "l2rv"
+
+/-- The variable that binder name `n` tags (`tagName`). -/
+def untag : Name → Option FVarId
+  | .str p "l2rv" => some ⟨p⟩
+  | _ => none
+
+def tagParam (p : Param .pure) : Param .pure := { p with binderName := tagName p.fvarId }
+
+/-- Code `c` with every binder named after its variable (`tagName`): the
+copies that `inferBorrowedParams` takes through Lean's passes get new
+variables (`internalize`, also in `pushProj`) and keep the names, so the
+names lead back to the declaration's own variables (`impureTags`). Lean's
+passes do not read binder names. -/
+partial def tagBinders : Code .pure → Code .pure
+  | .let d k => .let { d with binderName := tagName d.fvarId } (tagBinders k)
+  | .fun d k _ => .fun (.mk d.fvarId (tagName d.fvarId) (d.params.map tagParam) d.type
+                              (tagBinders d.value)) (tagBinders k)
+  | .jp d k => .jp (.mk d.fvarId (tagName d.fvarId) (d.params.map tagParam) d.type
+                       (tagBinders d.value)) (tagBinders k)
+  | .cases cs => .cases (cs.updateAlts (cs.alts.map fun
+      | .alt c ps k _ => .alt c (ps.map tagParam) (tagBinders k)
+      | .default k => .default (tagBinders k)
+      | a => a))
+  | c => c
+
+/-- The variables of impure code `c` (added to `acc`), each with the
+declaration's own variable that its binder name tags (`tagBinders`). A
+binder without a tag (one a pass made) is left out: a `reset` whose value
+or `cases` scrutinee is such a variable is dropped (`ResetSites`), so the
+release order there stays Reussir's. -/
+partial def impureTags (c : Code .impure) (acc : Std.HashMap FVarId FVarId) : Std.HashMap FVarId FVarId :=
+  let add (acc : Std.HashMap FVarId FVarId) (x : FVarId) (n : Name) := (untag n).elim acc (acc.insert x ·)
+  match c with
+  | .let d k => impureTags k (add acc d.fvarId d.binderName)
+  | .jp d k =>
+    let acc := d.params.foldl (fun acc p => add acc p.fvarId p.binderName) acc
+    impureTags k (impureTags d.value acc)
+  | .cases cs => cs.alts.foldl (fun acc alt => impureTags alt.getCode acc) acc
+  | .uset _ _ _ k _ | .sset _ _ _ _ _ k _ | .inc _ _ _ _ k _ | .dec _ _ _ _ _ k _
+  | .oset _ _ _ k _ | .setTag _ _ k _ | .del _ k _ => impureTags k acc
+  | _ => acc
+
+/-- The `cases` of pure code `c` (added to `acc`) in order: each one, then
+its alternatives; a join point's body before its continuation. -/
+partial def pureCases (c : Code .pure) (acc : Array (CasesKey × Array Name)) : Array (CasesKey × Array Name) :=
+  match c with
+  | .let _ k => pureCases k acc
+  | .fun d k _ | .jp d k => pureCases k (pureCases d.value acc)
+  | .cases cs => cs.alts.foldl (fun acc alt => pureCases alt.getCode acc)
+      (acc.push (casesKey cs, cs.alts.map altCtor))
+  | _ => acc
+
+/-- Impure code's `cases` (scrutinee and constructors) in `pureCases`'
+order, and its `reset`s, each with the innermost alternative that holds it
+(the index of its `cases` and the constructor). -/
+structure ImpureWalk where
+  cases : Array (FVarId × Array Name) := #[]
+  resets : Array (Nat × Name × FVarId) := #[]
+
+/-- `w` with the `cases` and `reset`s of impure code `c` (in alternative
+`at`) added (`ImpureWalk`). -/
+partial def impureWalk (c : Code .impure) («at» : Option (Nat × Name)) (w : ImpureWalk) : ImpureWalk :=
+  match c with
+  | .let d k =>
+    let w := match d.value, «at» with
+      | .reset _ x, some (i, ctor) => { w with resets := w.resets.push (i, ctor, x) }
+      | _, _ => w
+    impureWalk k «at» w
+  | .jp d k => impureWalk k «at» (impureWalk d.value none w)
+  | .cases cs =>
+    let i := w.cases.size
+    let w := { w with cases := w.cases.push (cs.discr, cs.alts.map altCtor) }
+    cs.alts.foldl (fun w alt => impureWalk alt.getCode (some (i, altCtor alt)) w) w
+  | .uset _ _ _ k _ | .sset _ _ _ _ _ k _ | .inc _ _ _ _ k _ | .dec _ _ _ _ _ k _
+  | .oset _ _ _ k _ | .setTag _ _ k _ | .del _ k _ => impureWalk k «at» w
+  | _ => w
+
+/-- For each `cases` of an impure copy (`ImpureWalk.cases`, its scrutinee
+led back to the declaration's variable where `impureTags` can), the
+declaration's own `cases` it comes from (`pureCases`): the next one in
+order with the same scrutinee and constructors. `toImpure` keeps the
+`cases` and their order but drops a trivial structure's, and the passes up
+to `insertResetReuse` add none (`pushProj` moves only projections), so the
+ones in between are skipped; `none` where none matches. -/
+def alignCases (pure : Array (CasesKey × Array Name)) (imp : Array (Option FVarId × Array Name)) :
+    Array (Option CasesKey) := Id.run do
+  let mut out := #[]
+  let mut i := 0
+  for (d, ctors) in imp do
+    let mut found : Option (Nat × CasesKey) := none
+    for h : j in [i:pure.size] do
+      let (k, cs) := pure[j]
+      if some k.1 == d && cs == ctors then
+        found := some (j, k)
+        break
+    match found with
+    | some (j, k) => out := out.push (some k); i := j + 1
+    | none => out := out.push none
+  return out
+
 /-- Lean's borrow inference on lean2rr's mono declarations `decls`: for each
 declaration with code, which of its parameters Lean's `inferBorrow` marks
 borrowed. Copies of the declarations go through the rest of Lean's
@@ -83,11 +221,16 @@ pipeline up to `inferBorrow`, as Lean compiles its own declarations after
 place is owned). Extern instances get the borrow annotations (`@&`) of
 their extern; a callee with no known signature takes its arguments owned.
 The environment is restored afterwards. A failure is an error: the emulation is all or nothing, and the program
-would silently get Reussir's release times. -/
-def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
-    CoreM (NameMap (Array Bool)) := do
+would silently get Reussir's release times. Also where `insertResetReuse`
+resets matched values in the copies (`ResetSites`); with `resetsOnly`, the
+copies stop there (no borrow flags), and only the declarations `only`
+names (all without it) go through the passes (their callees give their
+signatures to `toImpure`). -/
+def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) (resetsOnly : Bool := false)
+    (only : Option NameSet := none) :
+    CoreM (NameMap (Array Bool) × ResetSites) := do
   withoutModifyingEnv do
-    let fail (why : MessageData) : CoreM (NameMap (Array Bool)) :=
+    let fail (why : MessageData) : CoreM (NameMap (Array Bool) × ResetSites) :=
       throwError m!"lean2rr: Lean's borrow inference failed on this program ({why}), so the release \
         times of borrowed resources (files, child processes, promises) cannot be emulated (Lower/Borrow, \
         translation plan §5.8); internal error"
@@ -110,7 +253,14 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
     try
       CompilerM.run (phase := .mono) do
         let names := decls.foldl (fun s d => s.insert d.name) ({} : NameSet)
+        let callees : NameSet := match only with
+          | some o => decls.foldl (init := {}) fun s d => match d.value with
+            | .code c => if o.contains d.name then (codeConsts c #[]).foldl (·.insert ·) s else s
+            | _ => s
+          | none => {}
         let mut ds := #[]
+        -- The `cases` of each declaration that goes through the passes.
+        let mut pures : NameMap (Array (CasesKey × Array Name)) := {}
         for d in decls do
           let d ← match d.value, keys.find? d.name with
             | .extern _, some k =>
@@ -120,11 +270,21 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
                   { p with borrow := (sig.params[i]?.map (·.borrow)).getD false } }
               | none => pure d
             | _, _ => pure d
+          if resetsOnly && !only.all (·.contains d.name) then
+            -- Only the signature of a callee of theirs (for `toImpure`).
+            if callees.contains d.name then d.saveMono
+            continue
+          if let .code c := d.value then pures := pures.insert d.name (pureCases c #[])
+          -- Each binder named after its variable (`tagBinders`), which the
+          -- passes keep through the new ids that `internalize` (also
+          -- `pushProj`'s) gives: for the `reset`s (`ResetSites`).
+          let d := { d with params := d.params.map tagParam, value := d.value.mapCode tagBinders }
           let d ← d.internalize
           -- Every declaration of the batch has a signature for `toImpure`.
           d.saveMono
           ds := ds.push d
         let mut state : (pu : Purity) × Array (Decl pu) := ⟨.pure, ds⟩
+        let mut sites : ResetSites := {}
         for pass in #[toImp] ++ impure do
           if pass.name == `inferBorrow then
             -- Callees outside the batch without a signature: owned
@@ -144,12 +304,35 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) :
           let out ← withPhase pass.phase do
             st.fst.withAssertPurity pass.phase.toPurity fun h => pass.run (h ▸ st.snd)
           state := ⟨_, out⟩
+          if pass.name == `resetReuse then
+            -- The `reset`s right where the pass puts them, before `simpCase`
+            -- merges alternatives or removes a `cases` left with one.
+            let st := state
+            let rs ← st.fst.withAssertPurity .impure fun h => pure (h ▸ st.snd)
+            for d in rs do
+              let .code c := d.value | continue
+              let some pc := pures.find? d.name | continue
+              let bk := impureTags c (d.params.foldl (fun m p => (untag p.binderName).elim m (m.insert p.fvarId ·)) {})
+              let w := impureWalk c none {}
+              if w.resets.isEmpty then continue
+              let al := alignCases pc (w.cases.map fun (x, cs) => (bk[x]?, cs))
+              -- Variables matched by two or more `cases` without fields: their
+              -- keys do not tell the `cases` apart.
+              let counts := pc.foldl (init := ({} : Std.HashMap FVarId Nat)) fun m (k, _) =>
+                if k.2.isNone then m.insert k.1 (m.getD k.1 0 + 1) else m
+              for (i, ctor, x) in w.resets do
+                let (some (some k), some x) := (al[i]?, bk[x]?) | continue
+                if k.2.isNone && counts.getD k.1 0 > 1 then continue
+                let key := (d.name, k, ctor)
+                sites := sites.insert key ((sites.getD key #[]).push x)
+            if resetsOnly then return ({}, sites)
         let st := state
         let out ← st.fst.withAssertPurity .impure fun h => pure (h ▸ st.snd)
-        return out.foldl (init := ({} : NameMap (Array Bool))) fun m d =>
+        let flags := out.foldl (init := ({} : NameMap (Array Bool))) fun m d =>
           match d.value with
           | .code _ => m.insert d.name (d.params.map (·.borrow))
           | _ => m
+        return (flags, sites)
     catch e => fail (← e.toMessageData.toString)
 
 /-- The variables of declaration `d` that it only borrows (given which of
@@ -354,6 +537,17 @@ program that casts, `borrowInfo` counts none of their parameters that may
 hold a resource as lent. -/
 initialize flattenRewritten : IO.Ref NameSet ← IO.mkRef {}
 
+/-- Where Lean's `insertResetReuse` resets matched values in the code that
+declarations of `flattenRewritten` had before flatten-structs rewrote it
+(`ResetSites`), which is native Lean's code: the declarations whose sites
+these replace (a worker, which holds the code now, or a declaration
+rewritten in place), and the sites, by those declarations. The release
+order at the start of a branch (`armResetNames`) reads these for them, not
+the sites in the rewritten code (where a split structure's constructor is
+gone, so is its reuse). A wrapper keeps the sites of its own code (that of
+a peeled loop, `Flatten`'s `peel`, has the original code's shape). -/
+initialize flattenResets : IO.Ref (NameSet × ResetSites) ← IO.mkRef ({}, {})
+
 /-- Lean's borrow results for the program (computed once, when the program
 creates resources), and the variables each declaration borrows, by
 declaration and variable (`LowerState.armVars` says why). In a program
@@ -380,7 +574,11 @@ def borrowInfo : LowerM (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) :
   if let some r := (← get).borrowInfo then return r
   let ctx ← read
   let r ← if ← programMakesResources ctx.decls ctx.keys then
-      let flags ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
+      let (flags, resets) ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
+      let (replaced, fresets) ← flattenResets.get
+      let resets := fresets.fold (init := resets.filter fun (d, _, _) _ => !replaced.contains d)
+        fun m k v => m.insert k v
+      modify fun s => { s with armResets := resets }
       let initSlots := (← get).initSlots
       let isConst (f : Name) : Bool :=
         initSlots.contains f || (ctx.decls.find? f).any (·.params.isEmpty)
@@ -573,6 +771,45 @@ def noteArmFields (decl : Name) (discr : FVarId) (scrut variant : String) (ps : 
         | none => pure true
       if may then flags := flags.set! j true
   modify fun s => { s with armFields := s.armFields.insert (scrut, variant) flags }
+
+/-- For the release order at the start of a branch (Emit/ArmRelease): the
+names, in context `ctx` (the `cases`'), of the values that Lean's
+`insertResetReuse` resets in the alternative of constructor `ctor`
+(`Name.anonymous` for the default alternative) of `cases` `cs`
+(`LowerState.armResets`), for the arm or `if` branch it becomes
+(`RR.Arm.lasts`, `noteIteResets`). Natively the `reset` comes after the
+alternative's prolog: it releases the matched value after the values that
+die at the branch's start, its fields that the code after it does not
+read, last first (`expandResetReuse`). So a reset value counts by the
+names of its fields that an enclosing alternative binds
+(`CodeCtx.altParams`; the branch of an `if` nested in the alternative,
+where the fields the branch does not read die), last field first, and by
+its own name (the scrutinee of `cs`, or a matched value that `lazy-fields`
+keeps live). The pass releases the ones that die at the branch's start
+last, in this order. -/
+def armResetNames (ctx : CodeCtx) (cs : Cases .pure) (ctor : Name) : LowerM (Array String) := do
+  let some xs := (← getPart (·.armResets[(ctx.decl, casesKey cs, ctor)]?)) | return #[]
+  let mut names := #[]
+  for x in xs do
+    for p in ((ctx.altParams[x]?).getD #[]).reverse do
+      if let some (n, _) := ctx.vars[p]? then names := names.push n
+    if let some (n, _) := ctx.vars[x]? then names := names.push n
+  return names
+
+/-- `armResetNames` for the branch `key` (`true`/`false`) of the `if` on
+`scrut` that the alternative of `ctor` of `cases` `cs` on a `Bool` becomes,
+recorded by the condition's name (`LowerState.armIteLasts`; an `if` has no
+arms to carry them). Two `if`s on one name whose names differ (a `cases`
+lowered twice where its names differ, or two variables lowered to one name)
+tell nothing: the entry is then `none`, and the order Reussir's. -/
+def noteIteResets (ctx : CodeCtx) (cs : Cases .pure) (ctor : Name) (scrut key : String) : LowerM Unit := do
+  if (← getPart (·.armResets.isEmpty)) then return
+  let names ← armResetNames ctx cs ctor
+  let entry : Option (Array String) := match (← getPart (·.armIteLasts[(scrut, key)]?)) with
+    | none => some names
+    | some (some old) => if old == names then some old else none
+    | some none => none
+  modify fun s => { s with armIteLasts := s.armIteLasts.insert (scrut, key) entry }
 
 /-- Whether an argument passed to parameter `p` of declaration `f`, which
 Lean borrows, is kept until the call returns: when the parameter may hold

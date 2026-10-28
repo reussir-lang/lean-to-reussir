@@ -209,12 +209,20 @@ runtime.
   unresolved promises run their `sync` printers `p2` then `p1`; a
   scrutinee holding a handle `S` in a field the arm does not read, the arm
   reading its `Nat` (or `UInt64`) field, with two other handles, closes
-  `21S` (`1S` with one); an arm that reads no field `S21`; a default arm
+  `21S` (`1S` with one); an arm that reads no field `S21`; one that reads
+  no field and builds a value of the same constructor size, where Lean
+  reuses the scrutinee's cell, `1S` (test `RtDropArmReuse`); a default arm
   on such a scrutinee bound first `21S`; a loop's exit `N1N2` for its
   parameters `a = N2`, `b = N1`; a field converted to its own type `BA`; a
   closure holding handle `C`, bound before the scrutinee, `1CS` in an arm
   that reads a field and `SC1b` in one that does not; `match r, q` with
-  both dying in a nested branch `TS` (`q`, the inner, first).
+  both dying in a nested branch `TS` (`q`, the inner, first). Where Lean
+  reuses a matched value's cell (a `reset` of `insertResetReuse`), the
+  value goes after the others in the branch that holds the `reset`, and
+  so do its fields that the branch does not read when that branch is
+  nested in the value's alternative: an IO action that throws in the
+  `then` branch reuses the result of `open` for the error, `12` where `2`
+  is the result's handle that only the `else` branch reads.
 - **How:** a step of the core over the generated functions, right after
   `Outline` and before the optional passes over them
   (`LoweredProgram.armRelease`, in `Main.lean`). It computes Reussir's
@@ -266,7 +274,41 @@ runtime.
   or someone else holds them). `sink-proj`, after it, moves a
   structure's projection into the branches that use the projected value,
   and counts a release as such a use (the projection comes first, then
-  the releases in their order).
+  the releases in their order). The `reset`s: `inferBorrowedParams`, which
+  takes copies of the declarations through Lean's impure passes for the
+  borrow flags, also reads where `insertResetReuse` (pass `resetReuse`)
+  puts each `reset`, by the `cases` and constructor of the innermost
+  alternative that holds it (`ResetSites`; before `simpCase` merges
+  alternatives). A `cases` is told apart by its scrutinee and the first
+  field parameter of its alternatives (`CasesKey`), so two `match`es on
+  one value in one declaration keep their own `reset`s; the impure copy's
+  `cases` are matched to the declaration's in order (`pureCases`,
+  `impureWalk`, `alignCases`: `toImpure` keeps them and their order, but
+  for a trivial structure's), and a `cases` without fields (a `Bool`, an
+  enumeration) on a variable that the declaration matches so more than
+  once is left out. The copies get new variables
+  (`internalize`, also inside `pushProj`), so each binder is first named
+  after its variable (`tagBinders`; Lean's passes do not read binder
+  names) and the names lead back (`impureTags`; a site that does not lead
+  back is left out, so Reussir's order stays there). For a declaration that
+  `flatten-structs` rewrote, the sites come from its code before the
+  rewrite (native Lean's: a split structure's constructor and its reuse
+  are gone after it), read by `Flatten.run` with `resetsOnly` (only those
+  declarations go through the passes, their callees give signatures) and
+  kept by the declaration that holds the code now (`flattenResets`: the
+  worker, or the declaration rewritten in place; a wrapper keeps the sites
+  of its own code, which for a peeled loop's first step has the original
+  code's shape; a failure of that run leaves the sites out, with a note
+  under `L2R_DEBUG`).
+  The lowering records, for each arm of a `match`, the names of the values
+  reset there (`armResetNames`, `RR.Arm.lasts`), and for a branch of an
+  `if` by the condition's name (`noteIteResets`,
+  `LowerState.armIteLasts`; two `if`s on one name that disagree record
+  nothing): a reset value's fields that an enclosing alternative binds
+  (`CodeCtx.altParams`), last field first, and its own name. The step puts
+  those that die at the branch's start last, in that order (`Arm.lasts`,
+  `Info.iteLasts`, `lastAfter`), and a reset scrutinee counts as one whose
+  fields the arm reads (after the others).
 - **Why:** Natively `ExplicitRC.addPrologForAlt` releases the values that
   die at an alternative's start in one prolog, sorted by their binding
   index, each `dec` prepended: newest first; `withCtorAlt` gives the
@@ -325,12 +367,26 @@ runtime.
   writes as a `cases` with one alternative: taken for the branch, it let a
   field stay pending past a following call, `1T`, natively `T1`)
   ([control-flow/cases.md](control-flow/cases.md#fields-of-a-live-matched-value-are-bound-where-they-are-used-lazy-fields)).
+  A second hunt of the release order found the reused cells: Lean's
+  `reset` releases the matched value after the alternative's prolog, where
+  Reussir released it first (`S1`, natively `1S`; the throwing IO action
+  `21`, natively `12`, directly and through `ExceptT String IO`). The
+  review of the first fix found that keying the `reset`s by scrutinee and
+  constructor alone gave a `match` the `reset` of another `match` on the
+  same value (`r` matched in both branches of an `if`, reset in the first
+  only: `C1S` in the second, natively `CS1`): hence `CasesKey` and the
+  names carried by each arm.
 - **Where:** `Emit/ArmRelease.lean` (`goBlock`, `goMatch`, `Pos`,
-  `Info.key`, `LoweredProgram.armRelease`); `Lower/Borrow.lean`:
-  `armReleaseVars`, `armWalk`, `ArmOrders`, `mayHoldAt`,
-  `mayHoldRelease`, `noteArmFields`, `armSeeds`, `noteCutSeeds`;
+  `Info.key`, `Info.iteLasts`, `lastAfter`, `LoweredProgram.armRelease`);
+  `Lower/Borrow.lean`: `armReleaseVars`, `armWalk`, `ArmOrders`,
+  `mayHoldAt`, `mayHoldRelease`, `noteArmFields`, `armSeeds`,
+  `noteCutSeeds`, `ResetSites`, `CasesKey`, `pureCases`, `impureWalk`,
+  `alignCases`, `tagBinders`, `impureTags`, `inferBorrowedParams`,
+  `flattenResets`, `armResetNames`, `noteIteResets`;
+  `Opt/Flatten.lean`: `run` (the sites before the rewrite);
   `LowerBase.lean`: `noteVarUse`, `LowerState.armVars`, `armNames`,
-  `armFields`, `armAlts`, `armJps`, `armCutSeeds`; `RR.lean`:
+  `armFields`, `armAlts`, `armJps`, `armResets`, `armIteLasts`,
+  `armCutSeeds`; `Lower/Ctx.lean`: `CodeCtx.altParams`; `RR.lean`:
   `Arm.seeds`; the state machines' arms (`Lower/StateMachine.lean`,
   `Opt/StateMachines.lean`); the lookups in `Lower/Decls.lean` (`lowerArg`,
   `applyChain`), `Lower/Values.lean`, `Lower/Code.lean` (`return`,
@@ -370,7 +426,14 @@ runtime.
   Lean owns and whose fields that may hold one the declaration reads at
   its start, in field order (`Flatten.castParamFree`): natively it dies
   there, so each such field dies at its own last use and is bound in the
-  same order as the worker's parameter.
+  same order as the worker's parameter. A `reset` counts only at the start
+  of a branch of a `match` or an `if` on a constructor (not at the top of
+  a join point's body, outside its own `cases`, nor in a structure's
+  alternative or a `match` on `Nat` or `Int`, nor in a `cases` without
+  fields on a variable that the declaration matches so more than once).
+  The fields that a `reset` releases go in field order, natively
+  last first (plan §10, "Order of releases in one free"; test
+  `RtResetFieldOrder`).
 
 ### Reference sets store the new value before releasing the old one
 

@@ -401,6 +401,9 @@ structure LoweredProgram where
   may hold one (`LowerState.armFields`). -/
   armNames : Std.HashMap String (RR.Ty × Nat) := {}
   armFields : Std.HashMap (String × String) (Array Bool) := {}
+  /-- What a `reset` of Lean's releases in an `if`'s branch
+  (`LowerState.armIteLasts`, the entries that are not `none`). -/
+  armIteLasts : Std.HashMap (String × String) (Array String) := {}
   /-- The renumbered scrutinees in each outlined join point's function
   (`LowerState.armCutSeeds`). -/
   armCutSeeds : Std.HashMap String (Array (Nat × Nat)) := {}
@@ -762,6 +765,6 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   let (boxItem, st) ← (boxTypeItems.run ctx).run st
   timingMark "lowering: live functions, types" s!"{st.fns.size} functions"
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored,
-           armNames := st.armNames, armFields := st.armFields, armCutSeeds := st.armCutSeeds }
+           armNames := st.armNames, armFields := st.armFields, armIteLasts := st.armIteLasts.fold (init := {}) (fun m k v => match v with | some ns => m.insert k ns | none => m), armCutSeeds := st.armCutSeeds }
 
 end LeanToReussir

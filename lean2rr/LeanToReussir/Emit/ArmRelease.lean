@@ -75,6 +75,16 @@ The scrutinee `s` of a `match`, when it is recorded and dies in the match:
   field the arm does not read may hold a resource
   (`LoweredProgram.armFields`; otherwise its release frees nothing that
   shows).
+Where Lean reuses a matched value's cell (`insertResetReuse`'s `reset`,
+after the alternative's prolog), the value goes after the others in the
+branch that holds the `reset`: the lowering records the names that count
+for it (`Arm.lasts`; an `if`'s branches: `Info.iteLasts`,
+`LoweredProgram.armIteLasts`; the value's own, and its fields that an
+enclosing alternative binds, last field first, for a branch nested in that
+alternative), each `match` and `cases` apart, and those that die at the
+branch's start go
+last, in that order; a reset scrutinee counts as one whose fields the arm
+reads.
 Once an arm releases `s` itself, Reussir borrows it for the whole `match`
 and releases it with the other values that die in each arm that does not
 use it, oldest first: so then `s` is ordered in every arm where it dies with
@@ -121,11 +131,17 @@ open RR
 
 abbrev Names := Std.HashSet String
 
-/-- What the lowering recorded (`LoweredProgram.armNames`, `armFields`). -/
+/-- What the lowering recorded (`LoweredProgram.armNames`, `armFields`,
+`armIteLasts`). -/
 structure Info where
   /-- Name ↦ (type, the binding order of its Lean variable). -/
   names : Std.HashMap String (Ty × Nat)
   fields : Std.HashMap (String × String) (Array Bool)
+  /-- By the condition of an `if` and a branch (`true`/`false`): the names
+  that a `reset` of Lean's releases there, which go after the other values
+  that die at the branch's start, in this order (a `match` arm's:
+  `Arm.lasts`). -/
+  iteLasts : Std.HashMap (String × String) (Array String) := {}
 
 /-- The free names of a `.var` operand: the name, or the identifiers of a
 verbatim operand (`L2RUnit::u{}`; `atomIdents`), as `Outline.exprFvs` reads them. -/
@@ -196,6 +212,19 @@ def releaseAt (I : Info) (vs : Array String) (b : Block) : M Block := do
 def newestFirst (vs : Array (String × Nat)) : Array String :=
   (vs.qsort fun a b => a.2 > b.2 || (a.2 == b.2 && a.1 < b.1)).map (·.1)
 
+/-- The names that a `reset` releases in the branch `key` (`true`/`false`)
+of the `if` on `.var c` (`Info.iteLasts`), in their order. -/
+def Info.iteLastsAt (I : Info) (c : Expr) (key : String) : Array String :=
+  match c with
+  | .var n => (I.iteLasts.get? (n, key)).getD #[]
+  | _ => #[]
+
+/-- Releases `vs` (newest first) with `ls`' names among them moved to the
+end, in `ls`' order. -/
+def lastAfter (vs ls : Array String) : Array String :=
+  let ls := ls.foldl (fun acc v => if vs.contains v && !acc.contains v then acc.push v else acc) #[]
+  vs.filter (!ls.contains ·) ++ ls
+
 mutual
   /-- `e` with the releases added in its branches, and its free names. -/
   partial def goExpr (I : Info) (e : Expr) (p : Pos) : M (Expr × Names) := do
@@ -238,8 +267,8 @@ mutual
       let dying (other own : Names) : Array String :=
         newestFirst <| other.fold (init := #[]) fun acc v =>
           if I.names.contains v && !own.contains v && !live p.L v then acc.push (v, I.key p v) else acc
-      let t ← if unreachableBlock t then pure t else releaseAt I (dying ff ft) t
-      let f ← if unreachableBlock f then pure f else releaseAt I (dying ft ff) f
+      let t ← if unreachableBlock t then pure t else releaseAt I (lastAfter (dying ff ft) (I.iteLastsAt c "true")) t
+      let f ← if unreachableBlock f then pure f else releaseAt I (lastAfter (dying ft ff) (I.iteLastsAt c "false")) f
       return (.ite c t f, union fc (union ft ff))
     | .mtch s arms => goMatch I s arms p
 
@@ -301,6 +330,8 @@ mutual
     let mut dyings : Array (Array String) := #[]
     let mut pres : Array Bool := #[]
     let mut posts : Array Bool := #[]
+    -- Per arm: what a `reset` of Lean's releases there (`Arm.lasts`).
+    let lasts : Array (Array String) := arms.map (·.lasts)
     for h : i in [:arms.size] do
       let arm := arms[i]
       let fa := fas[i]!
@@ -308,7 +339,10 @@ mutual
       dyings := dyings.push (cands.filter fun v => !fa.contains v && some v != sd?)
       match sd? with
       | some sv =>
-        let reads := arm.binders.any fun x => match x with | some x => fb.contains x | none => false
+        -- Natively reset in the arm (`reset` after the arm's prolog), or
+        -- live until a field's last projection: after the others.
+        let reads := lasts[i]!.contains sv ||
+          arm.binders.any fun x => match x with | some x => fb.contains x | none => false
         let flags? := arm.ctor.bind fun c => I.fields[(sv, c)]?
         let anyMay := match flags? with
           | some fl => fl.any id
@@ -348,11 +382,13 @@ mutual
         out := out.push { arm with body }
         continue
       let others := dyings[i]!.map fun v => (v, I.key p v)
+      -- What a `reset` releases goes last (the scrutinee where its fields
+      -- are read: after them, where it dies after its last projection).
       let vs : Array String := match sd?, borrowed with
         | some sv, true =>
-          newestFirst (if pres[i]! then others.push (sv, keys[i]!) else others) ++
-            (if posts[i]! then #[sv] else #[])
-        | _, _ => newestFirst others
+          lastAfter (newestFirst (if pres[i]! then others.push (sv, keys[i]!) else others) ++
+            (if posts[i]! then #[sv] else #[])) (if posts[i]! then lasts[i]!.push sv else lasts[i]!)
+        | _, _ => lastAfter (newestFirst others) lasts[i]!
       out := out.push { arm with body := ← releaseAt I vs body }
     return (.mtch s' out, union fs treeFree)
 end
@@ -400,6 +436,6 @@ end ArmRelease
 that makes resources (`armNames` not empty), every generated function. -/
 def LoweredProgram.armRelease (p : LoweredProgram) : LoweredProgram :=
   if p.armNames.isEmpty then p else
-  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields } p.armCutSeeds p.fns }
+  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields, iteLasts := p.armIteLasts } p.armCutSeeds p.fns }
 
 end LeanToReussir

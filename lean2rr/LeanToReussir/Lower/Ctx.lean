@@ -138,6 +138,10 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   of their type instead of themselves (Opt/FreshRebuild: the constructor
   rebuilt from the alternative's fields). Plain: none. -/
   rebuild : Std.HashMap FVarId (RR.Expr × RR.Ty) := {}
+  /-- The matched values of the enclosing alternatives, with the
+  alternatives' field parameters: a `reset` of Lean's in a nested branch
+  releases the fields the branch does not read (`armResetNames`). -/
+  altParams : Std.HashMap FVarId (Array FVarId) := {}
   /-- The variables that the outlined join points in scope (J3, J4) capture,
   with their types. A jump to one passes them by these names, also where
   `vars` names the same LCNF variable differently (a hook or a `cases` bound

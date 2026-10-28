@@ -658,10 +658,14 @@ mutual
     | .named "bool" =>
       let branch (ctor : Name) : LowerM RR.Block := do
         match altFor ctor with
-        | some alt => lowerAlt ctx outlined retTy alt.getCode
+        | some alt =>
+          noteIteResets ctx cs ctor scrut (if ctor == ``Bool.true then "true" else "false")
+          lowerAlt ctx outlined retTy alt.getCode
         | none =>
           match dflt with
-          | some k => lowerAlt ctx outlined retTy k
+          | some k =>
+            noteIteResets ctx cs .anonymous scrut (if ctor == ``Bool.true then "true" else "false")
+            lowerAlt ctx outlined retTy k
           | none => return .ofExpr (.call "l2r_unreachable" #[retTy] #[])
       return .ite (.var scrut) (← branch ``Bool.true) (← branch ``Bool.false)
     | .named tn =>
@@ -694,6 +698,7 @@ mutual
           let arm : CasesArm := { discr := cs.discr, scrut, ty := tn, layout, params := ps, code := k,
                                   shared := !info.value && view.isNone }
           let (lets, ctx') ← H.structFields ctx arm
+          let ctx' := { ctx' with altParams := ctx'.altParams.insert cs.discr (ps.map (·.fvarId)) }
           let convs := fieldConvNames ctx' (ps.map (·.fvarId))
           let b ← lowerCode ctx' outlined retTy k
           return .block { b with lets := dropUnusedConvs lets convs b ++ b.lets }
@@ -741,17 +746,19 @@ mutual
               let (c, ctx2) ← bindField armCtx p.fvarId (← lowerType p.type) x ft
               conv := conv ++ c
               armCtx := ctx2
-            let body ← lowerAlt armCtx outlined retTy k
+            let lasts ← armResetNames ctx cs ctor
+            let body ← lowerAlt { armCtx with altParams := armCtx.altParams.insert cs.discr (ps.map (·.fvarId)) }
+              outlined retTy k
             conv := dropUnusedConvs conv (conv.foldl (fun s (y, _, _) => s.insert y) {}) body
             arms := arms.push { ty := tn, ctor := some layout.variant, binders := armBinders,
                                 body := { body with lets := pre ++ conv ++ body.lets },
-                                seeds := ← armSeeds ctx.decl cs.discr ps }
+                                seeds := ← armSeeds ctx.decl cs.discr ps, lasts }
           | _ => pure ()
         if arms.size < info.ctorOrder.size then
-          let body ← match dflt with
-            | some k => lowerAlt ctx outlined retTy k
-            | none => pure (.ofExpr (.call "l2r_unreachable" #[retTy] #[]))
-          arms := arms.push { ty := tn, ctor := none, binders := #[], body }
+          let (body, lasts) ← match dflt with
+            | some k => pure (← lowerAlt ctx outlined retTy k, ← armResetNames ctx cs .anonymous)
+            | none => pure (.ofExpr (.call "l2r_unreachable" #[retTy] #[]), #[])
+          arms := arms.push { ty := tn, ctor := none, binders := #[], body, lasts }
         return .mtch (.var scrut) arms
     | t => throwError "lean2rr: cases on value of type {t.render} ({cs.typeName})"
 

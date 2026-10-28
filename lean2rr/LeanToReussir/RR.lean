@@ -117,6 +117,10 @@ mutual
     body : Block
     wrap : Array (String × String) := #[]
     seeds : Array (Nat × Nat) := #[]
+    /-- The names that a `reset` of Lean's releases at the arm's start,
+    after the arm's other releases, in this order (Emit/ArmRelease; Lower/
+    Borrow's `armResetNames`). -/
+    lasts : Array String := #[]
 
   /-- `{ let x : T = e; … result }`. -/
   structure Block where

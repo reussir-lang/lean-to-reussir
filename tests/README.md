@@ -329,7 +329,25 @@ structure's field read first, a projection natively, then a call that stops
 `RtDropArmPushProj` is a documented difference (plan §10, with expectation
 files): natively Lean's `pushProj` keeps a scrutinee alive into the `if`
 that follows the arm's start, where the field is read (`1S`); lean2rr
-releases it at the arm's start (`S1`).
+releases it at the arm's start (`S1`). `RtDropArmReuse` checks the arms
+where Lean reuses the matched value's cell (plan §5.8): natively its
+`reset` comes after the arm's other releases, so an arm that builds a
+`.two` from a `.two` it does not read, with handle `1` dying there, closes
+`1S` (before the fix `S1`; two handles, `2S` and `1` in the caller); an IO
+action that throws in the `then` branch, which reuses the result of
+`open` whose handle `2` only the `else` branch reads, closes `12` (before
+`21`), directly and through `ExceptT String IO` (a declaration that
+flatten-structs rewrites); a value matched in both branches of an `if`
+and reset in the first match only keeps native's order in the second
+(`CS1`; the first fix gave `C1S`); the arms that build no `.two` or read
+the field were already right. `RtResetFieldOrder` is a documented difference
+(plan §10, "Order of releases in one free", with expectation files): a
+cell rebuilt in place releases its unread fields last first natively
+(`BA`), in field order through lean2rr (`AB`). `RtRefPtrEqOrder` checks
+`ST.Ref.ptrEq r1 r2` as the last use of both references: natively `r2`
+goes first (handles `21`, before the fix `12`; the `sync` dependents of
+promises `p2`, then `p1`), with only `r2` dying there and with a
+reference compared with itself.
 
 `RtBorrowClosure` checks the borrow emulation for values that hold a
 handle only through a closure, a thunk or a task (plan §5.8, "Borrowing"):

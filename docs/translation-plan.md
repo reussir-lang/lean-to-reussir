@@ -2180,7 +2180,22 @@ Rules:
   that die at a branch's start close `21` (Reussir alone: `12`); a
   scrutinee holding a handle `S` in a field the arm does not read, the arm
   reading its number, with two other handles that die there, `21S`
-  (`S12`); with no field read, `S21` (test `RtDropArmOrder`).
+  (`S12`); with no field read, `S21` (test `RtDropArmOrder`). Where Lean
+  reuses the matched value's cell (`insertResetReuse`: the alternative
+  builds a constructor of the same size and no longer needs the value),
+  the `reset` comes after the alternative's prolog: the matched value goes
+  after the others, and so do its fields that a branch nested in the
+  alternative does not read where the `reset` is at that branch's start
+  (`pushProj` moved the field's projection into the other branch). The
+  lowering reads where Lean puts each `reset` from the copies that the
+  borrow inference takes through Lean's impure passes (for a declaration
+  that `flatten-structs` rewrote, from its code before the rewrite) and
+  the step puts those values last: an arm that builds a `.two` from a
+  `.two` it does not read, with handle `S` in a field and handle `1`
+  dying there, `1S` (Reussir alone: `S1`); an IO action that throws in
+  the `then` branch, the result of `open` reused for the error, `12` where
+  `2` is the result's handle that only the `else` branch reads (test
+  `RtDropArmReuse`).
 
 ### 5.9 Panics and unreachable code
 
@@ -3542,7 +3557,15 @@ Each item says what differs and when.
   closed, natively after (test `RtPromiseDropRecordPending`, with
   expectation files: `q`'s dependent before `p`'s).
   (`RtDepDropOrderBoxed`'s and `RtDropUserListHandles`' expectation
-  files: `12345678` where native gives `87654321`.) Before the port to upstream Reussir's drop design,
+  files: `12345678` where native gives `87654321`.) A value whose cell is
+  rebuilt in place (Lean's reset/reuse, Reussir's token reuse) releases
+  the fields the code does not read: natively always last first
+  (`expandResetReuse`'s fast path), here in field order, as Reussir's
+  token path frees them (test `RtResetFieldOrder`, with expectation
+  files: a structure of handles `A`, `B` and a number, rebuilt from its
+  number, closes `AB`, natively `BA`, and so does the arm of an
+  inductive). A fix would route Reussir's token path through the drop
+  stack (parked). Before the port to upstream Reussir's drop design,
   Reussir's glue pushed record members on a stack shared with the
   runtime, and only the first two cells of such a free came out in field
   order (the list: `L0 L1 L7 … L2`).
@@ -3611,7 +3634,15 @@ Each item says what differs and when.
   use a field the field dies with the structure after the branch's own
   projections, where lean2rr releases it at the branch's start with the
   other values that die there (nothing runs in between: an order
-  difference only).
+  difference only). A `reset` of Lean's (§5.8) counts only at the start
+  of a branch of a `match` or an `if` on a constructor: not at the top of
+  a join point's body (outside the body's own `cases`), nor where the
+  alternative that holds it is a structure's (no branch) or a `match` on
+  `Nat` or `Int`, nor in a `cases` without fields (a `Bool`, an
+  enumeration) on a variable that the declaration matches so more than
+  once (the record cannot tell such `cases` apart), nor in an `if` whose
+  condition's name two `if`s with different `reset`s share. There the
+  order is Reussir's.
 - *Release time of pure tasks* (§5.14): a pure task (`Task.spawn`,
   `Task.map`, `Task.bind`) whose last reference the program drops before
   a worker starts it is deleted and never runs, as natively; but the place

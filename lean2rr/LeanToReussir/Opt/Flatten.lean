@@ -2079,7 +2079,7 @@ def resourceExcluded (keys : NameMap InstKey) (decls : Array (Decl .pure)) : Cor
   -- input (`castParamFree`; if the inference fails, every such parameter
   -- counts as borrowed and keeps its declaration whole).
   let mut closureHeld : Array (Name × Nat) := #[]
-  let native ← if r matches .types then (try inferBorrowedParams decls keys catch _ => pure {}) else pure {}
+  let native ← if r matches .types then (try (·.1) <$> inferBorrowedParams decls keys catch _ => pure {}) else pure {}
   let shown (d : Name) : Bool := debug || dbg.any (fun pat => (d.toString.splitOn pat).length > 1)
   let origOf (d : Name) : Name := (keys.find? d).map (·.decl) |>.getD d
   for d in decls do
@@ -2320,6 +2320,7 @@ def analyze (keys : NameMap InstKey) (excluded : NameSet) (resources : Resources
 /-- The pass over the program. -/
 def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (Decl .pure)) := do
   let timing := (← IO.getEnv "L2R_FLATTEN_TIME").isSome
+  let debug := (← IO.getEnv "L2R_DEBUG").isSome
   let t0 ← IO.monoMsNow
   let byName := decls.foldl (fun m d => m.insert d.name d) ({} : Std.HashMap Name (Decl .pure))
   -- The instances of `ptrAddrUnsafe`, `dbgTraceIfShared` and
@@ -2423,6 +2424,26 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (De
     | none =>
       out := out.push { d with params, type := ty, value := .code body' }
   flattenRewritten.set rewritten
+  -- Where Lean resets matched values in the rewritten declarations' code
+  -- (`flattenResets`, for the release order at the start of a branch): by
+  -- the declaration that holds the code now, the worker where there is one
+  -- (a wrapper keeps the sites of its own code).
+  let workerNames := workers.fold (fun s _ w => s.insert w) ({} : NameSet)
+  let mut replaced : NameSet := {}
+  let mut resets : ResetSites := {}
+  if !(resources matches .absent) && !rewritten.isEmpty then
+    for n in rewritten.toList do
+      if let some w := workers[n]? then replaced := replaced.insert w
+      else if !workerNames.contains n then replaced := replaced.insert n
+    let orig ← try (·.2) <$> inferBorrowedParams decls keys (resetsOnly := true) (only := some rewritten)
+      catch e => do
+        if debug then
+          IO.eprintln s!"lean2rr: flatten-structs: Lean's reset sites in the rewritten declarations failed ({← e.toMessageData.toString}); their release order at branch starts stays Reussir's"
+        pure {}
+    for ((n, x, c), xs) in orig.toList do
+      let n' := (workers[n]?).getD n
+      if replaced.contains n' then resets := resets.insert (n', x, c) xs
+  flattenResets.set (replaced, resets)
   if timing then
     IO.eprintln s!"flatten: {decls.size} declarations: collect {t1 - t0} ms, analysis {t2 - t1} ms, rewrite {(← IO.monoMsNow) - t2} ms"
   return out
