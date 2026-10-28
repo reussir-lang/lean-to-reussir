@@ -4091,6 +4091,41 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   second call with the same error and the loop goes on: a later connect
   resolves and the first `accept` returns the connection. Case
   `net/accept_parallel`.
+- *LB-22, an IPv6 address of 16 or more characters aborts `setMembership` and
+  `setMulticastInterface`*
+  ([LB-22](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-22-an-ipv6-address-of-16-or-more-characters-aborts-setmembership-and-setmulticastinterface)):
+  natively a multicast group or interface given as IPv6 text of 16 or more
+  characters (`ff02::1:ff00:123`) stops the process with a `LEAN ASSERTION
+  VIOLATION` (status 134); lean2rr formats the address at any length and
+  makes the call, with libuv's answer for that address. Case
+  `net/multicast_ipv6_long`.
+- *LB-24, `UDP.Socket.cancelRecv` leaks the socket and its descriptor*
+  ([LB-24](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-24-udpsocketcancelrecv-leaks-the-socket-and-its-descriptor)):
+  natively a socket whose pending `recv` or `waitReadable` was cancelled is
+  never freed, and its descriptor stays open until the process exits;
+  lean2rr releases the loop's references, and the socket closes when the
+  program drops it (the promise behaves as natively). Case
+  `net/udp_cancel_recv_leak`.
+- *LB-25, a failing TCP `shutdown` leaks the socket and its descriptor*
+  ([LB-25](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-25-a-failing-tcp-shutdown-leaks-the-socket-and-its-descriptor)):
+  natively a socket whose `shutdown` fails (`ENOTCONN`) is never freed;
+  lean2rr throws the same error and the socket closes when the program
+  drops it. Case `net/tcp_shutdown_fail_leak`.
+- *LB-26, `recv? 0` at end of stream fails with `ENOBUFS` instead of
+  returning `none`*
+  ([LB-26](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-26-recv-0-at-end-of-stream-fails-with-enobufs-instead-of-returning-none)):
+  natively `recv? 0` on a socket whose peer has closed its side, with no
+  data left, resolves to `resource exhausted (error code: 105)`; lean2rr
+  gives the documented `none` there, and native's error where data is
+  still waiting. Cases `net/recv_zero_eof`, `net/recv_zero_data_eof`.
+- *LB-27, a libuv callback that resolves a promise after `main` has
+  returned dereferences the finalized task manager*
+  ([LB-27](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-27-a-libuv-callback-that-resolves-a-promise-after-main-has-returned-dereferences-the-finalized-task-manager)):
+  natively a DNS lookup still in flight when `main` returns can crash the
+  exit with SIGSEGV (139) when it completes in the exit window; lean2rr's
+  event loop settles no promise after `main` and the exit's task wait, so
+  the process exits with the program's status. Case
+  `net/dns_pending_at_exit`.
 - *LB-28, a `shutdown` requested while `connect` is pending never happens*
   ([LB-28](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-28-a-shutdown-requested-while-connect-is-pending-never-happens)):
   natively libuv accepts the request but never carries it out: the connect
