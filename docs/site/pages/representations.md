@@ -135,7 +135,11 @@ The figure above shows an `Array UInt64` as `RVec<u64>`.
 - **`Array.map`.** Lean's library maps an array in place through an
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.
-  Otherwise it writes a new array of the result's kind.
+  Otherwise it writes a new array of the result's kind. When the check
+  then keeps the two kinds of a copy in boxes, the calls of the copy go
+  back to Lean's loop, which runs in place, if no kind that is typed goes
+  to boxes because of it. This is also true for a `mapM` in a monad,
+  whose copy returns its result as a tuple.
 - **A `match` on an array.** `match a with | ⟨l⟩ => …` takes the array
   at its own kind: `l` is a `List α`, and the call that makes it reads the
   compact array. A list holds boxes, so each `Float` of `l` is a new box,

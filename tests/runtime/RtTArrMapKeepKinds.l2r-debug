@@ -1,0 +1,2 @@
+[typed-arrays,compact-arrays,flatten-structs] typed arrays: 3 map loop entries kept split (in place, they turned kinds off)
+[typed-arrays,compact-arrays] ! typed arrays: I:Req off

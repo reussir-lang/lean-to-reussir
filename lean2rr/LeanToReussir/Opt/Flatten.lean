@@ -1502,6 +1502,36 @@ def paramShapes (st : AState) (f : Name) (n : Nat) : Array (Option Shape) :=
 /-- The worker's name of declaration `f`. -/
 def workerName (f : Name) : Name := .str f "_l2r_flat"
 
+/-- Shape `s` without its types: how a value is spread over variables, not
+at which types (a split `map` instance's types are more precise than its
+loop's). -/
+partial def Shape.erase : Shape → Shape
+  | .leaf _ => .leaf erasedExpr
+  | .irr _ => .irr erasedExpr
+  | .node _ ind cs fs => .node erasedExpr ind cs (fs.map Shape.erase)
+
+/-- The split `map` instances among `decls` whose worker spreads as their
+loop's worker does (`flattenSplitsAlike`, read by `revertPtrSplits`): both
+have a worker (`workers`), neither is peeled, the instance's parameters
+but `dst` have the shapes of the loop's, `dst` stays whole, and the two
+results have one shape (or both stay whole). -/
+def splitsAlike (st : AState) (byName : Std.HashMap Name (Decl .pure)) (workers : Std.HashMap Name Name)
+    (decls : Array (Decl .pure)) : NameSet := Id.run do
+  let mut alike : NameSet := {}
+  for d in decls do
+    let .num (.str f "_l2r_split") _ := d.name | continue
+    let some fd := byName[f]? | continue
+    unless workers.contains d.name && workers.contains f do continue
+    if st.peel.contains d.name || st.peel.contains f then continue
+    let some j := d.params.findIdx? (·.binderName == splitDstName) | continue
+    let ps := paramShapes st d.name d.params.size
+    if ps[j]!.isSome then continue
+    let ps := (ps.eraseIdx! j).map (·.map Shape.erase)
+    let qs := (paramShapes st f fd.params.size).map (·.map Shape.erase)
+    if ps == qs && st.results[d.name]?.map Shape.erase == st.results[f]?.map Shape.erase then
+      alike := alike.insert d.name
+  return alike
+
 /-- Bind the parameters `ps` of an alternative to the fields `fs` of a
 known value (a field without data: a placeholder let). -/
 def bindFields (env : Env) (ps : Array (Param .pure)) (fs : Array VVal) :
@@ -2316,6 +2346,7 @@ def run (keys : NameMap InstKey) (decls : Array (Decl .pure)) : CoreM (Array (De
     let w := st.results.contains d.name ||
       (List.range d.params.size).any fun i => st.slots.contains (.param d.name i)
     if w then workers := workers.insert d.name (workerName d.name)
+  flattenSplitsAlike.set (splitsAlike st byName workers decls)
   -- Tuples of every arity a result needs.
   for (_, s) in st.results.toList do ensureTuple s.leafTypes.size
   let jpSlotDecls := st.slots.fold (init := ({} : NameSet)) fun acc s _ =>

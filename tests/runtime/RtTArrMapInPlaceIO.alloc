@@ -1,0 +1,2 @@
+# ten rounds of String -> Nat -> String mapM in IO on a unique array of n elements: in place, as natively (with a new array of boxes per map, dev 0a1e4391: 168 bytes more per element)
+10000 | 40000 | 1 1000

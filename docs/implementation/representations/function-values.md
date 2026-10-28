@@ -89,7 +89,27 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   type (`mayHoldFn`, a reachability with one visited set: linear also on a
   dense mutual block, `RtErasedDenseMutual`), not only when its own type
   mentions one: `Op3 p.α` with `run : α → Nat → Nat` (tests
-  `RtErasedFieldFlow`, `RtErasedFieldFlowBox`, `RtErasedFieldFlowProof`). A
+  `RtErasedFieldFlow`, `RtErasedFieldFlowBox`, `RtErasedFieldFlowProof`).
+  The answers are kept for the run (`holdsFnTop`). In a program that
+  casts, where code calls an extern instance, each type argument of the
+  instance that can hold a function value is boxed and unboxed
+  (`externElems`): the runtime holds an array's, a thunk's or a task's
+  elements, a reference's or a promise's value in boxes, and the instance
+  takes and gives them at its own types (`Array.push` at `S` takes an
+  `S`), while a cast can read the container as another one, whose
+  elements nothing else links. So an `Array S` of function values boxed
+  whole and read back as `Array lcAny` (also inside a structure of its
+  own read as a generic one, `G lcAny`; a `Task S`; a `List S` that
+  `Array.toList` fills), its element cast to a function type `T`, links
+  `S` with `T`, and the other way round. Before, nothing linked them, the
+  cast's erased domain was phantom, and the value's body ran at each later
+  application (bug hunt of rule 4, 2026-10-27, and its review; tests
+  `RtErasedBoxedContainer`, `RtErasedBoxedContainerRev`). The first fix
+  counted a type that mentions `lcAny` as able to hold a function value:
+  `lcAny` anywhere made the program analyses of a program importing
+  `Cslib.Init` take 55 to 65 s instead of 12 s, for the same output; a
+  container of `lcAny` at the top of a type missed a container reached
+  through a field and a list filled by an extern. A
   `cases` or projection on a `Box` unboxes it at the inductive's uniform
   instance first. An `initialize` constant's cell has the type the lowering
   gives it, and the initializer's result is linked to it. The marks are
@@ -142,7 +162,8 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   `keptErasedHead`, `flowAnalysis` (`flowCode`, `flowLink`, `flowLinkK`,
   `flowLinkFields`, `flowFieldUses`, `mayHoldFn`, `flowThroughBoxes`,
   `boxShape`, `reachedMarks`, `layoutFieldTypes`, `layoutFieldKeys`,
-  `keyTy`; the memo tables:
+  `keyTy`, `FlowState.externElems`; `Emit/Program.lean`'s
+  `lowerProgram` gives the extern instances' type arguments; the memo tables:
   [../translator.md](../translator.md#questions-about-types-are-answered-once-per-run));
   `LowerBase.lean`: `lowerType`, `LowerCtx.erased`,
   `LowerState.keptErasedOf` (the decisions, cached), `FnTarget` (`keep`,

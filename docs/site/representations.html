@@ -276,7 +276,11 @@ element type gives the <em>storage kind</em>:</p>
 <li><strong><code>Array.map</code>.</strong> Lean's library maps an array in place through an
   array of boxes. lean2rr gives each such loop a typed copy at the element
   types of its call. When the two types are equal, the loop runs in place.
-  Otherwise it writes a new array of the result's kind.</li>
+  Otherwise it writes a new array of the result's kind. When the check
+  then keeps the two kinds of a copy in boxes, the calls of the copy go
+  back to Lean's loop, which runs in place, if no kind that is typed goes
+  to boxes because of it. This is also true for a <code>mapM</code> in a monad,
+  whose copy returns its result as a tuple.</li>
 <li><strong>A <code>match</code> on an array.</strong> <code>match a with | ⟨l⟩ =&gt; …</code> takes the array
   at its own kind: <code>l</code> is a <code>List α</code>, and the call that makes it reads the
   compact array. A list holds boxes, so each <code>Float</code> of <code>l</code> is a new box,

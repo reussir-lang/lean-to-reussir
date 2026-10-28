@@ -232,14 +232,21 @@ relative to `lean2rr/` unless they start with `scripts/`.
     `mayHoldFn`: each type is looked at once per question, a `true` is
     kept for the types on the path that found it, a `false` for every type
     the question visited;
+  - rule 4's question whether a type may hold a function value
+    (`mayHoldFn`): its reachability's answers (`holdsFn`) and its final
+    answers (`holdsFnTop`), which the flow analysis asks again for every
+    link it tries; walking the type each time (`hasFnTy`) cost about a
+    second on a program importing `Cslib.Init`, and a second walk of a
+    first fix of `RtErasedBoxedContainer` added 4 s there;
   - the field types of a constructor's layout (`layoutFieldTypes`,
     `layoutFieldCache`), and, in rule 4's flow analysis, the same fields
     normalized (`layoutFieldKeys`);
-  - in rule 4's links through `Box` (`flowThroughBoxes`), what `boxCompat`
-    reads of each boxed and unboxed type (`boxShape`: a function type's
-    skeleton, or the head, the number of arguments and whether it is an
-    inductive) and the type's normalized form, once per type and not once
-    per pair; `flowLinkK` is `flowLink` on normalized types;
+  - in rule 4's links through `Box` (`flowThroughBoxes`), what
+    `boxShapeCompat` compares of each boxed and unboxed type (`boxShape`:
+    a function type's skeleton, or the head, the number of arguments and
+    whether it is an inductive) and the type's normalized form, once per
+    type and not once per pair; `flowLinkK` is `flowLink` on normalized
+    types;
   - the name of a module by index (`moduleNameAt`), read from the header's
     module list: Lean's `EnvironmentHeader.moduleNames` builds the array
     of all module names at each call, and lean2rr indexed it once per

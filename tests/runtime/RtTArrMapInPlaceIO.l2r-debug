@@ -1,0 +1,1 @@
+[typed-arrays,compact-arrays,flatten-structs] typed arrays: 8 map loop entries in place again (their kinds are off)

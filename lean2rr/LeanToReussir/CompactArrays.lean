@@ -839,6 +839,29 @@ def splitOrigin? (n : Name) : Option Name :=
   | .num (.str f "_l2r_split") _ => some f
   | _ => none
 
+/-- What a call of `n` enters again in place (`revertPtrSplits`), if `n`
+is a split instance or its worker: for the instance `f._l2r_split.k`, the
+loop `f`; for the worker that `flatten-structs` gave it
+(`f._l2r_split.k._l2r_flat`, which callers call directly), the loop's
+worker `f._l2r_flat`, if the two spread alike (`alike`:
+`flattenSplitsAlike`); with whether `n` is such a worker. -/
+def splitTarget? (alike : NameSet) (n : Name) : Option (Name × Bool) :=
+  match n with
+  | .str s "_l2r_flat" =>
+    if alike.contains s then (splitOrigin? s).map fun f => (.str f "_l2r_flat", true) else none
+  | n => (splitOrigin? n).map (·, false)
+
+/-- The element types of the arrays that mono type `e` mentions. -/
+partial def arrayElemsIn (e : Expr) (acc : Array Expr := #[]) : Array Expr :=
+  let acc := match arrElemOf? e with
+    | some x => acc.push x
+    | none => acc
+  match e with
+  | .app f a => arrayElemsIn a (arrayElemsIn f acc)
+  | .forallE _ d b _ => arrayElemsIn b (arrayElemsIn d acc)
+  | .mdata _ b => arrayElemsIn b acc
+  | _ => acc
+
 /-- The free variables `c` uses. -/
 partial def codeUsedFVars (c : Code .pure) (acc : FVarIdSet := {}) : FVarIdSet :=
   let args (as : Array (Arg .pure)) (acc : FVarIdSet) : FVarIdSet :=
@@ -897,37 +920,75 @@ boxes in place, as natively (review probe D: rounds of `String → Nat →
 String` maps with every kind off allocated 96 bytes per element, native
 8). Each such entry calls the original loop with the original arguments,
 and the `let`s of `dst` and of the source's size go. Splits for a storage
-kind stay, as before typed arrays. The program changes, so the caller
-runs the check again; the number of entries changed is returned. -/
+kind stay, as before typed arrays. Where `flatten-structs` gave the split
+instance a worker (`f._l2r_split.k._l2r_flat`), its callers call the
+worker with the parameters spread and read its result from a tuple: such
+an entry calls the loop's worker (`f._l2r_flat`) instead, when the two
+workers spread alike (`flattenSplitsAlike`: the same shapes, `dst` aside)
+and each member of the two result tuples has one representation (an
+`Array β` of boxes for the loop's `Array lcAny`; test
+`RtTArrMapInPlaceIO`: `mapM` in `IO`). An entry whose loop returns, with
+its array of boxes, an array of a kind that is on (a `StateT` state
+`Array UInt8`) keeps its split: in one value, the two arrays are one flow
+class, and the kind would go off (test `RtTArrMapKeepKinds`). The program
+changes, so the caller runs the check again (and keeps the changed program
+only if no kind goes off); the number of entries changed is returned. -/
 partial def revertPtrSplits (decls : Array (Decl .pure)) (ca : CAResult) :
     CoreM (Array (Decl .pure) × Nat) := do
   let byName : Std.HashMap Name (Decl .pure) := decls.foldl (fun m d => m.insert d.name d) {}
   let on : Std.HashSet String := (ca.on ++ ca.ptrOn).foldl (·.insert ·) {}
   let cache ← IO.mkRef ({} : Std.HashMap Name (Option String))
   let memo ← IO.mkRef ({} : Std.HashMap Name (Option (Name × Nat × Nat)))
-  -- The original loop, the position of `src` (then `dst`) and the number
-  -- of parameters of split instance `sn`, if its entries go back to the
-  -- loop.
+  let alike ← flattenSplitsAlike.get
+  -- Whether element type `t` is stored as `Box`es (every kind it has is
+  -- off), so that `Array t` is the loop's array of boxes.
+  let boxedElem (t : Expr) : CoreM Bool := do
+    if ← holdsCompactKind cache t then return false
+    return (← elemKind? cache t true).all (!on.contains ·)
+  -- The original loop (or its worker), the position of `src` (then `dst`)
+  -- and the number of parameters of split instance (or worker) `sn`, if
+  -- its entries go back to the loop.
   let revertible (sn : Name) : CoreM (Option (Name × Nat × Nat)) := do
     if let some r := (← memo.get)[sn]? then return r
     let r ← do
-      let some f := splitOrigin? sn | pure none
+      let some (f, worker) := splitTarget? alike sn | pure none
       let (some sd, some fd) := (byName[sn]?, byName[f]?) | pure none
       let ps := sd.params
       -- The instance's own parameters: the loop's, with the loop's array
       -- replaced by the pair `src`, `dst` under names no user code has
-      -- (`splitSrcName`; a captured variable keeps its user name).
+      -- (`splitSrcName`; a captured variable keeps its user name). The
+      -- workers' too: they spread the other parameters alike, and the
+      -- arrays stay whole, under their names.
       if ps.size != fd.params.size + 1 then pure none else
       let pairs := (List.range ps.size).filter (fun i =>
           ps[i]!.binderName == splitSrcName && (ps[i + 1]?.map (·.binderName)) == some splitDstName)
       let [i] := pairs | pure none
       let (some α, some β) := (arrElemOf? ps[i]!.type, arrElemOf? ps[i + 1]!.type) | pure none
-      if (← holdsCompactKind cache α) || (← holdsCompactKind cache β) then pure none else
-      let mut ok := true
-      for t in [α, β] do
-        if let some k ← elemKind? cache t true then
-          if on.contains k then ok := false
-      pure (if ok then some (f, i, ps.size) else none)
+      if !(← boxedElem α) || !(← boxedElem β) then pure none else
+      -- The workers return tuples of one shape (`flattenSplitsAlike`); the
+      -- callers read the instance's at the loop's, so each member must
+      -- have one representation: the same type, or arrays of boxes (the
+      -- instance's `Array β`, the loop's `Array lcAny`).
+      let sameRepr (a b : Expr) : CoreM Bool := do
+        if keyTy a == keyTy b then return true
+        let (some x, some y) := (arrElemOf? a, arrElemOf? b) | return false
+        return (← boxedElem x) && (← boxedElem y)
+      let rs := (splitArrows sd.type ps.size).2.consumeMData
+      let rf := (splitArrows fd.type fd.params.size).2.consumeMData
+      -- The loop's result holds its array of boxes and the rest of the
+      -- result in one value, one flow class for the check: an array of a
+      -- kind that is on there (a `StateT (Array UInt8)` state) would go
+      -- off, and the check after the revert would keep every entry split
+      -- (`lowerProgram`). Such an entry keeps its split.
+      if !(← (arrayElemsIn rf).allM boxedElem) then pure none else
+      let tupleOk ← if !worker then pure true else
+        match (rs.getAppFn, rf.getAppFn) with
+        | (.const m _, .const n _) =>
+          if (flatTupleArity? m).isNone && (flatTupleArity? n).isNone then pure true
+          else if m != n || rs.getAppNumArgs != rf.getAppNumArgs then pure false
+          else (rs.getAppArgs.zip rf.getAppArgs).allM fun (a, b) => sameRepr a b
+        | _ => pure false
+      pure (if tupleOk then some (f, i, ps.size) else none)
     memo.modify (·.insert sn r)
     return r
   let count ← IO.mkRef 0

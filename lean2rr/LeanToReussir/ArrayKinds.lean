@@ -184,6 +184,16 @@ first among the loop's parameters with its user name, cannot match. -/
 def splitSrcName : Name := .num (.str .anonymous "_l2r_split_src") 0
 def splitDstName : Name := .num (.str .anonymous "_l2r_split_dst") 0
 
+/-- The split `map` instances (`f._l2r_split.k`) to which optimization
+`flatten-structs` (Opt/Flatten) gave a worker (`f._l2r_split.k._l2r_flat`)
+that spreads their parameters and their result as the worker of their
+loop (`f._l2r_flat`) spreads the loop's (`dst` aside, which stays one
+parameter), neither of the two peeled: `revertPtrSplits` enters such a
+worker's callers in place again through the loop's worker, with the same
+arguments but `dst`. Set by the pass, which runs once per process (one
+program per process: `Main.lean`, `run`); empty when it is off. -/
+initialize flattenSplitsAlike : IO.Ref NameSet ← IO.mkRef {}
+
 /-- Whether kind `k` is a pointer kind (not one of the storage kinds). -/
 def isPtrKind (k : String) : Bool := !compactKinds.contains k
 

@@ -199,19 +199,50 @@ drop (below), the program runs 493 M instructions instead of 602 M
   variables come first among the loop's parameters with their user
   names, and a capture named `src` matched by name moved the arguments
   (re-review probe SD2, an internal panic; test
-  `RtTArrMapCaptureNames`). The program changed, so the
-  check runs again, until no such entry is left. `L2R_DEBUG=1` prints
-  `lean2rr: typed arrays: N map loop entries in place again (their kinds
-  are off)`.
+  `RtTArrMapCaptureNames`). Where `flatten-structs` gave the split
+  instance a worker (`f._l2r_split.k._l2r_flat`: a loop in a monad
+  returns an `EST.Out` or another result that the pass returns as a
+  tuple), the callers call that worker, with the parameters spread and
+  the result read from the tuple: such an entry calls the loop's worker
+  (`f._l2r_flat`) instead, when the pass spread the two alike
+  (`flattenSplitsAlike`, set by the pass: both have a worker, neither is
+  peeled, the instance's parameters but `dst` and its result have the
+  shapes of the loop's, types aside) and each member of the two result
+  tuples has one representation (the same type, or an array of boxes:
+  the instance's `Array β`, the loop's `Array lcAny`). Otherwise the
+  entry keeps the split. So does an entry whose loop returns, with its
+  array of boxes, an array of a kind that is on (`arrayElemsIn`: the
+  state `Array UInt8` of a `mapM` in `StateT (Array UInt8) IO`): in one
+  value the two are one flow class, and the kind would go off (test
+  `RtTArrMapRevertMixed`). The program changed, so the
+  check runs again, until no such entry is left. The changed program is
+  kept only if every kind that was on stays on (`lowerProgram`): the loop
+  entered again works on `Array lcAny`, whose flow class can take in
+  arrays of other kinds, which then go off; otherwise the entries keep
+  their splits. Example: Cedar (Z06t), `toRequest`'s `mapM` in `Except`
+  over a request's context: in place, its `Array lcAny` met the arrays of
+  requests, entity ids and entities, and their three kinds went off (test
+  `RtTArrMapKeepKinds`; before, also without `flatten-structs`). One such
+  entry keeps every entry of the round split; a check per split instance
+  would keep only its own (not done).
+  `L2R_DEBUG=1` prints `lean2rr: typed arrays: N map loop entries in place
+  again (their kinds are off)`, or `N map loop entries kept split (in
+  place, they turned kinds off)`.
 - **Why:** On boxed arrays the split allocates a new array per `map`
   where the loop updates the array of boxes in place, as natively: review
   probe D (rounds of `String → Nat → String` maps, every kind off) made
   96 bytes per element, native 8; with the entries in place again, 8, as
-  on dev (test `RtTArrMapInPlace`). A split whose kinds stay on keeps its
+  on dev (test `RtTArrMapInPlace`). The same with `mapM` in `IO` (bug
+  hunt of the map loops, HsMaps3; test `RtTArrMapInPlaceIO`): the callers
+  called the split's worker, which the revert, by the split's own name
+  only, did not recognize, so every such `mapM` made a new array of boxes.
+  A split whose kinds stay on keeps its
   new array (the price of typing: natively a `map` is in place).
 - **Where:** `CompactArrays.lean`: `revertPtrSplits`, `splitOrigin?`,
-  `dropUnusedLets`, `codeUsedFVars`; `ArrayKinds.lean`: `splitSrcName`,
-  `splitDstName`; `Opt/SplitMapLoops.lean`: `ensureSplit`, `buildSplit`,
+  `splitTarget?`, `arrayElemsIn`, `dropUnusedLets`, `codeUsedFVars`; `ArrayKinds.lean`:
+  `splitSrcName`, `splitDstName`, `flattenSplitsAlike`;
+  `Opt/Flatten.lean`: `splitsAlike`, `Shape.erase`;
+  `Opt/SplitMapLoops.lean`: `ensureSplit`, `buildSplit`,
   `splitMapLoops` (the kept loops); `Emit/Program.lean`: `lowerProgram`.
 - **Remove only if:** Stage 3 knows the kinds before it splits.
 - **Open:** in probe D the second `map` of a round (`Nat → String`) keeps

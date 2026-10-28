@@ -137,7 +137,10 @@ happens only through:
   a jump argument and its parameter, a field and the variable bound to it);
 - a `Box`: a value boxed at `S` (used at an `lcAny` position) can come out
   wherever a `Box` is unboxed at `T` (an `lcAny` value used at `T`), if `S`
-  and `T` can be one type (`Skel.unify`).
+  and `T` can be one type (`Skel.unify`). In a program that casts, an
+  extern instance's elements count as boxed and unboxed at its type
+  arguments (`Array.push` at `S`: the runtime holds them in boxes, and the
+  container can be read as another one; `flowAnalysis`).
 
 `flowAnalysis` collects these edges from mono LCNF, closes the marks over
 them (`reachedMarks`), and gives the function types whose first domain
@@ -241,13 +244,18 @@ structure FlowState where
   /-- Function values created: (their type, the position they complete at). -/
   marks : Array (Expr × Nat) := #[]
   eMarks : Std.HashSet Skel := {}
-  /-- `mayHoldFn`'s answers. -/
+  /-- `mayHoldFn`'s answers (`holdsFnTop`), and those of its reachability
+  (`holdsFn`). -/
+  holdsFnTop : Std.HashMap Expr Bool := {}
   holdsFn : Std.HashMap Expr Bool := {}
   /-- `layoutFieldKeys`' answers, by constructor. -/
   fieldKeys : Std.HashMap Name (Array Expr) := {}
   /-- Whether the program can read a value as another type than its own
   (`programCasts`): a `Box` can then be unboxed at another inductive. -/
   casts : Bool := true
+  /-- In a program that casts, the type arguments of each extern instance
+  (normalized; `flowAnalysis`). -/
+  externElems : Std.HashMap Name (Array Expr) := {}
 
 abbrev FlowM := StateRefT FlowState CoreM
 
@@ -272,18 +280,26 @@ reference, a promise, any inductive's parameters) and, for an inductive,
 the fields of its constructors (`layoutFieldTypes`) are reachable. A plain
 reachability with one visited set (linear in the types reached): a `false`
 holds for every type visited, a `true` along the path that found it; both
-are cached. (A search along every simple path, with the cycle cut on the
-path only, took exponential time on a dense mutual block: review of
-d8027f5, test `RtErasedDenseMutual`.) -/
+are cached (`holdsFn`). (A search along every simple path, with the cycle
+cut on the path only, took exponential time on a dense mutual block:
+review of d8027f5, test `RtErasedDenseMutual`.) The answers are kept for
+the run (`holdsFnTop`): the analysis asks again for every link it tries,
+and walking the type each time (`hasFnTy`) took about a second on a
+program importing `Cslib.Init`. -/
 partial def mayHoldFn (t : Expr) : FlowM Bool := do
-  if hasFnTy t then return true
-  if let some b := (← get).holdsFn[t]? then return b
-  let visited ← IO.mkRef ({} : Std.HashSet Expr)
-  let found ← go t visited
-  unless found do
-    for v in (← visited.get) do
-      modify fun s => { s with holdsFn := s.holdsFn.insert v false }
-  return found
+  if let some b := (← get).holdsFnTop[t]? then return b
+  let r ← do
+    if hasFnTy t then pure true
+    else if let some b := (← get).holdsFn[t]? then pure b
+    else
+      let visited ← IO.mkRef ({} : Std.HashSet Expr)
+      let found ← go t visited
+      unless found do
+        for v in (← visited.get) do
+          modify fun s => { s with holdsFn := s.holdsFn.insert v false }
+      pure found
+  modify fun s => { s with holdsFnTop := s.holdsFnTop.insert t r }
+  return r
 where
   go (t : Expr) (visited : IO.Ref (Std.HashSet Expr)) : FlowM Bool := do
     if hasFnTy t then return true
@@ -396,32 +412,18 @@ partial def flowLinkFields (x y : Expr) (same : Bool) : FlowM Unit := do
           flowLinkK b a
 end
 
-/-- Whether a value boxed at `b` can be unboxed at `u` (Lower's
-`reprCompatible`, `boxCastable`): function types whose skeletons unify,
-instances of one inductive, or (in a program that casts) of two. -/
-def boxCompat (env : Environment) (casts : Bool) (b u : Expr) : Bool :=
-  match b, u with
-  | .forallE .., .forallE .. => (skelOf env b).unify (skelOf env u)
-  | .forallE .., _ | _, .forallE .. => false
-  | _, _ =>
-    match b.getAppFn, u.getAppFn with
-    | .const m _, .const n _ =>
-      (sameInductive env m n && b.getAppNumArgs == u.getAppNumArgs) ||
-        (casts && (inductiveOf env b).isSome && (inductiveOf env u).isSome)
-    | _, _ => false
-
-/-- What `boxCompat` reads of a type: a function type's skeleton, or the
-head constant of an application (a computed-field implementation as the
-type it implements, `implOf?`, so that equal heads are `sameInductive`)
-with its number of arguments and whether `inductiveOf` finds an inductive
-for it (`other`: neither). -/
+/-- What `boxShapeCompat` reads of a type: a function type's skeleton, or
+the head constant of an application (a computed-field implementation as
+the type it implements, `implOf?`, so that equal heads are
+`sameInductive`) with its number of arguments and whether `inductiveOf`
+finds an inductive for it (`other`: neither). -/
 inductive BoxShape where
   | fn (k : Skel)
   | app (head : Name) (nargs : Nat) (ind : Bool)
   | other
   deriving Inhabited
 
-/-- `boxCompat`'s view of type `t` (`BoxShape`). -/
+/-- The view of type `t` that `boxShapeCompat` compares (`BoxShape`). -/
 def boxShape (env : Environment) (t : Expr) : BoxShape :=
   match t with
   | .forallE .. => .fn (skelOf env t)
@@ -430,7 +432,10 @@ def boxShape (env : Environment) (t : Expr) : BoxShape :=
     | .const m _ => .app ((implOf? env m).getD m) t.getAppNumArgs (inductiveOf env t).isSome
     | _ => .other
 
-/-- `boxCompat` from the two types' shapes (`boxShape`). -/
+/-- Whether a value boxed at one type can be unboxed at another (Lower's
+`reprCompatible`, `boxCastable`), from the two types' shapes (`boxShape`):
+function types whose skeletons unify, instances of one inductive, or (in a
+program that casts, `casts`) of two. -/
 def boxShapeCompat (casts : Bool) : BoxShape → BoxShape → Bool
   | .fn a, .fn b => a.unify b
   | .fn _, _ | _, .fn _ => false
@@ -438,9 +443,9 @@ def boxShapeCompat (casts : Bool) : BoxShape → BoxShape → Bool
   | _, _ => false
 
 /-- Link every boxed type with every type a `Box` is unboxed at that it can
-be (`boxCompat`), until no link adds a boxed or unboxed type. Each type's
-shape (`boxShape`) and normalized form (`keyTy`, which `flowLink` applies
-first) are computed once, not once per pair. -/
+be (`boxShapeCompat`), until no link adds a boxed or unboxed type. Each
+type's shape (`boxShape`) and normalized form (`keyTy`, which `flowLink`
+applies first) are computed once, not once per pair. -/
 def flowThroughBoxes : FlowM Unit := do
   let env ← getEnv
   let mut doneB := 0
@@ -569,6 +574,12 @@ partial def flowCode (byName : Std.HashMap Name (Decl .pure)) (inits : Std.HashM
     match d.value with
     | .fvar g args => FlowM.apply (← FlowM.tyOf g) args d.type
     | .const f _ args _ =>
+      -- An extern instance at element types, in a program that casts
+      -- (`externElems`, see `flowAnalysis`): its elements through a `Box`.
+      if let some es := (← get).externElems[f]? then
+        for e in es do
+          FlowM.box e
+          FlowM.unbox e
       match ← flowCallee byName inits f with
       | some (n, ty, ctor?) =>
         -- The parameter types (a constructor's: its fields at the
@@ -659,9 +670,26 @@ def reachedMarks (edges : Std.HashMap Expr (Array Expr)) (marks : Array (Expr ×
 /-- Rule 4's analysis of program `decls` (see the section comment);
 `casts`: whether the program can read a value as another type
 (`programCasts`); `inits`: its constants defined by `initialize`, each with
-the declaration of its initializer. -/
-def flowAnalysis (decls : Array (Decl .pure)) (casts : Bool) (inits : Array (Name × Name)) :
-    CoreM ErasedInfo := do
+the declaration of its initializer; `externElems`: in a program that casts,
+the type arguments of each extern instance of `decls` (mono types).
+
+An extern's values of its type arguments (an array's, a thunk's or a
+task's elements, a reference's or a promise's value) are held in `Box`es
+by the runtime, and its instances take and give them at the instance's
+types (`Array.push` at `S` takes an `S`): so where code calls an extern
+instance, each of its type arguments that can hold a function value is
+boxed and unboxed (`flowCode`). Without a cast, the flow from such an
+instance to another reaches the other instance's types through the
+container's own type (`Array S` at both), which the analysis follows. In
+a program that casts, the container can be read as another one, whose
+elements nothing links: an `Array S` boxed whole and read back as
+`Array lcAny` (or `Task lcAny`; also inside a structure, `G lcAny`; or
+`List lcAny` after `Array.toList`), its element cast to a function type
+whose erased domain then stayed phantom, so the value's body ran at each
+later application (bug hunt of rule 4, 2026-10-27, and its review; tests
+`RtErasedBoxedContainer`, `RtErasedBoxedContainerRev`). -/
+def flowAnalysis (decls : Array (Decl .pure)) (casts : Bool) (inits : Array (Name × Name))
+    (externElems : Std.HashMap Name (Array Expr) := {}) : CoreM ErasedInfo := do
   let byName : Std.HashMap Name (Decl .pure) := decls.foldl (fun m d => m.insert d.name d) {}
   -- The type of each `initialize` constant's cell (`calleeOf`).
   let mut initTys : Std.HashMap Name Expr := {}
@@ -688,7 +716,8 @@ def flowAnalysis (decls : Array (Decl .pure)) (casts : Bool) (inits : Array (Nam
         for ctor in iv.ctors do
           for f in ← layoutFieldTypes ctor r do flowLink f t
     flowThroughBoxes
-  let ((), st) ← act.run { casts }
+  let externElems := if casts then externElems.map fun _ ts => ts.map keyTy else {}
+  let ((), st) ← act.run { casts, externElems }
   let reached := reachedMarks st.edges st.marks
   if (← IO.getEnv "L2R_DEBUG_RULE4").isSome then
     for (t, c) in st.marks do IO.eprintln s!"rule4 mark {c}: {t}"

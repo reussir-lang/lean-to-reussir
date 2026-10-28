@@ -526,24 +526,43 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
   -- `typed-arrays`: the pointer kinds whose arrays are typed; a `map` loop
   -- split only for pointer kinds that end up boxed is entered in place
   -- again (`revertPtrSplits`), and the check runs again on that program,
-  -- until no such entry is left.
+  -- until no such entry is left. Such a program is kept only if every
+  -- kind that was on stays on: the loop entered again works on
+  -- `Array lcAny`, whose flow class can take in arrays of other kinds
+  -- (in Cedar, Z06t, `toRequest`'s `mapM` in `Except` over a request's
+  -- context: entered in place, its `Array lcAny` met the arrays of
+  -- requests, entity ids and entities, and their three kinds went off);
+  -- otherwise the splits stay.
   let mut checked := decls
   let mut ca0 : CAResult ← if cfg.compactArrays then
       compactArrayKinds checked casts inits roots (ptr := cfg.typedArrays)
     else pure {}
   let mut reverted := 0
+  let mut keptSplit := 0
   if cfg.compactArrays && cfg.typedArrays then
     repeat
       let (decls', n) ← revertPtrSplits checked ca0
       if n == 0 then break
+      let ca1 ← compactArrayKinds decls' casts inits roots (ptr := true)
+      unless ca0.on.all ca1.on.contains && ca0.ptrOn.all ca1.ptrOn.contains do
+        keptSplit := n
+        break
       reverted := reverted + n
       checked := decls'
-      ca0 ← compactArrayKinds checked casts inits roots (ptr := true)
+      ca0 := ca1
   let decls := checked
   let ca := ca0
   -- Rule 4: where the program's function values complete, along its flow,
   -- for the erased domains of function types (`ErasedDomains`).
-  let erased ← flowAnalysis decls casts.isSome inits
+  -- (In a program that casts, with the type arguments of each extern
+  -- instance, whose elements the runtime holds in boxes.)
+  let externElems : Std.HashMap Name (Array Expr) ← if casts.isNone then pure {} else
+    decls.foldlM (init := {}) fun m d => do
+      unless d.value matches .extern .. do return m
+      let some k := keys.find? d.name | return m
+      if k.typeArgs.isEmpty then return m
+      return m.insert d.name (← k.typeArgs.mapM toMonoTypeKeep)
+  let erased ← flowAnalysis decls casts.isSome inits externElems
   -- The question of the borrow emulation and of the release order at a
   -- branch's start (`mayHoldAt`), in a program that makes resources and
   -- does not cast: which binders may hold a resource, by the flow analysis
@@ -573,6 +592,8 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
         for (k, why) in ca.ptrOff do IO.eprintln s!"lean2rr: typed arrays: {k} off: {why}"
         unless reverted == 0 do
           IO.eprintln s!"lean2rr: typed arrays: {reverted} map loop entries in place again (their kinds are off)"
+        unless keptSplit == 0 do
+          IO.eprintln s!"lean2rr: typed arrays: {keptSplit} map loop entries kept split (in place, they turned kinds off)"
     if cfg.typedCells then
       IO.eprintln s!"lean2rr: typed cells: references: {tc.refOn}"
       for (k, why) in tc.refOff do IO.eprintln s!"lean2rr: typed cells: references: {k} off: {why}"

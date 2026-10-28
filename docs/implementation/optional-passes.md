@@ -909,7 +909,11 @@ built-in integers
   `analyze`); `Opt/ResourceFlow.lean`: `mayCarry`,
   `mentionsResource`, `walk`, `run`; the rewrite `xform`,
   `explode`, `materialize` (`Env.mats`, `VVal.key`), `callWorker`, `run` (workers, wrappers,
-  peeled wrappers). `LowerBase.lean`: `flatTupleName`, `lowerType` (the
+  peeled wrappers; the split `map` instances whose worker spreads as
+  their loop's, `splitsAlike`, recorded in `ArrayKinds.lean`'s
+  `flattenSplitsAlike` for `revertPtrSplits`:
+  [representations/typed-arrays.md](representations/typed-arrays.md#a-map-split-only-for-pointer-kinds-that-end-up-boxed-runs-in-place-again)).
+  `LowerBase.lean`: `flatTupleName`, `lowerType` (the
   tuple types, `tupleType`); `Lower/Values.lean`: `lowerLetValue` (tuple
   constructor and projections, through `tupleLayout?`); the type rule, for
   a program that can cast, is
