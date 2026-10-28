@@ -44,9 +44,10 @@ Every pass lean2rr adds to or changes in the pipeline, in one place:
 * `required`: parts of the translation that look like optimizations but are
   not optional, with the reason.
 
-Stage 1 recompiles some declarations with Lean's base passes before
-`saveBase`, edited for type-unsafe code (`Mono.recompilePasses`); those
-edits depend on Stage 1's analysis and stay there.
+Stage 1 compiles some declarations from source with Lean's base passes
+before `saveBase`, edited so that they inline no persisted body and
+specialize nothing (`Mono.recompilePasses`); those edits depend on
+Stage 1's analysis and stay there.
 
 Adding a pass: write `Opt/Name.lean` with the transformation and an
 `install : PassConfig → PassConfig` that plugs it into a hook of

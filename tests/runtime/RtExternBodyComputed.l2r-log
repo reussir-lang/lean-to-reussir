@@ -1,0 +1,3 @@
+rt_ebc_mk  (extern of mkFoo)
+rt_ebc_tag  (extern of tagOf)
+rt_ebc_name  (extern of nameOf)

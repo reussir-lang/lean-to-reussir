@@ -39,7 +39,16 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   Only the exports of the modules of Lean's library and the shim count
   (`libraryExportMap`): a program's `@[export lean_shim_promise_is_resolved]`
   only names a C symbol, as natively, and the shim's extern of that symbol
-  stays the runtime's.
+  stays the runtime's. The call's arguments go to the definition by
+  position, so the two must line up: as many parameters, and at each
+  position both a type, both erased or both a value, in their base
+  declarations (`exportParamsMismatch?`); otherwise the call is refused,
+  with both parameter lists. All 147 such pairs (66 of Lean 4.34's
+  `Init`, `Std`, `Lean` and `Lake`, 81 of lean2rr's shim) line up except
+  `Lean.Idbg.idbgClientLoop`
+  (`lean_idbg_client_loop`: `(Type, ◾, String, Array Import, #3 → String,
+  lcVoid)` against `idbgClientLoopImpl`'s `(String, Array Import,
+  NonScalar → String, lcVoid)`).
 - **Why:** Lean's runtime calls back into compiled Lean code there; calling
   the definition directly gives exactly Lean's semantics (runtime request
   10, b9b3375). This takes precedence over a hand-written prelude version.
@@ -48,8 +57,13 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   unresolved promise; review of a bug hunt of the names lean2rr
   recognizes, test `RtNameShimSymExport`). Natively, a program's export
   under a symbol of Lean's library conflicts with it when linked, and no
-  native runtime has the shim's symbols.
-- **Where:** `Mono.lean`: `redirectTarget`, `libraryExportMap`.
+  native runtime has the shim's symbols. Until a bug hunt of the extern
+  routing (2026-10-27) the redirect passed the arguments without checking
+  that they line up: a call of `idbgClientLoop` (of the `Lean` package,
+  which no target program reaches) would have passed a type where a
+  string goes; a refusal names the mismatch instead.
+- **Where:** `Mono.lean`: `redirectTarget`, `libraryExportMap`,
+  `exportParamsMismatch?`.
 - **Remove only if:** never.
 
 ### The shim can replace any definition
@@ -81,7 +95,8 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   symbol binds to; or it stays an extern, refused:
   [program-externs.md](program-externs.md)) (else, only with
   `MonoConfig.safeSources`, off, a type-unsafe implementation to its safe
-  declaration); (2) Stage 4
+  declaration; by default the code lean2rr compiles from source calls
+  implementations as Lean's code does, `recompilePasses`); (2) Stage 4
   replaces a unary call of a definition the configuration replaces
   (`prelude-repr`: `Nat.repr`, `Nat.reprFast`, `Int.repr` →
   `l2r_nat_repr`/`l2r_int_repr`); (3) it lowers a constructor with an

@@ -418,32 +418,50 @@ partial def renameConsts (rename : Name → Name) : Code .pure → Code .pure
   | c => c
 
 /-- The base-pass pipeline lean2rr uses to compile a declaration from
-source: Lean's base passes before `saveBase`, except that
-* `implemented_by` replacement is done by lean2rr's own pass, which skips
-  type-unsafe implementations and maps them back to their safe declaration;
+source (an extern's Lean definition, an `@[export]` forwarder, a safe
+declaration whose `implemented_by` leaves it no persisted body): Lean's
+base passes before `saveBase`, except that
+* `implemented_by` replacement is done by lean2rr's own pass (before
+  `simp`'s first occurrence and in place of `specialize`): by default
+  exactly Lean's (`applyImplementedBy?` in that `simp`): a call of `f`
+  calls `f`'s implementation, type-unsafe or not, as in Lean's compiled
+  code, whose type-unsafe code lean2rr represents with `Box`
+  (`uniformCode`). Only with `MonoConfig.safeSources` does it skip
+  type-unsafe implementations and map them back to their safe declaration
+  (which `baseDeclFor?` then recompiles from source). Until a bug hunt of
+  the extern routing (2026-10-27) the default skipped them too, a leftover
+  of `safeSources`: an extern's Lean definition calling `f` ran `f`'s own
+  definition (`n + 1` where the `unsafeCast` implementation gives
+  `n + 100`), an `opaque` with an `implemented_by` gave its default value,
+  a type with computed fields built there was refused, and `Array.mapM`
+  there ran its reference definition (tests `RtExternBodyImplBy`,
+  `RtExternBodyOpaqueImpl`, `RtExternBodyComputed`);
 * nothing pulls in persisted callee bodies (no inlining of definitions, no
-  `specialize`), since those may already contain type-unsafe code. -/
+  `specialize`): Stage 1 instantiates the callees, and Stage 2 inlines
+  them. -/
 def recompilePasses : MonoM (Array Pass) := do
-  let implOf ← unsafeImplMap
-  let mut unsafeTargets : NameSet := {}
-  for (impl, _) in implOf.toList do
-    if ← isTypeUnsafeImpl impl then unsafeTargets := unsafeTargets.insert impl
   let env ← getEnv
-  let rename (n : Name) : Name :=
-    if unsafeTargets.contains n then (implOf.find? n).getD n
-    else match Compiler.getImplementedBy? env n with
-      | some impl => if unsafeTargets.contains impl then n else impl
-      | none => n
+  let rename : Name → Name ← if (← get).config.safeSources then do
+      let implOf ← unsafeImplMap
+      let mut unsafeTargets : NameSet := {}
+      for (impl, _) in implOf.toList do
+        if ← isTypeUnsafeImpl impl then unsafeTargets := unsafeTargets.insert impl
+      pure fun n =>
+        if unsafeTargets.contains n then (implOf.find? n).getD n
+        else match Compiler.getImplementedBy? env n with
+          | some impl => if unsafeTargets.contains impl then n else impl
+          | none => n
+    else pure fun n => (Compiler.getImplementedBy? env n).getD n
   let implPass : Pass := {
     name := `l2rImplementedBy, phase := .base
     run := fun decls => return decls.map fun d => { d with value := d.value.mapCode (renameConsts rename) } }
   let m ← getPassManager
   let some i := m.basePasses.findIdx? (·.name == `saveBase) | throwError "lean2rr: no saveBase pass"
   let mut out := #[]
-  -- `simp` must not inline persisted bodies here: Lean's persisted callers
-  -- already call type-unsafe implementations, and inlining them would bring
-  -- their untypable code back. Callees are instantiated (and recompiled if
-  -- tainted) on their own; Stage 2 inlines lean2rr's safe instances.
+  -- `simp` does not inline persisted bodies here: callees are instantiated
+  -- on their own (with `safeSources`, recompiled if tainted: inlining
+  -- Lean's persisted callers would bring their type-unsafe code back);
+  -- Stage 2 inlines lean2rr's instances.
   for p in m.basePasses[:i] do
     if p.name == `simp && p.occurrence == 1 then
       out := out.push implPass
@@ -931,6 +949,9 @@ def baseDeclFor? (n : Name) : MonoM (Option (Decl .pure)) := do
   if let some d := (← get).extraBase.find? n then return some d
   let some d ← getBaseDecl? n | do
     -- A safe declaration with an `implemented_by` has no persisted body.
+    -- Lean's code and `recompilePasses` call its implementation instead, so
+    -- only `safeSources` (which maps a type-unsafe implementation back to
+    -- it) reaches it here: its definition is compiled from source.
     if (← unsafeImplMap).toList.any (·.2 == n) then
       if ← recompile n then return (← get).extraBase.find? n
     return none
@@ -995,6 +1016,28 @@ def ensureIOErrorBuilders (f : Name) : MonoM Unit := do
     if let some d := (← libraryExportMap).get? b then
       discard <| instanceName { decl := d, typeArgs := #[] }
 
+/-- Why the arguments of a call of extern `f` of Lean's library do not line
+up with the parameters of `d`, the `@[export]` definition of its C symbol
+that `redirectTarget` passes them to, position by position, or `none` when
+they do: as many parameters, and at each position both a type, both erased
+or both a value (their base declarations; `none` too when one has none).
+All 147 such pairs (66 of Lean 4.34's `Init`, `Std`, `Lean` and `Lake`, 81 of
+lean2rr's shim) line up but `Lean.Idbg.idbgClientLoop`
+(`lean_idbg_client_loop`, whose extern takes a type and a proof that its
+`@[export]` definition does not); a call of a
+pair that does not is refused (bug hunt of the extern routing, 2026-10-27),
+where it would pass a type where a string goes. -/
+def exportParamsMismatch? (f d : Name) : MonoM (Option String) := do
+  let some fd ← getBaseDecl? f | return none
+  let some dd ← getBaseDecl? d | return none
+  let kind (p : Param .pure) : Nat :=
+    if isTypeFormerType p.type then 0 else if p.type.isErased then 1 else 2
+  let render (ps : Array (Param .pure)) : String :=
+    ", ".intercalate (ps.toList.map fun p => if p.type.isErased then "◾" else toString p.type)
+  if fd.params.size == dd.params.size && (fd.params.zip dd.params).all (fun (p, q) => kind p == kind q) then
+    return none
+  return some s!"({render fd.params}) and ({render dd.params})"
+
 /-- Redirect a call target: an extern implemented by an exported Lean
 definition becomes that definition, as does a definition lean2rr's shim
 replaces; with `safeSources`, a type-unsafe
@@ -1016,7 +1059,13 @@ def redirectTarget (f : Name) : MonoM Name := do
     if ← isToolchainDecl f then
       if let some sym := getExternNameFor (← getEnv) `c f then
         if let some d := (← libraryExportMap).get? sym then
-          if d != f then return d
+          if d != f then
+            -- The call's arguments go to `d` by position.
+            if let some why ← exportParamsMismatch? f d then
+              throwError "lean2rr: cannot call {f}: Lean's runtime implements its C symbol {sym} \
+                with the @[export] definition {d}, which lean2rr calls in its place, but their \
+                parameters do not line up: {why}"
+            return d
     else match ← externRoute f with
       | .implementedBy g => return g
       | _ => pure ()
@@ -1081,6 +1130,7 @@ RV7F-02, RV7F-04). Only a dictionary of functions gains from being copied: its
 methods become direct calls. `fuel` bounds the constants followed. -/
 partial def constComputes (c : Name) (fuel : Nat := 8) : MonoM Bool := do
   if fuel == 0 then return true
+  -- (For an `initialize` constant this caches a refused route: harmless, no call of it is lowered.)
   let some decl ← baseDeclFor? c | return false
   unless decl.params.isEmpty do return false
   let .code code := decl.value | return false
@@ -1667,9 +1717,15 @@ taken for its field and `Decidable` for `Bool`, as `toMono` does; a `let` is
 merged into one in scope (`cases` alternatives start a nested scope, join
 points see the enclosing scope, and a local function's body only its own:
 Lean's `cse` runs after lambda lifting), and `@[never_extract]` calls are
-not merged. Only calls of definitions count: Stage 1 does not rename
-constructors (Stage 2's `cse` merges them as natively), and extern instances
-and instances (dictionary builders) compute nothing observable. -/
+not merged. Only calls of definitions count, the externs of the program
+too (they run Lean code: their definition, an `@[export]` definition or
+their `implemented_by` target; until a bug hunt of the extern routing,
+2026-10-27, they were left out, and a trace in an extern's definition
+called at two types printed twice, test `RtExternBodyMerge`): Stage 1 does
+not rename constructors (Stage 2's `cse` merges them as natively), and the
+instances of Lean's library externs (the runtime's functions, whose
+observable ones are `@[never_extract]`) and instances (dictionary
+builders) compute nothing observable. -/
 partial def erasedMerges (code : Code .pure) :
     CompilerM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
   let ((), scan) ← (go code {}).run {}
@@ -1760,7 +1816,13 @@ where
         | .lit l => l.toExpr
         | .erased => erasedExpr
       if let .const f us args _ := d.value then
-        unless env.isConstructor f || isExtern env f || (← isInstanceReducible f) do
+        -- An extern of Lean's library is the runtime's function (its
+        -- observable ones, `dbgTrace` and the panics, are
+        -- `@[never_extract]`); one of the program runs Lean code (its
+        -- definition, an `@[export]` definition or its `implemented_by`
+        -- target) and counts as a definition (test `RtExternBodyMerge`).
+        let libExtern ← if isExtern env f then isToolchainDecl f else pure false
+        unless env.isConstructor f || libExtern || (← isInstanceReducible f) do
           modify fun s => { s with calls := s.calls.insert d.fvarId (f, us, args, d.type),
                                    order := s.order.push d.fvarId }
       let neverExtract := match d.value with

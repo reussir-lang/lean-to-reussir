@@ -4,6 +4,7 @@ import LeanToReussir.Mono
 import LeanToReussir.Passes
 import LeanToReussir.CompileRecord
 import LeanToReussir.ExtractClosedK
+import LeanToReussir.MonoTypesKeep
 
 /-!
 # Stage 2: Lean's own mono pipeline, driven by lean2rr
@@ -122,6 +123,68 @@ partial def leanNameOf (keys : NameMap InstKey) (n : Name) : Option (Name × Ins
     if p.isAnonymous then none
     else (leanNameOf keys p).map fun (q, k) => (s.map (q ++ Name.mkSimple ·) |>.getD q, k)
 
+/-- A marker of `closedMonoKey` (a name no program can declare: its last
+component is a number). -/
+def closedInstMarker : Expr := .const (Name.mkNum `_l2r_closed_inst 0) []
+
+/-- The key under which `extractLikeLean` caches closed term `e` (its code
+as an expression, `Code.toExpr`, of type `ty`) besides Lean's own cache:
+`e` with each instance `f._l2r.k`, and its `_redArg` (Lean's `reduceArity`
+copy), replaced by `f` (or `f._redArg`), the mono images of its type
+arguments (`toMonoTypeKeep`) and its static dictionaries. Natively one
+function serves every type, and Lean's closed-term cache compares mono
+terms, in which type arguments are erased and types are mono types: `mk 5`
+at `Option (Fin 3)`, at `Option Nat` and at `Option W` (`structure W where
+x : Nat`) is one term, `mk ◾ 5 : Option Nat`, made once (bug hunt of the
+extern routing, test `RtClosedMonoEqual`); Stage 1 gives the calls
+instances at `Fin 3`, `Nat` and `W`, whose code is the same mono code. The
+key is used only when its instances' images are precise and `ty` serves at
+itself (`serves`, so it mentions no `lcAny`, which could hide a type
+argument): `none` when `e` names no instance, when an image has an `lcAny`
+that its type argument has not (the instance at a type former such as `fun
+α => Nat → α × Nat`, whose image is `lcAny`, has code of its own; an
+argument that is `lcAny` itself, a hidden or uniform one, is the same in
+both instances), or when `ty` does not serve. Other
+declarations a pass made from an instance (`_lam_N`, `_closed_N`) are
+compared by name, as Lean's cache does: their numbering follows the
+extraction's order, not only the instance. Used only in a declaration whose
+code is concrete natively too (`monoOwner`). -/
+def closedMonoKey (keys : NameMap InstKey) (e ty : Expr) : CoreM (Option Expr) := do
+  let mut images : NameMap Expr := {}
+  for c in e.getUsedConstants do
+    let (inst, suffix) : Name × Name := match c with
+      | .str p "_redArg" => if keys.contains p then (p, `_redArg) else (c, .anonymous)
+      | _ => (c, .anonymous)
+    let some key := keys.find? inst | continue
+    let tys ← key.typeArgs.mapM toMonoTypeKeep
+    -- An `lcAny` the image introduced loses what tells instances apart
+    -- (one already in the type argument is the same in both).
+    if (key.typeArgs.zip tys).any (fun (t, i) => mentionsAny i && t != i) then return none
+    let dicts := key.dicts.map (·.getD erasedExpr)
+    images := images.insert c
+      (mkApp3 closedInstMarker (.const (key.decl ++ suffix) []) (mkAppN (.const ``Array.mk []) tys)
+        (mkAppN (.const ``List.cons []) dicts))
+  if images.isEmpty then return none
+  unless ← (serves ty ty).run' {} do return none
+  return some (e.replace fun x => match x with
+    | .const c _ => images.find? c
+    | _ => none)
+
+/-- Is declaration `n` (Stage 2's) made from an instance without type
+arguments, or with `lcAny` for each (`leanNameOf`)? Natively such code has
+the types it has here (a monomorphic declaration, or one of Lean's
+specializations), so its closed terms are the mono terms Lean's cache
+compares. An instance of a generic declaration has concrete types where
+the generic code native Lean runs has `lcAny`: `mk2 7` in `gen {α}` at
+`W` is natively a term at `Option lcAny`, which Lean's cache does not
+share with `user`'s `mk2 7 : Option Nat`, so `closedMonoKey` would share
+more than native (review of the bug hunt of the extern routing,
+2026-10-28). -/
+def monoOwner (keys : NameMap InstKey) (n : Name) : Bool :=
+  match leanNameOf keys n with
+  | some (_, key) => key.typeArgs.all (· == anyExpr)
+  | none => false
+
 /-- Closed-term extraction as Lean ran it, on the declarations Stage 2's
 other passes produced (`sccs`, Stage 2's groups after lambda lifting).
 Lean runs `extractClosed` module by module, in compilation order, with a
@@ -192,12 +255,20 @@ def extractLikeLean (keys : NameMap InstKey) (sccs : Array (Array (Decl .pure)))
     a < b || (a == b && (k1 < k2 || (k1 == k2 && i1 < i2)))
   let mut results : Std.HashMap Nat (Array (Decl .pure)) := {}
   let mut current : Option (Option Nat) := none
+  -- The module's closed terms by `closedMonoKey`, besides Lean's cache.
+  let monoCache ← IO.mkRef ({} : Std.HashMap Expr Name)
   for (m, _, i, sccIdx, extract) in sorted do
     if current != some m then
       modifyEnv (closedTermCacheExt.setState · {})
+      monoCache.set {}
       current := some m
     let d := flat[i]!
-    let res ← if extract then withPhase .mono (d.extractClosedK sccs[sccIdx]! leanName) else pure #[d]
+    -- Only a declaration whose code is concrete natively too (`monoOwner`)
+    -- looks up or adds terms under `closedMonoKey`.
+    let monoKey (e ty : Expr) : CompilerM (Option Expr) :=
+      if monoOwner keys d.name then closedMonoKey keys e ty else pure none
+    let res ← if extract then withPhase .mono (d.extractClosedK sccs[sccIdx]! leanName monoKey monoCache)
+      else pure #[d]
     -- What Lean's impure phase then drops (see `Decl.elimDeadLikeImpure`).
     results := results.insert i (← res.mapM (·.elimDeadLikeImpure))
   -- In Stage 2's order, each declaration after the closed terms it made.

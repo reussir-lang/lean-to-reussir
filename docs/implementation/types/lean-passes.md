@@ -60,6 +60,53 @@ Paths are relative to `lean2rr/LeanToReussir/`.
 - **Remove only if:** never: which declaration evaluates a shared closed
   term, and when, is observable through traces and panics.
 
+### A closed term is shared between instances with the same mono images
+
+- **What:** A term that misses Lean's cache is looked up, and then cached,
+  under a second key too (`closedMonoKey`, one cache per module like
+  Lean's): its code as an expression with each instance `f._l2r.k` (and
+  its `_redArg`) replaced by `f` (or `f._redArg`), the mono images of its
+  type arguments (`toMonoTypeKeep`) and its static dictionaries. The key
+  is used only when no image has an `lcAny` that its type argument has
+  not (a type argument that is `lcAny` itself, hidden or uniform, is the
+  same in both instances) and the term's type serves at itself
+  (`Mono.serves`: it mentions no `lcAny`), and only in a declaration made
+  from an instance without type arguments, or at `lcAny` for each
+  (`monoOwner`: a monomorphic declaration or a specialization Lean made,
+  whose code is concrete natively too); other declarations made from an
+  instance (`_lam_N`, `_closed_N`) are compared by name.
+  Example: `@[noinline] def mk {α} (n : Nat) : Option α` called as `mk 5`
+  in four declarations at `Option (Fin 3)`, `Option (Fin 5)`,
+  `Option Nat` and `Option W` (`structure W where x : Nat`): Stage 1 makes
+  instances at `Fin 3` (also serving `Fin 5`), `Nat` and `W`, one closed
+  term now, three before.
+- **Why:** Natively `mk` is one function, and Lean's cache compares mono
+  terms, in which type arguments are erased and types are mono types: the
+  four calls are one term, `mk ◾ 5 : Option Nat`, so a trace in `mk`
+  printed three times where natively once (a bug hunt of the extern
+  routing, 2026-10-27, test `RtClosedMonoEqual`). Instances whose type
+  arguments have equal images run the same mono code. An `lcAny` that the
+  image introduced (an instance at a type former such as `fun α => Nat →
+  α × Nat` has the image `lcAny`) does not tell that code apart, and an
+  `lcAny` in the term's type can hide a type argument; the numbering of
+  `_lam_N` and `_closed_N` follows the extraction's order, not only the
+  instance. An instance of a generic declaration has concrete types where
+  native Lean's generic code has `lcAny`: `mk2 7` in `gen {α}` is natively
+  a term at `Option lcAny`, which Lean's cache does not share with
+  `user`'s `mk2 7 : Option Nat`; without `monoOwner`, `gen` at `W` read
+  `user`'s term, one trace for native two (review of the bug hunt, repro
+  V3b, in `RtClosedMonoEqual`). Those terms stay apart, natively one
+  (plan §10, "Merging after erasure"), as do terms at type arguments that
+  only Lean's `toMonoType` makes equal. Lean's own cache still shares an
+  instance's term with a concrete declaration's when both call the same
+  instance (`gen` at `Nat` and `user`: one trace, natively two; plan §10,
+  kept as it is).
+- **Where:** `Pipeline.lean`: `closedMonoKey`, `closedInstMarker`,
+  `monoOwner`, `extractLikeLean`; `ExtractClosedK.lean`: `monoKey`,
+  `monoCache`, `performExtraction`; plan
+  [§3](../../translation-plan.md#3-stage-2--leans-mono-pipeline-leans-passes-driven-by-us).
+- **Remove only if:** Stage 1 stops making an instance per type.
+
 ### Join-point parameters are put in the order of their first use
 
 - **What:** After every pass of Stage 2 (`extractClosed` included), the

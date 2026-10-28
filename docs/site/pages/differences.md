@@ -108,10 +108,17 @@ schedules native Lean can produce. See
   type; a closed term that only the earlier call's instance could share
   with other functions) and calls that Lean's `cse` merges only after its
   later passes moved the code (a local function or a join point inlined),
-  where both calls run; and a closed call at the instance at `lcAny` whose
+  where both calls run; a closed call at the instance at `lcAny` whose
   result hides the type argument in a field, which does not share the
   closed term of the same call in another function, so it runs once
-  more. A trace or panic in them then prints another number of
+  more; closed calls in two functions at type arguments whose mono
+  types lean2rr cannot compare exactly (a type former, or a type that
+  holds `lcAny`), and closed calls in the instances of a generic function,
+  which also run once per function or instance. In one shape it is the
+  other way round: a closed call in an instance of a generic function and
+  the same call in a concrete function can be one closed term in lean2rr
+  (both call one instance), where natively they are two (the generic code
+  has `lcAny` there), so it runs once less. A trace or panic in them then prints another number of
   times. Lean does not fix how often a trace in pure code prints, so this
   is accepted: test `RtCseApart` records both outputs (expectation files)
   and fails if either changes.

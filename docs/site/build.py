@@ -299,7 +299,7 @@ def gen_testsets():
          "with <code>L2R_ALLOW_MISSING_EXTERNS=1</code>, a refused extern of the program warns, the build fails, "
          "and the code calls no runtime function of its symbol"],
         ["Shim types", "<code>tests/runtime/shim-types.sh</code>", "every export of the shim",
-         "each <code>@[export]</code> of <code>L2RShim</code> has the type of the <code>@[extern]</code> of the same C symbol"],
+         "each <code>@[export]</code> of <code>L2RShim</code> has the type of the <code>@[extern]</code> of the same C symbol, and each override (<code>l2r_override_…</code>) the type of the function it replaces"],
         ["Conversion counter", "<code>tests/runtime/conv-count-check.sh</code>", "9 programs",
          "no conversion function in eight programs whose containers cross between typed and generic code; "
          "a cast between inductives whose layouts differ converts, counts its elements and prints what native prints"],

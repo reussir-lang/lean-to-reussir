@@ -150,7 +150,14 @@ its mono type.
 Main mono passes (Lean's): `simp` (inlining, constant folding, dead code),
 `reduceJpArity`, `structProjCases`, `extendJoinPointContext`,
 `floatLetIn`, `reduceArity`, `commonJoinPointArgs`, `lambdaLifting`,
-`elimDeadBranches`, `cse`, `extractClosed`. After Lean's passes, lean2rr
+`elimDeadBranches`, `cse`, `extractClosed`. Lean's `extractClosed` gives
+two functions one closed term when the two mono terms are equal. In mono
+code, type arguments are erased, so `mk 5` at `Option (Fin 3)` and at
+`Option Nat` is one term, `mk ◾ 5 : Option Nat`. lean2rr calls two
+instances there, with two names. So lean2rr also compares a closed term
+with each instance replaced by its function and the mono types of its type
+arguments. Then the two calls share one closed term, as natively. After
+Lean's passes, lean2rr
 puts the parameters of each join point in the order of their first use in
 its body, so that an unrelated definition does not reorder them. Then
 lean2rr drops the declarations that no code reaches from the roots

@@ -153,11 +153,31 @@ lowering at the library extern's type arguments, was removed).
   marks it `noinline`; `compileExternBody` runs `recompilePasses` on it
   (Lean's base passes without inlining persisted bodies or specializing).
   An `opaque` (whose value only shows its type is inhabited), an axiom or
-  any other kind has none.
+  any other kind has none. `recompilePasses` replaces each call of a
+  function with an `@[implemented_by]` by its implementation, also a
+  type-unsafe one (`unsafeCast`, `NonScalar`), exactly as Lean's `simp`
+  does at its first occurrence (`applyImplementedBy?`); so does the
+  `@[export]` forwarder (`compileExportForward`).
 - **Why:** "As if the attribute weren't there". `noinline`: RV8E-11 (the
   body folded on literals in Stage 2). The `@[csimp]` replacement follows
   Lean: without it a body calling a function a `@[csimp]` maps would call
   the slow one. Tests `RtExternBody`, `RtExternRec`, `RtExternCsimp`.
+  The `implemented_by` replacement follows Lean too, type-unsafe
+  implementations included (lean2rr represents their code with `Box`,
+  [../types/uniform-types.md](../types/uniform-types.md#lean-library-code-that-relies-on-the-uniform-representation)).
+  Until a bug hunt of the extern routing (2026-10-27) it skipped a
+  type-unsafe implementation, a leftover of the off `safeSources` option,
+  and `baseDeclFor?` then compiled the function's own definition from
+  source: a definition calling `@[implemented_by fImpl] def f (n) := n + 1`
+  (`fImpl` gives `n + 100` through `unsafeCast`) gave `2` for native `101`,
+  directly, as `xs.map f` and through a polymorphic function (test
+  `RtExternBodyImplBy`); an `opaque` with such an implementation gave its
+  default value, `0` for native `41` (`RtExternBodyOpaqueImpl`); a type
+  with computed fields built there (its constructors' `_override`s cast)
+  was refused, "constructor Foo.a not in type T_Foo__impl"
+  (`RtExternBodyComputed`); `Array.mapM`, `Array.modifyM`,
+  `Array.mapFinIdxM` and `List.attachWith` ran their reference
+  definitions (a new array, not in place; Performance).
   Limit: the replacements applied are those of `CSimp.ext`'s state after
   import, the global ones. A `local` `@[csimp]` of the extern's module is
   not saved in its `.olean`, and a `scoped` one applied where its
@@ -170,7 +190,7 @@ lowering at the library extern's type arguments, was removed).
   declaration of the program, candidates included (`programCsimps`),
   so it stays conservative.
 - **Where:** `Mono.lean`: `externBodyDecl`, `compileExternBody`,
-  `recompilePasses`.
+  `recompilePasses`, `baseDeclFor?`.
 - **Remove only if:** never; `noinline` only with RV8E-11's fold gone.
 
 ### The Lean definition's closed terms are extracted as Lean would

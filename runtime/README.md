@@ -1517,7 +1517,8 @@ which externs run their Lean definition (`NAME.l2r-debug`: the same, with
 lean2rr run under `L2R_DEBUG=1`). `tests/runtime/shim-types.sh`
 checks that each `@[export]` definition of lean2rr's shim (`L2RShim`) has
 the type of the `@[extern]` declaration of its C symbol (Lean pairs them by
-name only). The Rust unit tests of `leanrt`
+name only), and each of its overrides (`l2r_override_<f mangled>`, compiled in
+place of every call of `f`) the type of `f`. The Rust unit tests of `leanrt`
 (boxes and their cells of big integers, tagged arrays, string layout and
 counts, the drop stack, the last-error slot over lean-runtime's decoding)
 run with `tests/runtime/leanrt-unit.sh` (one build, linked with Reussir's

@@ -308,11 +308,20 @@ at every `α`; a phantom parameter) gets `lcAny` at every call, so all calls
 share one instance (`Mono.typeParamHidden`): the instances would all have
 one type, and natively one closed term serves such a call at every type.
 
-Constructors are not renamed by Stage 1 and merge in Stage 2 as they are;
-extern instances and instances (dictionary builders) compute nothing
-observable and keep their per-type instances. Lean's closed-term cache
-compares types, so closed calls at two types in two declarations stay two
-closed terms, natively too; after a merge into the earlier call's instance,
+Constructors are not renamed by Stage 1 and merge in Stage 2 as they are.
+The instances of Lean's library externs (the runtime's functions, whose
+observable ones, `dbgTrace` and the panics, are `@[never_extract]`) and
+instances (dictionary builders) compute nothing observable and keep their
+per-type instances. An extern of the program runs Lean code (§5.8) and is
+grouped as a definition is (until a bug hunt of the extern routing,
+2026-10-27, it was left out: `mkE k` at `Option Nat` and at `Option String`
+in one function traced twice, natively once; test `RtExternBodyMerge`).
+Lean's closed-term cache compares mono terms: closed calls in two
+declarations at two types whose mono types differ stay two closed terms,
+natively too; in two concrete declarations at types whose mono types are
+equal (`Fin 3` and `Nat`) they are one closed term, as natively (§3,
+`closedMonoKey`; test `RtClosedMonoEqual`; in instances of a generic
+declaration they stay apart, §10). After a merge into the earlier call's instance,
 one declaration's call reads the other's closed term as natively
 (cross-test XT-6, fixture A482; review XT6-01, XT6-02, XT6-03, XT6-04;
 shared cases A833, A1028, D71TesterT23; tests `RtCseAcrossTypes`,
@@ -477,9 +486,14 @@ giving it the representation it assumes:
   reads back as the type's zero at every type.
 
 This keeps Lean's in-place update tricks, including `modify`'s unshared
-element. An alternative, redirecting to the safe reference implementations
-and recompiling tainted callers from source, exists behind an option; it is
-off, because it loses Lean's inlining and specialization in those callers.
+element. The code lean2rr compiles from source itself (the definition of an
+extern of the program and an `@[export]` forwarder, §5.8) gets Lean's
+`implemented_by` replacement as it is (`Mono.recompilePasses`): a call of
+`Array.mapM` there calls `Array.mapMUnsafe`, as in Lean's compiled code.
+An alternative, redirecting to the safe reference implementations and
+recompiling tainted callers from source, exists behind an option
+(`MonoConfig.safeSources`, with no command-line switch); it is off,
+because it loses Lean's inlining and specialization in those callers.
 
 ---
 
@@ -575,7 +589,34 @@ exactly the ones Lean's runtime and `lean.h` externs assume.
   on the declaration of Lean's compilation the instance was made from, so
   `@[never_extract]` functions are not extracted and, as natively, a call
   of a function whose type is not syntactically a function type
-  (`def F := Nat → Nat`) is not extracted on its own.
+  (`def F := Nat → Nat`) is not extracted on its own. Lean's cache compares
+  mono terms, in which type arguments are erased and types are mono types:
+  `mk 5` at `Option (Fin 3)`, at `Option Nat` and at `Option W` (a
+  one-field `structure W where x : Nat`) is one term, `mk ◾ 5 : Option
+  Nat`, made once, where Stage 1 calls instances at `Fin 3`, `Nat` and `W`.
+  So a term that misses Lean's cache is also looked up under a key that
+  replaces each instance (and its `_redArg`) by its declaration, the mono
+  images of its type arguments (`toMonoTypeKeep`) and its static
+  dictionaries (`Pipeline.closedMonoKey`; test `RtClosedMonoEqual`). The
+  key is used only when no image has an `lcAny` that its type argument
+  has not (an instance at a type former such as `fun α => Nat → α × Nat`
+  has the image `lcAny`, which loses what tells two instances' code apart;
+  an argument that is `lcAny` itself, hidden or uniform, is the same in
+  both) and the term's type serves at itself (`Mono.serves`: it mentions
+  no `lcAny`, which could hide a type argument), and only in a declaration
+  whose code is concrete natively too: one made from an instance without
+  type arguments, or at `lcAny` for each (`Pipeline.monoOwner`; a
+  monomorphic declaration, a specialization Lean made). An instance of a
+  generic declaration has concrete types where the generic code native
+  Lean runs has `lcAny`: `mk2 7` in `gen {α}` is natively a term at
+  `Option lcAny`, not shared with `user`'s `mk2 7 : Option Nat`, so `gen`
+  at `W` does not share `user`'s term either (review of the bug hunt).
+  Such terms, and terms at type arguments that only Lean's `toMonoType`
+  makes equal (`fun _ => Nat` and `fun _ => String` are both `lcAny`
+  natively, kept by `toMonoTypeKeep`), stay apart (§10, "Merging after
+  erasure"). Through Lean's own cache, an instance of a generic
+  declaration still shares the term of a concrete declaration that calls
+  the same instance (`gen` at `Nat` and `user`, §10).
 
 **Output shape.** Top-level declarations only; there are no local functions
 left. Closures are partial applications of top-level declarations. Join
@@ -1763,7 +1804,15 @@ Rules:
   `Substring.Raw.Internal.*`, `lean_string_intercalate`, …): Lean's runtime
   calls back into compiled Lean code. lean2rr calls that definition
   directly (`Mono.redirectTarget`) and compiles it like any other, so its
-  semantics are exactly Lean's. Only the exports of Lean's library and the
+  semantics are exactly Lean's. The call's arguments go to the definition
+  by position, so its parameters must line up with the extern's: as many,
+  and at each position both a type, both erased or both a value
+  (`Mono.exportParamsMismatch?`); a call of a pair that does not is
+  refused with both parameter lists. All 147 such pairs (66 of Lean
+  4.34's `Init`, `Std`, `Lean` and `Lake`, 81 of lean2rr's shim) line up
+  except `Lean.Idbg.idbgClientLoop`
+  (its extern takes a type and a proof that `idbgClientLoopImpl` does not
+  take). Only the exports of Lean's library and the
   shim count (`Mono.libraryExportMap`): a program's `@[export]` under such
   a symbol only names a C symbol, as natively. Lean's other exports are not externs of the
   program: the `IO.Error` builders `lean_mk_io_error_*`, which Lean's C
@@ -1829,7 +1878,18 @@ Rules:
      runs. It is compiled as Lean compiles a definition without the
      attribute (`Mono.externBodyDecl`: the `_unsafe_rec` copy of a
      recursive or `partial` one, `@[csimp]` replacements, `macro_inline`,
-     matchers), `noinline` (RV8E-11). Its callees follow the same rules.
+     matchers), `noinline` (RV8E-11). Lean's base passes then replace each
+     call of a function with an `@[implemented_by]` by its implementation,
+     also a type-unsafe one, as Lean's compiled code does
+     (`Mono.recompilePasses`, §2.7). Until a bug hunt of the extern
+     routing (2026-10-27) a type-unsafe implementation was skipped there,
+     a leftover of the off `safeSources` option: the definition ran the
+     function's own definition (`n + 1` where the `unsafeCast`
+     implementation gives `n + 100`), an `opaque`'s default value, the
+     reference definition of `Array.mapM` (a new array, not in place), and
+     a type with computed fields built there was refused (tests
+     `RtExternBodyImplBy`, `RtExternBodyOpaqueImpl`,
+     `RtExternBodyComputed`). Its callees follow the same rules.
      Lean's compiled callers of a function that a `@[csimp]` theorem
      replaces by an extern call the extern (lean-zip's `UInt64.ctz` →
      `UInt64.ctzFast`), so they get its definition too. `@&` marks need
@@ -3221,7 +3281,27 @@ Each item says what differs and when.
     its later passes moved the code (a call inside a local function merged
     with one outside it, where Lean inlined the local function first; a
     call in a join point merged with one in a branch that jumps to it,
-    where Lean inlined the join point into that branch): both run.
+    where Lean inlined the join point into that branch): both run;
+  - closed calls in two declarations whose instances' mono images are not
+    precise (an image with an `lcAny` that its type argument has not, from
+    a type-former argument such as `fun α => Nat → α × Nat`), whose type
+    mentions `lcAny`, or whose type arguments only Lean's `toMonoType`
+    makes equal (`AssocList Nat (fun _ => Nat)` and `AssocList Nat (fun _
+    => String)` are both `AssocList Nat lcAny` natively, two types for
+    `toMonoTypeKeep`), and terms inside instances of generic declarations
+    (`mk 5 : Option α` in `gen {α}` at `Fin 3` and at `Nat`: natively one
+    term of the generic code; `Pipeline.monoOwner`): natively one closed
+    term, here one per declaration or instance (§3, `closedMonoKey`), so
+    it runs once more;
+  - the other direction: a closed term inside an instance of a generic
+    declaration that calls the same instance as a concrete declaration's
+    term (`mk2 7 : Option α` in `gen {α}` at `Nat`, and `mk2 7 : Option
+    Nat` in `user`) is one term through Lean's own cache, which compares
+    the code and finds the same instance name; natively the generic
+    code's term is at `Option lcAny` and `user`'s at `Option Nat`, two
+    terms, so a trace in it prints once here and twice natively. Lean's
+    cache is kept as it is (changing it would also change which
+    declaration evaluates a shared term).
 - *Unread constants are not evaluated* (§5.12, optional pass
   `unread-consts`): natively every constant is evaluated at startup. A
   constant that no kept code reads and whose evaluation cannot show is not
@@ -3972,6 +4052,13 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   connect stays pending until the connection exists or fails, and the
   shutdown queued behind it (LB-28) then shuts it. Case
   `net/shutdown_during_slow_connect`.
+- *LB-23, `keepAlive` with a delay of 0 fails with `EPERM`, where its
+  documentation says `EINVAL`*
+  ([LB-23](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-23-keepalive-with-a-delay-of-0-fails-with-eperm-where-its-documentation-says-einval)):
+  natively libuv 1.48 returns a bare -1 for a delay of 0 on a socket with a
+  descriptor, which decodes as `operation not permitted`; Lean's docstring,
+  libuv from 1.49 and upstream Lean's restated contract say `invalid
+  argument`, which lean2rr gives. Case `net/keepalive_zero_delay`.
 - *LB-51, `waitReadable` resolves `true` at the end of the stream*
   ([LB-51](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-51-waitreadable-resolves-true-at-the-end-of-the-stream)):
   its docstring and Lean's own end-of-file branch say `false`; lean-runtime

@@ -9,13 +9,21 @@ import Lean
 /-!
 # Stage 2's `extractClosed`, looking at Lean's declarations
 
-Lean's closed-term extraction, unchanged except that the attributes and the
-kernel type of a declaration called in a candidate term are those of the
-declaration of Lean's compilation it was made from (`leanName`): an
-instance `f._l2r.k` is not a kernel constant, so Lean's check that a root
-call's callee has a function type (`def F := Nat → Nat; def g : F` is not
-extracted as a root) and `@[never_extract]` would not see it. Run by
-`extractLikeLean` (Pipeline.lean).
+Lean's closed-term extraction, unchanged except for two things:
+* the attributes and the kernel type of a declaration called in a
+  candidate term are those of the declaration of Lean's compilation it was
+  made from (`leanName`): an instance `f._l2r.k` is not a kernel constant,
+  so Lean's check that a root call's callee has a function type (`def F :=
+  Nat → Nat; def g : F` is not extracted as a root) and `@[never_extract]`
+  would not see it;
+* a term that misses Lean's cache is also looked up in a second cache
+  (`monoCache`) under a key that replaces each instance by its declaration
+  and the mono images of its type arguments (`monoKey`, Pipeline's
+  `closedMonoKey`): Lean's cache compares mono terms, where `mk ◾ 5` at
+  `Option (Fin 3)` and at `Option Nat` is one term, `mk ◾ 5 : Option Nat`,
+  while Stage 1 calls two instances there.
+
+Run by `extractLikeLean` (Pipeline.lean).
 -/
 
 namespace Lean.Compiler.LCNF
@@ -57,6 +65,11 @@ structure Context where
   /-- The name in Lean's compilation of a declaration called here (an
   instance `f._l2r.k` is `f`'s). -/
   leanName : Name → Name
+  /-- The key of a closed term (its code as an expression, its type) in
+  `monoCache`, if it has one (Pipeline's `closedMonoKey`). -/
+  monoKey : Expr → Expr → CompilerM (Option Expr)
+  /-- The closed terms of the module so far, by `monoKey`. -/
+  monoCache : IO.Ref (Std.HashMap Expr Name)
 
 structure State where
   decls : Array (Decl .pure) := {}
@@ -228,14 +241,21 @@ where
     if let some closedTermName := getClosedTermName? env closedExpr then
       eraseCode closedCode
       return closedTermName
-    else
-      let name := (← read).baseName ++ (`_closed).appendIndexAfter (← get).decls.size
-      cacheClosedTermName env closedExpr name |> setEnv
-      let decl := { name, levelParams := [], type := decl.type, params := #[],
-                    value := .code closedCode, inlineAttr? := some .noinline }
-      decl.saveMono
-      modify fun s => { s with decls := s.decls.push decl }
-      return name
+    -- lean2rr: the same term at instances whose type arguments have the
+    -- same mono images (see the module's comment).
+    let monoKey ← (← read).monoKey closedExpr decl.type
+    if let some k := monoKey then
+      if let some closedTermName := (← (← read).monoCache.get)[k]? then
+        eraseCode closedCode
+        return closedTermName
+    let name := (← read).baseName ++ (`_closed).appendIndexAfter (← get).decls.size
+    cacheClosedTermName env closedExpr name |> setEnv
+    if let some k := monoKey then (← read).monoCache.modify (·.insert k name)
+    let decl := { name, levelParams := [], type := decl.type, params := #[],
+                  value := .code closedCode, inlineAttr? := some .noinline }
+    decl.saveMono
+    modify fun s => { s with decls := s.decls.push decl }
+    return name
 
 
 end
@@ -246,9 +266,10 @@ def visitDecl (decl : Decl .pure) : M (Decl .pure) := do
 
 end ExtractClosedK
 
-partial def Decl.extractClosedK (decl : Decl .pure) (sccDecls : Array (Decl .pure)) (leanName : Name → Name) :
+partial def Decl.extractClosedK (decl : Decl .pure) (sccDecls : Array (Decl .pure)) (leanName : Name → Name)
+    (monoKey : Expr → Expr → CompilerM (Option Expr)) (monoCache : IO.Ref (Std.HashMap Expr Name)) :
     CompilerM (Array (Decl .pure)) := do
-  let mut ⟨decl, s⟩ ← ExtractClosedK.visitDecl decl |>.run { baseName := decl.name, sccDecls, leanName } |>.run {}
+  let mut ⟨decl, s⟩ ← ExtractClosedK.visitDecl decl |>.run { baseName := decl.name, sccDecls, leanName, monoKey, monoCache } |>.run {}
   if !s.decls.isEmpty then
     -- Closed term extraction might have left behind dead values.
     decl ← decl.elimDeadVars

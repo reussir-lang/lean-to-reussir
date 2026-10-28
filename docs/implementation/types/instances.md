@@ -49,8 +49,14 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   `Fin`, `Char`) taken for its field and `Decidable` for `Bool`; one scope
   per `cases` alternative, join points in the enclosing scope, a local
   function's body in its own (Lean's `cse` runs after lambda lifting);
-  `@[never_extract]` calls apart. Constructors, extern instances and
-  instances (dictionary builders) are not aligned. The instance of a group:
+  `@[never_extract]` calls apart. Constructors, the instances of Lean's
+  library externs (the runtime's functions; its observable ones,
+  `dbgTrace` and the panics, are `@[never_extract]`) and instances
+  (dictionary builders) are not aligned; an extern of the program is, as a
+  definition (it runs Lean code: its definition, an `@[export]` definition
+  or its `implemented_by` target; test `RtExternBodyMerge`: until a bug
+  hunt of the extern routing, 2026-10-27, `mkE k` at `Option Nat` and at
+  `Option String` traced twice, natively once). The instance of a group:
   1. The earlier call's, when its result serves every later call's
      (`serves`): the later calls get its type and value arguments and
      universe levels. Example: `gp xs none` as an `Option String`, then as
@@ -134,7 +140,7 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   `RtCseFnField`, `RtCseFnTrivial`, `RtCseFnResult`, `RtCseHiddenAny`,
   `RtCseUniform`, `RtCseClosed`, `RtCseApart` (expectation files: the
   shapes that still run apart or more often than natively), `RtDepXA833`,
-  `RtDepXD71TesterT23`.
+  `RtDepXD71TesterT23`, `RtExternBodyMerge`.
 - **Remove only if:** Stage 1 stops making an instance per type, or Lean's
   `cse` starts comparing type arguments.
 
@@ -319,16 +325,29 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
 - **What:** Stage 1 can redirect type-unsafe `implemented_by` targets
   (`Array.mapMUnsafe`) to their safe declarations and recompile the
   callers they taint from source, but this is off:
-  `MonoConfig.safeSources := false`, with no command-line switch. (The
-  recompilation itself, `recompile` with `recompilePasses`, is still used
-  for a safe declaration whose `implemented_by` leaves it no persisted
-  body.)
+  `MonoConfig.safeSources := false`, with no command-line switch. The code
+  lean2rr compiles from source itself (`recompilePasses`: the definition of
+  an extern of the program, an `@[export]` forwarder) calls
+  implementations exactly as Lean's code does: each call of a function
+  with an `implemented_by` calls its implementation, type-unsafe or not
+  (`Array.mapM` calls `Array.mapMUnsafe`). Only with `safeSources` does
+  `recompilePasses` skip type-unsafe implementations and map them back to
+  their safe declaration, which `baseDeclFor?` then compiles from source
+  (`recompile`; by default nothing reaches that branch: Lean's code and
+  `recompilePasses` call the implementation instead).
 - **Why:** Recompiling loses Lean's inlining and specialization in those
   callers. lean2rr represents the unsafe code instead (see
   [uniform-types.md](uniform-types.md#lean-library-code-that-relies-on-the-uniform-representation)).
-- **Where:** `Mono.lean`: `MonoConfig.safeSources`, `redirectTarget`,
-  `isTainted`, `isTypeUnsafeImpl`, `baseDeclFor?`, `recompile`; plan
+  Until a bug hunt of the extern routing (2026-10-27) `recompilePasses`
+  skipped type-unsafe implementations by default too (a leftover of
+  `safeSources`), so an extern's definition ran the reference definitions
+  of the functions it called, or an `opaque`'s default value
+  ([../externs-ffi/program-externs.md](../externs-ffi/program-externs.md#the-lean-definition-is-compiled-as-lean-compiles-one-and-noinline)).
+- **Where:** `Mono.lean`: `MonoConfig.safeSources`, `recompilePasses`,
+  `redirectTarget`, `isTainted`, `isTypeUnsafeImpl`, `baseDeclFor?`,
+  `recompile`; plan
   [§2.7](../../translation-plan.md#27-library-code-that-relies-on-the-uniform-representation).
-- **Remove only if:** the `safeSources` branches (the last case of
-  `redirectTarget`, the `isTainted` check in `baseDeclFor?`) may be
-  deleted; `recompile`/`recompilePasses` stay.
+- **Remove only if:** the `safeSources` branches (in `recompilePasses`,
+  the last case of `redirectTarget`, the `isTainted` check and the
+  recompilation of a declaration without a persisted body in
+  `baseDeclFor?`) may be deleted; `recompilePasses` stays.
