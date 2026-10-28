@@ -147,8 +147,10 @@ Paths are relative to `lean2rr/LeanToReussir/`. Plan
   the kept code (`ExtractClosedK` runs per module on what is left), which
   changes sharing only.
 - **Where:** `Opt/UnreadConsts.lean`: `prune`, `blockers`, `scanCode`,
-  `classifyCall`, `pureExterns`, `recursionEnds`, `isComputedFieldImpl`,
+  `classifyCall`, `recursionEnds`, `isComputedFieldImpl`,
   `axiomTaints`, `standardAxioms`, `isAxiomLeaf`;
+  `PureExterns.lean`: `pureExterns` (with `fixedWidthOps`, `floatOps`;
+  also read by `Mono.erasedMerges`);
   `CompileRecord.lean`: `programCsimps`;
   hook `PassConfig.startupPrune`; `Main.lean`: `pipeline` (after Stage 1).
   Tests `RtUnreadConsts` (its `.l2r-debug` lists the decisions),

@@ -45,7 +45,12 @@ Paths are relative to `lean2rr/LeanToReussir/`.
   the others are left as they are. Afterwards the dead reads of closed
   terms are dropped and dead calls kept, as Lean's impure `elimDeadVars`
   does. lean2rr's copy of the pass looks up attributes and kernel types on
-  the declaration of Lean's compilation an instance comes from.
+  the declaration of Lean's compilation an instance comes from, and
+  recognizes an array literal (`searchArrayLiteral`: `Array.mkEmpty` or
+  `Array.emptyWithCapacity`, then `Array.push` per element) by those
+  declarations too (`leanCall?`): a literal of Stage 1's instances
+  `Array.push._l2r.k` is one closed term, as natively (before 2026-10-28,
+  one closed term per element, a chain).
 - **Why:** With one cache for the whole program, another declaration
   owned shared terms (the evaluation order inside constants differed), the
   calls Lean leaves dead after a cache hit were missing, and
@@ -54,7 +59,8 @@ Paths are relative to `lean2rr/LeanToReussir/`.
   Lean's "callee has a function type" check (`def F := Nat → Nat`) would
   not see it.
 - **Where:** `Pipeline.lean`: `extractLikeLean`, `leanNameOf`;
-  `ExtractClosedK.lean` (`leanName`), `Decl.elimDeadLikeImpure`,
+  `ExtractClosedK.lean` (`leanName`, `leanCall?`, `searchArrayLiteral`),
+  `Decl.elimDeadLikeImpure`,
   `safeToElim`; `CompileRecord.lean`: `closedRecord`, `closedTermOwner?`,
   `moduleIRDeclsImpl`.
 - **Remove only if:** never: which declaration evaluates a shared closed

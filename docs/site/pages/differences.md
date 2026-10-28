@@ -122,6 +122,15 @@ schedules native Lean can produce. See
   times. Lean does not fix how often a trace in pure code prints, so this
   is accepted: test `RtCseApart` records both outputs (expectation files)
   and fails if either changes.
+- **Inlining across a `module` boundary.** A public function of a
+  `module` file without `@[expose]` does not give its compiled body to a
+  `module` that imports it. Natively, the importer calls the function, and
+  a closed term of that function is in the function's own module, one
+  time. lean2rr reads every module at the private level, so Lean's passes
+  can copy the function into the importer. The closed term is then in the
+  importer too, a second time. The results are the same. A trace or panic
+  in such a closed term prints one more time (test `RtModuleVisInline`,
+  with expectation files).
 - **Compiler options** of the program's modules (`set_option compiler.…`)
   are not in the `.olean`. lean2rr runs Lean's passes with the defaults.
 - **Order of panics in pure code.** When several pure computations panic,

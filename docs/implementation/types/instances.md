@@ -49,14 +49,19 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they say otherwise.
   `Fin`, `Char`) taken for its field and `Decidable` for `Bool`; one scope
   per `cases` alternative, join points in the enclosing scope, a local
   function's body in its own (Lean's `cse` runs after lambda lifting);
-  `@[never_extract]` calls apart. Constructors, the instances of Lean's
-  library externs (the runtime's functions; its observable ones,
-  `dbgTrace` and the panics, are `@[never_extract]`) and instances
-  (dictionary builders) are not aligned; an extern of the program is, as a
-  definition (it runs Lean code: its definition, an `@[export]` definition
-  or its `implemented_by` target; test `RtExternBodyMerge`: until a bug
-  hunt of the extern routing, 2026-10-27, `mkE k` at `Option Nat` and at
-  `Option String` traced twice, natively once). The instance of a group:
+  `@[never_extract]` calls apart. Constructors, the instances of the pure
+  total externs of Lean's library (`pureExterns`, in `PureExterns.lean`,
+  shared with unread-consts) and instances (dictionary builders) are not
+  aligned; every other extern is, as a definition: one of the program runs
+  Lean code (its definition, an `@[export]` definition or its
+  `implemented_by` target; test `RtExternBodyMerge`: until a bug hunt of
+  the extern routing, 2026-10-27, `mkE k` at `Option Nat` and at
+  `Option String` traced twice, natively once), and one of the library can
+  show without being `@[never_extract]` (`Array.get!Internal` and
+  `Array.set!` panic; test `RtGetMergeErased`: until a bug hunt of the
+  passes, 2026-10-28, `a[n]!` on two empty arrays at two element types
+  printed two `index out of bounds` messages, natively one). The instance
+  of a group:
   1. The earlier call's, when its result serves every later call's
      (`serves`): the later calls get its type and value arguments and
      universe levels. Example: `gp xs none` as an `Option String`, then as

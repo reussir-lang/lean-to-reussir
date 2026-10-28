@@ -9,7 +9,7 @@ import Lean
 /-!
 # Stage 2's `extractClosed`, looking at Lean's declarations
 
-Lean's closed-term extraction, unchanged except for two things:
+Lean's closed-term extraction, unchanged except for three things:
 * the attributes and the kernel type of a declaration called in a
   candidate term are those of the declaration of Lean's compilation it was
   made from (`leanName`): an instance `f._l2r.k` is not a kernel constant,
@@ -21,7 +21,12 @@ Lean's closed-term extraction, unchanged except for two things:
   and the mono images of its type arguments (`monoKey`, Pipeline's
   `closedMonoKey`): Lean's cache compares mono terms, where `mk ◾ 5` at
   `Option (Fin 3)` and at `Option Nat` is one term, `mk ◾ 5 : Option Nat`,
-  while Stage 1 calls two instances there.
+  while Stage 1 calls two instances there;
+* an `Array` literal (`searchArrayLiteral`: `Array.mkEmpty` or
+  `Array.emptyWithCapacity`, then `Array.push` per element) is recognized
+  by the declarations its calls were made from (`leanName`), so a chain of
+  Stage 1's instances `Array.push._l2r.k` is one closed term, as natively,
+  not one closed term per element.
 
 Run by `extractLikeLean` (Pipeline.lean).
 -/
@@ -132,6 +137,13 @@ where
 
 end
 
+/-- The declaration of Lean's compilation that a call's callee was made from
+(`leanName`: `f` for Stage 1's instance `f._l2r.k`), with the call's
+arguments. -/
+def leanCall? (v : LetValue .pure) : M (Option (Name × Array (Arg .pure))) := do
+  let .const f _ args .. := v | return none
+  return some ((← read).leanName f, args)
+
 /--
 Check if `let decl; k` forms an `Array`, `ByteArray`, or `FloatArray` literal. They consist of some
 initial allocation (`Array.mkEmpty` or `Array.emptyWithCapacity`) followed by a sequence of
@@ -144,11 +156,11 @@ on persistent `Array` objects during initialization.
 -/
 def searchArrayLiteral (decl : LetDecl .pure) (k : Code .pure) :
     M (Option (LetDecl .pure × Code .pure)) := do
-  let .const ``Array.push  _ #[_, .fvar parentId, _] := decl.value | return none
+  let some (``Array.push, #[_, .fvar parentId, _]) ← leanCall? decl.value | return none
   let some parentDecl ← findLetDecl? (pu := .pure) parentId | return none
-  match parentDecl.value with
-  | .const ``Array.mkEmpty _ #[_, .fvar sizeFVar]
-  | .const ``Array.emptyWithCapacity _ #[_, .fvar sizeFVar] =>
+  match ← leanCall? parentDecl.value with
+  | some (``Array.mkEmpty, #[_, .fvar sizeFVar])
+  | some (``Array.emptyWithCapacity, #[_, .fvar sizeFVar]) =>
     let some (.lit (.nat size)) ← findLetValue? (pu := .pure) sizeFVar | return none
     identifyChain parentDecl.fvarId decl k {} size
   | _ => return none
@@ -158,7 +170,7 @@ where
     match size with
     | 0 => return none
     | nextSize + 1 =>
-      let .const ``Array.push _ #[_, .fvar arrId, elemArg] := decl.value | return none
+      let some (``Array.push, #[_, .fvar arrId, elemArg]) ← leanCall? decl.value | return none
       if arrId != prevArrayId then return none
       if !(← shouldExtractArg elemArg) then return none
       if nextSize != 0 then
@@ -198,9 +210,9 @@ partial def visitCode (code : Code .pure) : M (Code .pure) := do
       else
         return code.updateLet! decl (← visitCode k)
 
-    match decl.value with
-    | .const ``Array.mkEmpty _ #[_, .fvar sizeId]
-    | .const ``Array.emptyWithCapacity _ #[_, .fvar sizeId] =>
+    match ← leanCall? decl.value with
+    | some (``Array.mkEmpty, #[_, .fvar sizeId])
+    | some (``Array.emptyWithCapacity, #[_, .fvar sizeId]) =>
       if let some (.lit (.nat n)) ← findLetValue? (pu := .pure) sizeId then
         if n == 0 then
           let name ← performExtraction decl

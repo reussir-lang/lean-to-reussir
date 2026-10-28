@@ -309,13 +309,20 @@ share one instance (`Mono.typeParamHidden`): the instances would all have
 one type, and natively one closed term serves such a call at every type.
 
 Constructors are not renamed by Stage 1 and merge in Stage 2 as they are.
-The instances of Lean's library externs (the runtime's functions, whose
-observable ones, `dbgTrace` and the panics, are `@[never_extract]`) and
-instances (dictionary builders) compute nothing observable and keep their
-per-type instances. An extern of the program runs Lean code (§5.8) and is
-grouped as a definition is (until a bug hunt of the extern routing,
+The instances of the pure total externs of Lean's library (the runtime's
+functions that only compute their result: arithmetic, `Array.push`,
+`Array.size`, `String.append`; `pureExterns`, shared with unread-consts) and instances
+(dictionary builders) compute nothing observable and keep their per-type
+instances. Every other extern is grouped as a definition is. An extern of
+the program runs Lean code (§5.8) (until a bug hunt of the extern routing,
 2026-10-27, it was left out: `mkE k` at `Option Nat` and at `Option String`
-in one function traced twice, natively once; test `RtExternBodyMerge`).
+in one function traced twice, natively once; test `RtExternBodyMerge`). An
+extern of the library can show without being `@[never_extract]`:
+`Array.get!Internal` (`a[n]!`) and `Array.set!` panic out of bounds (until
+a bug hunt of the passes, 2026-10-28, every library extern was left out:
+`a[n]!` and `b[n]!` on two empty arrays at `Option Nat` and at
+`Option String` printed two `index out of bounds` messages, natively one;
+test `RtGetMergeErased`).
 Lean's closed-term cache compares mono terms: closed calls in two
 declarations at two types whose mono types differ stay two closed terms,
 natively too; in two concrete declarations at types whose mono types are
@@ -589,7 +596,10 @@ exactly the ones Lean's runtime and `lean.h` externs assume.
   on the declaration of Lean's compilation the instance was made from, so
   `@[never_extract]` functions are not extracted and, as natively, a call
   of a function whose type is not syntactically a function type
-  (`def F := Nat → Nat`) is not extracted on its own. Lean's cache compares
+  (`def F := Nat → Nat`) is not extracted on its own; it also recognizes an
+  array literal (`Array.mkEmpty`, then `Array.push` per element) by those
+  declarations, so a literal of Stage 1's instances `Array.push._l2r.k` is
+  one closed term, as natively, not one per element. Lean's cache compares
   mono terms, in which type arguments are erased and types are mono types:
   `mk 5` at `Option (Fin 3)`, at `Option Nat` and at `Option W` (a
   one-field `structure W where x : Nat`) is one term, `mk ◾ 5 : Option
@@ -3270,7 +3280,11 @@ Each item says what differs and when.
     test refused it (`mkO 3 : Option (α → α)` in `one` at `Nat` and in
     `both` at `Nat` and `String`: natively `both` shares `one`'s closed
     term, one trace; lean2rr runs `both`'s calls apart, two traces, as
-    before): both calls run;
+    before): or an argument of the later call is the result of a pure library extern
+    (`Array.mkEmpty`), which the search leaves out, at a type that does not
+    serve (`a[n]!` and `b[n]!` on empty arrays at `Option (Nat → Nat)` and
+    `Option (String → String)`: natively one `index out of bounds`, lean2rr
+    two): both calls run;
   - a closed call that takes the instance at `lcAny` because the base test
     aligned it, and whose result type hides the type argument in a field
     (`Foo α` with a field `(b : Bool) → if b then List α else Unit`): it is
@@ -3302,6 +3316,19 @@ Each item says what differs and when.
     terms, so a trace in it prints once here and twice natively. Lean's
     cache is kept as it is (changing it would also change which
     declaration evaluates a shared term).
+- *Inlining across a `module` boundary* (§2.3): a public definition of a
+  `module` file without `@[expose]` (`f` in `ModuleVisInlineDep`, whose
+  body is `noisyP rfl`) exports no mono body to a `module` importer, so
+  natively the importer's `g` calls `f`, and `f`'s closed term lives once,
+  in the cache of `f`'s module. lean2rr imports every module at the
+  private level, so Lean's passes in Stage 2 inline `f` into `g`, and the
+  term becomes a second closed term, in `g`'s module. Results are the
+  same; an effect in such a term (a trace, a panic) shows once more:
+  `noisy` once natively, twice through lean2rr (test `RtModuleVisInline`,
+  with expectation files). This applies only to code inlined across the
+  boundary of a `module` file. lean2rr does not emulate the exported level
+  in Stage 2: for Init and Std that would also take inlining away (a
+  possible cost).
 - *Unread constants are not evaluated* (§5.12, optional pass
   `unread-consts`): natively every constant is evaluated at startup. A
   constant that no kept code reads and whose evaluation cannot show is not
@@ -3970,6 +3997,18 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   (`l2r_int_sat_i64`) to lean-runtime's `scaleb`, `scalbn` of the exponent
   clamped to the `int` range: `x * 2^i` for every `Int` (`-0.000000`
   there). Test `RtFloatScaleBBig`.
+- *LB-32, a waiter of a finished task stays asleep while a `sync`
+  dependent of it does not return*
+  ([LB-32](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-32-a-waiter-of-a-finished-task-stays-asleep-while-a-sync-dependent-of-it-does-not-return)):
+  natively the waiters of a finished task wake only after each `sync`
+  dependent has returned; `Promise.result!` on a dropped promise is such a
+  dependent, and it blocks for good after its panic, so a thread in
+  `IO.wait p.result?` never reports `none` (or only when an unrelated task
+  finishes). lean-runtime also wakes them when a `sync` dependent reaches
+  that permanent block: after the panic line the waiter reports `none`;
+  the dependent still blocks, as documented. Cases
+  `tasks/dropped_promise_waiter_wakes`,
+  `tasks/dropped_promise_waiter_unrelated_finish`.
 - *LB-39, a task priority cut to 32 bits*
   ([LB-39](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-39-a-task-priority-is-cut-to-32-bits-232---1-runs-the-task-at-once-on-the-spawning-thread-and-232-to-232--8-go-to-the-pool)):
   natively `Task.spawn`, `Task.map`, `Task.bind`, `IO.asTask`,
@@ -4044,6 +4083,22 @@ and `taskio/output_input_while_ticking` (LB-40), `io/getline_after_error`
   decoders give `inappropriateType` on both paths, with native's details.
   No program can cause it on demand (a corrupted file system);
   lean-runtime's decoding table checks it.
+- *LB-21, a second `accept` while one is pending stops the event loop*
+  ([LB-21](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-21-a-second-accept-while-one-is-pending-stops-the-event-loop)):
+  natively the second `accept` fails with `EALREADY` but keeps the event
+  loop's lock, so no later libuv callback runs and the program hangs at
+  its next wait (fixed upstream after 4.35.0-rc1). lean2rr fails the
+  second call with the same error and the loop goes on: a later connect
+  resolves and the first `accept` returns the connection. Case
+  `net/accept_parallel`.
+- *LB-28, a `shutdown` requested while `connect` is pending never happens*
+  ([LB-28](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-28-a-shutdown-requested-while-connect-is-pending-never-happens)):
+  natively libuv accepts the request but never carries it out: the connect
+  succeeds, the shutdown's promise stays pending, no FIN is sent and the
+  socket is never closed. lean-runtime queues the shutdown behind the
+  connect, like a write: once the connection exists and the writes have
+  drained, the write side is shut, the promise resolves `ok` and the peer
+  reads the end of the stream. Case `net/shutdown_during_connect`.
 - *LB-50, a `shutdown` during a `connect` resolves the connect `ok` before
   the connection exists*
   ([LB-50](https://github.com/QueClr/lean-runtime-rs/blob/main/docs/lean-bugs.md#lb-50-a-shutdown-during-a-connect-resolves-the-connect-ok-before-the-connection-exists)):

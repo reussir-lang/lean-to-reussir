@@ -5,6 +5,7 @@ import LeanToReussir.Passes
 import LeanToReussir.CompileRecord
 import LeanToReussir.Env
 import LeanToReussir.NatEncoding
+import LeanToReussir.PureExterns
 
 /-!
 # Stage 1: monomorphization
@@ -1717,15 +1718,21 @@ taken for its field and `Decidable` for `Bool`, as `toMono` does; a `let` is
 merged into one in scope (`cases` alternatives start a nested scope, join
 points see the enclosing scope, and a local function's body only its own:
 Lean's `cse` runs after lambda lifting), and `@[never_extract]` calls are
-not merged. Only calls of definitions count, the externs of the program
-too (they run Lean code: their definition, an `@[export]` definition or
-their `implemented_by` target; until a bug hunt of the extern routing,
+not merged. Calls of definitions count, the externs of the program too
+(they run Lean code: their definition, an `@[export]` definition or their
+`implemented_by` target; until a bug hunt of the extern routing,
 2026-10-27, they were left out, and a trace in an extern's definition
-called at two types printed twice, test `RtExternBodyMerge`): Stage 1 does
-not rename constructors (Stage 2's `cse` merges them as natively), and the
-instances of Lean's library externs (the runtime's functions, whose
-observable ones are `@[never_extract]`) and instances (dictionary
-builders) compute nothing observable. -/
+called at two types printed twice, test `RtExternBodyMerge`), and the
+externs of Lean's library that can show (until a bug hunt of the passes,
+2026-10-28, every library extern was left out on the claim that the
+observable ones are `@[never_extract]`; `Array.get!Internal` is not, and
+`a[n]!` on two empty arrays at two element types printed one `index out
+of bounds` natively and two through lean2rr, test `RtGetMergeErased`).
+Left out are constructors (Stage 1 does not rename them; Stage 2's `cse`
+merges them as natively), the pure total externs of Lean's library
+(`pureExterns`: the runtime's functions, which compute the same result at
+every instance) and instances (dictionary builders), which compute nothing
+observable. -/
 partial def erasedMerges (code : Code .pure) :
     CompilerM (Std.HashMap FVarId (List Level × Array (Arg .pure))) := do
   let ((), scan) ← (go code {}).run {}
@@ -1816,13 +1823,17 @@ where
         | .lit l => l.toExpr
         | .erased => erasedExpr
       if let .const f us args _ := d.value then
-        -- An extern of Lean's library is the runtime's function (its
-        -- observable ones, `dbgTrace` and the panics, are
-        -- `@[never_extract]`); one of the program runs Lean code (its
-        -- definition, an `@[export]` definition or its `implemented_by`
-        -- target) and counts as a definition (test `RtExternBodyMerge`).
-        let libExtern ← if isExtern env f then isToolchainDecl f else pure false
-        unless env.isConstructor f || libExtern || (← isInstanceReducible f) do
+        -- A pure total extern of Lean's library (`pureExterns`) is left
+        -- out: the runtime's function, whose instances compute the same
+        -- result. Every other extern is aligned like a definition: one of
+        -- the library that can show is not always `@[never_extract]`
+        -- (`Array.get!Internal` panics, and Lean's cse merges two of its
+        -- calls; test `RtGetMergeErased`), and one of the program runs
+        -- Lean code (its definition, an `@[export]` definition or its
+        -- `implemented_by` target; test `RtExternBodyMerge`).
+        let libPure ← if isExtern env f && pureExterns.contains f then isToolchainDecl f
+                      else pure false
+        unless env.isConstructor f || libPure || (← isInstanceReducible f) do
           modify fun s => { s with calls := s.calls.insert d.fvarId (f, us, args, d.type),
                                    order := s.order.push d.fvarId }
       let neverExtract := match d.value with
