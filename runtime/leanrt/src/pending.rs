@@ -43,6 +43,7 @@
 //! code runs inside one (the end work runs after it).
 
 use reussir_rt::drop_stack as ds;
+pub use ds::StepStatus;
 
 /// Releases one pending cell, given the pointer it was deferred with.
 pub type Release = ds::Release;
@@ -71,14 +72,14 @@ pub fn depth() -> usize {
 /// right after ([`run_step`]).
 #[inline(always)]
 pub fn defer_step(p: usize, step: Step) {
-    unsafe { ds::defer_step(p, step) }
+    unsafe { ds::defer_step(p as *mut std::ffi::c_void, step) }
 }
 
 /// Runs incremental work and everything it pushes; inside a drain, only
 /// pushes it.
 #[inline(always)]
 pub fn run_step(p: usize, step: Step) {
-    unsafe { ds::run_step(p, step) }
+    unsafe { ds::join_or_run_step(p as *mut std::ffi::c_void, step) }
 }
 
 /// Defers `release(cell)` until the current thread's drain pops it; outside a
@@ -101,7 +102,8 @@ pub unsafe fn defer_cell(cell: *mut u8, release: Release) {
 /// whatever is pushed meanwhile.
 #[inline(always)]
 pub fn drain() {
-    ds::drain()
+    // Enqueue operations complete their own outermost scope.
+    debug_assert!(releasing() || depth() == 0);
 }
 
 /// Asks the running drain to run the end work once it is over
@@ -112,12 +114,11 @@ pub fn drain() {
 #[inline(always)]
 pub fn want_end_work() {
     debug_assert!(releasing(), "leanrt: end work asked for outside a drain");
-    ds::set_end_work(end_work);
-    ds::want_end_work();
+    ds::defer_until_scope_exit(end_work);
 }
 
 /// The end work, called by the stack once its outermost drain is over.
-unsafe extern "C" fn end_work() {
+fn end_work() {
     #[cfg(test)]
     tests::END_SEEN.with(|s| s.borrow_mut().push((releasing(), depth())));
     crate::task::drained();

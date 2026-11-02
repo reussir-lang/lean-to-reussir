@@ -771,14 +771,16 @@ impl Drop for Promise {
 ///   (the drain's end work, `drained`). With the store made there too, the other contexts see
 ///   the promise unresolved until its dependents run, as natively (the
 ///   store-with-resolve shape of the design's review RW1-05).
-unsafe extern "C" fn defer_promise_drop(cell: usize) -> bool {
+unsafe extern "C" fn defer_promise_drop(object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let cell = object as usize;
     if promise_resolved(cell) {
-        return drop_promise_now(cell);
+        drop_promise_now(cell);
+        return crate::pending::StepStatus::Complete;
     }
     defer_to_drain_end(Deferred::Call(Box::new(move || unsafe {
         drop_promise_now(cell);
     })));
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Put `d` off to the end of the running drain (lean-runtime's `defer`),

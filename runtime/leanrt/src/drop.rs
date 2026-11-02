@@ -463,21 +463,22 @@ const SCANNED: u32 = 1;
 /// work (done first) or none is left (then free the block). A step runs
 /// only from the drain's loop: a free is always running here, with this
 /// step the top entry of the stack.
-unsafe extern "C" fn step_vec<T: Clone>(p: usize) -> bool {
+unsafe extern "C" fn step_vec<T: Clone>(object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let p = object as usize;
     let o = p as *mut Hdr;
     if (*o)._pad != SCANNED {
         (*o)._pad = SCANNED;
         if T::scan(o) {
             mi_free(o as *mut std::ffi::c_void);
-            return true;
+            return crate::pending::StepStatus::Complete;
         }
     }
     let depth = crate::pending::depth();
     if !T::release_from_end(o, depth) {
-        return false;
+        return crate::pending::StepStatus::Pending;
     }
     mi_free(o as *mut std::ffi::c_void);
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Releasing the elements of a block being freed (`step_vec`), in native
@@ -937,10 +938,11 @@ extern "C" fn free_cell<T>(p: usize) {
 }
 
 /// Free the cell at `p` (count 1), then release its value.
-unsafe extern "C" fn step_cell<T>(p: usize) -> bool {
+unsafe extern "C" fn step_cell<T>(object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let p = object as usize;
     let v = crate::alloc::rc_into_inner(std::mem::transmute::<usize, reussir_rt::rc::Rc<T>>(p));
     drop(v);
-    true
+    crate::pending::StepStatus::Complete
 }
 
 #[cfg(test)]
@@ -1030,9 +1032,9 @@ mod tests {
     }
 
     /// A step that drops the array in `HELD` (inside the free).
-    unsafe extern "C" fn step_drop_held(_: usize) -> bool {
+    unsafe extern "C" fn step_drop_held(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
         drop(HELD.with(|h| h.borrow_mut().take()));
-        true
+        crate::pending::StepStatus::Complete
     }
 
     /// An array of records whose elements are shared inside it, freed inside
@@ -1086,14 +1088,14 @@ mod tests {
         drop(shared());
         assert_eq!(members(), vec![1001, 10, 1002, 90, 20]);
         HELD.with(|h| *h.borrow_mut() = Some(shared()));
-        run(0, step_drop_held);
+        run(1, step_drop_held);
         assert_eq!(members(), vec![20, 90, 10]);
         // Inside a free (the step): native's order.
         HELD.with(|h| *h.borrow_mut() = Some(dup()));
-        run(0, step_drop_held);
+        run(1, step_drop_held);
         assert_eq!(members(), vec![40, 20, 30, 10]);
         HELD.with(|h| *h.borrow_mut() = Some(holder()));
-        run(0, step_drop_held);
+        run(1, step_drop_held);
         assert_eq!(members(), vec![70, 50, 60]);
         assert_eq!(FREE_NOW_DEPTH.with(|c| c.get()), 0);
         assert!(!active());
@@ -1141,12 +1143,12 @@ mod tests {
 
     /// A step that releases the record left in `PENDING`, logging 100
     /// before and 101 after.
-    unsafe extern "C" fn step_release(_: usize) -> bool {
+    unsafe extern "C" fn step_release(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
         LOG.with(|l| l.borrow_mut().push(100));
         let r = PENDING.with(|p| p.borrow_mut().take()).unwrap();
         release(B::new(r));
         LOG.with(|l| l.borrow_mut().push(101));
-        true
+        crate::pending::StepStatus::Complete
     }
 
     /// Inside a free, `release` only pushes the record: it is released
@@ -1157,11 +1159,12 @@ mod tests {
         let first = rec(4, vec![]);
         // The free: a step releasing `first` (pushed below), then one
         // releasing the pending record.
-        unsafe extern "C" fn step_first(p: usize) -> bool {
+        unsafe extern "C" fn step_first(object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let p = object as usize;
             LOG.with(|l| l.borrow_mut().push(50));
-            defer(0, step_release);
+            defer(1, step_release);
             release(B::new(TRec(p as *mut TCell)));
-            true
+            crate::pending::StepStatus::Complete
         }
         let p = first.0 as usize;
         std::mem::forget(first);
@@ -1269,7 +1272,7 @@ mod tests {
     /// once and takes no entry (review RB-03 of the destructor port).
     #[test]
     fn arrays_inside_a_free_share_one_entry() {
-        unsafe extern "C" fn step_arrays(_: usize) -> bool {
+        unsafe extern "C" fn step_arrays(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
             let before = crate::pending::depth();
             let imms = (0..4u64).map(crate::any::LAny::imm).fold(crate::array::empty::<crate::any::LAny>(), crate::array::push);
             drop(imms);
@@ -1279,9 +1282,9 @@ mod tests {
                 drop(a.into_iter().fold(crate::array::empty::<B>(), crate::array::push));
             }
             DEPTHS.with(|d| d.set((before, after_imms, crate::pending::depth())));
-            true
+            crate::pending::StepStatus::Complete
         }
-        run(0, step_arrays);
+        run(1, step_arrays);
         let (before, after_imms, after) = DEPTHS.with(|d| d.get());
         assert_eq!(after_imms, before, "an array of immediates takes no entry");
         assert_eq!(after, before + 1, "three arrays, one run");
@@ -1300,26 +1303,26 @@ mod tests {
     /// members they push are popped after it, the last pushed first.
     #[test]
     fn array_cells_whose_steps_push_work() {
-        unsafe extern "C" fn step_a(_: usize) -> bool {
+        unsafe extern "C" fn step_a(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
             let arr = |xs: std::vec::Vec<TRec>| xs.into_iter().map(B::new).fold(crate::array::empty::<B>(), crate::array::push);
             for k in 0..3u32 {
                 drop(arr(vec![rec(10 * k + 1, vec![rec(10 * k + 5, vec![])]), rec(10 * k + 2, vec![rec(10 * k + 3, vec![]), rec(10 * k + 4, vec![])])]));
                 drop(crate::array::empty::<B>());
             }
-            true
+            crate::pending::StepStatus::Complete
         }
-        run(0, step_a);
+        run(1, step_a);
         assert_eq!(take_log(), vec![21, 22, 24, 23, 25, 11, 12, 14, 13, 15, 1, 2, 4, 3, 5]);
-        unsafe extern "C" fn step_b(_: usize) -> bool {
+        unsafe extern "C" fn step_b(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
             let arr = |xs: std::vec::Vec<TRec>| xs.into_iter().map(B::new).fold(crate::array::empty::<B>(), crate::array::push);
             drop(arr(vec![rec(61, vec![])]));
             release(B::new(rec(50, vec![rec(51, vec![])])));
             drop((0..4u64).map(crate::any::LAny::imm).fold(crate::array::empty::<crate::any::LAny>(), crate::array::push));
             drop(arr(vec![rec(62, vec![rec(63, vec![])])]));
             drop(arr(vec![rec(64, vec![])]));
-            true
+            crate::pending::StepStatus::Complete
         }
-        run(0, step_b);
+        run(1, step_b);
         assert_eq!(take_log(), vec![64, 62, 63, 50, 51, 61]);
         assert!(!active());
         assert_eq!(crate::pending::depth(), 0);
@@ -1328,9 +1331,9 @@ mod tests {
     thread_local! {
         static HELD_STRS: RefCell<Option<Vec<crate::string::LStr>>> = RefCell::new(None);
     }
-    unsafe extern "C" fn step_drop_strs(_: usize) -> bool {
+    unsafe extern "C" fn step_drop_strs(_object: *mut std::ffi::c_void) -> crate::pending::StepStatus {
         drop(HELD_STRS.with(|h| h.borrow_mut().take()));
-        true
+        crate::pending::StepStatus::Complete
     }
 
     /// An array of a leaf kind (`free_leaves`) is freed at once, inside a
@@ -1347,7 +1350,7 @@ mod tests {
         drop(strs());
         assert!(!crate::is_shared(&s));
         HELD_STRS.with(|h| *h.borrow_mut() = Some(strs()));
-        run(0, step_drop_strs);
+        run(1, step_drop_strs);
         assert!(!crate::is_shared(&s));
         assert!(!active());
         assert_eq!(crate::pending::depth(), 0);
