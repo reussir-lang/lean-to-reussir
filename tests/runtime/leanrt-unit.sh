@@ -37,11 +37,9 @@ lr = l2r.build_lean_runtime(l2r.leanrt_out())
 for e in lr.externs: print("--extern"); print(e)
 for d in lr.dirs: print("-L"); print(f"dependency={d}")' "$ROOT/scripts")
 [ ${#LR[@]} -ge 4 ] || exit 1
-# The Reussir checkout's rcgmp runtime (built with Reussir: its build
-# directory's `rcgmp-runtime.a`; the newest one, as cargo keeps a
-# build-script output directory per configuration).
-A=$(ls -t "$REUSSIR"/build/target/release/build/rene-*/out/rcgmp-runtime.a 2>/dev/null | head -1)
-[ -n "$A" ] || { echo "leanrt-unit: no rcgmp-runtime.a in $REUSSIR/build (a Reussir built with rcgmp)" >&2; exit 2; }
+# Use the same runtime archive as the compiler driver.
+A="$REUSSIR/build/lib/libRCGMPRuntime.a"
+[ -f "$A" ] || { echo "leanrt-unit: no $A (build Reussir with rcgmp)" >&2; exit 2; }
 # Debug assertions on (rustc turns them on by itself only at opt-level 0):
 # leanrt's invariant checks run.
 "$RUSTC" --edition 2021 --test --crate-name leanrt -C opt-level=1 -C debug-assertions=on -L "$RT" -L "$RT/deps" \

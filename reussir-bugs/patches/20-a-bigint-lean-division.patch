@@ -1,60 +1,9 @@
-From a2c2647a56ed03943f5a244a2c29da2c6ed13f4c Mon Sep 17 00:00:00 2001
+From e03e09e89d4c2549d94427db3713d92425be02bf Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 24 Oct 2026 23:28:28 -0400
-Subject: [PATCH 03/24] l2r-local: step D (R1): bigint intrinsics for Lean's
- division modes and floormod2expi
+Subject: [PATCH] [bigint] expose Lean division modes and power-of-two
+ remainder
 
-lean2rr lowers Lean's Nat and Int onto the rcgmp builtin (step D). Lean's
-divisions do not trap on a zero divisor: x / 0 = 0 and x % 0 = x, for
-Nat.div/mod, Int.tdiv/tmod (lean_int_div/mod), Int.ediv/emod, Int.fdiv/fmod
-and the exact divisions (0 / 0 = 0). Its mod-2^k rewrite needs the
-remainder by a power of two. mlir-rcgmp has both: the `divzero<lean>` mode
-of divsi, remsi, edivsi, emodsi, floordivsi, floormodsi and `divsi exact`,
-lowered inline on immediates and to the rcgmp_mpz_*_lean runtime entries
-on heap values, and `rcgmp.floormod2expi`. Reussir's `core::intrinsic::
-bigint` exposes neither, so the prelude has to compose a zero test and the
-trapping operation (two tests on the immediate path) and cannot reach the
-power-of-two remainder at all.
-
-New `core::intrinsic::bigint` intrinsics, declared in core like the others
-and lowered to the operation their name spells:
-
-- `divsi_lean`, `remsi_lean`, `edivsi_lean`, `emodsi_lean`,
-  `floordivsi_lean`, `floormodsi_lean`, `divsi_exact_lean`, each
-  `(T, T) -> T` for T = Nat or Int: the trapping operation with
-  `divzero<lean>`;
-- `floormod2expi(x : T, amount : u64) -> T`: `rcgmp.floormod2expi`, x
-  modulo 2^amount rounded toward negative infinity (the low bits of the
-  infinite two's complement, never negative).
-
-All consume their integer operands, as the existing divisions do, so the
-ownership analysis and monomorphization's operand check need no change.
-
-Divisions of Nats also set rcgmp's `nonnegative` attribute (mlir-rcgmp
-#48, in the pinned ca288d5e): both operands are nonnegative, so immediates
-untag by a logical shift and divide unsigned, with no test of the
-quotient, and every rounding agrees. This covers the `/` and `%`
-operators at Nat and every division intrinsic at Nat, the existing
-trapping ones and the `_lean` ones; Int divisions are unchanged. (If
-upstream sets the attribute itself, this part drops.)
-
-The backend gains `rcgmp::division` and `rcgmp::exact_division`, which
-take a `DivisionMode { lean, nonnegative }`, and `Shift::FloorMod2Exp`
-(the dialect's floormod2expi is a shift-shaped op).
-
-Tests: frontend/bigint_lean_division.rr (each mode on immediate and heap
-operands of every sign, heap by heap included, the smallest immediate by
--1 whose quotient 2^61 is a heap value, a zero divisor from the driver so
-the runtime paths run, and constant operands that fold),
-frontend/bigint_floormod2exp.rr (amounts 0, within the value, around the
-62-bit immediate width and the largest u64, on Nat, negative Int and heap
-values, a cross-check against floormodsi by 2^k for k up to 130, an
-in-place reduction chain), both also under ASan in
-sanitizer/bigint-asan.rr, the new names and the `nonnegative` Nat
-divisions in frontend/bigint_intrinsics.rr (MIR round trip, MLIR
-spelling), and in bigint_lean_division.rr the -O LLVM IR of a Nat `/` and
-a Nat `remsi_lean` (unsigned division of the untagged immediates) against
-an Int `/` (signed).
 ---
  crates/reussir-backend/src/rcgmp.rs           |  96 +++++++
  .../reussir-codegen/src/lower/expr/bigint.rs  |  63 ++++-
@@ -948,3 +897,6 @@ index a30a2390..b625bb2e 100644
  
  // Heap integers come from the sanitized runtime's allocator through the rcgmp
  // allocation hooks, so ASan sees every retain, release and in-place reuse of
+-- 
+2.53.0
+

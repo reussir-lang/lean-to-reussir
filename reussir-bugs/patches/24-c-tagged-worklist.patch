@@ -1,0 +1,119 @@
+From 451526f5f12c04e26ec5b994a7a02d7d42896842 Mon Sep 17 00:00:00 2001
+From: Schrodinger ZHU Yifan <yifanzhu@rochester.edu>
+Date: Thu, 5 Nov 2026 15:05:04 -0500
+Subject: [PATCH] [ffi] preserve tagged handle guards inside worklists
+
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     |  8 ++++
+ .../conversion/worklist_tagged_ffi.mlir       | 40 +++++++++++++++++++
+ .../frontend/ffi_tagged_worklist.c            |  3 ++
+ .../frontend/ffi_tagged_worklist.rr           | 21 ++++++++++
+ 4 files changed, 72 insertions(+)
+ create mode 100644 tests/integration/conversion/worklist_tagged_ffi.mlir
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.c
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.rr
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 0cc39458..99956670 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -723,6 +723,14 @@ void emitWorklistDecrement(mlir::Value rc, mlir::Location loc,
+                            mlir::SymbolTableCollection *symbols, bool run,
+                            bool tailRecursiveDrops) {
+   auto type = llvm::cast<RcType>(rc.getType());
++  if (auto ffi = llvm::dyn_cast<FFIObjectType>(type.getElementType());
++      ffi && ffi.getTagged()) {
++    auto dec =
++        ReussirRcDecOp::create(rewriter, loc, NullableType{}, rc,
++                               mlir::IntegerAttr{}, mlir::DenseI64ArrayAttr{});
++    dec->setAttr(REUSSIR_NO_DEFER, rewriter.getUnitAttr());
++    return;
++  }
+   auto module = rewriter.getInsertionBlock()
+                     ->getParentOp()
+                     ->getParentOfType<mlir::ModuleOp>();
+diff --git a/tests/integration/conversion/worklist_tagged_ffi.mlir b/tests/integration/conversion/worklist_tagged_ffi.mlir
+new file mode 100644
+index 00000000..3e6ec43c
+--- /dev/null
++++ b/tests/integration/conversion/worklist_tagged_ffi.mlir
+@@ -0,0 +1,40 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' --verify-each | %FileCheck %s
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++!ref = !reussir.ref<!word unspecified>
++!nullable = !reussir.nullable<!word>
++!nullable_ref = !reussir.ref<!nullable unspecified>
++
++module attributes {reussir.drop_order = "backward"} {
++  func.func private @word_drop(!word)
++
++  // CHECK-LABEL: func.func @direct
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @direct(%w: !word) attributes {reussir.worklist_drop} {
++    reussir.rc.dec(%w : !word)
++    return
++  }
++
++  // CHECK-LABEL: func.func @from_ref
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @from_ref(%w: !ref) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%w : !ref)
++    return
++  }
++
++  // CHECK-LABEL: func.func @from_nullable_ref
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @from_nullable_ref(%w: !nullable_ref) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%w : !nullable_ref)
++    return
++  }
++}
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.c b/tests/integration/frontend/ffi_tagged_worklist.c
+new file mode 100644
+index 00000000..43afad36
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.c
+@@ -0,0 +1,3 @@
++#include <stdint.h>
++extern uint64_t reussir_main(void);
++int main(void) { return reussir_main() == 84 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.rr b/tests/integration/frontend/ffi_tagged_worklist.rr
+new file mode 100644
+index 00000000..9bae9e54
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.rr
+@@ -0,0 +1,21 @@
++// UNSUPPORTED: darwin
++// RUN: %rrc %s -o %t.o -Oaggressive --relocation-mode pic
++// RUN: %cc %t.o %S/ffi_tagged_worklist.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++#[ffi(rust = "usize", tagged)]
++pub struct Word;
++
++pub struct Node { word: Word }
++pub enum Nodes { Nil, Cons(Word, Word, Nodes) }
++
++#[ffi(import)]
++fn word() -> Word [{ 3 }];
++
++#[ffi(import)]
++fn discard<T>(x: T) -> u64 [{ ::std::mem::drop(x); 42 }];
++
++pub fn main() -> u64 {
++    discard(Node { word: word() }) + discard(Nodes::Cons{word(), word(), Nodes::Nil})
++}
++extern "C" trampoline "reussir_main" = main;
+-- 
+2.53.0
+

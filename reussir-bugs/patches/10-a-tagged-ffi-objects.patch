@@ -1,77 +1,45 @@
-From f4cd7729fb41c5465bae79c199a8ffd4f2596941 Mon Sep 17 00:00:00 2001
+From 3defc518aa3771d22049cd3eff9dda6b89eda9f1 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 01/24] l2r-local: tagged FFI objects: an odd handle is an
- immediate, not counted
+Subject: [PATCH] [ffi] support tagged foreign handles
 
-`#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
-also be an odd word that is not a pointer: an immediate the foreign side
-encodes in the handle itself (lean2rr's one-word `Nat`/`Int`: a small value
-is `(v << 1) | 1`, a big one a pointer to a counted big number, as Lean's
-runtime boxes scalars).
-
-The flag travels with the record (semi `Record::ffi_tagged`, HIR
-`{ ffi tagged "path" }`, MIR `RecordLayout::Opaque { tagged }` printed as
-`{ "path", @hook, tagged }`) to the dialect type
-`!reussir.ffi_object<"path", @hook, tagged = true>` (a default-valued
-parameter; the C API and the Rust bindings take it, and C++ code that
-builds the type without it, `FFIObjectType::get(ctx, name, hook)`, gets an
-untagged object). In the LLVM lowering,
-`rc.inc` of a tagged object updates the count only when the handle's low
-bit is clear, and `rc.dec` calls the cleanup hook only then; nothing is
-loaded from the handle before the test. Real boxes are at least 4-aligned
-(the `u32` count at offset 0), so the low bit is free. Untagged objects
-lower as before.
-
-The two other places that read the count of an arbitrary rc value skip
-tagged objects: the optional nonlinear-FFI instrumentation, and the
-unique-carrying recursion analysis (`rc.assume_unique` on a carried
-argument). Otherwise an `ffi_object` handle is never read through: it
-produces no reuse token, is not deferred by the drop glue, and reaches
-foreign code only as its Rust type, which knows the encoding.
-
-Tests: conversion/tagged_ffi_object.mlir (guarded inc/dec, unguarded for
-an untagged object, the type's textual form),
-conversion/instrument_nonlinear_ffi_tagged.mlir, frontend/ffi_tagged.rr
-(the attribute through HIR, MIR and MLIR), HIR and MIR round-trip unit
-tests.
 ---
- crates/reussir-backend-sys/src/lib.rs         |  1 +
- crates/reussir-backend/src/dialect/ty.rs      |  6 +-
- crates/reussir-codegen/src/lower/ty.rs        | 11 ++-
- crates/reussir-core/src/full/mir.rs           |  5 +-
- crates/reussir-core/src/full/mir/build.rs     | 19 ++++++
- .../reussir-core/src/full/mir/grammar.lalrpop |  8 ++-
- crates/reussir-core/src/full/mir/print.rs     |  6 +-
- crates/reussir-core/src/full/mir/raw.rs       |  4 +-
- crates/reussir-core/src/full/mono.rs          |  1 +
- crates/reussir-core/src/ir_lex.rs             |  2 +
- crates/reussir-core/src/semi/ctxt.rs          | 38 +++++++----
- crates/reussir-core/src/semi/externs.rs       |  1 +
- crates/reussir-core/src/semi/hir/build.rs     | 29 ++++++--
- .../reussir-core/src/semi/hir/grammar.lalrpop |  9 ++-
- crates/reussir-core/src/semi/hir/print.rs     |  9 ++-
- crates/reussir-core/src/semi/hir/raw.rs       |  5 +-
- crates/reussir-core/src/semi/repl.rs          |  1 +
- include/Reussir-c/Types.h                     |  7 +-
- include/Reussir/IR/ReussirTypes.td            | 21 +++++-
- lib/CAPI/Types.cpp                            |  4 +-
- .../BasicOpsLowering/BasicOpsLowering.cpp     | 57 ++++++++++++++++
- .../InstrumentNonlinearFFI.cpp                |  4 ++
- .../UniqueCarryingRecursionAnalysis.cpp       |  7 +-
- .../instrument_nonlinear_ffi_tagged.mlir      | 33 +++++++++
- .../conversion/tagged_ffi_object.mlir         | 68 +++++++++++++++++++
- tests/integration/frontend/ffi_tagged.rr      | 40 +++++++++++
- 26 files changed, 355 insertions(+), 41 deletions(-)
+ crates/reussir-backend-sys/src/lib.rs         |   1 +
+ crates/reussir-backend/src/dialect/ty.rs      |   6 +-
+ crates/reussir-codegen/src/lower/ty.rs        |  11 +-
+ crates/reussir-core/src/full/mir.rs           |   5 +-
+ crates/reussir-core/src/full/mir/build.rs     | 208 ++++++++++--------
+ .../reussir-core/src/full/mir/grammar.lalrpop |   8 +-
+ crates/reussir-core/src/full/mir/print.rs     |   6 +-
+ crates/reussir-core/src/full/mir/raw.rs       |   4 +-
+ crates/reussir-core/src/full/mono.rs          |   1 +
+ crates/reussir-core/src/ir_lex.rs             |   2 +
+ crates/reussir-core/src/semi/ctxt.rs          |  38 ++--
+ crates/reussir-core/src/semi/externs.rs       |   1 +
+ crates/reussir-core/src/semi/hir/build.rs     |  29 ++-
+ .../reussir-core/src/semi/hir/grammar.lalrpop |   9 +-
+ crates/reussir-core/src/semi/hir/print.rs     |   9 +-
+ crates/reussir-core/src/semi/hir/raw.rs       |   5 +-
+ crates/reussir-core/src/semi/repl.rs          |   1 +
+ include/Reussir-c/Types.h                     |   7 +-
+ include/Reussir/IR/ReussirTypes.td            |  21 +-
+ lib/CAPI/Types.cpp                            |   4 +-
+ .../BasicOpsLowering/BasicOpsLowering.cpp     |  57 +++++
+ .../InstrumentNonlinearFFI.cpp                |   4 +
+ .../UniqueCarryingRecursionAnalysis.cpp       |   7 +-
+ .../instrument_nonlinear_ffi_tagged.mlir      |  33 +++
+ .../conversion/tagged_ffi_object.mlir         |  68 ++++++
+ tests/integration/frontend/ffi_tagged.rr      |  40 ++++
+ 26 files changed, 450 insertions(+), 135 deletions(-)
  create mode 100644 tests/integration/conversion/instrument_nonlinear_ffi_tagged.mlir
  create mode 100644 tests/integration/conversion/tagged_ffi_object.mlir
  create mode 100644 tests/integration/frontend/ffi_tagged.rr
 
 diff --git a/crates/reussir-backend-sys/src/lib.rs b/crates/reussir-backend-sys/src/lib.rs
-index f519f306..a5ceff86 100644
+index 30d89ed8..7dedbe59 100644
 --- a/crates/reussir-backend-sys/src/lib.rs
 +++ b/crates/reussir-backend-sys/src/lib.rs
-@@ -393,6 +393,7 @@ unsafe extern "C" {
+@@ -404,6 +404,7 @@ unsafe extern "C" {
          context: MlirContext,
          ffi_name: MlirAttribute,
          cleanup_hook: MlirAttribute,
@@ -107,10 +75,10 @@ index f5116f30..f3a18e1d 100644
      }
  }
 diff --git a/crates/reussir-codegen/src/lower/ty.rs b/crates/reussir-codegen/src/lower/ty.rs
-index fb24f3b0..3b11b53f 100644
+index e8e6bf53..4da447c3 100644
 --- a/crates/reussir-codegen/src/lower/ty.rs
 +++ b/crates/reussir-codegen/src/lower/ty.rs
-@@ -353,11 +353,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -400,11 +400,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
      }
  
      /// The `!reussir.ffi_object<…>` payload type of an opaque instance.
@@ -129,7 +97,7 @@ index fb24f3b0..3b11b53f 100644
          )
      }
  
-@@ -444,7 +450,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -491,7 +497,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
              mir::RecordLayout::Opaque {
                  rust_name,
                  drop_hook,
@@ -140,10 +108,10 @@ index fb24f3b0..3b11b53f 100644
          let name = StringAttribute::new(self.context, self.program.symbol(rec.symbol));
          let record = record_incomplete(self.context, name, kind);
 diff --git a/crates/reussir-core/src/full/mir.rs b/crates/reussir-core/src/full/mir.rs
-index 61ee1dab..a305b111 100644
+index 3a537036..c15906c5 100644
 --- a/crates/reussir-core/src/full/mir.rs
 +++ b/crates/reussir-core/src/full/mir.rs
-@@ -204,10 +204,13 @@ pub enum RecordLayout<'tcx> {
+@@ -205,10 +205,13 @@ pub enum RecordLayout<'tcx> {
      Compound(&'tcx [Member<'tcx>]),
      Variant(&'tcx [VariantDef<'tcx>]),
      /// An opaque `#[ffi]` record instance: the rendered Rust type name (the
@@ -159,10 +127,10 @@ index 61ee1dab..a305b111 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mir/build.rs b/crates/reussir-core/src/full/mir/build.rs
-index 82c7ef5f..be718288 100644
+index d83afb6a..5a1d048b 100644
 --- a/crates/reussir-core/src/full/mir/build.rs
 +++ b/crates/reussir-core/src/full/mir/build.rs
-@@ -203,9 +203,11 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -208,9 +208,11 @@ impl<'tcx> Builder<'_, 'tcx> {
              raw::RecordBody::Opaque {
                  rust_name,
                  drop_hook,
@@ -174,11 +142,212 @@ index 82c7ef5f..be718288 100644
              },
          };
          mir::RecordInstance {
-@@ -1243,6 +1245,23 @@ mod tests {
-         );
+@@ -909,105 +911,105 @@ mod tests {
+     /// Print a program, parse it back, re-print, and assert text equality
+     /// (the text-faithful round-trip contract).
+     fn roundtrip(source: &str) {
+-        with_tcx(|tcx| {
+-            let interner = std::sync::Arc::new(reussir_syntax::new_threaded_interner());
+-            let parse = reussir_syntax::parse_with_interner(source, interner.clone());
+-            assert!(parse.ok(), "parse errors: {:#?}", parse.errors);
+-            let prog = surface::program(&parse.root);
+-            let elab = elaborate(tcx, &prog, &interner);
+-            assert!(!elab.has_errors(), "elab errors: {:#?}", elab.reports);
+-            let (full, reports) = monomorphize(&elab.mono_input());
+-            assert!(reports.is_empty(), "mono reports: {reports:#?}");
+-
+-            let text = Printer::new(&elab.defs, elab.resolver).program(&full);
+-            let parsed = parse_program(tcx, &text).expect("re-parse");
+-            assert_eq!(
+-                parsed
+-                    .program
+-                    .functions
+-                    .iter()
+-                    .filter(|function| function.transform_anchor)
+-                    .count(),
+-                full.functions
+-                    .iter()
+-                    .filter(|function| function.transform_anchor)
+-                    .count()
+-            );
+-            assert_eq!(
+-                parsed
+-                    .program
+-                    .transform_scripts
+-                    .iter()
+-                    .map(|script| &script.body)
+-                    .collect::<Vec<_>>(),
+-                full.transform_scripts
+-                    .iter()
+-                    .map(|script| &script.body)
+-                    .collect::<Vec<_>>()
+-            );
+-            let text2 = Printer::new(&parsed.defs, &parsed.names).program(&parsed.program);
+-            assert_eq!(
+-                text, text2,
+-                "round-trip mismatch\n=== printed ===\n{text}\n=== reparsed ===\n{text2}"
+-            );
+-        });
+-    }
++    with_tcx(|tcx| {
++        let interner = std::sync::Arc::new(reussir_syntax::new_threaded_interner());
++        let parse = reussir_syntax::parse_with_interner(source, interner.clone());
++        assert!(parse.ok(), "parse errors: {:#?}", parse.errors);
++        let prog = surface::program(&parse.root);
++        let elab = elaborate(tcx, &prog, &interner);
++        assert!(!elab.has_errors(), "elab errors: {:#?}", elab.reports);
++        let (full, reports) = monomorphize(&elab.mono_input());
++        assert!(reports.is_empty(), "mono reports: {reports:#?}");
++
++        let text = Printer::new(&elab.defs, elab.resolver).program(&full);
++        let parsed = parse_program(tcx, &text).expect("re-parse");
++        assert_eq!(
++            parsed
++                .program
++                .functions
++                .iter()
++                .filter(|function| function.transform_anchor)
++                .count(),
++            full.functions
++                .iter()
++                .filter(|function| function.transform_anchor)
++                .count()
++        );
++        assert_eq!(
++            parsed
++                .program
++                .transform_scripts
++                .iter()
++                .map(|script| &script.body)
++                .collect::<Vec<_>>(),
++            full.transform_scripts
++                .iter()
++                .map(|script| &script.body)
++                .collect::<Vec<_>>()
++        );
++        let text2 = Printer::new(&parsed.defs, &parsed.names).program(&parsed.program);
++        assert_eq!(
++            text, text2,
++            "round-trip mismatch\n=== printed ===\n{text}\n=== reparsed ===\n{text2}"
++        );
++    });
++}
+ 
+     /// The lossless form: print WITH the source cache (file table, per-fn
+     /// `in <file>`, node spans), parse back, re-print against a cache rebuilt
+     /// from the dump's own table, and assert text equality.
+     fn roundtrip_with_locations(source: &str) {
+-        use reussir_syntax::source::SourceCache;
+-        with_tcx(|tcx| {
+-            let interner = std::sync::Arc::new(reussir_syntax::new_threaded_interner());
+-            let parse = reussir_syntax::parse_with_interner(source, interner.clone());
+-            assert!(parse.ok(), "parse errors: {:#?}", parse.errors);
+-            let prog = surface::program(&parse.root);
+-            let elab = elaborate(tcx, &prog, &interner);
+-            assert!(!elab.has_errors(), "elab errors: {:#?}", elab.reports);
+-            let (full, reports) = monomorphize(&elab.mono_input());
+-            assert!(reports.is_empty(), "mono reports: {reports:#?}");
+-
+-            let cache = SourceCache::single("<test>", source);
+-            let text = Printer::with_sources(&elab.defs, elab.resolver, &cache).program(&full);
+-            assert!(
+-                text.contains("0 = \"<test>\";"),
+-                "file table missing:\n{text}"
+-            );
+-            assert!(text.contains(" in 0"), "fn file reference missing:\n{text}");
+-            let parsed = parse_program(tcx, &text).expect("re-parse");
+-            assert_eq!(parsed.files, vec!["<test>".to_string()]);
+-            assert_eq!(
+-                parsed
+-                    .program
+-                    .transform_scripts
+-                    .iter()
+-                    .map(|script| (&script.body, script.file, script.span))
+-                    .collect::<Vec<_>>(),
+-                full.transform_scripts
+-                    .iter()
+-                    .map(|script| (&script.body, script.file, script.span))
+-                    .collect::<Vec<_>>()
+-            );
+-            let tramp_locs = |p: &crate::full::mir::Program<'_>| {
+-                p.trampolines
+-                    .iter()
+-                    .map(|t| (p.symbol(t.export).to_owned(), t.file, t.span))
+-                    .collect::<Vec<_>>()
+-            };
+-            assert_eq!(tramp_locs(&parsed.program), tramp_locs(&full));
+-            let mut cache2 = SourceCache::new();
+-            for name in &parsed.files {
+-                cache2.add_unavailable(name);
+-            }
+-            let text2 = Printer::with_sources(&parsed.defs, &parsed.names, &cache2)
+-                .program(&parsed.program);
+-            assert_eq!(
+-                text, text2,
+-                "lossless round-trip mismatch\n=== printed ===\n{text}\n=== reparsed ===\n{text2}"
+-            );
+-        });
+-    }
++    use reussir_syntax::source::SourceCache;
++    with_tcx(|tcx| {
++        let interner = std::sync::Arc::new(reussir_syntax::new_threaded_interner());
++        let parse = reussir_syntax::parse_with_interner(source, interner.clone());
++        assert!(parse.ok(), "parse errors: {:#?}", parse.errors);
++        let prog = surface::program(&parse.root);
++        let elab = elaborate(tcx, &prog, &interner);
++        assert!(!elab.has_errors(), "elab errors: {:#?}", elab.reports);
++        let (full, reports) = monomorphize(&elab.mono_input());
++        assert!(reports.is_empty(), "mono reports: {reports:#?}");
++
++        let cache = SourceCache::single("<test>", source);
++        let text = Printer::with_sources(&elab.defs, elab.resolver, &cache).program(&full);
++        assert!(
++            text.contains("0 = \"<test>\";"),
++            "file table missing:\n{text}"
++        );
++        assert!(text.contains(" in 0"), "fn file reference missing:\n{text}");
++        let parsed = parse_program(tcx, &text).expect("re-parse");
++        assert_eq!(parsed.files, vec!["<test>".to_string()]);
++        assert_eq!(
++            parsed
++                .program
++                .transform_scripts
++                .iter()
++                .map(|script| (&script.body, script.file, script.span))
++                .collect::<Vec<_>>(),
++            full.transform_scripts
++                .iter()
++                .map(|script| (&script.body, script.file, script.span))
++                .collect::<Vec<_>>()
++        );
++        let tramp_locs = |p: &crate::full::mir::Program<'_>| {
++            p.trampolines
++                .iter()
++                .map(|t| (p.symbol(t.export).to_owned(), t.file, t.span))
++                .collect::<Vec<_>>()
++        };
++        assert_eq!(tramp_locs(&parsed.program), tramp_locs(&full));
++        let mut cache2 = SourceCache::new();
++        for name in &parsed.files {
++            cache2.add_unavailable(name);
++        }
++        let text2 = Printer::with_sources(&parsed.defs, &parsed.names, &cache2)
++            .program(&parsed.program);
++        assert_eq!(
++            text, text2,
++            "lossless round-trip mismatch\n=== printed ===\n{text}\n=== reparsed ===\n{text2}"
++        );
++    });
++}
+ 
+     #[test]
+     fn rejects_malformed_tuple_annotations() {
+@@ -1291,6 +1293,24 @@ mod tests {
+         });
      }
  
 +    #[test]
++
 +    fn roundtrips_tagged_ffi_records() {
 +        // A `tagged` opaque layout (a handle may be an odd immediate word)
 +        // keeps its flag through the textual form.
@@ -199,10 +368,10 @@ index 82c7ef5f..be718288 100644
      fn roundtrips_ffi_trait_glue() {
          let text = concat!(
 diff --git a/crates/reussir-core/src/full/mir/grammar.lalrpop b/crates/reussir-core/src/full/mir/grammar.lalrpop
-index 08dc9156..8792cf13 100644
+index c0bec9da..e8de85e4 100644
 --- a/crates/reussir-core/src/full/mir/grammar.lalrpop
 +++ b/crates/reussir-core/src/full/mir/grammar.lalrpop
-@@ -83,11 +83,13 @@ RecordBody: (raw::Ty, raw::RecordBody, bool) = {
+@@ -101,11 +101,13 @@ RecordBody: (raw::Ty, raw::RecordBody, bool) = {
      "struct" <t:Ty> "{" <ms:Comma<Member>> "}" => (t, raw::RecordBody::Compound(ms), false),
      "enum" <fixed:"fixed"?> <t:Ty> "{" <vs:Comma<Variant>> "}"
          => (t, raw::RecordBody::Variant(vs), fixed.is_some()),
@@ -218,7 +387,7 @@ index 08dc9156..8792cf13 100644
          }, false),
  };
  
-@@ -135,6 +137,7 @@ BareName: &'input str = {
+@@ -155,6 +157,7 @@ BareName: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -226,7 +395,7 @@ index 08dc9156..8792cf13 100644
      "texture" => "texture",
      "glue" => "glue",
      "trait" => "trait",
-@@ -498,6 +501,7 @@ extern {
+@@ -520,6 +523,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -235,10 +404,10 @@ index 08dc9156..8792cf13 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/full/mir/print.rs b/crates/reussir-core/src/full/mir/print.rs
-index 9c74bffb..922e87a1 100644
+index 5f037cec..1c0ff7ec 100644
 --- a/crates/reussir-core/src/full/mir/print.rs
 +++ b/crates/reussir-core/src/full/mir/print.rs
-@@ -237,13 +237,15 @@ impl Render<'_> {
+@@ -255,13 +255,15 @@ impl Render<'_> {
              mir::RecordLayout::Opaque {
                  rust_name,
                  drop_hook,
@@ -257,10 +426,10 @@ index 9c74bffb..922e87a1 100644
              }
          };
 diff --git a/crates/reussir-core/src/full/mir/raw.rs b/crates/reussir-core/src/full/mir/raw.rs
-index fd85b28f..82f68441 100644
+index 3401f448..6339f177 100644
 --- a/crates/reussir-core/src/full/mir/raw.rs
 +++ b/crates/reussir-core/src/full/mir/raw.rs
-@@ -114,10 +114,12 @@ pub enum RecordBody {
+@@ -115,10 +115,12 @@ pub enum RecordBody {
      Compound(Vec<Member>),
      /// An enum: one compound sub-record per variant, in declaration order.
      Variant(Vec<Variant>),
@@ -275,22 +444,22 @@ index fd85b28f..82f68441 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mono.rs b/crates/reussir-core/src/full/mono.rs
-index 242a1872..d7db2d5b 100644
+index f3f61c48..cfe735a0 100644
 --- a/crates/reussir-core/src/full/mono.rs
 +++ b/crates/reussir-core/src/full/mono.rs
-@@ -810,6 +810,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+@@ -820,6 +820,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
                      let layout = mir::RecordLayout::Opaque {
                          rust_name: mir::Symbol(driver.symbols.get_or_intern(&rust_name)),
                          drop_hook: mir::Symbol(driver.symbols.get_or_intern(&hook_name)),
 +                        tagged: record.ffi_tagged,
                      };
                      ffi_textures.push(mir::FfiTexture {
-                         anchor: symbol,
+                         release_bindings: decls
 diff --git a/crates/reussir-core/src/ir_lex.rs b/crates/reussir-core/src/ir_lex.rs
-index 57d7b1b2..e38bafca 100644
+index c2d552c0..43aa2866 100644
 --- a/crates/reussir-core/src/ir_lex.rs
 +++ b/crates/reussir-core/src/ir_lex.rs
-@@ -36,6 +36,8 @@ pub enum Token<'a> {
+@@ -40,6 +40,8 @@ pub enum Token<'a> {
      Field,
      #[token("fixed")]
      Fixed,
@@ -300,7 +469,7 @@ index 57d7b1b2..e38bafca 100644
      Extern,
      #[token("trampoline")]
 diff --git a/crates/reussir-core/src/semi/ctxt.rs b/crates/reussir-core/src/semi/ctxt.rs
-index 1f5f9af4..c3805710 100644
+index 8d319521..36f2f5b3 100644
 --- a/crates/reussir-core/src/semi/ctxt.rs
 +++ b/crates/reussir-core/src/semi/ctxt.rs
 @@ -83,7 +83,9 @@ enum FfiSpec {
@@ -325,7 +494,7 @@ index 1f5f9af4..c3805710 100644
      pub fields: Option<RecordFields<'tcx>>,
      /// Generics that must be instantiated regional because they appear as the
      /// element of a `[field]` link (e.g. `inner: [field] T`). Checked at the
-@@ -2526,9 +2532,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2532,9 +2538,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
          seen && valid
      }
  
@@ -339,7 +508,7 @@ index 1f5f9af4..c3805710 100644
      fn ffi_attr(&mut self, attrs: &[surface::Attribute]) -> Option<FfiSpec> {
          let mut spec = None;
          for attr in attrs {
-@@ -2543,12 +2550,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2549,12 +2556,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              match (attr.args.as_slice(), attr.values.as_slice()) {
                  ([arg], []) if self.sym(*arg) == "import" => spec = Some(FfiSpec::Import),
                  ([], [(k, path)]) if self.sym(*k) == "rust" => {
@@ -358,7 +527,7 @@ index 1f5f9af4..c3805710 100644
                  ),
              }
          }
-@@ -2654,13 +2664,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2662,13 +2672,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      }
  
      /// Check the `#[ffi(rust = "path")]` rules on a record and return the
@@ -375,7 +544,7 @@ index 1f5f9af4..c3805710 100644
          let opaque = matches!(rec.fields, surface::RecordFields::Opaque);
          let Some(spec) = ffi else {
              if opaque {
-@@ -2672,7 +2683,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2680,7 +2691,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              }
              return None;
          };
@@ -384,7 +553,7 @@ index 1f5f9af4..c3805710 100644
              self.error(span, "`#[ffi(import)]` may only be attached to a function");
              return None;
          };
-@@ -2689,7 +2700,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2697,7 +2708,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              self.error(span, "an `#[ffi(rust = ...)]` record is always `[shared]`");
              return None;
          }
@@ -393,7 +562,7 @@ index 1f5f9af4..c3805710 100644
      }
  
      /// Check the `#[ffi(import)]` rules on a function; returns whether the
-@@ -2888,7 +2899,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2896,7 +2907,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      fn scan_record(
          &mut self,
          rec: &surface::Record,
@@ -402,7 +571,7 @@ index 1f5f9af4..c3805710 100644
          span: Option<Span>,
      ) -> Option<DefId> {
          let ty_params = self.collect_generics(&rec.ty_params, span);
-@@ -2937,7 +2948,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2945,7 +2956,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              repr_fixed,
              placement: rec.placement.clone(),
              launch: rec.launch,
@@ -425,10 +594,10 @@ index 13a3aac0..a1e3bf14 100644
                  regional_generics: remap.generic_ids(&rec.regional_generics),
                  span: rec.span,
 diff --git a/crates/reussir-core/src/semi/hir/build.rs b/crates/reussir-core/src/semi/hir/build.rs
-index 85090047..1c336d46 100644
+index 9084af6b..3ed96087 100644
 --- a/crates/reussir-core/src/semi/hir/build.rs
 +++ b/crates/reussir-core/src/semi/hir/build.rs
-@@ -643,11 +643,11 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -650,11 +650,11 @@ impl<'tcx> Builder<'_, 'tcx> {
                      })
                      .collect(),
              ),
@@ -444,7 +613,7 @@ index 85090047..1c336d46 100644
          };
          let record = Record {
              def,
-@@ -664,6 +664,7 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -671,6 +671,7 @@ impl<'tcx> Builder<'_, 'tcx> {
              placement: r.placement.clone(),
              launch: r.launch,
              ffi,
@@ -452,7 +621,7 @@ index 85090047..1c336d46 100644
              fields: Some(fields),
              regional_generics,
              span: span_of(r.span),
-@@ -1764,6 +1765,26 @@ mod tests {
+@@ -1783,6 +1784,26 @@ mod tests {
          );
      }
  
@@ -480,10 +649,10 @@ index 85090047..1c336d46 100644
      fn roundtrips_cells() {
          roundtrip(
 diff --git a/crates/reussir-core/src/semi/hir/grammar.lalrpop b/crates/reussir-core/src/semi/hir/grammar.lalrpop
-index 3488ae0b..08ee0519 100644
+index 446e7853..bb238c10 100644
 --- a/crates/reussir-core/src/semi/hir/grammar.lalrpop
 +++ b/crates/reussir-core/src/semi/hir/grammar.lalrpop
-@@ -79,9 +79,10 @@ RecordDecl: raw::Record = {
+@@ -83,9 +83,10 @@ RecordDecl: raw::Record = {
          span: loc.and_then(|l| l.1),
          body: raw::RecordBody::Compound(ms),
      },
@@ -496,7 +665,7 @@ index 3488ae0b..08ee0519 100644
      => raw::Record {
          lang,
          placement: placement.map(|p| unescape_debug_str(p).into_owned()), launch,
-@@ -93,7 +94,7 @@ RecordDecl: raw::Record = {
+@@ -97,7 +98,7 @@ RecordDecl: raw::Record = {
          generics: generics.unwrap_or_default(),
          file: loc.map(|l| l.0),
          span: loc.and_then(|l| l.1),
@@ -505,7 +674,7 @@ index 3488ae0b..08ee0519 100644
      },
      // Only an enum may carry the `fixed` marker (`#[repr(fixed)]`).
      <lang:LangAttr?> <placement:("placement" <"quoted">)?> <launch:LaunchConfig?> <p:"pub"?> <default_cap:DefaultCap> "enum" <fixed:"fixed"?> "#" <path:QPath> <generics:Generics?> <loc:ItemLoc?>
-@@ -375,6 +376,7 @@ Name: &'input str = {
+@@ -383,6 +384,7 @@ Name: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -513,7 +682,7 @@ index 3488ae0b..08ee0519 100644
      "texture" => "texture",
      "glue" => "glue",
      "interface" => "interface",
-@@ -689,6 +691,7 @@ extern {
+@@ -699,6 +701,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -522,10 +691,10 @@ index 3488ae0b..08ee0519 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/semi/hir/print.rs b/crates/reussir-core/src/semi/hir/print.rs
-index 47e15a57..fea53db3 100644
+index b2f090ea..259bb560 100644
 --- a/crates/reussir-core/src/semi/hir/print.rs
 +++ b/crates/reussir-core/src/semi/hir/print.rs
-@@ -508,8 +508,13 @@ impl<'a> Printer<'a> {
+@@ -519,8 +519,13 @@ impl<'a> Printer<'a> {
                      .collect();
                  comma_sep(parts)
              }
@@ -542,10 +711,10 @@ index 47e15a57..fea53db3 100644
              None => Doc::Null,
          }
 diff --git a/crates/reussir-core/src/semi/hir/raw.rs b/crates/reussir-core/src/semi/hir/raw.rs
-index dbf38010..33273498 100644
+index 73fc8c42..7f2164cf 100644
 --- a/crates/reussir-core/src/semi/hir/raw.rs
 +++ b/crates/reussir-core/src/semi/hir/raw.rs
-@@ -208,8 +208,9 @@ pub enum RecordBody {
+@@ -210,8 +210,9 @@ pub enum RecordBody {
      Compound(Vec<Member>),
      /// An enum's variants, in declaration order.
      Variant(Vec<Variant>),
@@ -558,10 +727,10 @@ index dbf38010..33273498 100644
  
  /// One compound field: a `pub` visibility marker, an optional source name
 diff --git a/crates/reussir-core/src/semi/repl.rs b/crates/reussir-core/src/semi/repl.rs
-index 9c51a65e..6886bda4 100644
+index b132ff27..43c64285 100644
 --- a/crates/reussir-core/src/semi/repl.rs
 +++ b/crates/reussir-core/src/semi/repl.rs
-@@ -404,6 +404,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -408,6 +408,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
                  placement: None,
                  launch: None,
                  ffi: None,
@@ -589,10 +758,10 @@ index d1fe8804..d8bce1ad 100644
  // `!reussir.str<lifeScope>`.
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope);
 diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
-index 602c61a3..33fe7f6c 100644
+index a876a250..95850754 100644
 --- a/include/Reussir/IR/ReussirTypes.td
 +++ b/include/Reussir/IR/ReussirTypes.td
-@@ -728,10 +728,27 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+@@ -731,10 +731,27 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
      refcount the foreign `Rc` wrapper pins at offset 0. The payload behind
      the header stays opaque — debug info describing a boxed variable is the
      client, and it renders the box as that visible header.
@@ -640,7 +809,7 @@ index cb9115e6..1cb126cc 100644
  
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope) {
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 1440c929..48fe2248 100644
+index 10b002ed..3bbdeb74 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -267,6 +267,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
@@ -712,8 +881,8 @@ index 1440c929..48fe2248 100644
      return mlir::success();
 @@ -2510,6 +2556,17 @@ struct ReussirRcDecOpConversionPattern
      }
-     if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
-       mlir::FlatSymbolRefAttr cleanupHook = eleTy.getCleanupHook();
+     if (auto ffi = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
+       mlir::FlatSymbolRefAttr cleanupHook = ffi.getCleanupHook();
 +      if (eleTy.getTagged()) {
 +        // An immediate is not a box: only a real one reaches the hook.
 +        mlir::Block *cont =
@@ -744,10 +913,10 @@ index 50f73cc7..06170a82 100644
        }
      }
 diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-index d096b2c4..66837180 100644
+index 27674cbe..f54728d8 100644
 --- a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
 +++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-@@ -211,7 +211,12 @@ static bool isRcType(mlir::Type type) { return llvm::isa<RcType>(type); }
+@@ -212,7 +212,12 @@ static bool isRcType(mlir::Type type) { return llvm::isa<RcType>(type); }
  
  static bool isAssumableRcType(mlir::Type type) {
    auto rcType = llvm::dyn_cast<RcType>(type);
@@ -920,3 +1089,6 @@ index 00000000..2c79d82d
 +
 +// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u64>", @{{.*}}_ffi_drop, tagged }
 +// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u32>", @{{[A-Za-z0-9_]*}}_ffi_drop }
+-- 
+2.53.0
+

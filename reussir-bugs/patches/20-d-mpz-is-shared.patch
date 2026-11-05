@@ -1,47 +1,19 @@
-From 90c532693e5db4072cab69e9de4f9edb16080ba0 Mon Sep 17 00:00:00 2001
+From eb4b9ec45dc246c2d91a267c2af11ec48060c3aa Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:30:35 -0400
-Subject: [PATCH 06/24] l2r-local: step D (R2c): Mpz::is_shared through
- compiler-emitted glue from rcgmp.mpz.is_unique
+Subject: [PATCH] [bigint] expose foreign handle sharing through generated glue
 
-lean2rr's dbgTraceIfShared (Lean's `lean_dbg_trace_if_shared`, natively
-`!lean_is_scalar(a) && !lean_is_exclusive(a)`) must say whether a big Nat
-or Int held in runtime code is shared. rcgmp's C API has no count or
-uniqueness query; its dialect has `rcgmp.bridge.mpz.is_unique` (a heap
-handle with an owned reference; false for an immortal).
-
-Codegen emits a third function with the owned handle's acquire/release
-glue, in the same place and the same way (home unit, `weak_odr`, hidden):
-`__reussir_rcgmp_ffi_is_unique(handle) -> u8`, 1 for an immediate
-(`rcgmp.bridge.mpz.is_immediate`) and otherwise `rcgmp.bridge.mpz.is_unique`.
-It returns a byte rather than an `i1`, like the borrowed comparison
-entries, so the C ABI value is defined. `Mpz::is_shared` is
-`is_unique == 0`. So an immediate is never shared, a heap integer is
-shared while another reference holds it, and an immortal literal always
-is: natively, a persistent object (count 0) fails `lean_is_st`, so
-`lean_is_exclusive` is false and dbgTraceIfShared reports it, as for Lean's
-closed constants. The backend gains the `is_immediate` and `is_unique`
-builders; reussir-core names the symbol (`RCGMP_IS_UNIQUE`).
-
-Tests: frontend/bigint_ffi_shared.rr (an immediate, a unique heap value,
-a heap value the caller still holds, one after a clone in the texture, an
-immortal literal, a negative heap Int, and Vec<Nat> elements read while
-the vector holds them; the glue's MLIR; run with the glue out of line and
-inlined) and its ASan twin sanitizer/bigint-ffi-shared-asan.rr, the hidden
-weak_odr definition in frontend/bigint_ffi_glue.rr,
-docs/design/polymorphic-ffi.md.
 ---
  crates/reussir-backend/src/rcgmp.rs           | 29 ++++++++
- crates/reussir-codegen/src/lower/expr.rs      | 67 +++++++++++++++--
+ crates/reussir-codegen/src/lower/expr.rs      | 63 +++++++++++++++-
  crates/reussir-codegen/src/lower/mod.rs       |  2 +-
  crates/reussir-core/src/full/ffi.rs           |  5 ++
  crates/reussir-rt/src/rcgmp.rs                | 15 ++++
- docs/design/polymorphic-ffi.md                | 10 +++
  tests/integration/frontend/bigint_ffi_glue.rr |  1 +
  .../integration/frontend/bigint_ffi_shared.c  | 16 ++++
  .../integration/frontend/bigint_ffi_shared.rr | 74 +++++++++++++++++++
  .../sanitizer/bigint-ffi-shared-asan.rr       | 14 ++++
- 10 files changed, 225 insertions(+), 8 deletions(-)
+ 9 files changed, 214 insertions(+), 5 deletions(-)
  create mode 100644 tests/integration/frontend/bigint_ffi_shared.c
  create mode 100644 tests/integration/frontend/bigint_ffi_shared.rr
  create mode 100644 tests/integration/sanitizer/bigint-ffi-shared-asan.rr
@@ -87,25 +59,24 @@ index a46f374b..5cbc323d 100644
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  pub enum Binary {
 diff --git a/crates/reussir-codegen/src/lower/expr.rs b/crates/reussir-codegen/src/lower/expr.rs
-index 0b4a2ff2..5117f413 100644
+index 7f82c47d..6969915a 100644
 --- a/crates/reussir-codegen/src/lower/expr.rs
 +++ b/crates/reussir-codegen/src/lower/expr.rs
-@@ -576,11 +576,9 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+@@ -576,11 +576,11 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// `release` decrements the box of a value of `glue.ty`. Bound by the
      /// generated foreign wrappers' `Clone`/`Drop` impls, so the symbols must
-     /// stay external for the linked bitcode to resolve them. For `Nat` /
-     /// `Int` (`reussir_rt::rcgmp::Mpz`) they are `rcgmp.retain` and
--    /// `rcgmp.release`, whose lowering tests for an immediate inline.
+     /// stay external for the linked bitcode to resolve them.
 -    pub(super) fn ffi_rc_glue_pair(
--        &self,
--        glue: &mir::FfiRcGlue<'tcx>,
++    pub(super) fn ffi_rc_glue(
+         &self,
+         glue: &mir::FfiRcGlue<'tcx>,
+         define: bool,
 -    ) -> Result<[Operation<'c>; 2]> {
-+    /// `rcgmp.release`, whose lowering tests for an immediate inline, and a
-+    /// third function answers `Mpz::is_shared` (`rcgmp_is_unique_glue`).
-+    pub(super) fn ffi_rc_glue(&self, glue: &mir::FfiRcGlue<'tcx>) -> Result<Vec<Operation<'c>>> {
++    ) -> Result<Vec<Operation<'c>>> {
          let loc = Location::unknown(self.context);
          let ty = self.tys.mlir_ty(glue.ty)?;
-         // The rcgmp glue has fixed names, which every module using `Nat` or
-@@ -621,10 +619,65 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+         let attributes = if define && glue.ty.bigint().is_some() {
+@@ -631,10 +631,65 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
                  loc,
              ))
          };
@@ -115,7 +86,7 @@ index 0b4a2ff2..5117f413 100644
              build(self.program.symbol(glue.release), false)?,
 -        ])
 +        ];
-+        if glue.ty.bigint().is_some() {
++        if define && glue.ty.bigint().is_some() {
 +            functions.push(self.rcgmp_is_unique_glue(ty, &attributes)?);
 +        }
 +        Ok(functions)
@@ -174,23 +145,23 @@ index 0b4a2ff2..5117f413 100644
  
      /// Build one borrowed comparison entry. The foreign caller retains both
 diff --git a/crates/reussir-codegen/src/lower/mod.rs b/crates/reussir-codegen/src/lower/mod.rs
-index 456080d4..17c53369 100644
+index 89023bbf..21dfa863 100644
 --- a/crates/reussir-codegen/src/lower/mod.rs
 +++ b/crates/reussir-codegen/src/lower/mod.rs
-@@ -545,7 +545,7 @@ pub fn lower_unit<'c, 'tcx>(
-         if !unit.is_home(program.symbol(glue.acquire)) {
+@@ -573,7 +573,7 @@ pub fn lower_unit<'c, 'tcx>(
              continue;
          }
--        for op in lowerer.ffi_rc_glue_pair(glue)? {
-+        for op in lowerer.ffi_rc_glue(glue)? {
+         ffi_symbols.push(program.symbol(glue.release));
+-        for op in lowerer.ffi_rc_glue_pair(glue, define)? {
++        for op in lowerer.ffi_rc_glue(glue, define)? {
              body.append_operation(op);
          }
      }
 diff --git a/crates/reussir-core/src/full/ffi.rs b/crates/reussir-core/src/full/ffi.rs
-index 751f9e96..db90a788 100644
+index 961e1405..aa1a1e33 100644
 --- a/crates/reussir-core/src/full/ffi.rs
 +++ b/crates/reussir-core/src/full/ffi.rs
-@@ -499,6 +499,11 @@ const RCGMP_OWNED: &str = "::reussir_rt::rcgmp::Mpz";
+@@ -505,6 +505,11 @@ const RCGMP_OWNED: &str = "::reussir_rt::rcgmp::Mpz";
  /// such a program finds them too.
  pub const RCGMP_GLUE: &str = "__reussir_rcgmp";
  
@@ -242,34 +213,6 @@ index a7600e39..59e62c73 100644
  }
  
  impl Clone for Mpz {
-diff --git a/docs/design/polymorphic-ffi.md b/docs/design/polymorphic-ffi.md
-index 61f261ac..ae466fb1 100644
---- a/docs/design/polymorphic-ffi.md
-+++ b/docs/design/polymorphic-ffi.md
-@@ -256,6 +256,7 @@ valid v0 mangling is a prefix of another:
- | `<record instance>_ffi_drop`| an opaque instance's drop hook          |
- | `<record instance>_ffi_acquire` / `_ffi_release` | Reussir rc glue    |
- | `__reussir_rcgmp_ffi_acquire` / `_ffi_release` | rc glue of `Nat`/`Int` (`Mpz`) |
-+| `__reussir_rcgmp_ffi_is_unique` | `Mpz`'s count query (`u8`)    |
- | `<record instance>_ffi_eq`  | borrowed equality entry (`u8`)          |
- | `<record instance>_ffi_partial_cmp` | borrowed partial classifier (`i8`) |
- | `<record instance>_ffi_cmp` | borrowed total-order entry (`i8`)       |
-@@ -309,6 +310,15 @@ defines it because it uses integers. The methods are inlined into the code
- that uses them, so `reussir-rt` references neither the glue nor the rcgmp
- runtime, and a program without integers links without them.
- 
-+A third glue function, `__reussir_rcgmp_ffi_is_unique`, emitted with the
-+pair, answers `Mpz::is_shared`, the question of Lean's `dbgTraceIfShared`
-+(`!lean_is_scalar(a) && !lean_is_exclusive(a)`): it returns 1 for an
-+immediate and otherwise lowers `rcgmp.bridge.mpz.is_unique`, which is false
-+for an immortal integer. So an immediate is never shared, a heap integer is
-+shared while another reference holds it, and an immortal literal always is,
-+as a persistent Lean object (count 0) is never exclusive. It returns a byte,
-+like the borrowed comparison entries.
-+
- ## Exposing a new type
- 
- Nothing in the compiler is Vec-specific. To expose another Rust type:
 diff --git a/tests/integration/frontend/bigint_ffi_glue.rr b/tests/integration/frontend/bigint_ffi_glue.rr
 index 675f8244..55e801d7 100644
 --- a/tests/integration/frontend/bigint_ffi_glue.rr
@@ -404,3 +347,6 @@ index 00000000..64ecf078
 +
 +// The sanitized allocator backs every heap integer: asking a count reads only
 +// live heap integers, never an immediate, and changes none.
+-- 
+2.53.0
+
