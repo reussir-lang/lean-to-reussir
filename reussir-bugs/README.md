@@ -232,14 +232,19 @@ the order to apply them. To make a patched Reussir, from the repository
 root:
 
 ```sh
-git -C reussir checkout -b l2r-base12 95d9a1c8
+git -C reussir checkout -b l2r-current "$(cat reussir-bugs/patches/base)"
 while read -r p; do
     git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
 
-Checked on 2026-10-26 (`git am` in a throwaway worktree): the series on
+The current series targets upstream `44abd17c` and keeps the Lean-specific
+tagged-handle and bigint extensions here. It uses upstream's scoped worklist
+runtime instead of the old 23-series patches. The older 20-b tests and 20-e/21-a
+optimizations are retained as patch files but are not in the current series.
+
+Historical series: Checked on 2026-10-26 (`git am` in a throwaway worktree): the series on
 `95d9a1c8` gives tree `af82b837`, the tree of `./reussir`'s
 `l2r-base12` (`c1170ff9`). The series before, on `00906e38`, gave
 `l2r-base11`'s tree, `eb79e76e` (`a39e59b0`, with 20-f and the whole

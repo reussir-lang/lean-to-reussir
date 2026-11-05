@@ -1,0 +1,73 @@
+From 4ce1b1ef44b826bb5ba03ed061e366eb37bcf639 Mon Sep 17 00:00:00 2001
+From: Schrodinger ZHU Yifan <yifanzhu@rochester.edu>
+Date: Thu, 5 Nov 2026 15:05:04 -0500
+Subject: [PATCH] [ffi] preserve tagged handle guards inside worklists
+
+---
+ .../RcDecrementExpansion.cpp                  |  4 +++
+ .../frontend/ffi_tagged_worklist.c            |  3 +++
+ .../frontend/ffi_tagged_worklist.rr           | 27 +++++++++++++++++++
+ 3 files changed, 34 insertions(+)
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.c
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.rr
+
+diff --git a/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp b/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
+index c64bcac6..0f1e56bf 100644
+--- a/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
++++ b/lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp
+@@ -54,6 +54,10 @@ bool canScheduleDecrement(ReussirRcDecOp op) {
+   if (op.isDestructuring() || op->hasAttr(REUSSIR_NO_DEFER) ||
+       op.getRcPtr().getType().getCapability() != Capability::shared)
+     return false;
++  if (auto ffi = llvm::dyn_cast<FFIObjectType>(
++          op.getRcPtr().getType().getElementType());
++      ffi && ffi.getTagged())
++    return false;
+   auto token = op.getNullableToken();
+   return !token || llvm::all_of(token.getUsers(), [](mlir::Operation *user) {
+     return llvm::isa<ReussirTokenFreeOp>(user);
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.c b/tests/integration/frontend/ffi_tagged_worklist.c
+new file mode 100644
+index 00000000..2327285e
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.c
+@@ -0,0 +1,3 @@
++#include <stdint.h>
++extern uint64_t reussir_main(void);
++int main(void) { return reussir_main() == 42 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.rr b/tests/integration/frontend/ffi_tagged_worklist.rr
+new file mode 100644
+index 00000000..b8360d87
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.rr
+@@ -0,0 +1,27 @@
++// UNSUPPORTED: darwin
++// RUN: %rrc %s -o %t.o -Oaggressive
++// RUN: %cc %t.o %S/ffi_tagged_worklist.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++extern "rust" [{
++    #[derive(Clone)]
++    #[repr(transparent)]
++    pub struct Word(usize);
++    impl Drop for Word {
++        fn drop(&mut self) { panic!("immediates must not be released"); }
++    }
++}];
++
++#[ffi(rust = "Word", tagged)]
++pub struct Word;
++
++pub struct Node { word: Word }
++
++#[ffi(import)]
++fn word() -> Word [{ Word(3) }];
++
++#[ffi(import)]
++fn discard<T>(x: T) -> u64 [{ ::std::mem::drop(x); 42 }];
++
++pub fn main() -> u64 { discard(Node { word: word() }) }
++extern "C" trampoline "reussir_main" = main;
+-- 
+2.53.0
+

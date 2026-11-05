@@ -1,34 +1,8 @@
-From 3dea33bab72e850ae3697f8f35d280538415b633 Mon Sep 17 00:00:00 2001
+From 5429505c5fb26c4b451961eeb550f595f170c349 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
-Subject: [PATCH 02/24] l2r-local: issue 38: tagged FFI objects: clear the top
- 16 bits before the inline count access
+Subject: [PATCH] [ffi] mask tag bits before accessing foreign reference counts
 
-A `tagged` opaque handle (`#[ffi(rust = "path", tagged)]`, patch 0050) is
-either an odd immediate or a pointer to a box whose `u32` count is at
-offset 0. On 64-bit targets the foreign side may now also keep data in the
-top 16 bits of a pointer handle: `rc.inc` clears them (`llvm.ptrmask` with
-2^48 - 1, provenance kept) before it loads and stores the count, on every
-path (plain, with a delta, atomic). The cleanup hook still gets the handle
-unchanged, so the foreign side sees its own encoding. lean2rr's one-word
-`Box` (`leanrt::any::LAny`) keeps the number of its payload's type there,
-as `lean_object*`-style runtimes keep tags; without the mask the increment
-reads and writes an address with those bits set (a SIGSEGV on aarch64,
-which ignores only the top 8 bits, and on x86-64).
-
-Nothing changes for the existing tagged types (lean2rr's `Nat` and `Int`):
-their pointers come from mimalloc and have the top 16 bits clear (user
-addresses are below 2^48 on aarch64 and x86-64), so the mask is a no-op on
-them. It costs one AND on the increment of a big number (the even-word
-path only; small values never reach it). Untagged objects and targets
-narrower than 64 bits lower as before. No other code reads through a
-tagged handle: `rc.dec` calls the hook, the nonlinear-FFI instrumentation
-and the unique-carrying analysis skip tagged objects, and an ffi_object
-gets no reuse token and no deferred release (patch 0050's notes).
-
-Tests: conversion/tagged_ffi_object.mlir (the mask before the load and the
-store, also with a delta and before the atomicrmw of an atomic count; none
-for an untagged object; the hook gets the unmasked handle).
 ---
  include/Reussir-c/Types.h                     |  3 +-
  include/Reussir/IR/ReussirTypes.td            |  5 ++-
@@ -51,10 +25,10 @@ index d8bce1ad..3af23483 100644
                                   MlirAttribute cleanupHook, bool tagged);
  
 diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
-index 33fe7f6c..06437d8f 100644
+index 95850754..0b96eef72 100644
 --- a/include/Reussir/IR/ReussirTypes.td
 +++ b/include/Reussir/IR/ReussirTypes.td
-@@ -735,7 +735,10 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+@@ -738,7 +738,10 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
      Lean's runtime boxes scalars). Its `rc.inc` touches the refcount only
      when the low bit is clear, and its `rc.dec` calls the cleanup hook only
      then; an immediate is never dereferenced. Real boxes are at least
@@ -67,7 +41,7 @@ index 33fe7f6c..06437d8f 100644
    let parameters = (ins "::mlir::StringAttr":$ffiName,
        "::mlir::FlatSymbolRefAttr":$cleanupHook,
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 48fe2248..4153705b 100644
+index 3bbdeb74..9f4313e7 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -306,6 +306,26 @@ bool isTaggedFFIObject(RcType rcType) {
@@ -199,3 +173,6 @@ index 275984dc..2c97ff74 100644
    // CHECK: load i32, ptr %0
    // CHECK: store i32
    func.func @inc_plain(%b: !plain) {
+-- 
+2.53.0
+
