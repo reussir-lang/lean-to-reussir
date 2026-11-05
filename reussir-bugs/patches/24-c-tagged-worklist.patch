@@ -1,4 +1,4 @@
-From e7bf85dc1231dfefab5425f16eea5aeebff9e5b1 Mon Sep 17 00:00:00 2001
+From 9b3bd7abf1d32b042b4f81415a4e6aa54cf66919 Mon Sep 17 00:00:00 2001
 From: Schrodinger ZHU Yifan <yifanzhu@rochester.edu>
 Date: Thu, 5 Nov 2026 15:05:04 -0500
 Subject: [PATCH] [ffi] preserve tagged handle guards inside worklists
@@ -37,12 +37,12 @@ index 00000000..2327285e
 +int main(void) { return reussir_main() == 42 ? 0 : 1; }
 diff --git a/tests/integration/frontend/ffi_tagged_worklist.rr b/tests/integration/frontend/ffi_tagged_worklist.rr
 new file mode 100644
-index 00000000..0d645896
+index 00000000..fd112bf3
 --- /dev/null
 +++ b/tests/integration/frontend/ffi_tagged_worklist.rr
 @@ -0,0 +1,18 @@
 +// UNSUPPORTED: darwin
-+// RUN: %rrc %s -o %t.o -Oaggressive
++// RUN: %rrc %s -o %t.o -Oaggressive --relocation-mode pic
 +// RUN: %cc %t.o %S/ffi_tagged_worklist.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
 +// RUN: %t.exe
 +

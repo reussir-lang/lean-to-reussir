@@ -234,7 +234,7 @@ root:
 ```sh
 git -C reussir checkout -b l2r-current "$(cat reussir-bugs/patches/base)"
 while read -r p; do
-    git -C reussir am "$PWD/reussir-bugs/patches/$p" || break
+    git -C reussir am --keep-non-patch "$PWD/reussir-bugs/patches/$p" || break
 done < reussir-bugs/patches/series
 cmake --build reussir/build --target rrc reussir-rt
 ```
