@@ -553,7 +553,6 @@ fn end_work_runs_after_the_outermost_drain() {
         defer_cell(cell.as_mut_ptr().cast(), release_wanting);
 
         defer_cell(cell.as_mut_ptr().cast(), release_nothing);
-
     }
     run_step(1, leaf_step);
     assert_eq!(take_end_seen(), vec![(false, 0), (false, 0)]);

@@ -44,7 +44,7 @@ L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
 (where rrc keeps the compiled textures; default
 runtime/leanrt/target/polyffi-cache, empty to turn the cache off).
 """
-import argparse, fcntl, hashlib, json, os, subprocess, sys, tempfile, tomllib
+import argparse, fcntl, hashlib, json, os, platform, subprocess, sys, tempfile, tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,7 +70,9 @@ LEAN_RUNTIME = Path(os.environ.get("L2R_LEAN_RUNTIME", LEAN_RUNTIME_PIN)).resolv
 # through the packed-argument FFI boundary (float or `str` arguments, four or
 # more parameters) keep an escaping stack slot in the caller and block
 # tail-call elimination of Reussir loops.
-NATIVE_FLAGS = ["-C", "target-cpu=native", "-C", "target-feature=-outline-atomics"]
+NATIVE_FLAGS = ["-C", "target-cpu=native"]
+if platform.machine() == "aarch64":
+    NATIVE_FLAGS += ["-C", "target-feature=-outline-atomics"]
 
 
 def run(cmd, env=None, cwd=None, show_stderr=False):

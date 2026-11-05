@@ -1160,7 +1160,7 @@ mod tests {
         // The free: a step releasing `first` (pushed below), then one
         // releasing the pending record.
         unsafe extern "C" fn step_first(p: *mut std::ffi::c_void) -> crate::pending::StepStatus {
-    let p = p as usize;
+            let p = p as usize;
             LOG.with(|l| l.borrow_mut().push(50));
             defer(1, step_release);
             release(B::new(TRec(p as *mut TCell)));
