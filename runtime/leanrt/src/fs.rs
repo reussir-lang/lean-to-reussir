@@ -261,9 +261,10 @@ impl Drop for FileHandle {
     }
 }
 
-unsafe extern "C" fn close_deferred(p: usize) -> bool {
+unsafe extern "C" fn close_deferred(p: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let p = p as usize;
     close(*Box::from_raw(p as *mut Option<Handle>));
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Drop a handle (the last clone closes its stream, `fclose`) in a

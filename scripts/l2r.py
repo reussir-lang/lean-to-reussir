@@ -319,14 +319,13 @@ def build_lean_runtime_cargo(out, cargo):
     # RUSTFLAGS), change the release profile (CARGO_PROFILE_*: leanrt, a
     # plain rustc build, never sees them, so the two crates would be
     # compiled differently, e.g. lean-runtime at another opt-level), turn on
-    # unstable cargo features (CARGO_UNSTABLE_*), wrap rustc, or move the
+    # unstable cargo features (CARGO_UNSTABLE_*), or move the
     # build (CARGO_BUILD_BUILD_DIR moves its intermediate files out of the
     # target directory). Also used for `cargo metadata` (cargo_link_order).
     env = dict(os.environ, RUSTC=str(RUSTC), RUSTFLAGS=" ".join(NATIVE_FLAGS + LEANRT_FLAGS))
     for v in list(env):
-        if v in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
+        if v in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
                  "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_RUSTC",
-                 "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
                  "CARGO_BUILD_BUILD_DIR", "CARGO_INCREMENTAL") \
                 or v.startswith(("CARGO_PROFILE_", "CARGO_UNSTABLE_")) \
                 or (v.startswith("CARGO_TARGET_") and v.endswith("_RUSTFLAGS")):
@@ -414,46 +413,15 @@ def build_lean_runtime(out):
     return build_lean_runtime_cargo(out, lean_runtime_manifest())
 
 
-# Local Reussir patches whose absence would not show as a build error at the
-# right place: (patch, file of the Reussir checkout, a text the patch adds
-# there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
-# (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
-# 95d9a1c8 plus reussir-bugs/patches/series. Plain upstream fails the first
-# check. 23-f: rrc's lowering pipeline (through the C API; the C++ bridge
-# has a copy) frees the records of a recursive type that is neither Direct
-# nor TailLoop through the per-thread drop stack of 23-a to 23-e (worklist
-# drops), not through upstream's retcon coroutines, whose memory grows by
-# one suspended frame per level of the value being freed
-# (reussir-bugs/23-worklist-drops.md). The check also refuses the checkout
-# of a base before Phase 2, whose drop glue pushed onto a stack that leanrt
-# no longer reads (patches 02-a to 02-e and 09-a, now out of the series).
-# 23-k and 23-m: that drop stack is shared with leanrt, whose pending stack
-# is built on it (runtime/leanrt/src/pending.rs): the end work after the
-# outermost drain (23-k: set_end_work, want_end_work) and steps, depth and
-# drain for a host (23-m; 23-l, the runs of cells, comes between them).
-# leanrt would also fail to compile without them.
-# 21-a (entry 21, inc/dec cancellation of integer members of [value]
-# records) is an optimization of code with rcgmp integers, 23-p (one
-# release function's pending records as cells, fewer instructions than
-# links) an optimization of the drops, and mlir-rcgmp's pin cc73b218
-# (quotient-only division; upstream since #844, before as patch 20-f) a
-# faster dependency: nothing needs them, so they are not checked.
+# Required upstream worklist APIs and the remaining integration patches.
 REQUIRED_REUSSIR_PATCHES = [
-    ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
-    ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
-    ("23-m", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_step"),
-    # 23-n and 23-o: the glue's pending records wait linked through their
-    # own headers (defer_wide), not one stack entry each: without them a
-    # chain whose levels each leave a record of another type pending takes
-    # 24 bytes per level (RtAltTreeFree's bounds are native's).
-    ("23-n", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_wide"),
-    ("23-o", "lib/Conversion/BasicOpsLowering/DropStackLowering.cpp", "__reussir_drop_defer_wide"),
-    # The one-word box `LAny` keeps its payload's type number in the top 16
-    # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
+    ("scoped worklists", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn join_or_run_step"),
+    ("scope exit callbacks", "crates/reussir-rt/src/drop_stack.rs", "pub fn defer_until_scope_exit"),
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
+    ("20-d", "crates/reussir-rt/src/rcgmp.rs", "pub fn is_shared"),
 ]
-REUSSIR_HELP = ("build with upstream Reussir 95d9a1c8 plus the patches of "
-                "reussir-bugs/patches/series (reussir-bugs/README.md)")
+REUSSIR_HELP = ("build current upstream Reussir with the tagged-handle and bigint "
+                "integration patches (10-a, 07-a, 20-a, 20-c, 20-d)")
 
 
 def check_reussir_patches():
@@ -716,7 +684,7 @@ def main():
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
         rt, deps = rt_dirs()
         target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
-        libdirs = [rt, deps, Path(target_libdir), rlib.parent]
+        libdirs = [rt, deps, REUSSIR / "build" / "lib", Path(target_libdir), rlib.parent]
         # rrc runs in the temporary directory: it leaves its polymorphic-FFI
         # scratch files (reussir_rust_module_*) in the current directory.
         rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),

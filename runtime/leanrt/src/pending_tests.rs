@@ -1,23 +1,5 @@
-//! Order tests for the pending stack (`pending`, Reussir's drop stack since
-//! entry 23-m), ported from local Reussir patch 13-c's `reussir_rt::drop`
-//! tests (02-c at Reussir 7954a367).
-//!
-//! A scenario is a forest of cells and steps: freeing a cell (its release
-//! function) records it, checks that its header is as written (the stack
-//! never writes a cell), and does its actions in order:
-//! defer a child cell, release a child cell at once (as
-//! Reussir's glue frees a record member itself), push a child step
-//! ([`defer_step`], [`run_step`]), or call [`drain`]. A step does its
-//! actions as leanrt's array frees do: one after another until one pushes
-//! work (then it answers "not done") or none is left. Each root is freed as
-//! leanrt frees a box's payload: deferred, then drained, so every release
-//! runs inside the drain (the stack is empty whenever no drain runs).
-//! Random scenarios are run through the stack and through a model with one
-//! stack entry per pending cell or step, last pushed first; the orders must
-//! agree. The traces (with the [`depth`] and [`releasing`] seen at every
-//! event, which show how cells were grouped into runs) are also hashed, so
-//! that two implementations can be compared exactly (`digest`, run with
-//! `--nocapture`).
+//! Compare shared-worklist release order with a simple LIFO model.
+//! Scenarios include cells, incremental steps, and work enqueued by either.
 
 use super::*;
 use std::cell::{Cell, RefCell};
@@ -39,7 +21,6 @@ enum Action {
     Inline { child: usize },
     Step { child: usize },
     RunStep { child: usize },
-    Drain,
 }
 
 struct Node {
@@ -156,13 +137,13 @@ fn perform(a: Action) {
             let (p, k) = with_world(|w| (ptr_of(w, child), w.nodes[child].k));
             unsafe { release_fn(k)(p) }
         }
-        Action::Step { child } => defer_step(child, step_fn),
-        Action::RunStep { child } => run_step(child, step_fn),
-        Action::Drain => drain(),
+        Action::Step { child } => defer_step(child + 1, step_fn),
+        Action::RunStep { child } => run_step(child + 1, step_fn),
     }
 }
 
-unsafe extern "C" fn step_fn(id: usize) -> bool {
+unsafe extern "C" fn step_fn(id: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let id = id as usize - 1;
     let actions = with_world(|w| {
         let done = w.progress[id];
         record(w, Ev::Step { node: id, done });
@@ -172,15 +153,15 @@ unsafe extern "C" fn step_fn(id: usize) -> bool {
     loop {
         let done = with_world(|w| w.progress[id]);
         if done == actions.len() {
-            return true;
+            return crate::pending::StepStatus::Complete;
         }
         perform(actions[done]);
         with_world(|w| w.progress[id] = done + 1);
         if done + 1 == actions.len() {
-            return true;
+            return crate::pending::StepStatus::Complete;
         }
         if depth() != before {
-            return false;
+            return crate::pending::StepStatus::Pending;
         }
     }
 }
@@ -211,7 +192,6 @@ impl Model<'_> {
                 self.stack.push((true, child));
                 self.drain();
             }
-            Action::Drain => self.drain(),
         }
     }
 
@@ -315,12 +295,10 @@ fn scenario(seed: u64, budget: usize) -> (Vec<usize>, Vec<Node>) {
                     let c = new_node(&mut rng, &mut nodes, true);
                     queue.push_back(c);
                     Action::Step { child: c }
-                } else if roll < 95 {
+                } else {
                     let c = new_node(&mut rng, &mut nodes, true);
                     queue.push_back(c);
                     Action::RunStep { child: c }
-                } else {
-                    Action::Drain
                 };
                 nodes[id].actions.push(action);
             }
@@ -388,7 +366,7 @@ fn run_stats(seed: u64, budget: usize) -> (u64, usize, usize, usize) {
     for &r in &roots {
         let p = with_world(|w| ptr_of(w, r));
         unsafe { defer_cell(p, release_fn(ks[r])) };
-        drain();
+
         assert!(!releasing());
         assert_eq!(depth(), 0);
     }
@@ -461,13 +439,13 @@ fn boxed_cell(id: u64) -> *mut u8 {
 /// leanrt's callers read it from a table: two pointers to one function may
 /// differ (Miri gives them different addresses), and a cell whose pointer
 /// differs starts a run of its own.
-unsafe extern "C" fn step_defer_boxes(_: usize) -> bool {
+unsafe extern "C" fn step_defer_boxes(_: *mut std::ffi::c_void) -> crate::pending::StepStatus {
     let release = release_box as Release;
     for p in TO_DEFER.with(|t| std::mem::take(&mut *t.borrow_mut())) {
         unsafe { defer_cell(p, release) };
     }
     DEPTH_AFTER.with(|d| d.set(depth()));
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Three cells in separate allocations, deferred with one release
@@ -479,7 +457,7 @@ unsafe extern "C" fn step_defer_boxes(_: usize) -> bool {
 #[test]
 fn cells_in_separate_boxes() {
     TO_DEFER.with(|t| *t.borrow_mut() = vec![boxed_cell(10), boxed_cell(20), boxed_cell(30)]);
-    run_step(0, step_defer_boxes);
+    run_step(1, step_defer_boxes);
     assert_eq!(DEPTH_AFTER.with(|d| d.get()), 2, "the step, and one run");
     assert_eq!(depth(), 0);
     assert_eq!(BOXES_SEEN.with(|s| s.borrow_mut().split_off(0)), vec![30, 20, 10]);
@@ -493,13 +471,13 @@ thread_local! {
 
 /// A step that defers cells 0..n, cell `i` with release function
 /// `RUN_KS[i]`, and notes the depth after.
-unsafe extern "C" fn step_runs(_: usize) -> bool {
+unsafe extern "C" fn step_runs(_: *mut std::ffi::c_void) -> crate::pending::StepStatus {
     let n = RUN_KS.with(|r| r.borrow().len());
     for c in 0..n {
         perform(Action::Defer { child: c });
     }
     DEPTH_AFTER.with(|d| d.set(depth()));
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Defers cells with the release functions `ks` in one step; answers the
@@ -513,7 +491,7 @@ fn runs_of(ks: Vec<usize>) -> usize {
     let slot: Vec<usize> = (0..n).collect();
     let base = fill(&mut arena, &nodes, &slot);
     install(nodes, base, slot);
-    run_step(0, step_runs);
+    run_step(1, step_runs);
     assert_eq!(depth(), 0);
     let world = WORLD.with(|w| w.borrow_mut().take().unwrap());
     drop(arena);
@@ -547,17 +525,17 @@ unsafe extern "C" fn release_wanting(_: *mut u8) {
     want_end_work();
 }
 
-unsafe extern "C" fn leaf_step(_: usize) -> bool {
-    true
+unsafe extern "C" fn leaf_step(_: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    crate::pending::StepStatus::Complete
 }
 
-/// A step that asks for the end work, starts work inside the drain (only
-/// pushed) and a nested drain (returns at once).
-unsafe extern "C" fn nesting_step(_: usize) -> bool {
+/// Repeated requests and nested work complete before one end callback.
+unsafe extern "C" fn nesting_step(_: *mut std::ffi::c_void) -> crate::pending::StepStatus {
     want_end_work();
-    run_step(0, leaf_step);
-    drain();
-    true
+    want_end_work();
+    run_step(1, leaf_step);
+
+    crate::pending::StepStatus::Complete
 }
 
 /// The end work runs once per drain that asked for it, after it is over
@@ -568,16 +546,16 @@ unsafe extern "C" fn nesting_step(_: usize) -> bool {
 #[test]
 fn end_work_runs_after_the_outermost_drain() {
     take_end_seen();
-    run_step(0, nesting_step);
-    drain();
+    run_step(1, nesting_step);
+
     let mut cell = [1u64, 0];
     unsafe {
         defer_cell(cell.as_mut_ptr().cast(), release_wanting);
-        drain();
+
         defer_cell(cell.as_mut_ptr().cast(), release_nothing);
-        drain();
+
     }
-    run_step(0, leaf_step);
+    run_step(1, leaf_step);
     assert_eq!(take_end_seen(), vec![(false, 0), (false, 0)]);
 }
 
@@ -616,13 +594,13 @@ unsafe extern "C" fn release_head(p: *mut u8) {
 
 /// A step that defers every cell of the arena, as Reussir's glue frees the
 /// heads of a long list inside a free: one run.
-unsafe extern "C" fn step_list(_: usize) -> bool {
+unsafe extern "C" fn step_list(_: *mut std::ffi::c_void) -> crate::pending::StepStatus {
     let (base, n) = CHAIN.with(|c| (c.borrow().0, c.borrow().1));
     for i in 0..n {
         unsafe { defer_cell(base.add(i).cast::<u8>(), release_head) };
     }
     assert_eq!(depth(), 2, "the step and one run");
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// 10^6 cells: a chain whose releases each defer the next, on a 256 KiB
@@ -643,10 +621,10 @@ fn a_million_cells() {
             let base = arena.as_mut_ptr();
             CHAIN.with(|c| *c.borrow_mut() = (base, n, 0));
             unsafe { defer_cell(base.cast::<u8>(), release_chain) };
-            drain();
+
             assert_eq!(CHAIN.with(|c| c.borrow().2), n);
             CHAIN.with(|c| *c.borrow_mut() = (base, n, 0));
-            run_step(0, step_list);
+            run_step(1, step_list);
             assert_eq!(CHAIN.with(|c| c.borrow().2), n);
             assert!(!releasing());
             assert_eq!(depth(), 0);
