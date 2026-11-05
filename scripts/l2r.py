@@ -421,9 +421,10 @@ REQUIRED_REUSSIR_PATCHES = [
     ("scope exit callbacks", "crates/reussir-rt/src/drop_stack.rs", "pub fn defer_until_scope_exit"),
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
     ("20-d", "crates/reussir-rt/src/rcgmp.rs", "pub fn is_shared"),
+    ("24-c", "lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp", "ffi && ffi.getTagged()"),
 ]
-REUSSIR_HELP = ("build current upstream Reussir with the tagged-handle and bigint "
-                "integration patches (10-a, 07-a, 20-a, 20-c, 20-d)")
+REUSSIR_HELP = ("build Reussir from reussir-bugs/patches/base with all patches in "
+                "reussir-bugs/patches/series")
 
 
 def check_reussir_patches():
