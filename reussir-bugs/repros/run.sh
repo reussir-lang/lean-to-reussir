@@ -39,8 +39,9 @@
 # --emit mlir, --emit mlir-llvm); entries 6 and 17 read their LLVM IR (the
 # calls left, the stack slots left), entry 18 its aarch64 assembly (stores
 # through x8), entry 24 the MLIR after two passes (the token frees), entry
-# 28 the exit status of two passes on a generated MLIR function (entries 24
-# and 28 need the checkout's reussir-opt, in build/bin or build-tests/bin);
+# 28 the exit status of two passes on a generated MLIR function, entries
+# 30, 31 and 32 the shape of the MLIR after one pass (entries 24, 28 and 30
+# to 32 need the checkout's reussir-opt, in build/bin or build-tests/bin);
 # entries 26 and 27 link a C driver that prints what the program saw
 # (entry 27 on aarch64 only, a few seconds); entry
 # 23 links a C driver (cc) that measures peak RSS around each free; entry 8
@@ -525,8 +526,61 @@ bug28() {
     elif [ $up != 0 ]; then say_line REPRODUCES 28 "a chain of 13 blocks: MLIR's storage pass, which the pipeline runs on SVE hosts, fails (exit $up, no message)"
     else say_line OTHER 28 "a chain of 13 blocks: MLIR's storage pass succeeds, and the checkout has no pass of its own"; fi
 }
+# expanded NN FILE: the checkout's reussir-opt on FILE with the acquire/drop
+# expansion (worklist drops, as rrc's pipeline); the result in
+# $WORK/out/NN.mlir. Returns 1 after saying why when it cannot.
+expanded() {
+    local opt
+    opt=$(reussir_opt)
+    [ -n "$opt" ] || { say_line SKIPPED "$1" "no reussir-opt in $CK/build/bin or $CK/build-tests/bin (build its target reussir-opt)"; return 1; }
+    { "$opt" "$HERE/$2" --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' \
+        > "$WORK/out/$1.mlir" 2> "$WORK/out/$1.log"; } 2> /dev/null
+    RC=$?
+    if [ $RC != 0 ]; then say_line OTHER "$1" "reussir-opt $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$WORK/out/$1.log")"; return 1; fi
+    return 0
+}
+bug30() {
+    # A cost of rrc's own time, on an aarch64 host with SVE: the pipeline
+    # lowers the vector dialect with MLIR's pass, whose region
+    # simplification merges arms that differ only in their values into
+    # blocks with arguments; in a big function the arguments multiply (one
+    # lean2rr program: about 16 minutes in rrc). Shown at pass level by the
+    # shape, not by a time: two pairs of such arms come out as two blocks
+    # with arguments from MLIR's pass, and unchanged from 30-a's pass.
+    local opt up own
+    opt=$(reussir_opt)
+    [ -n "$opt" ] || { say_line SKIPPED 30 "no reussir-opt in $CK/build/bin or $CK/build-tests/bin (build its target reussir-opt)"; return; }
+    up=$("$opt" "$HERE/bug30-vector-lowering-merge.mlir" --convert-vector-to-llvm 2> "$WORK/out/30.log" | grep -c '^ *\^bb[0-9]*(')
+    if "$opt" --help | grep -q -- '--reussir-convert-vector-to-llvm'; then
+        own=$("$opt" "$HERE/bug30-vector-lowering-merge.mlir" --reussir-convert-vector-to-llvm 2>> "$WORK/out/30.log" | grep -c '^ *\^bb[0-9]*(')
+        if [ "$own" = 0 ] && [ "$up" = 2 ]; then say_line FIXED 30 "the pipeline's vector lowering leaves the arms as they are (MLIR's own pass merges them into $up blocks with arguments)"
+        else say_line OTHER 30 "blocks with arguments: $own from the pipeline's vector lowering, $up from MLIR's pass (expected 0 and 2)"; fi
+    elif [ "$up" = 2 ]; then say_line REPRODUCES 30 "MLIR's vector lowering, which the pipeline runs on SVE hosts, merges the arms into $up blocks with arguments"
+    else say_line OTHER 30 "MLIR's vector lowering gives $up blocks with arguments (expected 2), and the checkout has no pass of its own"; fi
+}
+bug31() {
+    # A cost: the FFI release of a box with no counted member enters the
+    # drop worklist to do nothing but free the box.
+    local n
+    expanded 31 bug31-leaf-foreign-release.mlir || return
+    n=$(grep -c 'reussir.drop.join' "$WORK/out/31.mlir")
+    if ! grep -q 'reussir.token.free' "$WORK/out/31.mlir"; then say_line OTHER 31 "the release does not free the box (see $WORK/out/31.mlir)"
+    elif [ "$n" = 0 ]; then say_line FIXED 31 "the foreign release of a leaf record frees the box directly (no drop.join)"
+    else say_line REPRODUCES 31 "the foreign release of a leaf record enters the drop worklist ($n drop.join)"; fi
+}
+bug32() {
+    # A cost: integer members make every dead child of a record a worklist
+    # entry, and no arm continues in a child.
+    local t r
+    expanded 32 bug32-integer-member-release.mlir || return
+    t=$(grep -c 'reussir.musttail' "$WORK/out/32.mlir")
+    r=$(grep -c 'rcgmp.release' "$WORK/out/32.mlir")
+    if [ "$r" = 0 ]; then say_line OTHER 32 "no rcgmp.release in the drop functions (see $WORK/out/32.mlir)"
+    elif [ "$t" = 0 ]; then say_line REPRODUCES 32 "a variant with integer members: every dead child is deferred, no tail release"
+    else say_line FIXED 32 "a variant with integer members: integers released in place, the last dead child by a tail release ($t musttail)"; fi
+}
 
-ALL="01 02 03 04 06 07 08 12 17 18 19 23 24 26 27 28"
+ALL="01 02 03 04 06 07 08 12 17 18 19 23 24 26 27 28 30 31 32"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

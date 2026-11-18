@@ -1,0 +1,252 @@
+From 4fb8e8f2567064a638bd7d9dacdccc87d3ea15c9 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 18 Nov 2026 07:36:31 -0500
+Subject: [PATCH 10/15] [drop] release a foreign box of trivially copyable
+ members in place
+
+`prepareWorklistDropBridges` wraps every foreign drop function: the body
+moves to `<name>.worklist.<order>`, and for the last reference the
+function joins or starts a destruction scope around it. The scope is
+there for the work the body may enqueue. A shared box whose payload is
+trivially copyable enqueues none: its release only frees the box, which
+is how `WorklistGlue::release` already treats it (`isTriviallyCopyable`,
+then `emitBoxFree`). Closure drops with trivially copyable payloads are
+exempt for the same reason.
+
+Such a foreign drop now keeps its body, a decrement and the free at the
+last reference. A payload with a managed member (another box, a foreign
+object, a big integer, a token) and a regional box keep the bridge. The
+behaviour is the same: inside a drain the bridge called the body
+directly, and outside one it opened a scope around a body that queues
+nothing, drained an empty list and found no scope-exit callback, since
+those are queued only inside a scope.
+
+The cost was one runtime entry (`__reussir_drop_join_or_run`, a
+thread-local test, a scope and an indirect call) per final release from
+Rust code. Measured with a prototype of this change on a program that
+keeps a 64-byte record of floats in a Rust array and drops the old
+element at every store: 34.2 ms to 22.8 ms (median of 9; ratio 0.667,
+minimum 0.665), 19 other programs in the same step between 0.984 and
+1.005, all outputs equal. This form has not been timed; for that
+program it gives the release function and its caller the same eight
+instructions as the prototype (the decrement and
+`__reussir_deallocate(p, 8, 64)`).
+
+Tests: conversion/worklist_drop_bridges_leaf.mlir (a record of scalars,
+a record of value records, a variant of them and an atomic box keep
+their bodies under both drop orders; a record with a link to another
+box, one with a foreign object and a rigid box get the bridge),
+frontend/ffi_leaf_release_e2e.rr (a Rust `Vec` of such records and of an
+enum with nullary arms: no call to `__reussir_drop_join_or_run` in their
+release functions, one in the release of a record that holds a box; the
+program runs under both drop orders).
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     |  7 ++
+ .../worklist_drop_bridges_leaf.mlir           | 95 +++++++++++++++++++
+ .../frontend/ffi_leaf_release_e2e.c           |  5 +
+ .../frontend/ffi_leaf_release_e2e.rr          | 61 ++++++++++++
+ 4 files changed, 168 insertions(+)
+ create mode 100644 tests/integration/conversion/worklist_drop_bridges_leaf.mlir
+ create mode 100644 tests/integration/frontend/ffi_leaf_release_e2e.c
+ create mode 100644 tests/integration/frontend/ffi_leaf_release_e2e.rr
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 7ceeb564..4ab77e12 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -651,6 +651,13 @@ prepareWorklistDropBridges(mlir::ModuleOp module,
+         function->removeAttr(REUSSIR_CLOSURE_DROP);
+         continue;
+       }
++    } else if (auto rc =
++                   llvm::dyn_cast<RcType>(function.getArgument(0).getType());
++               rc && !rc.isRegional() &&
++               isTriviallyCopyable(rc.getElementType())) {
++      // Releasing such a box only frees it: no work to enqueue, no scope.
++      function->removeAttr(REUSSIR_FOREIGN_DROP);
++      continue;
+     }
+     auto order = isForwardDrop(module) ? "forward" : "backward";
+     auto name = std::format("{}.worklist.{}",
+diff --git a/tests/integration/conversion/worklist_drop_bridges_leaf.mlir b/tests/integration/conversion/worklist_drop_bridges_leaf.mlir
+new file mode 100644
+index 00000000..fab215c6
+--- /dev/null
++++ b/tests/integration/conversion/worklist_drop_bridges_leaf.mlir
+@@ -0,0 +1,95 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' --verify-each | %FileCheck %s --implicit-check-not='{{(leaf|pair|shape|atomic)}}.worklist'
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true drop-order=forward' --verify-each | %FileCheck %s --implicit-check-not='{{(leaf|pair|shape|atomic)}}.worklist'
++
++// A foreign drop of a box whose payload is trivially copyable only frees the
++// box: it keeps its body and enters no destruction scope. A payload with a
++// managed member, or a regional box, still gets the bridge.
++
++!leaf = !reussir.record<compound "Leaf" { i64, f64 }>
++!point = !reussir.record<compound "Point" [value] { i64, f64 }>
++!pair = !reussir.record<compound "Pair" { !point, !point }>
++!shape = !reussir.record<variant "Shape" { !point, !reussir.record<compound "Shape::Empty" [value] {}> }>
++!foreign = !reussir.rc<!reussir.ffi_object<"Handle", @handle_drop>>
++!held = !reussir.record<compound "Held" { i64, !leaf }>
++!owner = !reussir.record<compound "Owner" { i64, !foreign }>
++!token24 = !reussir.nullable<!reussir.token<align: 8, size: 24>>
++!token40 = !reussir.nullable<!reussir.token<align: 8, size: 40>>
++!dynamic = !reussir.nullable<!reussir.token<align: 8, size: ?>>
++
++module {
++  func.func private @handle_drop(!foreign)
++
++  // CHECK-LABEL: func.func @leaf(
++  // CHECK-NOT: reussir.drop
++  // CHECK: reussir.rc.fetch
++  // CHECK: reussir.token.free
++  // CHECK-NOT: reussir.drop
++  // CHECK: return
++  func.func @leaf(%rc: !reussir.rc<!leaf shared>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!leaf shared>) : !token24
++    reussir.token.free(%token : !token24)
++    return
++  }
++
++  // Value records in the payload are stored in line.
++  // CHECK-LABEL: func.func @pair(
++  // CHECK-NOT: reussir.drop
++  // CHECK: reussir.token.free
++  // CHECK-NOT: reussir.drop
++  // CHECK: return
++  func.func @pair(%rc: !reussir.rc<!pair shared>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!pair shared>) : !token40
++    reussir.token.free(%token : !token40)
++    return
++  }
++
++  // CHECK-LABEL: func.func @shape(
++  // CHECK-NOT: reussir.drop
++  // CHECK: reussir.token.free
++  // CHECK-NOT: reussir.drop
++  // CHECK: return
++  func.func @shape(%rc: !reussir.rc<!shape shared>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!shape shared>) : !dynamic
++    reussir.token.free(%token : !dynamic)
++    return
++  }
++
++  // CHECK-LABEL: func.func @atomic(
++  // CHECK-NOT: reussir.drop
++  // CHECK: reussir.rc.fetch_sub
++  // CHECK: reussir.token.free
++  // CHECK-NOT: reussir.drop
++  // CHECK: return
++  func.func @atomic(%rc: !reussir.rc<!leaf shared atomic>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!leaf shared atomic>) : !token24
++    reussir.token.free(%token : !token24)
++    return
++  }
++
++  // A record member of a shared record type is a link to another box.
++  // CHECK-LABEL: func.func private @held.worklist.
++  // CHECK-LABEL: func.func @held(
++  // CHECK: reussir.drop.join @held.worklist.
++  func.func @held(%rc: !reussir.rc<!held shared>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!held shared>) : !token24
++    reussir.token.free(%token : !token24)
++    return
++  }
++
++  // CHECK-LABEL: func.func private @owner.worklist.
++  // CHECK-LABEL: func.func @owner(
++  // CHECK: reussir.drop.join @owner.worklist.
++  func.func @owner(%rc: !reussir.rc<!owner shared>) attributes {reussir.foreign_drop} {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!owner shared>) : !token24
++    reussir.token.free(%token : !token24)
++    return
++  }
++
++  // CHECK-LABEL: func.func private @rigid.worklist.
++  // CHECK-LABEL: func.func @rigid(
++  // CHECK: reussir.drop.join @rigid.worklist.
++  func.func @rigid(%rc: !reussir.rc<!leaf rigid>) attributes {reussir.foreign_drop} {
++    reussir.rc.dec(%rc : !reussir.rc<!leaf rigid>)
++    return
++  }
++}
+diff --git a/tests/integration/frontend/ffi_leaf_release_e2e.c b/tests/integration/frontend/ffi_leaf_release_e2e.c
+new file mode 100644
+index 00000000..bc1ae76d
+--- /dev/null
++++ b/tests/integration/frontend/ffi_leaf_release_e2e.c
+@@ -0,0 +1,5 @@
++#include <stdint.h>
++
++extern int64_t reussir_main(void);
++
++int main(void) { return reussir_main() == 573 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_leaf_release_e2e.rr b/tests/integration/frontend/ffi_leaf_release_e2e.rr
+new file mode 100644
+index 00000000..205d1b0d
+--- /dev/null
++++ b/tests/integration/frontend/ffi_leaf_release_e2e.rr
+@@ -0,0 +1,61 @@
++// UNSUPPORTED: darwin
++// A Rust `Vec` drops Reussir boxes through the `_ffi_release` glue. A box
++// whose payload is trivially copyable (a record of scalars, an enum of
++// scalars with nullary arms) is released in place; one that holds another
++// box still enters a destruction scope.
++
++// RUN: %rrc %s -t llvm-ir -Oaggressive -o %t.ll
++// RUN: %FileCheck %s --check-prefix=LEAF --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=COLOR --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=HELD --input-file=%t.ll
++// RUN: %rrc %s -o %t.o --relocation-mode pic
++// RUN: %cc %t.o %S/ffi_leaf_release_e2e.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -o %t.opt.o --relocation-mode pic -Oaggressive --drop-order forward
++// RUN: %cc %t.opt.o %S/ffi_leaf_release_e2e.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++
++extern "rust" [{
++    use reussir_rt::collections::vec::Vec as RVec;
++}];
++
++#[ffi(rust = "::reussir_rt::collections::vec::Vec")]
++pub struct Vec<T>;
++
++pub struct Leaf { a: i64, b: f64 }
++pub enum Color { Red, Green, Rgb(i64) }
++pub struct Held { leaf: Leaf }
++
++#[ffi(import)]
++pub fn new<T>() -> Vec<T> [{ RVec::new() }];
++
++#[ffi(import)]
++pub fn push<T>(v: Vec<T>, x: T) -> Vec<T> [{ RVec::push(v, x) }];
++
++// Clones the vector, which retains every element, and drops both copies.
++#[ffi(import)]
++pub fn count<T>(v: Vec<T>) -> i64 [{
++    let w = v.clone().push(v.get(0).unwrap());
++    (v.len() + w.len()) as i64
++}];
++
++pub fn main() -> i64 {
++    let leaves = push(push(new<Leaf>(), Leaf { a: 1, b: 2.0 }), Leaf { a: 3, b: 4.0 });
++    let colors = push(push(push(new<Color>(), Color::Red), Color::Rgb{7}), Color::Green);
++    let held = push(new<Held>(), Held { leaf: Leaf { a: 5, b: 6.0 } });
++    count(leaves) * 100 + count(colors) * 10 + count(held)
++}
++
++extern "C" trampoline "reussir_main" = main;
++
++// LEAF: define {{.*}}4Leaf_ffi_release.backward(
++// LEAF-NOT: __reussir_drop_join_or_run
++// LEAF: {{^}}}
++
++// COLOR: define {{.*}}5Color_ffi_release.backward(
++// COLOR-NOT: __reussir_drop_join_or_run
++// COLOR: {{^}}}
++
++// HELD: define {{.*}}4Held_ffi_release.backward(
++// HELD: __reussir_drop_join_or_run
++// HELD: {{^}}}
+-- 
+2.43.0
+

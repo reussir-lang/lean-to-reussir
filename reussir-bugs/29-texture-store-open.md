@@ -9,8 +9,8 @@ opens the store once for a module's textures. It is an optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (29-a), patch 9 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-final`, commit
-`2b9d8ca0`; 4 files, +53/-9, without `tests/` 3 files, +35/-8).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
+`0f679c4e`; 4 files, +50/-8).
 `scripts/l2r.py` does not check for the patch: without it builds are
 slower, with the same results.
 
@@ -119,12 +119,12 @@ with a working store, `rrc -v` logs one `cache opened` line (two on
 pristine upstream), and a second run that may not compile succeeds.
 The second case depends on the text of compcache's debug log.
 
-**The patch file and the gated compiler.** The file in `patches/` has
-this test in its last form. The Reussir branch that the gate used
-(`l2r-base13-final`, head `d62797ac`, tree `9066f3fc`) has the form
-before it, in which the test made a lock file read-only. Only that one
-test file differs (+6/-8); no compiler source differs. So the series of
-this folder gives tree `ccdf369d`, not `9066f3fc`.
+**The patch file and the gated compilers.** The file in `patches/` has
+this test in its last form, and so has the Reussir branch of the
+current series (`l2r-base13-r3-vec`). The compiler of the port's final
+gate (branch `l2r-base13-final`, head `d62797ac`) had the form before
+it, in which the test made a lock file read-only; only that test file
+differed, no compiler source.
 
 ## Review
 
@@ -222,6 +222,10 @@ that one run cannot separate: this patch, the store on a memory file
 system, the six other patches that came after the first gate, and a
 much quieter machine.
 
+The gate on the series of 15 patches (the store on a memory file
+system again) took 652 s for the suite, with 30-a removing the outlier
+program ([entry 30](30-vector-to-llvm-block-merging.md)).
+
 **Not measured:** the patch alone in a full suite run; the share of
 each of the four things above; a store on disk in the final gate;
 other platforms.
@@ -233,7 +237,16 @@ uses more time than on `l2r-base12` (the MLIR pipeline 12.44 s to
 14.73 s for RtTArrKinds and 15.03 s to 19.15 s for lean-zip's compress;
 code generation 6.8 s to 11.2 s for lean-zip; one run each, before
 this patch). The cause is not attributed to an upstream change. Small
-programs do not show it. Measured not to be causes: the frontend and
+programs do not show it. One program's build of 16 to 18 minutes on
+this base had its own cause, which is patched
+([entry 30](30-vector-to-llvm-block-merging.md)). Open, from the gate
+on the series of 15 patches: with every texture in the cache and alone
+on the machine, a small program takes about 0.15 s more in rrc and the
+link on that series than on the series of 12 (1.84 s against 1.69 s
+for each of 20 tests, about 9%; between 5% and 12%; slower in 17 of
+20 tests in both passes). The three patches that the two series differ
+by are 31-a, 32-a and 30-a; which one costs it is not measured.
+Measured not to be causes of the difference to `l2r-base12`: the frontend and
 the loading of core's interface, the borrow analysis, the link, and
 rustc's time for a cold texture.
 

@@ -1,28 +1,29 @@
-From d62797ac6242c1273b9e120362bb5ec876b83a5b Mon Sep 17 00:00:00 2001
+From 46c816b39e9b4460014caff9fe141292f5ae6264 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 01:51:48 -0500
-Subject: [PATCH 12/12] [conversion] legalize the storage of scalable vectors
+Subject: [PATCH 14/15] [conversion] legalize the storage of scalable vectors
  with the patterns alone
 
-On a target with SVE the pipeline ran MLIR's
-`arm-sve-legalize-vector-storage` on every function. The cause of the
-failure is in that MLIR pass: it applies its patterns with the greedy
-driver's default configuration, which also folds and simplifies the
-regions of the function, and it fails when the driver has not reached a
-fixpoint after ten iterations. Dropping the redundant arguments of a
-chain of blocks takes one iteration per block when the blocks are laid
-out last first, so a large function without any vector made the whole
+On a target with SVE the pipeline ran MLIR's `arm-sve-legalize-vector-
+storage` on every function. The cause of the failure is in that MLIR
+pass: it applies its patterns with the greedy driver's default
+configuration, which also folds and simplifies the regions of the
+function, and it fails when the driver has not reached a fixpoint
+after ten iterations. Dropping the redundant arguments of a chain of
+blocks takes one iteration per block when the blocks are laid out last
+first, so a large function without any vector made the whole
 compilation fail with `RunPass` and no diagnostic. The pass has no
 option for the driver's configuration; no LLVM report has been filed.
 
 `reussir-legalize-vector-storage` applies the same patterns with
 folding, constant CSE and region simplification off, and like MLIR's
 pass it fails, with a diagnostic, when a use of a legalized allocation
-is left that the patterns cannot rewrite. The pipeline and the vector
-lowering test use it.
+is left that the patterns cannot rewrite. The pipeline, the JIT bridge
+and the vector lowering test use it.
 ---
  crates/reussir-backend-sys/build.rs           |  1 +
  include/Reussir/Conversion/Passes.td          | 18 ++++++
+ lib/Bridge/Bridge.cppm                        |  2 +-
  lib/CAPI/CMakeLists.txt                       |  1 +
  lib/CAPI/Passes.cpp                           |  3 +-
  lib/Conversion/CMakeLists.txt                 |  2 +
@@ -31,7 +32,7 @@ lowering test use it.
  .../conversion/legalize_vector_storage.mlir   | 52 ++++++++++++++++
  .../conversion/vector_lowering.mlir           |  2 +-
  tool/reussir-opt/main.cpp                     |  3 +
- 10 files changed, 155 insertions(+), 3 deletions(-)
+ 11 files changed, 156 insertions(+), 4 deletions(-)
  create mode 100644 lib/Conversion/LegalizeVectorStorage/CMakeLists.txt
  create mode 100644 lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
  create mode 100644 tests/integration/conversion/legalize_vector_storage.mlir
@@ -77,6 +78,19 @@ index 66170846..68585ffe 100644
  //===----------------------------------------------------------------------===//
  // AttachNativeTarget
  //===----------------------------------------------------------------------===//
+diff --git a/lib/Bridge/Bridge.cppm b/lib/Bridge/Bridge.cppm
+index 3585434a..cffc8a08 100644
+--- a/lib/Bridge/Bridge.cppm
++++ b/lib/Bridge/Bridge.cppm
+@@ -255,7 +255,7 @@ void createLoweringPipeline(mlir::PassManager &pm,
+   pm.addPass(createReussirBasicOpsLoweringPass());
+   if (armSVE)
+     pm.addNestedPass<mlir::func::FuncOp>(
+-        mlir::arm_sve::createLegalizeVectorStoragePass());
++        reussir::createReussirLegalizeVectorStoragePass());
+   mlir::ConvertVectorToLLVMPassOptions vectorOptions;
+   vectorOptions.armSVE = armSVE;
+   pm.addPass(mlir::createConvertVectorToLLVMPass(vectorOptions));
 diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
 index baa35ab4..932bb544 100644
 --- a/lib/CAPI/CMakeLists.txt

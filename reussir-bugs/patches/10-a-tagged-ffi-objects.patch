@@ -1,7 +1,7 @@
 From 169d8db583a12f579752a4a9dfbb2b7588efd293 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 01/12] [ffi] support tagged foreign handles
+Subject: [PATCH 01/15] [ffi] support tagged foreign handles
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
 also be an immediate: an odd word that the foreign side encodes in the

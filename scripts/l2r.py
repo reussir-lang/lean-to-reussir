@@ -532,6 +532,19 @@ REQUIRED_REUSSIR_PATCHES = [
 # - 29-a: rrc opens its texture cache's store once per module, not once
 #   per texture (`PolyffiCache openPolyffiCache()` in
 #   include/Reussir/RustCompiler.h; without it builds are only slower);
+# - 31-a: a record without counted members that foreign code releases is
+#   freed directly, not through the drop worklist (`Releasing such a box
+#   only frees it` in lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp;
+#   fewer instructions per release);
+# - 32-a: the integer members of a record are released in place and its
+#   pure children by a tail release (`enum class Visit { Leaf, Boxes,
+#   Ordered }` in the same file; fewer worklist entries);
+# - 30-a: on an aarch64 host with SVE, rrc lowers the vector dialect with
+#   its patterns alone (`createReussirConvertVectorToLLVMPass` in
+#   lib/CAPI/Passes.cpp). Without it the results are the same and rrc's
+#   time grows steeply with the size of a function: one known program
+#   takes about 16 minutes to compile. A slow build is not an error, so it
+#   is not checked;
 # - 27-a: `core::object::is_unique` of a nullary immediate under TBI
 #   (a wrong answer upstream; lean2rr's programs do not call it);
 # - the patches out of the series (reussir-bugs/patches/parked).

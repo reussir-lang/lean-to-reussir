@@ -1,0 +1,451 @@
+From 6d56ffeb6e1e7782ba72b8e60d5acbacfecbee0e Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 18 Nov 2026 08:08:39 -0500
+Subject: [PATCH 11/15] [drop] release integer members in place and
+ tail-release the last child
+
+A record that holds an arbitrary-precision integer reports an observable
+cleanup, because every member type that is not trivially copyable does.
+The worklist glue asks that flag per record in two places.
+`dispatchLeaf` refuses the record, so a dead value released from user
+code opens a destruction scope even when its arm holds only integers.
+`releasePure` is off, so every dead child is deferred and popped again,
+with no tail call. But an integer release runs no cleanup hook; the
+tail-loop drop already releases integers in place.
+
+The glue now asks the members (`classify`): a `Leaf` holds scalars and
+integers, `Boxes` adds shared boxes whose release can wait, anything
+else (a foreign object, a closure) is `Ordered`. An arm that is a leaf
+is released where it is found, its integers in place. Under backward
+order `releasePure` serves every arm that is not `Ordered`, also when a
+cleanup hook is in reach behind a box; an `Ordered` arm keeps the
+ordered release. The order of the hooks does not change: the backward
+walk also decrements every box at its visit and defers the dead ones,
+and the box that `releasePure` continues in is the one the work list
+would pop next. The forward walk decrements a box only when its turn
+comes, which a shared box can observe, so under forward order
+`releasePure` stays limited to records with no observable cleanup: only
+the leaf dispatch is new there.
+
+Measured with a prototype that generates the same LLVM IR as this form
+for the six programs (compared function by function): wall time against
+the unpatched compiler, median of 9, 0.846 and 0.839 (symbolic
+derivative, two sizes), 0.846 and 0.875 (red-black tree with integer
+keys), 0.933, 0.958; six control programs 0.988 to 1.003. On the
+derivative program the destruction scopes entered fall from 565,495 to 1
+and the deferred releases from 2,426,392 to 652,241; on the tree program
+the deferred releases fall from 1,053,560 to 204,963. Call sites of
+`__reussir_drop_run` in the optimized IR: 94 to 31, 97 to 34, 15 to 6.
+Of the benchmark suite, core and std (33 units) three change:
+bigint-rbtree, nbe-hoas and std gain tail calls in their release
+helpers and lose deferrals; the lowered MLIR of the others is identical.
+
+The cost is code size, in the release helpers and where user code
+releases a leaf arm in place: the optimized IR of a derivative-style
+program grows by 3.8% and that of two large programs by 0.3% and 0.2%,
+the object of one unit of the benchmark suite by 4.4%, and that of a
+synthetic type with 19 arms by 39% at the aggressive level.
+
+Tests: conversion/worklist_integer_members.mlir (a leaf arm of an
+integer, an arm with a foreign object, an arm of boxes and an integer,
+both drop orders), conversion/worklist_pure_order.mlir (hooks behind
+the boxes of a pure record run in the order of the walk under both drop
+orders, with a shared box; a chain of 100,000 needs no stack).
+---
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 156 ++++++++++++------
+ .../conversion/worklist_integer_members.mlir  |  54 ++++++
+ .../conversion/worklist_pure_order.c          |  59 +++++++
+ .../conversion/worklist_pure_order.mlir       |  30 ++++
+ 4 files changed, 246 insertions(+), 53 deletions(-)
+ create mode 100644 tests/integration/conversion/worklist_integer_members.mlir
+ create mode 100644 tests/integration/conversion/worklist_pure_order.c
+ create mode 100644 tests/integration/conversion/worklist_pure_order.mlir
+
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 4ab77e12..2cb5449f 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -104,19 +104,47 @@ public:
+     });
+   }
+ 
++  // What releasing a value stored in line does at its visit. A `Leaf` holds
++  // scalars and integers, released in place with no cleanup hook; `Boxes`
++  // adds shared boxes, whose release can wait; anything else is `Ordered`.
++  enum class Visit { Leaf, Boxes, Ordered };
++  static Visit classify(mlir::Type type) {
++    if (isTriviallyCopyable(type) || isRCGMPIntegerType(type))
++      return Visit::Leaf;
++    if (auto nullable = llvm::dyn_cast<NullableType>(type))
++      type = nullable.getPtrTy();
++    if (auto rc = llvm::dyn_cast<RcType>(type))
++      return rc.getCapability() == Capability::shared &&
++                     !llvm::isa<FFIObjectType, ClosureType>(rc.getElementType())
++                 ? Visit::Boxes
++                 : Visit::Ordered;
++    auto record = llvm::dyn_cast<RecordType>(type);
++    if (!record || !record.getComplete() || !record.isCompound())
++      return Visit::Ordered;
++    auto visit = Visit::Leaf;
++    for (auto [member, field] :
++         llvm::zip(record.getMembers(), record.getMemberIsField()))
++      if (!field)
++        visit = std::max(visit, classify(getProjectedType(
++                                    member, false, Capability::shared)));
++    return visit;
++  }
++
++  // A leaf arm reaches no box, so it is released where it is found.
+   bool dispatchLeaf(mlir::Value ref, llvm::function_ref<void()> onLeaf,
+                     llvm::function_ref<void()> onOther) {
+     auto refType = llvm::cast<RefType>(ref.getType());
+     auto record = llvm::dyn_cast<RecordType>(refType.getElementType());
+-    if (!record || !record.isVariant() || record.hasObservableCleanup()) {
++    if (!record || !record.isVariant() || !record.getComplete()) {
+       return false;
+     }
+     llvm::SmallVector<bool> leaf;
+     llvm::SmallVector<mlir::Attribute> tags;
+     for (const auto &[i, member, field] :
+          llvm::enumerate(record.getMembers(), record.getMemberIsField())) {
+-      leaf.push_back(field || isTriviallyCopyable(getProjectedType(
+-                                  member, false, Capability::shared)));
++      leaf.push_back(field || classify(getProjectedType(
++                                  member, false, Capability::shared)) ==
++                                  Visit::Leaf);
+       tags.push_back(builder.getDenseI64ArrayAttr({int64_t(i)}));
+     }
+     if (!llvm::is_contained(leaf, true)) {
+@@ -135,10 +163,14 @@ public:
+           {RefType::get(builder.getContext(), projected,
+                         Capability::unspecified, refType.getAtomicKind())},
+           {loc});
+-      if (leaf[i])
++      if (leaf[i]) {
++        if (!field)
++          visitInline(builder.getInsertionBlock()->getArgument(0),
++                      [](mlir::Value) {});
+         onLeaf();
+-      else
++      } else {
+         onOther();
++      }
+       ReussirScfYieldOp::create(builder, loc, nullptr);
+     }
+     return true;
+@@ -339,26 +371,26 @@ public:
+     schedule(task, rc, false);
+   }
+ 
+-  static bool canReleasePure(mlir::Type type) {
+-    if (isTriviallyCopyable(type))
+-      return true;
+-    if (auto nullable = llvm::dyn_cast<NullableType>(type))
+-      type = nullable.getPtrTy();
+-    if (auto rc = llvm::dyn_cast<RcType>(type))
+-      return rc.getCapability() == Capability::shared;
+-    auto record = llvm::dyn_cast<RecordType>(type);
+-    if (!record || record.hasObservableCleanup())
++  // Whether `releasePure` serves the record. It decrements every box first,
++  // as the backward walk does: there it serves each arm that holds a box or
++  // an integer. The forward walk does not, so there no hook may be in reach.
++  bool canReleasePure(RecordType record) const {
++    if (!record.getComplete())
+       return false;
+-    return llvm::all_of(
+-        llvm::zip(record.getMembers(), record.getMemberIsField()),
+-        [&](auto member) {
+-          auto [type, field] = member;
+-          auto projected = getProjectedType(type, field, Capability::shared);
+-          auto nested = llvm::dyn_cast<RecordType>(projected);
+-          return field || isTriviallyCopyable(projected) ||
+-                 ((!record.isCompound() || !nested || !nested.isVariant()) &&
+-                  canReleasePure(projected));
+-        });
++    bool forward = isForwardDrop(module);
++    if (forward && record.hasObservableCleanup())
++      return false;
++    if (record.isCompound())
++      return classify(record) != Visit::Ordered;
++    unsigned pure = 0, other = 0;
++    for (auto [member, field] :
++         llvm::zip(record.getMembers(), record.getMemberIsField())) {
++      auto type = getProjectedType(member, false, Capability::shared);
++      if (field || isTriviallyCopyable(type))
++        continue;
++      ++(classify(type) != Visit::Ordered ? pure : other);
++    }
++    return other == 0 || (!forward && pure != 0);
+   }
+ 
+   // Drop one reference and report whether the child needs release.
+@@ -427,8 +459,42 @@ public:
+     call->setAttr(kMustTailCallAttr, builder.getUnitAttr());
+   }
+ 
++  // Release the integers stored in line in `slot` and hand its boxes to
++  // `onBox`. Only for a slot that `classify` does not call `Ordered`.
++  void visitInline(mlir::Value slot,
++                   llvm::function_ref<void(mlir::Value)> onBox) {
++    auto slotType = llvm::cast<RefType>(slot.getType());
++    auto valueType = slotType.getElementType();
++    if (isTriviallyCopyable(valueType))
++      return;
++    if (isRCGMPIntegerType(valueType)) {
++      ReussirRefDropOp::create(builder, loc, slot);
++      return;
++    }
++    if (auto record = llvm::dyn_cast<RecordType>(valueType)) {
++      assert(record.isCompound());
++      for (const auto &[i, member, field] :
++           llvm::enumerate(record.getMembers(), record.getMemberIsField())) {
++        if (field)
++          continue;
++        auto projected = getProjectedType(
++            member, false, Capability::unspecified, slotType.getAtomicKind());
++        visitInline(ReussirRefProjectOp::create(
++                        builder, loc,
++                        RefType::get(builder.getContext(), projected,
++                                     Capability::unspecified,
++                                     slotType.getAtomicKind()),
++                        slot, builder.getIndexAttr(i)),
++                    onBox);
++      }
++      return;
++    }
++    onBox(ReussirRefLoadOp::create(builder, loc, valueType, slot));
++  }
++
+   // Collect children before freeing the parent, then defer siblings and
+-  // continue directly with one child. Only used without observable cleanup.
++  // continue directly with one child. No member runs a cleanup hook at its
++  // visit; an arm that does keeps the ordered backward release.
+   void releasePure(mlir::Value ref, mlir::Value box) {
+     auto refType = llvm::cast<RefType>(ref.getType());
+     auto type = refType.getElementType();
+@@ -452,41 +518,25 @@ public:
+             {loc});
+         if (field)
+           emitBoxFree(box, loc, module, builder);
+-        else
++        else if (classify(getProjectedType(member, false,
++                                           Capability::shared)) !=
++                 Visit::Ordered)
+           releasePure(arm->getArgument(0), box);
++        else {
++          assert(!isForwardDrop(module));
++          ReussirRefDropOp::create(builder, loc, arm->getArgument(0), true,
++                                   nullptr);
++          emitBoxFree(box, loc, module, builder);
++        }
+         ReussirScfYieldOp::create(builder, loc, nullptr);
+       }
+       return;
+     }
+     llvm::SmallVector<mlir::Value> children, dead;
+-    auto collect = [&](auto &&self, mlir::Value slot) -> void {
+-      auto slotType = llvm::cast<RefType>(slot.getType());
+-      auto valueType = slotType.getElementType();
+-      if (isTriviallyCopyable(valueType))
+-        return;
+-      if (auto record = llvm::dyn_cast<RecordType>(valueType)) {
+-        assert(record.isCompound());
+-        for (const auto &[i, member, field] :
+-             llvm::enumerate(record.getMembers(), record.getMemberIsField())) {
+-          if (field)
+-            continue;
+-          auto projected = getProjectedType(
+-              member, false, Capability::unspecified, slotType.getAtomicKind());
+-          self(self, ReussirRefProjectOp::create(
+-                         builder, loc,
+-                         RefType::get(builder.getContext(), projected,
+-                                      Capability::unspecified,
+-                                      slotType.getAtomicKind()),
+-                         slot, builder.getIndexAttr(i)));
+-        }
+-        return;
+-      }
+-      mlir::Value child =
+-          ReussirRefLoadOp::create(builder, loc, valueType, slot);
++    visitInline(ref, [&](mlir::Value child) {
+       children.push_back(child);
+       dead.push_back(deadTest(child));
+-    };
+-    collect(collect, ref);
++    });
+     emitBoxFree(box, loc, module, builder);
+     if (children.empty())
+       return;
+@@ -556,7 +606,7 @@ public:
+       auto record = llvm::dyn_cast<RecordType>(type.getElementType());
+       auto target = module->getAttrOfType<mlir::StringAttr>(
+           mlir::LLVM::LLVMDialect::getTargetTripleAttrName());
+-      if (record && !record.hasObservableCleanup() && canReleasePure(record) &&
++      if (record && canReleasePure(record) &&
+           (!target || !llvm::Triple(target.getValue()).isWasm())) {
+         releasePure(ref, arg);
+         return;
+diff --git a/tests/integration/conversion/worklist_integer_members.mlir b/tests/integration/conversion/worklist_integer_members.mlir
+new file mode 100644
+index 00000000..55437c60
+--- /dev/null
++++ b/tests/integration/conversion/worklist_integer_members.mlir
+@@ -0,0 +1,54 @@
++// REQUIRES: rcgmp
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' --verify-each | %FileCheck %s
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true drop-order=forward' --verify-each | %FileCheck %s --check-prefix=FORWARD
++
++// An integer member is released in place: an arm of integers is a leaf, and
++// under backward order an arm of integers and boxes continues in its last
++// dead box. An arm with a foreign object keeps the ordered release.
++
++!handle = !reussir.rc<!reussir.ffi_object<"Handle", @handle_drop>>
++!expr_ = !reussir.record<variant "Expr" incomplete>
++!val = !reussir.record<compound "Expr::Val" [value] { !rcgmp.mpz }>
++!var = !reussir.record<compound "Expr::Var" [value] { !handle }>
++!add = !reussir.record<compound "Expr::Add" [value] { !expr_, !rcgmp.mpz, !expr_ }>
++!expr = !reussir.record<variant "Expr" { !val, !var, !add }>
++!token = !reussir.nullable<!reussir.token<align: 8, size: ?>>
++
++module {
++  func.func private @handle_drop(!handle)
++
++  // CHECK-LABEL: REUSSIR_DROP_release_backward{{.*}}: !reussir.rc<!reussir.record<variant "Expr"
++  // CHECK: ^bb0(%{{.*}}"Expr::Val"
++  // CHECK: rcgmp.release
++  // CHECK-NEXT: reussir.rc.reinterpret
++  // CHECK-NEXT: reussir.token.free
++  // CHECK: ^bb0(%{{.*}}"Expr::Var"
++  // CHECK: reussir.drop.defer
++  // CHECK: reussir.token.free
++  // CHECK: ^bb0(%{{.*}}"Expr::Add"
++  // CHECK: rcgmp.release
++  // CHECK: reussir.token.free
++  // CHECK: reussir.rc.defer
++  // CHECK: {reussir.musttail}
++  // CHECK: {reussir.musttail}
++  // CHECK: return
++  // CHECK-LABEL: REUSSIR_DROP_entry_backward{{.*}}: !reussir.ref<!reussir.record<variant "Expr"
++  // CHECK: ^bb0(%{{.*}}"Expr::Val"
++  // CHECK: rcgmp.release
++  // CHECK-NEXT: reussir.scf.yield
++  // CHECK: reussir.drop.run
++  // CHECK: reussir.drop.run
++
++  // FORWARD-LABEL: REUSSIR_DROP_release_forward{{.*}}: !reussir.rc<!reussir.record<variant "Expr"
++  // FORWARD-NOT: rcgmp.release
++  // FORWARD: call @{{.*}}REUSSIR_DROP_walk_forward
++  // FORWARD-LABEL: REUSSIR_DROP_entry_forward{{.*}}: !reussir.ref<!reussir.record<variant "Expr"
++  // FORWARD: ^bb0(%{{.*}}"Expr::Val"
++  // FORWARD: rcgmp.release
++  // FORWARD-NEXT: reussir.scf.yield
++  func.func @expr(%rc: !reussir.rc<!expr>) {
++    %token = reussir.rc.dec(%rc : !reussir.rc<!expr>) : !token
++    reussir.token.free(%token : !token)
++    return
++  }
++}
+diff --git a/tests/integration/conversion/worklist_pure_order.c b/tests/integration/conversion/worklist_pure_order.c
+new file mode 100644
+index 00000000..893d2905
+--- /dev/null
++++ b/tests/integration/conversion/worklist_pure_order.c
+@@ -0,0 +1,59 @@
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++
++extern void *__reussir_allocate(size_t, size_t);
++extern void __reussir_deallocate(void *, size_t, size_t);
++extern void pure_drop(void *);
++
++// A handle with its id, or the box that owns a handle.
++typedef struct Cell {
++  uint32_t count;
++  uintptr_t value;
++} Cell;
++typedef struct Node {
++  uint32_t count;
++  Cell *owner;
++  struct Node *left, *right;
++} Node;
++static uintptr_t events[4], count;
++
++void pure_cleanup(void *box) {
++  Cell *handle = box;
++  if (--handle->count)
++    return;
++  if (handle->value) {
++    if (count >= 4)
++      abort();
++    events[count++] = handle->value;
++  }
++  __reussir_deallocate(handle, 8, sizeof(*handle));
++}
++static Cell *cell(uintptr_t value) {
++  Cell *result = __reussir_allocate(8, sizeof(*result));
++  *result = (Cell){1, value};
++  return result;
++}
++static Node *node(unsigned id, Node *left, Node *right) {
++  Node *result = __reussir_allocate(8, sizeof(*result));
++  *result = (Node){1, cell((uintptr_t)cell(id)), left, right};
++  return result;
++}
++int main(int argc, char **argv) {
++  if (argc != 2)
++    return 1;
++  // Both children of the third node hold the fourth.
++  Node *shared = node(4, NULL, NULL);
++  shared->count = 2;
++  pure_drop(node(1, node(2, NULL, NULL), node(3, shared, shared)));
++  uintptr_t expected[] = {1, 2, 3, 4};
++  if (strcmp(argv[1], "backward") == 0)
++    memcpy(expected, (uintptr_t[]){4, 3, 2, 1}, sizeof(expected));
++  if (count != 4 || memcmp(events, expected, sizeof(events)))
++    return 2;
++  Node *chain = NULL;
++  for (unsigned i = 0; i != 100000; ++i)
++    chain = node(0, NULL, chain);
++  pure_drop(chain);
++  return 0;
++}
+diff --git a/tests/integration/conversion/worklist_pure_order.mlir b/tests/integration/conversion/worklist_pure_order.mlir
+new file mode 100644
+index 00000000..4c186292
+--- /dev/null
++++ b/tests/integration/conversion/worklist_pure_order.mlir
+@@ -0,0 +1,30 @@
++// REQUIRES: pointer64
++// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,reussir-acquire-drop-expansion{outline-record=true expand-decrement=true drop-order=forward},reussir-convert-to-std,canonicalize,convert-scf-to-cf,reussir-lowering-basic-ops,reussir-convert-to-llvm,reconcile-unrealized-casts,canonicalize)' -o %t.forward.mlir
++// RUN: %reussir-translate --reussir-to-llvmir %t.forward.mlir | %opt -S -O2 -o %t.forward.ll
++// RUN: %llc %t.forward.ll -relocation-model=pic -filetype=obj -o %t.forward.o
++// RUN: %cc %t.forward.o %S/worklist_pure_order.c -o %t.forward.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.forward.exe forward
++// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,reussir-acquire-drop-expansion{outline-record=true expand-decrement=true drop-order=backward},reussir-convert-to-std,canonicalize,convert-scf-to-cf,reussir-lowering-basic-ops,reussir-convert-to-llvm,reconcile-unrealized-casts,canonicalize)' -o %t.backward.mlir
++// RUN: %reussir-translate --reussir-to-llvmir %t.backward.mlir | %opt -S -O2 -o %t.backward.ll
++// RUN: %llc %t.backward.ll -relocation-model=pic -filetype=obj -o %t.backward.o
++// RUN: %cc %t.backward.o %S/worklist_pure_order.c -o %t.backward.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.backward.exe backward
++
++// A record of boxes decrements them all and continues in the last dead one:
++// the hooks behind them keep their order, and a long chain needs no stack.
++
++!handle = !reussir.rc<!reussir.ffi_object<"PureHandle", @pure_cleanup>>
++!owner = !reussir.record<compound "PureOwner" { !handle }>
++!node_ = !reussir.record<compound "PureOrder" incomplete>
++!link = !reussir.nullable<!reussir.rc<!node_ shared>>
++!node = !reussir.record<compound "PureOrder" { !owner, !link, !link }>
++!rc = !reussir.rc<!node shared>
++
++module {
++  func.func private @pure_cleanup(!handle)
++  func.func @pure_drop(%rc: !rc) {
++    %token = reussir.rc.dec(%rc : !rc) : !reussir.nullable<!reussir.token<align: 8, size: 32>>
++    reussir.token.free(%token : !reussir.nullable<!reussir.token<align: 8, size: 32>>)
++    return
++  }
++}
+-- 
+2.43.0
+

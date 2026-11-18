@@ -7,6 +7,9 @@
 20-e-hex-bigint-literals.patch
 21-a-value-record-member-retains.patch
 29-a-polyffi-store-once.patch
+31-a-leaf-foreign-release.patch
+32-a-integer-members-pure-release.patch
 26-a-trmc-observable-release.patch
 27-a-is-unique-tbi-immediate.patch
 28-a-sve-vector-storage-patterns.patch
+30-a-vector-to-llvm-patterns.patch

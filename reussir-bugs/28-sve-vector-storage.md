@@ -9,7 +9,7 @@ Patch 28-a applies the same patterns without the cleanup that fails.
 ## Summary
 
 **Kind:** bug. **Status:** patched (28-a), in the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-final`, commit `d62797ac`).
+`36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit `46c816b3`).
 lean2rr reaches the bug on the build machine (aarch64 with SVE): the
 largest function of the row oracle of `tests/runtime/rows-check.sh`
 does not compile without the patch. `scripts/l2r.py` requires the
@@ -112,7 +112,7 @@ agrees` (13 rows files, 5488 rows).
 
 [`patches/28-a-sve-vector-storage-patterns.patch`](patches/28-a-sve-vector-storage-patterns.patch),
 `[conversion] legalize the storage of scalable vectors with the patterns
-alone` (10 files, +155/-3; without `tests/`, 8 files, +102/-2).
+alone` (11 files, +156/-4).
 
 - A new pass, `reussir-legalize-vector-storage`
   (`lib/Conversion/LegalizeVectorStorage/`), applies MLIR's own patterns
@@ -126,6 +126,13 @@ alone` (10 files, +155/-3; without `tests/`, 8 files, +102/-2).
 - The C API's constructor that the pipeline calls
   (`reussirCreateArmSVELegalizeVectorStoragePass`) returns the new
   pass; `reussir-opt` registers it; the vector lowering test uses it.
+- Amended on 2026-11-18, one line: the JIT bridge
+  (`lib/Bridge/Bridge.cppm`) added MLIR's pass in its own lowering
+  pipeline too, and the first form of the patch had missed it (the
+  search did not include `.cppm` files). The bridge now adds the new
+  pass. That line is compiled and linked, not executed: nothing in the
+  tree calls the bridge, and rrc and rrepl use the Rust pipeline. So
+  lean2rr was not affected by the gap.
 
 Two smaller ways were looked at and do not work. A canonicalize before
 the pass has the same limit of 10 rounds (it only does not report it),

@@ -1,7 +1,7 @@
 From 3db9b8179bacd94ccf99d78ecaa3e3162f777582 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 07:38:16 -0400
-Subject: [PATCH 08/12] [rc] cancel rcgmp retains of by-value record members
+Subject: [PATCH 08/15] [rc] cancel rcgmp retains of by-value record members
  against the record's drop
 
 A by-value record (or tuple) taken apart retains each member it extracts

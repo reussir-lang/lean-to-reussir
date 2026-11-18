@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `36a55a0f` with the series
-(the Reussir branch `l2r-base13-final`, `d62797ac`); the workarounds
+(the Reussir branch `l2r-base13-r3-vec`, `2e0bb232`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)). The measurements in this file were
 made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
@@ -21,19 +21,42 @@ program than on the base before, also with a warm texture cache; the
 largest measured cause was rrc's texture store, which rrc opened once
 for each texture
 ([issue 29](../../../reussir-bugs/29-texture-store-open.md), patched in
-the series). Open build-time items on this base:
+the series). Build-time items on this base:
 
-- `RtOutlineStates` takes about 18 minutes in rrc and the link (1079 s
-  in the final gate, 984 s in the first one, with the same `.rr`; the
-  whole suite took 671 s on the base before). The cause is under
-  investigation.
-- On large programs rrc uses more time than on the base before (the
-  MLIR pipeline +18% for `RtTArrKinds` and +27% for lean-zip's
-  compress, one run each); the cause is not attributed.
-- The final gate's suite took 1582 s, about 690 s without
-  `RtOutlineStates`. That run had the patch, the texture store on a
-  memory file system and a quiet machine; their shares were not
-  separated.
+- Closed: `RtOutlineStates` took about 18 minutes in rrc and the link
+  (1079 s in the final gate on 12 patches, 984 s in the first one,
+  with the same `.rr`). The time was in MLIR's vector lowering pass,
+  which merged the blocks of a large function without vectors
+  ([issue 30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md)).
+  With patch 30-a it takes 10.7 s. The patch costs code size: the
+  executables are 2.0% larger (Cedar 9.3%).
+- The gate's runtime suite on the series of 15 patches took 652 s
+  (750 tests, 8 shards, a cold texture store on a memory file system,
+  a quiet machine); on the base before 671 s (747 tests, a warm store
+  on disk). One run each, not a benchmark.
+- Per test, the first 20 tests of one shard, rrc and the link: 16.7 s
+  in the first gate (cold store on disk, a loaded machine), 3.2 s in
+  the final gate on 12 patches, 4.2 s in the gate on 15 patches (both
+  with a cold store on a memory file system). The 4.2 s against 3.2 s
+  was mostly noise of the cold start with 8 shards: the sum over the
+  whole suite is 5% lower than the final gate's without
+  `RtOutlineStates` (3085 s against 3244 s).
+- Open: a warm repeat of those 20 tests (the same driver and
+  translator, two passes for each compiler in turn, alone on the
+  machine, every texture a cache hit) shows a small real cost of the
+  series of 15 patches against the series of 12: 1.84 s against 1.69 s
+  of rrc and the link for each test, about 0.15 s or 9% (between 5%
+  and 12% by the spread of the passes; slower in 17 of 20 tests in
+  both passes). Which of the three new patches (31-a, 32-a, 30-a)
+  costs it is not measured.
+- Open: `RtDepPolyRec` (a 6 MB `.rr`) takes 136 s in rrc and the link
+  (146 s in the final gate). It is the one large single-program time
+  now. Its time is in the drop expansion and other passes, not in the
+  vector pass; not investigated.
+- Open: on large programs rrc uses more time than on the base before
+  (the MLIR pipeline +18% for `RtTArrKinds` and +27% for lean-zip's
+  compress, one run each, measured before patches 29-a to 32-a); the
+  cause is not attributed.
 
 One cost here is current, with no entry in `reussir-bugs/`:
 [the inliner's copies of a callee into one function](#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function).

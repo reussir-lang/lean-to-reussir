@@ -3392,10 +3392,13 @@ Each item says what differs and when.
   a patch of the series opens it once for a module. In the port's final
   gate the same 20 tests took 4.8 s each, with that patch, the store on
   a memory file system and a quiet machine; their shares were not
-  separated. Two things are open: one runtime test, `RtOutlineStates`,
-  takes about 18 minutes in rrc and the link on this base (cause under
-  investigation), and on large programs rrc uses more time than on the
-  base before (cause not attributed).)
+  separated. One runtime test, `RtOutlineStates`, took about 18
+  minutes in rrc and the link on this base: an MLIR pass for vectors
+  merged the blocks of its largest function. A later patch of the
+  series lowers vectors without that merging; the test then takes 11 s
+  and the suite 652 s (671 s on the base before), and the code of the
+  programs is 2.0% larger. Open: on large programs rrc uses more time
+  than on the base before (cause not attributed).)
   Polymorphic recursion through type functions (monad transformer towers)
   makes hundreds of representations of a few function types, with
   conversions between them, and several rrc costs grow superlinearly on

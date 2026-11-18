@@ -97,6 +97,13 @@ bounds):
   +14 MB of peak came with the base and not with lean2rr's changes.
   The repro is FIXED there too (172 to 192 KiB of growth on the
   series' build, 0 on pristine; the limit is 16 MiB).
+- The gate on the series of 15 patches (with 31-a and 32-a, which
+  change the drop glue): all 81 `alloc-check` tests pass and no row is
+  worse. One row is better: `RtClosureChainFree`'s chain of
+  compositions peaks at 45.7 MB, 66.1 MB before (which of the two
+  patches does it is not separated). `RtListDropWhole`'s `arr` row did
+  not move; the report observes that the test's `ref` row had exactly
+  these values (+48.58 MB, 68.0 MB) on `l2r-base12` already.
 
 Still hypotheses, not measured:
 
@@ -106,16 +113,24 @@ Still hypotheses, not measured:
   member. So for a record with a `Nat` or `Int` member, the tail call on
   the last child and the finish in line are off: each dead child is a
   deferral and a pop. 23-i and 23-j gave up the tail call only when a
-  member after the children could push. The cost per freed cell was
-  not measured alone. What timing run 20 shows (2026-11-18, the port
-  against dev on `l2r-base12`, direct pairs): twelve of 53 cases are
-  slower, and they are concentrated on programs that free large
-  structures (L02 rbtree-ck 1.138, X06 rbtree_ck 1.151, X02 deriv
-  1.164, L03 deriv 1.047, cfold, expr_eval); two cases that allocate
-  and free are faster (L06 binarytrees 0.886, X01 0.938). Neither is
-  attributed to a cause. That upstream's worklist drops cost more than
-  these patches did on such programs is a hypothesis only: no build
-  with one and without the other was timed.
+  member after the children could push. **This was measured, and it
+  is patched** ([entry 32](32-integer-members-drop-path.md)). Timing
+  run 20 (the port against dev on `l2r-base12`) showed twelve of 53
+  cases slower, most of them programs that free large structures. The
+  cause of seven of them is this rule: deriv entered 565,495 scopes
+  where `l2r-base12` entered 2, and rbtree-ck deferred every freed
+  node where `l2r-base12` deferred 19% of them. With 32-a (timing run
+  21, direct pairs against the series before): X02 deriv 0.829, L03
+  deriv 0.841, L02 rbtree-ck 0.849, X06 rbtree_ck 0.855, E06 expr_eval
+  0.875, X03 cfold 0.946, L05 cfold 0.961. One more of the twelve, X10
+  n_body, had another cause in upstream's drop code and is patched too
+  ([entry 31](31-leaf-foreign-release.md)).
+  What remains: four cases are still above 1.03 of `l2r-base12`
+  (derived from two sessions): L18 hashmap 1.077, X07 qsort 1.075, L08
+  unionfind 1.062, L15 monadic-interp 1.054. They did not move with
+  31-a and 32-a. Their cause is unknown. The two allocate-and-free
+  cases that are faster than on `l2r-base12` (L06 binarytrees, X01)
+  are not attributed either.
 - **The order of releases** is upstream's `backward` policy. Two of its
   rules differ from these patches'; lean2rr's emitter answers both
   ([entry 2](02-native-drop-order.md#on-upstream-36a55a0f)).

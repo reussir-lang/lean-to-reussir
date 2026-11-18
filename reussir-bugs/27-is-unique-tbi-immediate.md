@@ -10,8 +10,8 @@ no box at all. Patch 27-a makes the test answer false for an immediate.
 ## Summary
 
 **Kind:** bug, low severity. **Status:** patched (27-a), in the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-final`, commit
-`6e072b9b`). It does not affect lean2rr: lean2rr's prelude and generated
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
+`ef7e1e64`). It does not affect lean2rr: lean2rr's prelude and generated
 code do not call `core::object::is_unique`. `scripts/l2r.py` does not
 check for the patch.
 

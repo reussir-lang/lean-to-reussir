@@ -20,6 +20,10 @@ the repro (`repros/bug19-retcon-direct-arms.py`) prints FIXED on
 pristine `36a55a0f` and on the patched base (the code grows 1.28 times
 from N = 3 to N = 4), and lean2rr's `RtSyncSelect` and `RtDepPolyRec`,
 the programs that showed the bug, build and are identical to native.
+On the series of 15 patches the repro's module at `-O none` is about
+23% larger than on pristine upstream (37 and 48 KB against 30 and
+39 KB), with the same growth rate (1.29); still FIXED, far from the
+repro's limit.
 
 By the README's policy, an entry that upstream fixed in full is deleted
 and its number retired. Not deleted yet (the coordinator decides). The
