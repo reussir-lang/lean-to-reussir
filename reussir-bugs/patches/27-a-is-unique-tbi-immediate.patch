@@ -1,0 +1,114 @@
+From 6e072b9bc5d73ed963c2703fb4de0a297e026009 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 17 Nov 2026 23:31:18 -0500
+Subject: [PATCH 11/12] [codegen] answer false to a uniqueness test of an
+ immediate under TBI
+
+Under TBI the retains of a nullary immediate count on its dummy box, and
+after 2^32 - 1 of them the 32-bit count reads one. `rc.is_unique` then
+answered true for a value that is no box at all; since #983 a program
+reaches it through `core::object::is_unique`.
+
+The special-pointer-tag pass now joins `rc.is_immediate` to the
+uniqueness tests of the program. The tests that later passes add are
+left alone: a borrow entry only picks between two sound callees.
+---
+ .../BasicOpsLowering/BasicOpsLowering.cpp     |  5 ++--
+ .../SpecialPointerTag/SpecialPointerTag.cpp   | 26 +++++++++++++++++++
+ .../conversion/special_pointer_tag.mlir       | 15 +++++++++++
+ 3 files changed, 44 insertions(+), 2 deletions(-)
+
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index e757203e..93a6aab6 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -125,8 +125,9 @@ namespace {
+ //     expansion therefore takes its unique branch only for a value that is
+ //     not one of the type's immediates (RcDecrementExpansion), and rc.inc
+ //     only assumes `old >= 1` for real boxes. Under TBI `rc.is_unique` can
+-//     then answer true for a wrapped dummy; no pass emits it for a type with
+-//     immediates.
++//     then answer true for a wrapped dummy, so the special-pointer-tag pass
++//     joins `rc.is_immediate` to the tests of a program; a borrow entry's
++//     test only picks between two sound callees.
+ //   * `rc.set` — the one decrementing store — skips the store for a
+ //     recognized immediate (behind an unlikely branch), so a decrement never
+ //     writes the dummy count.
+diff --git a/lib/Transformation/SpecialPointerTag/SpecialPointerTag.cpp b/lib/Transformation/SpecialPointerTag/SpecialPointerTag.cpp
+index 46d54a58..57612fdf 100644
+--- a/lib/Transformation/SpecialPointerTag/SpecialPointerTag.cpp
++++ b/lib/Transformation/SpecialPointerTag/SpecialPointerTag.cpp
+@@ -19,6 +19,7 @@
+ #include "Reussir/IR/ReussirTypes.h"
+ #include "Reussir/Transformation/Passes.h"
+ 
++#include <mlir/Dialect/Arith/IR/Arith.h>
+ #include <mlir/IR/Builders.h>
+ #include <mlir/IR/PatternMatch.h>
+ #include <mlir/Pass/Pass.h>
+@@ -86,6 +87,29 @@ struct NullaryVariantPattern
+   }
+ };
+ 
++// Under TBI the retains of an immediate count on its dummy box, whose count
++// can wrap to one, and an immediate is never unique. Only the tests present
++// now need the answer: those a later pass adds pick between sound paths.
++void guardUniquenessTests(mlir::ModuleOp module) {
++  llvm::SmallVector<ReussirRcIsUniqueOp> tests;
++  module.walk([&](ReussirRcIsUniqueOp op) {
++    if (op.getRcPtr().getType().mayCarrySpecialPointerTag())
++      tests.push_back(op);
++  });
++  for (ReussirRcIsUniqueOp op : tests) {
++    mlir::OpBuilder builder(op.getContext());
++    builder.setInsertionPointAfter(op);
++    mlir::Value isImmediate = ReussirRcIsImmediateOp::create(
++        builder, op.getLoc(), builder.getI1Type(), op.getRcPtr());
++    mlir::Value notImmediate = mlir::arith::XOrIOp::create(
++        builder, op.getLoc(), isImmediate,
++        mlir::arith::ConstantIntOp::create(builder, op.getLoc(), 1, 1));
++    auto unique = mlir::arith::AndIOp::create(builder, op.getLoc(),
++                                              op.getResult(), notImmediate);
++    op.getResult().replaceAllUsesExcept(unique, unique);
++  }
++}
++
+ struct SpecialPointerTagPass
+     : public impl::ReussirSpecialPointerTagPassBase<SpecialPointerTagPass> {
+   using Base::Base;
+@@ -101,6 +125,8 @@ struct SpecialPointerTagPass
+     patterns.add<NullaryVariantPattern>(&getContext());
+     if (mlir::failed(mlir::applyPatternsGreedily(module, std::move(patterns))))
+       signalPassFailure();
++    if (encoding == kSpecialPtrTagTBI)
++      guardUniquenessTests(module);
+   }
+ };
+ } // namespace
+diff --git a/tests/integration/conversion/special_pointer_tag.mlir b/tests/integration/conversion/special_pointer_tag.mlir
+index 9f7458af..8b177b6c 100644
+--- a/tests/integration/conversion/special_pointer_tag.mlir
++++ b/tests/integration/conversion/special_pointer_tag.mlir
+@@ -43,4 +43,19 @@ module @test {
+     %2 = reussir.rc.create value(%1 : !list) : !rclist
+     return %2 : !rclist
+   }
++
++  // Under TBI the count of an immediate's dummy box can wrap to one, so a
++  // uniqueness test also asks that the value is a real box.
++  // CHECK-LABEL: func.func @is_unique
++  // CHECK: %[[ONE:.+]] = reussir.rc.is_unique
++  // TBI: %[[IMM:.+]] = reussir.rc.is_immediate(%{{.+}} :
++  // TBI: %[[BOX:.+]] = arith.xori %[[IMM]], %{{.+}} : i1
++  // TBI: %[[UNIQUE:.+]] = arith.andi %[[ONE]], %[[BOX]] : i1
++  // TBI: return %[[UNIQUE]]
++  // IMMORTAL-NOT: reussir.rc.is_immediate
++  // IMMORTAL: return %[[ONE]]
++  func.func @is_unique(%list: !rclist) -> i1 {
++    %unique = reussir.rc.is_unique (%list : !rclist) : i1
++    return %unique : i1
++  }
+ }
+-- 
+2.43.0
+

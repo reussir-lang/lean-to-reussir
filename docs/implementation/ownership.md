@@ -15,7 +15,9 @@ runtime.
   resource, passed to a borrowed parameter, alive until the call returns
   (`l2r_release_after`); arguments the caller only borrows itself are left
   alone, so loops keep their tail calls, and function values go through
-  `<fn>_boxed` variants. Whether an argument may hold a resource is decided
+  `<fn>_boxed` variants. Where native Lean knows the constructor of the
+  kept value at that release, the release is field by field (the next
+  entry). Whether an argument may hold a resource is decided
   for the borrowed parameter it is passed to (`keepsAt`): in a program
   that does not cast, by the whole-program flow analysis that guards
   `flatten-structs` (`Opt/ResourceFlow.lean`), run again on the declarations
@@ -184,9 +186,75 @@ runtime.
   ("Borrowing").
 - **Remove only if:** the borrow emulation goes (see above).
 
+### A value whose constructor Lean knows is released field by field
+
+- **What:** Where lean2rr releases a value itself (after a call that
+  borrows it natively, `releaseAfter`; at the start of a branch,
+  Emit/ArmRelease, one value alone too) and native Lean knows the value's
+  constructor there,
+  the release is a call of `l2r_release_known_<type>`, a generated
+  function with one arm per constructor of the type that releases the
+  constructor's fields one after the other, in Lean's field order, each
+  with `l2r_release_after`. Elsewhere the release is `l2r_release_after`
+  of the whole value. Lean knows the constructor of (1) a variable bound
+  by a constructor application that is still one in Lean's impure code
+  (`KnownCtors`, read from the copies of the declarations that go through
+  Lean's passes for the borrow inference, after `inferBorrow`: a
+  constructor that `insertResetReuse` made a `reuse`, a trivial
+  structure's and a scalar constructor are not there), and (2) the
+  scrutinee inside a constructor's alternative of a `cases` that is one
+  natively (two or more alternatives that can run): for a kept argument
+  by the enclosing alternatives (`knownAt`: `CodeCtx.altParams` and
+  `armAlts`), at a branch's start by the scrutinee's renumbering there
+  (`Info.knownAt`: `Pos.moved`). Rule (2) follows the place where
+  lean2rr lowers the code, so it says "known" in two places where native
+  does not: a join point's body placed under another `match` than
+  natively, and alternatives that `simpCase` folds into a default
+  alternative only after `toImpure` (plan §10). A value that a `reset` of Lean's
+  releases (`Arm.lasts`, `iteLasts`) keeps the plain release. The
+  function exists for a shared record with a constructor of two or more
+  fields that can hold something to release, all of them types that can
+  be an argument of an FFI function (`knownReleaseFn?`); the fields that
+  hold nothing (scalars, `Nat`, `Int`, strings) are left to Reussir's
+  drop of the cell.
+- **Why:** Native Lean releases such a value with
+  `lean_dec_ref_known(x, n)` (`ExplicitRC.addDec`, `EmitC`): a cell that
+  is not shared releases its `n` fields in field order, each a `lean_dec`
+  that is complete before the next; a shared cell is decremented.
+  `l2r_release_after` is a Rust `drop` of the handle, the record's FFI
+  release: on upstream Reussir (`36a55a0f`) one free from the root, last
+  pushed first, which is `lean_dec`. So a tree
+  `node (node leaf A leaf) R (node leaf B leaf)` built in `main` and
+  released after a borrowing call closed `B R A` for native `A R B`, a
+  list `[1, …, 8]` `87654321` for `18765432`, and two promises in such a
+  tree ran their dependents in the other order (the port's gate 53:
+  `RtDropOrderMix`, `RtDepDropOrderBoxed`, `RtPromiseDepDrainShapes`). On
+  `l2r-base12` the FFI release went through the root's fields in field
+  order, so these cases were native's by the base's design, and the
+  `lean_dec` cases were the documented difference. A shared value:
+  Reussir's `match` on a shared cell retains the bound fields and
+  decrements the cell, and each field's release takes its retain back,
+  so the net effect is the cell's decrement (test `RtDropKnownCtorOrder`,
+  `shared`). Static cost: one more function per such type (a `match`, one
+  FFI release per field); only in programs that make resources, at
+  releases that lean2rr already made itself.
+- **Where:** `Lower/Borrow.lean`: `KnownCtors`, `impureCtorLets`,
+  `inferBorrowedParamsK`, `knownReleaseFn?`, `knownRelease`, `knownAt`,
+  `armKnownFns`, `borrowKeeps` (a flag per kept argument) and
+  `releaseAfter`; `LowerBase.lean`: `knownCtors`, `armKnown`,
+  `noteVarUse`; `Emit/ArmRelease.lean`: `Info.knownAt`, `releaseAt`;
+  `Emit/Program.lean`: `LoweredProgram.armKnown`, `armKnownFns`. Tests:
+  `RtDropKnownCtorOrder`, `RtDepDropOrderBoxed`, `RtDropOrderMix`
+  (`shared`), `RtPromiseDepDrainShapes` (`s4`); plan
+  [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
+  "Order of releases in one free".
+- **Remove only if:** Reussir's FFI release of a record goes through the
+  root's fields in field order again (then the `lean_dec` cases need the
+  opposite rule), or lean2rr stops releasing values itself.
+
 ### Values that die at the start of an arm are released newest first
 
-- **What:** In a program that makes resources, when two or more values
+- **What:** In a program that makes resources, when values
   that may hold a resource (by the rule of the borrow emulation,
   `mayHoldAt`: in a program that does not cast, the flow analysis, which
   follows closures, thunks and tasks, so one of them counts only when it
@@ -195,7 +263,13 @@ runtime.
   (the arm of a `match`, a branch of an `if`: values another branch uses
   and this one does not, which the code after it does not use), lean2rr
   releases them there itself with `l2r_release_after`, newest binding
-  first. The scrutinee `s` of a `match`, when it may hold a resource and
+  first. One value alone is released this way too (since the port to
+  Reussir `36a55a0f`; not a value that a `reset` of Lean's releases):
+  Reussir's own drop of it is in place for a record without a cycle and
+  a loop for a list, where native's `dec` is one free, last pushed first
+  (`{i := {x, y}, h}` from another function, dying alone in a branch:
+  `xyh` in place, natively and now `hyx`), or field by field where Lean
+  knows the constructor (the entry above). The scrutinee `s` of a `match`, when it may hold a resource and
   dies in the match: in an arm that reads none of its fields it goes with
   the others, first in a constructor's arm and by its own binding in the
   default arm (`_`); in an arm that reads a field (a scalar field too) it
@@ -489,11 +563,16 @@ runtime.
 ### Runtime objects free through leanrt's pending stack, in Lean's order
 
 - **What:** one stack of pending releases per thread, which Reussir's
-  drop glue and leanrt share: Reussir's drop stack (reussir-rt's
-  `drop_stack`, with local patches 23-k to 23-m: runs of cells with one
-  release function, steps, depth, the end work), which leanrt uses
-  through `pending`; and one flag that tells whether a drain runs
-  (`pending::releasing`, which `drop::active` wraps). leanrt's releases
+  drop glue and leanrt share: Reussir's drop worklist (reussir-rt's
+  `drop_stack`: upstream's scoped worklists since Reussir `36a55a0f`,
+  with runs of cells with one release function, steps, depth and
+  scope-exit callbacks; on the base before, local patches 23-k to 23-m
+  on entry 23's stack), which leanrt uses
+  through `pending`; and one flag that tells whether a free runs
+  (`pending::releasing`, which `drop::active` wraps). The text below
+  says "drain" for the work of the outermost free's scope: the outermost
+  free opens a scope, and the scope is over when its work and everything
+  that the work pushed is done. There is no `drain` function to call. leanrt's releases
   that go through it: the last reference of a
   container (`RVec`, `LRef`: `leanrt::drop::Vec`, the runtime's one-block
   array; `LCell`: `leanrt::drop::Cell`, a transparent wrapper of
@@ -502,13 +581,16 @@ runtime.
   Reussir's glue defers there the dead children of the records it frees
   as a worklist (below).
   - The first such release on a thread that finds the flag clear is the
-    outermost free. It sets the flag, runs the release, pops the stack
-    last pushed first until it is empty, and clears the flag
-    (`pending::drain`; a drain of Reussir's glue the same way). Then it
-    runs the end work, if a release asked for it
+    outermost free. It opens a scope: the flag is set, the release
+    runs, the stack is popped last pushed first until it is empty, and
+    the flag is cleared (`pending::defer_cell`, `defer_step`, `run_step`
+    outside a scope; a free of Reussir's glue the same way). Then the
+    end work runs, if a release asked for it
     (`pending::want_end_work`): the promise resolutions put off, then
-    lean-runtime's `after_drain` (`task::drained`, registered as the
-    stack's end function).
+    lean-runtime's `after_drain` (`task::drained`). The end work is a
+    scope-exit callback of the worklist
+    (`drop_stack::defer_until_scope_exit`); a thread-local flag makes
+    one request for each outermost scope.
   - A release that leanrt reaches while the flag is set is pushed
     (`drop::defer`, `drop::run`, `pending::defer_cell`). That includes
     every runtime object that Reussir's drop glue reaches (the opaque
@@ -519,20 +601,25 @@ runtime.
     the promise's resolution with `none`
     ([tasks/dependents.md](tasks/dependents.md#no-context-is-ever-suspended-inside-a-free)).
   - Reussir frees records itself, at a bounded stack depth, through that
-    stack (Reussir base l2r-base12 and local patches 23-a to 23-p,
+    stack (upstream's worklist drops at Reussir `36a55a0f`; on
+    l2r-base12, local patches 23-a to 23-p,
     [Reussir issue 23](../../reussir-bugs/23-worklist-drops.md)). A record
     whose last managed member is its one recursive member (a list) is
-    freed in a loop. A record type whose drop could recurse otherwise
-    (two recursive members, or a managed member after the recursive one:
-    the Worklist kind) is freed by a walk under the stack's drain: the
-    members in field order, at once, except a member box of a Worklist
-    record whose count reaches zero, which is pushed and popped later,
-    last pushed first; the last dead child of a cell goes on at once, as
-    the drain would pop it next (order (a), the owner's choice). A drop
-    that starts while the thread drains only pushes, and the running
-    drain frees it. When user code drops a Worklist record, the record's
-    own members go in field order, and each dead Worklist child is a drain
-    of its own that ends before the next member.
+    freed in a loop from its head. A record without a cycle is taken
+    apart in place, in the order of the record's fields. A record type
+    whose drop could recurse otherwise (the Worklist kind) is freed by
+    worklist glue in one scope: every dead member is deferred (a record
+    box linked through its header, an untagged runtime object as a
+    cell; the hook of the tagged box `LAny` runs in line and pushes in
+    leanrt at the same place), and the pops are last pushed first. So a
+    whole recursive value is one free, last field first, as native
+    `lean_dec`. A value released through its record's FFI release
+    (`l2r_release_after`) goes the same way: the release's bridge joins
+    the running scope, or opens one. A drop run that starts inside a
+    running scope is a scope of its own: it finishes before it returns
+    (upstream's rule, tested upstream; on l2r-base12 such a run joined
+    the drain). On l2r-base12 the glue released a record's own members
+    in field order at once and pushed only the dead Worklist children.
   - So one drain pops the glue's records and leanrt's cells and steps in
     one order, last pushed first, and no Lean code runs inside any drain
     (the end work comes after the outermost one). On l2r-base9 without
@@ -571,21 +658,33 @@ runtime.
   Until the port to upstream Reussir's drop design, Reussir's glue pushed
   record members on one stack shared with leanrt (the old local patches
   02-a to 02-e, [Reussir issue 2](../../reussir-bugs/02-native-drop-order.md));
-  since entry 23 the stack is Reussir's own, and leanrt shares it. Two
-  differences from native remain (plan
+  since entry 23 the stack is Reussir's own, and leanrt shares it; since
+  Reussir `36a55a0f` it is upstream's code. On `36a55a0f` a drop run
+  that starts inside a running free is a scope of its own, complete
+  before it returns (on l2r-base12 it joined the free). So the release
+  of a box's payload, which leanrt calls inside its free, goes through
+  the record's FFI release where a drop of the record in place could
+  start such a run
+  ([box-and-uniform.md](representations/box-and-uniform.md#the-program-releases-its-own-payloads-one-function-per-type)).
+  Two differences from native are left (plan
   [§10](../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Order of releases in one free" and "A value shared by two fields of
   one freed cell"):
-  - When user code drops a record by itself, no drain runs (a list, a
-    structure; a record that Reussir frees as a worklist starts a drain
-    only for each of its dead children). Each runtime object that
+  - When Reussir's own code drops a record without a cycle (a matched
+    value that dies in its `match` with nothing released before it, a
+    value that Lean's reset/reuse resets), no drain runs. Each runtime object that
     Reussir's glue reaches there finds the flag clear, so it is an
     outermost free of its own, which ends before the glue goes on to the
-    next member. So the order is field order at every record level from
-    the root: a list of handles dropped by itself closes `h1 … hn`
-    (natively `hn … h1`, or `h1 hn … h2` where Lean knows the
-    constructor). Below the first runtime object or drain, the order is
-    native again.
+    next member. So the order is the record's field order at every
+    record level from the root (a matched `mk {x, y} h` whose arms read
+    no field closes `x y h`, natively `h y x`). Below the first runtime
+    object or drain, the order is native again. Where lean2rr releases
+    the value itself (after a call that borrows it, or at a branch's
+    start), the order is native's: one free from the root
+    (`l2r_release_after`), or field by field where Lean knows the
+    constructor (the entry "A value whose constructor Lean knows is
+    released field by field"; on l2r-base12 the first was field order
+    too, with expectation files).
   - Inside a drain, a value that two fields of one cell hold can
     come out at another place: Reussir decrements while it descends,
     while native decrements all fields of a cell first. In
@@ -593,26 +692,30 @@ runtime.
     closes `Y.h` before `W.h`; leanrt closes `W.h` first, because `W`
     dies at `b` and is pushed last.
 - **Where:** `runtime/leanrt/src/pending.rs`: `releasing`, `depth`,
-  `defer_step`, `run_step`, `defer_cell`, `drain`, `want_end_work`, over
-  reussir-rt's `drop_stack`;
+  `defer_step`, `run_step`, `defer_cell`, `want_end_work`, over
+  reussir-rt's `drop_stack` (`defer_step`, `join_or_run_step`, `defer`,
+  `defer_until_scope_exit`; a step answers `StepStatus`, and the
+  argument of a step or a cell is never null);
   `runtime/leanrt/src/drop.rs`: `Vec`, `Cell`, `free_vec`, `step_vec`,
   `free_cell`, and the wrappers `active`, `defer`, `run`, `release`;
   `runtime/leanrt/src/task.rs`: `drained`; `scripts/l2r.py`:
-  `check_reussir_patches` requires the local patches of the current base
-  (`REQUIRED_REUSSIR_PATCHES`: 23-f, 23-k, 23-m, 23-n, 23-o and 07-a), so it refuses the
-  checkout of an older base (l2r-base8 and the bases before it push
-  onto the old shared stack; l2r-base7, a trial base of the port, freed
-  with upstream's destructor executor). Reussir: `lib/IR/RecordDrop.cpp` (`classifyRecordDrop`),
+  `check_reussir_patches` requires upstream's scoped worklists
+  (`join_or_run_step`, `defer_until_scope_exit`) and the local patches
+  of the current base (`REQUIRED_REUSSIR_PATCHES`: 10-a, 07-a, 20-c,
+  20-d, 26-a, 28-a), so it refuses the checkout of an older base (l2r-base12 and the
+  bases before it have another drop stack); `rrc_command` passes
+  `--drop-order backward`. Reussir: `lib/IR/RecordDrop.cpp` (`classifyRecordDrop`),
   `lib/Conversion/AcquireDropExpansion/TailDrop.cpp`,
   `lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`,
   `crates/reussir-rt/src/drop_stack.rs`.
   Tests: `RtDropOrder`, `RtDropOrderRec`, `RtArrayRecordFreeOrder`,
   `RtNestedArrayFreeOrder`, `RtDropDepth3Order`, `RtDepDropOrderBoxed`
-  (expectation files: the field order of a free that user code starts),
+  (a free that user code starts: identical to native), `RtDropNestedRunOrder`,
   `RtArrayDeepSharedFree`, `RtBoxDeepChain`, `RtDropGlue`; leanrt's
   `pending` unit tests; `RtDropSharedSubtree` (expectation files: the
-  shared value), `RtDropUserListHandles` (expectation files: a list of
-  handles that user code drops closes them first to last),
+  shared value), `RtDropUserListHandles` (a list of
+  handles that user code drops closes them last to first, as natively;
+  first to last on l2r-base12),
   `RtDropRefListHandles` (one that `r.set []` frees: native's order),
   `RtPromiseDepFreeInDrain` and `RtPromiseDepWaitInDrain` (no Lean code
   inside a drain), `RtDeepTreeFree` and `RtClosureChainFree` (deep
@@ -966,9 +1069,11 @@ runtime.
   `__reussir_drop_drain` 18, `__reussir_drop_defer` 17, `release_last` 7,
   `release_record` 6 with the record's own free). These numbers were
   measured on the old local Reussir stack (the same code, later leanrt's
-  own `pending`, now Reussir's drop stack again, called from Rust
+  own `pending`, then Reussir's drop stack again, called from Rust
   instead of through C symbols; outside a drain one cell is now released
-  without being pushed); they were not measured again. The order is the same:
+  without being pushed); they were not measured again, also not on
+  upstream's worklist at Reussir `36a55a0f`, which has no
+  `__reussir_drop_drain`. The order is the same:
   in both forms the record's release runs inside the drain on top of the
   stack as it was, and the stack is popped last pushed first. Totals
   (step 10 in brackets): unionfind +0.8% against dev d39294a (+5.0%);

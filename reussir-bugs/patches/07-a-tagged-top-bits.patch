@@ -1,46 +1,40 @@
-From 3dea33bab72e850ae3697f8f35d280538415b633 Mon Sep 17 00:00:00 2001
+From 854f2b276ad4e8fe628bc24aab90560c7c973654 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
-Subject: [PATCH 02/24] l2r-local: issue 38: tagged FFI objects: clear the top
- 16 bits before the inline count access
+Subject: [PATCH 02/12] [ffi] mask tag bits before accessing foreign reference
+ counts
 
-A `tagged` opaque handle (`#[ffi(rust = "path", tagged)]`, patch 0050) is
-either an odd immediate or a pointer to a box whose `u32` count is at
-offset 0. On 64-bit targets the foreign side may now also keep data in the
-top 16 bits of a pointer handle: `rc.inc` clears them (`llvm.ptrmask` with
-2^48 - 1, provenance kept) before it loads and stores the count, on every
-path (plain, with a delta, atomic). The cleanup hook still gets the handle
-unchanged, so the foreign side sees its own encoding. lean2rr's one-word
-`Box` (`leanrt::any::LAny`) keeps the number of its payload's type there,
-as `lean_object*`-style runtimes keep tags; without the mask the increment
-reads and writes an address with those bits set (a SIGSEGV on aarch64,
-which ignores only the top 8 bits, and on x86-64).
+A `tagged` foreign handle that is not an immediate points to a box whose
+`u32` count is at offset 0. On 64-bit targets the foreign side may also
+keep data in the top 16 bits of such a handle, as runtimes with tagged
+pointers do. `rc.inc` now clears them (`llvm.ptrmask`, which keeps the
+provenance) before it loads and stores the count, on every path: plain,
+with a delta, and atomic. `FFIObjectType::TAGGED_ADDRESS_BITS` (48) names
+the width of the address. The cleanup hook still gets the handle
+unchanged, so the foreign side sees its own encoding.
 
-Nothing changes for the existing tagged types (lean2rr's `Nat` and `Int`):
-their pointers come from mimalloc and have the top 16 bits clear (user
-addresses are below 2^48 on aarch64 and x86-64), so the mask is a no-op on
-them. It costs one AND on the increment of a big number (the even-word
-path only; small values never reach it). Untagged objects and targets
-narrower than 64 bits lower as before. No other code reads through a
-tagged handle: `rc.dec` calls the hook, the nonlinear-FFI instrumentation
-and the unique-carrying analysis skip tagged objects, and an ffi_object
-gets no reuse token and no deferred release (patch 0050's notes).
+Without the mask the increment reads and writes an address with those
+bits set, which faults on x86-64 and on aarch64 (only the top byte is
+ignored there). A handle with clear top bits is unchanged, at the cost of
+one AND on the increment of a box; immediates never reach it. Untagged
+objects and targets narrower than 64 bits lower as before. No other code
+reads through a tagged handle.
 
 Tests: conversion/tagged_ffi_object.mlir (the mask before the load and the
 store, also with a delta and before the atomicrmw of an atomic count; none
 for an untagged object; the hook gets the unmasked handle).
 ---
  include/Reussir-c/Types.h                     |  3 +-
- include/Reussir/IR/ReussirTypes.td            |  5 ++-
- .../BasicOpsLowering/BasicOpsLowering.cpp     | 26 +++++++++++
+ include/Reussir/IR/ReussirTypes.td            | 11 ++++-
+ .../BasicOpsLowering/BasicOpsLowering.cpp     | 22 ++++++++++
  .../conversion/tagged_ffi_object.mlir         | 44 +++++++++++++++++--
- 4 files changed, 72 insertions(+), 6 deletions(-)
+ 4 files changed, 74 insertions(+), 6 deletions(-)
 
 diff --git a/include/Reussir-c/Types.h b/include/Reussir-c/Types.h
-index d8bce1ad..3af23483 100644
+index 2d674713..a8cb4b17 100644
 --- a/include/Reussir-c/Types.h
 +++ b/include/Reussir-c/Types.h
-@@ -148,7 +148,8 @@ MlirType reussirArrayTypeGet(intptr_t nDims, int64_t const *shape,
+@@ -165,7 +165,8 @@ MlirType reussirArrayTypeGet(intptr_t nDims, int64_t const *shape,
  
  // `!reussir.ffi_object<ffiName, cleanupHook[, tagged = true]>`. `ffiName` must
  // be a `StringAttr` and `cleanupHook` a `FlatSymbolRefAttr`. A `tagged` object
@@ -51,36 +45,45 @@ index d8bce1ad..3af23483 100644
                                   MlirAttribute cleanupHook, bool tagged);
  
 diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
-index 33fe7f6c..06437d8f 100644
+index 2df14e7b..9ef08894 100644
 --- a/include/Reussir/IR/ReussirTypes.td
 +++ b/include/Reussir/IR/ReussirTypes.td
-@@ -735,7 +735,10 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
-     Lean's runtime boxes scalars). Its `rc.inc` touches the refcount only
-     when the low bit is clear, and its `rc.dec` calls the cleanup hook only
-     then; an immediate is never dereferenced. Real boxes are at least
--    4-aligned (the `u32` refcount), so the low bit is free.
-+    4-aligned (the `u32` refcount), so the low bit is free. On 64-bit
-+    targets the top 16 bits of a real box's handle may carry foreign data
-+    too (e.g. the type of the payload): `rc.inc` clears them before it
-+    touches the refcount, and the cleanup hook gets the handle unchanged.
+@@ -741,7 +741,10 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+     operation may access the refcount. The foreign type must be a
+     pointer-sized scalar that promises neither alignment nor
+     dereferenceability: an integer or a raw pointer, not a reference, a
+-    `Box`, or an `Option` of one.
++    `Box`, or an `Option` of one. On 64-bit targets the foreign side may keep
++    data in the top 16 bits of a handle that is not an immediate: `rc.inc`
++    clears them before it accesses the refcount, and the cleanup hook gets
++    the handle unchanged.
    }];
    let parameters = (ins "::mlir::StringAttr":$ffiName,
        "::mlir::FlatSymbolRefAttr":$cleanupHook,
-diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 48fe2248..4153705b 100644
---- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-+++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -306,6 +306,26 @@ bool isTaggedFFIObject(RcType rcType) {
-   return ffiTy && ffiTy.getTagged();
+@@ -754,6 +757,12 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+   ];
+   let assemblyFormat =
+       "`<` $ffiName `,` $cleanupHook (`,` `tagged` `=` $tagged^)? `>`";
++  let extraClassDeclaration = [{
++    /// The address width of a tagged handle on 64-bit targets; the bits
++    /// above it belong to the foreign side. Assumes that every box lies
++    /// below 2^48 and carries no address tag of its own (TBI, MTE).
++    static constexpr unsigned TAGGED_ADDRESS_BITS = 48;
++  }];
  }
  
-+// The box address of a `tagged` ffi_object handle that is not an immediate:
-+// the handle with its top 16 bits cleared. The foreign side may keep data
-+// there (lean2rr's one-word `Box` keeps the number of the payload's type);
-+// user-space addresses fit in the low 48 bits on the 64-bit targets. A
-+// pointer mask (provenance kept), applied only where the count is accessed:
-+// the handle itself, with its top bits, still goes to the cleanup hook. On
-+// targets narrower than 64 bits the handle is the address.
+ def ReussirStrType : ReussirType<"Str", "str",
+diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+index 7f8a8128..e757203e 100644
+--- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
++++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
+@@ -299,6 +299,23 @@ void endRealBoxGuard(mlir::ConversionPatternRewriter &rewriter,
+   rewriter.setInsertionPointToStart(contBlock);
+ }
+ 
++// The box address of a tagged FFI handle that is not an immediate: the
++// handle without the top bits, which belong to the foreign side on 64-bit
++// targets.
 +mlir::Value taggedBoxAddress(mlir::ConversionPatternRewriter &rewriter,
 +                             mlir::Location loc, mlir::Value ptr,
 +                             mlir::Type indexTy) {
@@ -89,20 +92,20 @@ index 48fe2248..4153705b 100644
 +    return ptr;
 +  mlir::Value mask = mlir::LLVM::ConstantOp::create(
 +      rewriter, loc, intTy,
-+      rewriter.getIntegerAttr(intTy, (uint64_t(1) << 48) - 1));
-+  return mlir::LLVM::PtrMaskOp::create(rewriter, loc, ptr.getType(), ptr,
-+                                       mask);
++      rewriter.getIntegerAttr(
++          intTy, llvm::APInt::getLowBitsSet(
++                     64, FFIObjectType::TAGGED_ADDRESS_BITS)));
++  return mlir::LLVM::PtrMaskOp::create(rewriter, loc, ptr.getType(), ptr, mask);
 +}
 +
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1696,6 +1716,12 @@ struct ReussirRcIncConversionPattern
+@@ -1732,6 +1749,11 @@ struct ReussirRcIncConversionPattern
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
        refcntPtr = adaptor.getRcPtr();
-+      // A tagged object's box address is the handle without its top bits.
-+      if (eleTy.getTagged())
++      if (taggedCont)
 +        refcntPtr = taggedBoxAddress(
 +            rewriter, op.getLoc(), refcntPtr,
 +            static_cast<const mlir::LLVMTypeConverter *>(getTypeConverter())
@@ -199,3 +202,6 @@ index 275984dc..2c97ff74 100644
    // CHECK: load i32, ptr %0
    // CHECK: store i32
    func.func @inc_plain(%b: !plain) {
+-- 
+2.43.0
+

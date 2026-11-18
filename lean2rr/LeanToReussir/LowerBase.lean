@@ -477,6 +477,16 @@ structure LowerState where
   (J4, by the variant's name): those where the join point is declared
   (`armJps`). -/
   armCutSeeds : Std.HashMap String (Array (Nat × Nat)) := {}
+  /-- The variables whose constructor native Lean knows wherever it
+  releases them: bound by a constructor application that is still one in
+  Lean's impure code (`KnownCtors`, Lower/Borrow's `inferBorrowedParamsK`).
+  Lean releases such a value with `lean_dec_ref_known`: its fields in
+  field order, each completely (`knownReleaseFn?`). By declaration and
+  variable, as `armVars`; empty in a program that makes no resources. -/
+  knownCtors : Std.HashSet (Name × FVarId) := {}
+  /-- The Reussir names of the uses of `knownCtors`' variables that are in
+  `armNames` (`noteVarUse`), for Emit/ArmRelease. -/
+  armKnown : Std.HashSet String := {}
   /-- Generated placeholder (`box(0)`) functions, per type. -/
   zeroFns : Std.HashMap RR.Ty String := {}
   /-- Types without a finite placeholder (their function in `zeroFns` is
@@ -620,7 +630,9 @@ field) gets its order. -/
 def noteVarUse (decl : Name) (x : FVarId) (n : String) (t : RR.Ty) : LowerM Unit := do
   if t != .unit then
     if let some k := (← getPart (·.armVars[(decl, x)]?)) then
-      modify fun s => { s with armNames := s.armNames.insert n (t, k) }
+      let known ← getPart (·.knownCtors.contains (decl, x))
+      modify fun s => { s with armNames := s.armNames.insert n (t, k),
+                               armKnown := if known then s.armKnown.insert n else s.armKnown }
 
 /-- An identifier-safe rendering of a Lean name, for readable hints in
 generated names (uniqueness always comes from a numeric component). -/

@@ -8,10 +8,39 @@ Patch 19-a drops the direct arms in one function per type. lean2rr no
 longer reaches the bug: since 23-f rrc makes no retcon destructors
 ([issue 23](23-worklist-drops.md)), so 19-a is parked.
 
+**Fixed upstream, to delete.** Upstream deleted the retcon drop
+lowering, its LLVM passes and the executor (#872, with the scoped
+worklists of #873 to #914), and closed issue #759 as completed on
+2026-11-01. lean2rr's base since 2026-11-17, upstream `36a55a0f`, has no
+retcon destructors and no `retcon-drops` option, so the code of this bug
+and the code that the parked 19-a changes do not exist there. The
+question that stayed was the size of upstream's new drop code for
+deeply nested types. The port's first gate answered it (2026-11-18):
+the repro (`repros/bug19-retcon-direct-arms.py`) prints FIXED on
+pristine `36a55a0f` and on the patched base (the code grows 1.28 times
+from N = 3 to N = 4), and lean2rr's `RtSyncSelect` and `RtDepPolyRec`,
+the programs that showed the bug, build and are identical to native.
+
+By the README's policy, an entry that upstream fixed in full is deleted
+and its number retired. Not deleted yet (the coordinator decides). The
+deletion removes:
+
+- this file, `reussir-bugs/19-retcon-direct-arms.md`;
+- `patches/parked/19-a-retcon-direct-arms.patch`;
+- `repros/bug19-retcon-direct-arms.py`, the function `bug19` of
+  `repros/run.sh` and `19` in its list of entries;
+- the entry's rows in the README (status table, parked table, review
+  table) and in `docs/implementation/reussir-workarounds/README.md`;
+- the local report `docs/local/reussir-bug-reports/19-retcon-direct-arms.md`.
+
+Number 19 is then retired. The text below is the entry as it was on
+`l2r-base12` (history).
+
 ## Summary
 
 **Kind:** bug (rrc runs out of memory on valid input: the code of a drop
-is exponential in type nesting). **Status:** does not affect lean2rr
+is exponential in type nesting). **Status (history; now fixed upstream,
+see above):** does not affect lean2rr
 since 2026-10-25 (base `l2r-base12`): patch 23-f switches rrc's pipeline
 from retcon destructors to worklist drops, so no retcon destructor and no
 direct-arm expansion is made, and patch 19-a is parked
@@ -21,7 +50,7 @@ which used upstream's retcon drops; the series of `l2r-base12` replaced that bas
 before it reached lean2rr's dev branch. The bug stays reachable through
 `reussir-opt`'s `retcon-drops` option.
 
-**Upstream (2026-10-25):** Open at 00906e38: upstream issue #759 (ours,
+**Upstream (history, 2026-10-25):** Open at 00906e38: upstream issue #759 (ours,
 with the measurements of the options below). Reussir's
 maintainer chose option (a+), which is 19-a, and asked that it stay a
 local patch. If the retcon lowering is deleted (entry 23's open items),

@@ -11,19 +11,54 @@ and 20-f's pin (#844): 20-f left the series, and 20-b keeps only the
 reviewed patch's tests that the pull requests left out. Each patch is
 described below with its tests.
 
+**On upstream `36a55a0f` (the series of 2026-11-18)** the series has
+five patches of this entry: 20-a (the intrinsics that lean2rr uses),
+20-g (the `nonnegative` mark of `Nat` divisions, once a part of 20-a),
+20-c (the glue, kept out of upstream's scoped drop lowering), 20-d and
+20-e. 20-b (tests) stays parked. Each patch has a measured claim; none
+of them is a wall-time claim.
+
 ## Summary
 
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
 rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a,
-20-c to 20-e; 20-b's code upstream, its remaining tests in 20-b),
-applied in `./reussir`'s series since 2026-10-25 (branch `l2r-base12`
-on upstream `95d9a1c8`, commits `a2c2647a`, `b2e70249`, `6471a6de`,
-`90c53269`, `2b2ef6be`; made on `l2r-stepd` as `c13b1ac3`, `6bd31204`,
-`cb24040e`, `729ea9fb`, `e3b96e03`, the same code but for 20-b, which
-was the whole R2 there). 20-f (`a39e59b0` on `l2r-base11`) left the
-series: upstream #844 made the same move.
+20-g, 20-c, 20-d, 20-e), patches 3 to 7 of the series on upstream
+`36a55a0f` (Reussir branch `l2r-base13-final`). 20-b's code is upstream;
+its remaining tests are parked
+([`patches/parked/`](patches/parked/)). 20-f left the series on
+2026-10-26: upstream #844 made the same move.
 
-**Upstream (2026-10-26):** At `95d9a1c8` upstream has 20-b's code, as our
+| Patch | Subject on `36a55a0f` | Commit | Kind | Measured claim (aarch64; details in the patch's section) |
+|---|---|---|---|---|
+| [20-a](patches/20-a-bigint-lean-division.patch) | `[bigint] expose Lean division modes and power-of-two remainder` | `0212e8f1` | feature | changes no existing code (8 of 8 upstream units byte-identical after it). A `Nat` division in Lean's mode: 11 instructions on the immediate path, 24 in all, against 16 and 74 for the composed form |
+| [20-g](patches/20-g-bigint-nat-nonnegative.patch) | `[bigint] divide Nats as nonnegative integers` | `c9e433ea` | optimization | `if b == 0 { 0 } else { a / b }` at `Nat`: 23 to 16 instructions on the immediate path, 81 to 74 in all (`sdiv` to `udiv`) |
+| [20-c](patches/20-c-mpz-inline-glue.patch) | `[bigint] emit inlineable acquire and release glue for foreign handles` | `00e367fb` | optimization | 100 copy-on-write copies of a 1000-element `Vec<Nat>`: 100,000 retain calls and 101,000 release calls to 0 and 0; the object's text 4215 to 4779 bytes (+13%) |
+| [20-d](patches/20-d-mpz-is-shared.patch) | `[bigint] expose foreign handle sharing through generated glue` | `d5a9f21b` | feature | no performance claim (a debug primitive); one more small function in every unit that uses integers |
+| [20-e](patches/20-e-hex-bigint-literals.patch) | `[bigint] pass integer constants and match keys to MLIR in hexadecimal` | `5baeed3b` | optimization (build time) | rrc on one `Nat` literal of 20,000 digits: 8.17 s to 0.07 s; of 40,000 digits: 74.57 s to 0.18 s; the objects are byte-identical |
+| [20-b](patches/parked/20-b-mpz-handle-more-tests.patch) | (tests) | - | tests | parked: tests only, so no claim is possible; it found nothing on the new base |
+
+Wall time of lean2rr's programs with these patches: pending the timing
+run. The instruction counts of 20-c's old section and 20-f's effect on
+L11 were measured on the earlier bases.
+
+**Upstream (2026-11-18):** At `36a55a0f`, 20-b's code and 20-f's pin are
+upstream as before; the pin is `dee6c102` now (mlir-rcgmp #51 to #53).
+Upstream has no `_lean` division, no `floormod2expi` at the language
+level and no `Mpz::is_shared` (source read). Reussir's maintainer wrote
+on 2026-10-25: "some further changes may be needed: e.g. exposing
+`divi_lean/remi_lean` ... Please make those patches sitting on your
+tree. do not open PRs on reussir side." His own upstream attempt with
+these changes (Reussir #923) was closed unmerged on 2026-11-05. So these
+patches stay here. #988 (2026-11-13) changed upstream's `Mpz`: its
+`Clone` and `Drop` call `rcgmp_mpz_retain` and `rcgmp_mpz_release`
+directly; 20-c replaces those calls with the glue, as before. Upstream
+still prints big constants in decimal (20-e), and its `Nat` divisions
+do not set `nonnegative` (20-g).
+
+The text from here to the per-patch sections records the state on
+`l2r-base12` (history).
+
+**Upstream, earlier base (history, 2026-10-26):** At `95d9a1c8` upstream has 20-b's code, as our
 pull requests #824 (`8130286e`: the handle `reussir_rt::rcgmp::Mpz`),
 #843 (`20252b29`: the polymorphic FFI spells `Nat` and `Int` as `Mpz`)
 and #845 (`95d9a1c8`: the tests of std's collections and of the edge
@@ -40,10 +75,10 @@ changed lines each), they are prepared as pull request candidates.
 | Patch | Step D name | `l2r-base12` commit | Kind | What it adds |
 |---|---|---|---|---|
 | [20-a](patches/20-a-bigint-lean-division.patch) | R1 | `a2c2647a` | feature (with an optimization) | bigint intrinsics for Lean's division modes and `floormod2expi`; Nat divisions marked `nonnegative` |
-| [20-b](patches/20-b-mpz-handle-more-tests.patch) | R2 (rest) | `b2e70249` | tests | the reviewed R2's tests that #824, #843 and #845 left out (R2 itself, a bug fix and feature: `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz`, is upstream) |
+| [20-b](patches/parked/20-b-mpz-handle-more-tests.patch) | R2 (rest) | `b2e70249` | tests | the reviewed R2's tests that #824, #843 and #845 left out (R2 itself, a bug fix and feature: `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz`, is upstream) |
 | [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `6471a6de` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
 | [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `90c53269` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
-| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `2b2ef6be` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
+| [20-e](patches/parked/20-e-hex-bigint-literals.patch) | R3 | `2b2ef6be` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
 
 Step D's notes and the patches' subject lines use the names R1 to R3.
 The patches apply in this order, after 10-a and 07-a (until Phase 2,
@@ -134,7 +169,116 @@ round trip, MLIR spelling).
 **lean2rr.** The prelude's rcgmp blocks call the `_lean` intrinsics for
 Lean's divisions and `floormod2expi` for the mod-2^k rewrite.
 
+### 20-a on 36a55a0f: only the intrinsics that have a user
+
+The patch of the final series differs from the text above in two
+points (review of 2026-11-18, local notes `port13/reviews/RV2`):
+
+- **Three intrinsics are gone:** `floordivsi_lean`, `floormodsi_lean`
+  and `divsi_exact_lean`. Nothing in lean2rr calls them: the prelude
+  uses `divsi_lean`, `remsi_lean`, `edivsi_lean`, `emodsi_lean` and
+  `floormod2expi`. The backend's `rcgmp::exact_division` went with
+  them. The patch is +468/-4 lines now (before: +674/-14).
+- **The `nonnegative` mark is a patch of its own, 20-g.** 20-a alone
+  changes no existing division.
+
+Checked on this base:
+
+- *Semantics.* A table of 3104 functions against Python integers: the
+  `_lean` divisions on `Int` and `Nat`, the trapping divisions and `/`,
+  `%` on `Nat`, `floormod2expi`, shifts; operands from 0 to
+  ±(2^128 - 1), zero divisors, heap by heap; each case with runtime
+  operands, constant operands and mixed. 23,860 checks, 0 failures at
+  `-O none`, `-O default` and `-O aggressive` (run on the series before
+  the three intrinsics were removed).
+- *The fused quotient and remainder of mlir-rcgmp #51* work through the
+  intrinsics: `divsi_lean` with `remsi_lean`, and `edivsi_lean` with
+  `emodsi_lean`, of the same operands are one runtime call (847 checks,
+  0 failures).
+- *What it buys* (AArch64 instructions at `-O aggressive`, from the
+  entry to the first `ret`, which is the path of immediates, and in the
+  whole function; "composed" is `if b == 0 { 0 } else { a / b }` on the
+  series):
+
+  | Function | 20-a's intrinsic | composed |
+  |---|---|---|
+  | `Nat` div | 11 / 24 | 16 / 74 |
+  | `Nat` mod | 12 / 25 | 17 / 63 |
+  | `Int` div | 15 / 28 | 23 / 81 |
+  | `Int` emod | 20 / 33 | 24 / 70 |
+
+  The composed form also calls `rcgmp_mpz_cmp` for a heap divisor
+  before it divides. The power-of-two remainder has no composed form
+  without a call that builds 2^w.
+- *What it costs elsewhere:* nothing. After 10-a, 07-a and 20-a, the 8
+  upstream units that the series changes at all (core, std, six integer
+  programs) are byte-identical to pristine upstream.
+
+## 20-g: divisions of `Nat`s are marked `nonnegative`
+
+Split from 20-a on 2026-11-18, because it is a second topic: an
+optimization of code that exists upstream, not a new intrinsic.
+
+**The cost.** rcgmp's divisions take a `nonnegative` attribute
+(mlir-rcgmp #48): both operands are then known to be nonnegative, so an
+immediate is untagged by a logical shift and divided unsigned, with no
+test of the quotient's sign. Upstream Reussir does not set it, so a
+`Nat` division pays the signed path.
+
+**The patch.** Every division of `Nat`s sets the attribute: `/` and `%`
+at `Nat`, and every division intrinsic at `Nat` (`edivsi`, `emodsi`,
+`floordivsi`, `floormodsi`, `divsi_exact` and the `_lean` ones). `Int`
+divisions do not change. `DivisionMode` gets the field `nonnegative`,
+and `rcgmp::divsi_exact` a parameter.
+
+**Why it is sound.** A `Nat` cannot be negative in Reussir: `Int as
+Nat` and `i64 as Nat` are refused, `Nat` has no negation, and `-` on
+`Nat` stops at zero (checked by the review with one program of each).
+A negative value can reach such a division only from the foreign side
+(a texture that returns a negative `Mpz` at type `Nat`); the result is
+then a wrong number, not undefined behaviour of the generated code
+(read in mlir-rcgmp's lowering: no `nuw`, `exact` or assume flag).
+
+**Measured** (AArch64 instructions at `-O aggressive`, immediate path /
+whole function, the compiler at 20-a against the compiler at 20-g):
+
+| Function | at 20-a | at 20-g |
+|---|---|---|
+| `if b == 0 { 0 } else { a / b }`, `Nat` | 23 / 81 (`sdiv`) | 16 / 74 (`udiv`) |
+| `divsi_lean`, `Nat` | 15 / 28 | 11 / 24 |
+| `remsi_lean`, `Nat` | 13 / 26 | 12 / 25 |
+| `a % ipowi(2, w)`, `Nat` | 18 / 41 | 15 / 38 |
+| the `Int` functions, `floormod2expi` | unchanged | unchanged |
+
+On upstream's benchmark suite with core and std (33 units), 20-g is the
+only patch of the series that changes existing code: 6 functions (two
+of core's `Nat::div_exact`, and one each in bigint-binomial,
+bigint-collatz, bigint-factorial and bigint-fib): `ashr` to `lshr`,
+`sdiv`/`srem` to `udiv`/`urem`, and 5 or 6 operations fewer where the
+quotient is taken. No wall time was measured.
+
+**Tests.** `frontend/bigint_nat_division.rr` (the `-O` LLVM IR of a
+`Nat` `/` and of a `Nat` `remsi_lean` divides the untagged immediates
+unsigned, an `Int` `/` signed); the `nonnegative` spelling in
+`frontend/bigint_intrinsics.rr`.
+
 ## 20-b (R2): `Nat` and `Int` at polyffi type arguments are an owned handle
+
+**Parked since the move to `36a55a0f` (2026-11-17); decided on
+2026-11-18: it stays parked.** What is left of
+20-b is tests, and the maintainer's port left it out. Its file is in
+`patches/parked/`. It applies to the new base and its tests pass there
+(7 of 7 `frontend/bigint_ffi*` lit tests and the unit test), but it is
+tests only, so it cannot have a measured claim, it found nothing on the
+new base, and it edits three upstream test files, which costs a
+conflict at every upstream change there. Upstream's own tests cover
+most of it; three checks are only in 20-b: `set` on a uniquely owned
+vector, growth through reallocation with heap elements, and set
+membership of `Int` across signs. Without it, 20-c has no unit-test assertion of the
+glue pair (that hunk of 20-c edited a test that 20-b adds); if 20-b
+comes back, that hunk comes back with it. An open upstream pull request
+(#974) moves `frontend/bigint_ffi_std.rr`, which the tests of 20-b sit
+next to.
 
 **Upstream since 2026-10-26.** The patch described here went upstream
 split in three pull requests: #824 (the handle), #843 (the spelling at
@@ -200,7 +344,8 @@ types next to the substituted ones. So:
   still passes a pointer).
 
 Placeholders (`[:T:]`) and opaque instances (`Vec<Mpz>` and its drop
-hook) follow. `docs/design/polymorphic-ffi.md` describes both spellings.
+hook) follow. `docs/design/polymorphic-ffi.md` described both spellings
+(upstream has moved its design documents to another repository since).
 
 **Tests.** `frontend/bigint_ffi_std.rr` (std's copy-on-write `Vec`,
 `HashMap`, `HashSet`, `BTreeMap`, `BTreeSet`, `VecDeque` and
@@ -299,6 +444,102 @@ without a call for immediates. lean2rr's runtime, outside the textures,
 holds big `Nat`s as `Mpz` and uses the glue that every program with
 integers gets.
 
+### 20-c on 36a55a0f: the glue and upstream's scoped drop lowering
+
+Upstream's drop series of 2026-11-01 keeps records of foreign releases:
+it marks every `_ffi_release` function as a foreign drop
+(`reussir.foreign_drop`), collects the FFI symbols of a unit, and gives
+each import and each texture its `release_bindings`. A foreign drop
+becomes a bridge into the drop worklist. The integer glue of 20-c must
+stay out of all three, and the patch on `36a55a0f` does that (the
+change is from the maintainer's port, where it was a part of his patch
+24-b):
+
+- `crates/reussir-codegen/src/lower/expr.rs`: the integer release glue
+  does not get the `reussir.foreign_drop` attribute.
+- `lower/mod.rs`: its symbol is not added to the unit's FFI symbols.
+- `crates/reussir-core/src/full/mono.rs` (two places): integer
+  declarations are filtered out of the `release_bindings` of an
+  `FfiImport` and of an `FfiTexture`.
+
+Why: `rcgmp.release` is a leaf (an integer has no members to release),
+and the glue's symbol has one fixed name shared by all modules, not one
+name for each texture. Without these changes the new lowering treats
+the glue as the release binding of one texture.
+
+**The refinement of 2026-11-18** (review `port13/reviews/RV2`, then
+`RV6`):
+
+- *The glue is defined in every codegen unit* (`weak_odr`), not only in
+  its home unit. Before, with more than one unit, the textures of the
+  other units called the glue out of line. The reviewer's program with
+  four units: 21 call relocations to the glue before, 3 now, the same 3
+  that the one-unit build has (measured with the program compiled for
+  the textures' target, `--target-cpu generic --target-features=`).
+  lean2rr builds with one unit, so this changes nothing for lean2rr
+  today.
+- *Hidden visibility through a module attribute.* The unit lists the
+  glue in `reussir.hidden_symbols` (next to `reussir.ffi_symbols`), and
+  `qualifyFfiSymbols` hides the listed definitions when the module is
+  translated, in rrc and in `reussir-translate`. The scan of symbol
+  names by prefix in the Rust backend (`hide_rcgmp_glue`) is gone, and
+  `crates/reussir-backend/src/llvm.rs` is no longer touched. Test
+  `codegen/hidden_symbols.mlir`.
+- *The `WrapperDecl` entry: removed, then restored.* Rendering `Mpz`
+  records a glue entry next to the shared-record wrappers' (it declares
+  nothing in the texture). The first round of the refinement removed it
+  as redundant with the rule "every program that uses `Nat` or `Int`
+  gets the pair" (`uses_bigint`). The review of that round showed that
+  it is not redundant: a generic import whose type parameter appears
+  only in the foreign body (`probe<Nat>` with a `Vec<[:T:]>` inside)
+  uses no integer in any place that `uses_bigint` looks at. The program
+  compiled, and the link failed with `undefined reference to
+  __reussir_rcgmp_ffi_acquire`. The entry is back: the owned handle's
+  spelling is made at exactly one place, and that place records the
+  entry, so every texture that the compiler writes with the handle
+  brings the glue. Test `frontend/bigint_ffi_phantom.rr` (it failed to
+  link on the round-1 patch; it links and prints 5 now). Not covered,
+  as before: a foreign body that writes `::reussir_rt::rcgmp::Mpz` by
+  hand in a program without integers.
+
+Other differences from `l2r-base12`'s 20-c: one conflict at the move, in
+`render_ty` (`full/ffi.rs`: upstream added arms for pointers and SIMD
+types next to the `BigInt` arm; both are kept); the FileCheck names of
+the wrappers in `bigint_ffi_glue.rr` end in `.backward` (upstream's
+suffix for the drop order); no hunk in `docs/design/polymorphic-ffi.md`,
+and no unit-test hunk (see 20-b).
+
+**Measured on this base** (aarch64, `-O aggressive --relocation-mode
+pic`, textures compiled for the program's CPU; the calls into the rcgmp
+runtime counted with the linker's `--wrap`): 100 copy-on-write copies
+of a 1000-element `Vec<Nat>`.
+
+| | retain calls | release calls | free calls | object text |
+|---|---|---|---|---|
+| upstream `36a55a0f`, immediates / heap values | 100,000 / 100,000 | 101,000 / 101,000 | 0 / 1 | 4215 bytes |
+| with 20-c, immediates / heap values | 0 / 0 | 0 / 0 | 0 / 1001 | 4779 bytes (+13%) |
+
+So a call for each element at each clone and each drop becomes a test
+of the low bit in the loop; a heap value is freed by one call at its
+last release. Executed instructions and wall time were not measured on
+this base (the table of the section above is from the earlier base).
+The inlining needs textures compiled for the program's CPU, as
+lean2rr's are. Cost in every program: with 20-c and 20-d each unit that
+uses integers has three small hidden `weak_odr` functions, also
+upstream's own benchmark units; no existing function of those units
+changes.
+
+**Ownership checked** by the review: no leak and no double free in four
+container shapes under both drop orders. Linkage: three codegen units
+link with no duplicate symbol; a shared library exports and imports
+none of the glue, also with thin and fat LTO; `libreussir_rt.so` has no
+reference to the glue.
+
+On the final series (2026-11-18, aarch64): `frontend/bigint_ffi_glue.rr`,
+`bigint_ffi_dynlib.rr`, `bigint_ffi_phantom.rr` and
+`codegen/hidden_symbols.mlir` pass. The ASan runs cannot run on the
+build machine (no sanitizer runtime).
+
 ## 20-d (R2c): `Mpz::is_shared`
 
 **What is missing.** lean2rr's `dbgTraceIfShared` (Lean's
@@ -329,48 +570,78 @@ the glue out of line and inlined) and its ASan twin
 `sanitizer/bigint-ffi-shared-asan.rr`; the hidden `weak_odr` definition
 in `frontend/bigint_ffi_glue.rr`.
 
+**On `36a55a0f`.** The third function is emitted like 20-c's pair: in
+every codegen unit, `weak_odr`, listed in `reussir.hidden_symbols`. The
+C driver of `bigint_ffi_glue.rr` also calls the three glue functions on
+a heap value: unique, shared after an acquire, unique again after a
+release (from the maintainer's port). `frontend/bigint_ffi_shared.rr`
+passes on aarch64 (2026-11-18); its ASan twin cannot run on the build
+machine. No performance claim: the patch is a feature for a debug
+primitive, and it adds one small function to every unit that uses
+integers.
+
+Upstream's new `core::object::is_unique` (#983) is a language intrinsic
+for rc-managed objects and rejects `Nat` and `Int` today
+(`crates/reussir-core/src/semi/ty_eval.rs`: "a built-in integer
+handle"). The review sketched an extension of it (about 30 lines) that
+could replace this patch with a cleaner interface. Parked: 20-d stays
+as it is. Note the two names: the glue function is
+`__reussir_rcgmp_ffi_is_unique`; the runtime method, which
+`scripts/l2r.py` checks for, is `Mpz::is_shared`.
+
 ## 20-e (R3): big integer constants and match keys reach MLIR in hexadecimal
 
-**The cost.** Under rcgmp a 100k-digit `Nat` literal took rrc about 17
-minutes, all of it in the step from MIR to MLIR, and the time grew with
-the cube of the length (20k digits 8 s, 80k digits 527 s). Codegen
-printed each `rcgmp.constant` value and each `rcgmp.match` key as a
-decimal integer attribute (`bigint_constant`, `narrowest`), and
-`rcgmp::match_arms` printed the keys again in decimal to build the arms
-attribute. `Attribute::parse` reads decimal text through LLVM's
-`StringRef::consumeInteger`: one full `APInt` multiplication per digit,
-cubic in the length (also on LLVM's main branch). Hexadecimal text goes
-through one shift of the whole value per digit: quadratic, with a small
-constant (`mlir-opt` reads one constant of 100k, 200k and 400k hexadecimal
-digits in 0.36, 1.31 and 5.18 s). The patch's code comments and commit
-message still say "linear" for this parse; they are corrected when the
-series is next rebuilt.
+**Back in the series since 2026-11-18**, moved to `36a55a0f` with no
+conflict and measured there. The maintainer's port had left it out.
+Upstream has not fixed the cost: at `36a55a0f` codegen still prints
+each big constant in decimal and parses it. The text above says
+"linear" in one place for the hexadecimal parse; the new commit message
+says "through shifts".
 
-**The patch.** `literal::mlir_integer_attr_text`
-(`crates/reussir-core/src/literal.rs`) writes the attribute text in
-hexadecimal, `0x…` or `-0x…` (malachite's `LowerHex`; writing the text is linear), at the
-same narrowest signed width. Codegen uses it for constants and match
-keys, and `rcgmp::match_arms` takes the keys' text instead of parsed
-attributes. The MLIR attributes do not change: the MLIR of a 10k-digit
-literal is identical, and a unit test compares the decimal and
-hexadecimal parses (and the arms attribute) at the edges of the widths,
-in the immediate range and at a limb, for either sign.
+**Measured on `36a55a0f`** (aarch64; one rrc process, user seconds; a
+program with one `Nat` literal of the given length, default level, to
+an object):
 
-**Measured.** A 100k-digit `Nat` or negative `Int` literal now compiles
-to an object at `-O aggressive` in about 0.5 s (before: about 17 min).
+| Digits | without 20-e | with 20-e |
+|---|---|---|
+| 5,000 | 0.15 s | 0.04 s |
+| 10,000 | 1.04 s | 0.05 s |
+| 20,000 | 8.17 s | 0.07 s |
+| 40,000 | 74.57 s | 0.18 s |
+| 100,000 | not finished: stopped at 300 s of wall time (283 s user); about 19 min by the cube law | 0.85 s |
 
-**Tests.** `frontend/bigint_huge_literal.rr` (3^104795, 50000 digits, as
-a `Nat` constant, a negative `Int` constant and two `Nat` match keys,
-generated by `Inputs/bigint_huge_literal.py`; the compile runs under
-`timeout 120`, and the program compares every literal with the power
-computed at run time); the reussir-codegen unit test;
-`mlir_integer_attr_text` cases in reussir-core's literal tests.
+Two match keys of 10,000 digits: 4.17 s to 0.10 s; of 20,000 digits:
+32.9 s to 0.15 s (each key was parsed twice). The review measured three
+of the rows again (10,000 digits 1.05 s to 0.03 s, 20,000 digits 8.16 s
+to 0.05 s, two keys of 10,000 digits 4.19 s to 0.08 s).
 
-**lean2rr.** Under rcgmp a `Nat` literal of any size is a Reussir literal
-(a read-only object in the program's data, no parse at run time), so a
-program with a long literal reaches this path.
+**The same code.** The objects are byte-identical with and without the
+patch at 5,000 to 40,000 digits and for both key programs; `--emit
+mlir` and `--emit llvm-ir` are byte-identical at 10,000 digits. The
+review checked 520 values at the edges of the widths (limbs, sign, the
+arm that a `match` selects) at three levels: 0 bad. On upstream's
+benchmark suite with core and std, and on 14 lean2rr programs, the
+patch changes no code.
+
+**The claim is a build-time claim only.** There is no run-time claim.
+What it means for lean2rr: the largest literals of the runtime suite
+(`RtNatLitHuge`, 20,000 digits) cost about 8 s each without the patch,
+so the suite passes without it; a literal of 100,000 digits is the case
+where rrc looks hung. `scripts/l2r.py` does not check for the patch.
+
+**Not covered:** `--emit mlir` prints decimal, so a compile that starts
+again from a saved `.mlir` with such a literal pays MLIR's own cubic
+parse.
+
+**Tests on this base:** `frontend/bigint_huge_literal.rr` passes;
+reussir-core's `literal` tests (28) and reussir-codegen's `hexadecimal`
+test pass.
 
 ## 20-f: the mlir-rcgmp pin moved to cc73b218 (upstream since #844)
+
+History. At `36a55a0f` upstream pins `dee6c102` (mlir-rcgmp's main on
+2026-11-14), which has `cc73b218`'s changes and mlir-rcgmp #51 (a fused
+quotient and remainder) to #53.
 
 **Upstream since 2026-10-26:** #844 (`5aeb834d`) made the same move, so
 20-f left the series (`l2r-base12`); its file is in git history (commit
@@ -403,6 +674,19 @@ to `cc73b218` (as it did for #48 in #804); upstream did, in #844.
 
 ## Review
 
+On `36a55a0f` (2026-11-18), independent reviews (local notes
+`port13/reviews/`): `RV2` for 20-a, 20-c and 20-d (no bug; its findings
+are the trimmed intrinsics, the split of 20-g, the glue in every unit
+and the hidden-symbols attribute), `RV6` for that refinement (one
+regression found and fixed: the `WrapperDecl` entry), `RV5` for 20-e
+(approved as ported). On the final series: 26 of the 30 lit tests that
+the series adds or changes pass, and 4 are unsupported on the build
+machine (the sanitizer twins); `reussir-ut` 97 of 97; cargo tests of
+reussir-core (677), reussir-codegen (87) and reussir-backend (29) with
+0 failures. Not run: the full lit suite, clang-tidy, the sanitizer
+tests; clang-format is not installed there. The text below records the
+reviews on the earlier bases.
+
 Each patch was reviewed adversarially (code review and targeted repros,
 plain and under ASan). The reviews found no bug in the final versions of
 the five patches. The review notes are
@@ -434,5 +718,8 @@ polyffi type arguments and generic positions (an owned `Mpz`; positions
 declared `Nat` or `Int` keep #795's borrowed raw handle) is upstream
 (#824, #843, #845), and what is left of 20-b is tests; 20-f is upstream
 (#844). 20-c and 20-d add compiler-emitted glue with fixed names, hidden
-and `weak_odr`; they need the `Mpz` of #824. 20-e changes only the text
-that codegen gives to MLIR's parser, not the attributes.
+and `weak_odr`; they need the `Mpz` of #824, and on `36a55a0f` 20-c
+keeps the glue out of the scoped drop lowering's records of foreign
+releases. 20-e changes only the text that codegen gives to
+MLIR's parser, not the attributes. 20-g drops if upstream sets the
+`nonnegative` attribute itself.

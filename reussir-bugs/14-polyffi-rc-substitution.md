@@ -6,7 +6,9 @@
 **Status:** not patched; it does not affect lean2rr (unreachable: only
 MLIR written by hand reaches this code).
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744 (the source read; there is no repro): `formatInto` still writes `::reussir_rt::rc::Rc` for a shared rc type, and the file's only change since 943f2195 is #657 (`fec8f033`, an unterminated `[:`); open.
+**Upstream (2026-11-18):** Unchanged at `36a55a0f` (the source read; there is no repro): `formatInto` (`lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp`) still writes `::reussir_rt::rc::Rc` for a shared rc type whose element is not an FFI object. The file has one commit after `95d9a1c8` (symbol uses and names of generated definitions), which does not touch this case.
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744 (the source read; there is no repro): `formatInto` still writes `::reussir_rt::rc::Rc` for a shared rc type, and the file's only change since 943f2195 is #657 (`fec8f033`, an unterminated `[:`); open.
 
 **Verdict: bug.** A polymorphic FFI function (a *texture*) is Rust
 text with placeholders `[:T:]`, which rrc replaces by the Rust spelling of

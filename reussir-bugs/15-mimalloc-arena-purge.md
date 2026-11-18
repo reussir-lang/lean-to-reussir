@@ -9,7 +9,9 @@ cost: the results are correct. **Status:** worked around in lean2rr's
 runtime (leanrt); no Reussir patch. The change on Reussir's side, a newer
 `libmimalloc-sys`, is parked ([parked option](#parked-option-b-a-newer-libmimalloc-sys)).
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744: it still pins `libmimalloc-sys` 0.1.44 (checked 2026-10-24; also on 7954a367, 2026-10-19).
+**Upstream (2026-11-17):** Unchanged at `36a55a0f`: it still pins `libmimalloc-sys` 0.1.44 (`crates/reussir-rt/Cargo.toml`, read on 2026-11-17). #1020 changes only the date and time macros of the mimalloc C build. leanrt's setting stays.
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744: it still pins `libmimalloc-sys` 0.1.44 (checked 2026-10-24; also on 7954a367, 2026-10-19).
 
 `crates/reussir-rt/Cargo.toml` pins `libmimalloc-sys = { version =
 "0.1.44", optional = true, features = ["extended"] }` (`Cargo.lock`:

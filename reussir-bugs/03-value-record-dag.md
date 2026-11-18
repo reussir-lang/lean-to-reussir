@@ -8,7 +8,9 @@ output is correct, and there is no patch.
 **Kind:** cost (build time; the expansion is deliberate). **Status:** does
 not affect lean2rr (its `[value]` records are shallow). No patch.
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744 (by the source; the repro was not run again): #800 (`810849d6`) changes `AcquireDropExpansion.cpp`, but only after the expansion (it replaces a load by an equivalent load that dominates it); the first phase still writes the copy out in line. On upstream 7954a367 with the series the repro still reproduced (2026-10-19: `--emit mlir-llvm` 7,341 lines at K = 8, 28,875 at K = 10, 3.93x); open.
+**Upstream (2026-11-18):** Reproduces on `36a55a0f` (the port's first gate, 2026-11-18, `repros/run.sh`): 3.93x on pristine upstream and on the patched base. No patch.
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744 (by the source; the repro was not run again): #800 (`810849d6`) changes `AcquireDropExpansion.cpp`, but only after the expansion (it replaces a load by an equivalent load that dominates it); the first phase still writes the copy out in line. On upstream 7954a367 with the series the repro still reproduced (2026-10-19: `--emit mlir-llvm` 7,341 lines at K = 8, 28,875 at K = 10, 3.93x); open.
 
 **Verdict: cost of a deliberate design, not a defect.** Copying or dropping
 a `[value]` record retains or releases every counted value inside it.

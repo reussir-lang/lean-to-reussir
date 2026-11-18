@@ -4,37 +4,36 @@ parameter: every such position is a box, rule 1), and for comparison in a
 record of a monomorphic type, are closed when user code drops the value by
 itself, with no container around it (adversarial review of the
 dependent-type branch, finding 3). Each handle's buffered tag
-reaches the shared file when the handle is closed. A documented difference
-(plan §10, "Order of releases in one free"): `RtDepDropOrderBoxed.l2r.out`
-is lean2rr's output, `RtDepDropOrderBoxed.native.out` native's.
+reaches the shared file when the handle is closed. Each value is released
+after a call that borrows it natively; lean2rr releases it there as native
+Lean does (plan §10, "Order of releases in one free"), so the output is
+native's.
 
 - `nest`: `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` built by
   another function and dropped by `main` after a call that borrows it.
-  Natively `lean_dec` frees it last field first: `edcba`. lean2rr: `abdce`.
-  Reussir's release of the first cell goes through its fields in field
-  order; a box whose last reference it drops is released at once (inner's
-  `a`, `b`, then opt's `e`), and the array frees its elements last first
-  (`dc`).
+  Natively `lean_dec` frees it last field first: `edcba`. lean2rr
+  releases the record through its FFI release, one free from the root,
+  last pushed first.
 - `list`: `[h1, …, h8]` built in `main` and dropped after `hs.length`.
   Natively Lean knows the constructor there (`lean_dec_ref_known`): the
   first cell's fields in order, each completely, then the rest last first:
-  `18765432`. lean2rr: `12345678`. Reussir's release of the list goes
-  along its tail in a loop, and each boxed head is released where the
-  loop reaches it (a free of its own: no leanrt free runs), first cell
-  first.
+  `18765432`. lean2rr releases the cell's fields one after the other
+  (`l2r_release_known_<type>`, Lower/Borrow).
 - `built`: the same list made by another function and dropped by `main`.
-  Natively `lean_dec`, all last first: `87654321`. lean2rr: `12345678`.
+  Natively `lean_dec`, all last first: `87654321`.
 - `pair`: a list holding one structure `{a := #[A0, A1], l := [L0, L1]}`,
-  dropped after `length`: `L1L0A1A0`, as natively. The structure is the
+  dropped after `length`: `L1L0A1A0`. The structure is the
   payload of a box, released inside a free of the runtime: its fields go
   on the stack of pending work and come back last first.
 - `typed`: the same structure in a monomorphic list type (`ALs`, whose
-  field is the record itself, no box): natively `L1L0A1A0`, lean2rr
-  `A1A0L0L1`. Reussir's release of the first cell releases the record's
-  fields in field order while no free runs: the array, a free of its own,
-  frees its elements last first (`A1A0`), then the list's handles go
-  first first (`L0L1`).
+  field is the record itself, no box): `L1L0A1A0`.
 
+History. On the Reussir base l2r-base12, Reussir's release of a record
+that user code drops went through the fields in field order, each
+runtime object a free of its own: `abdce`, `12345678` for both lists and
+`A1A0L0L1`, a documented difference with expectation files. On upstream
+Reussir 36a55a0f the record's FFI release is one free, and without the
+rule for a known constructor `list` gave `87654321`.
 With lean2rr's local Reussir drop patches (before the destructor port),
 Reussir's release of a list's first cell also released the members of
 the second cell before it drained its stack of pending work, and from

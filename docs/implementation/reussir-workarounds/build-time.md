@@ -7,10 +7,34 @@ bugs: rrc's output is correct, though a superlinear cost can make large
 builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
-lean2rr's builds use a later base, upstream `95d9a1c8` with the series
-(`./reussir` branch `l2r-base12`, `c1170ff9`); the workarounds
+lean2rr's builds use a later base, upstream `36a55a0f` with the series
+(the Reussir branch `l2r-base13-final`, `d62797ac`); the workarounds
 stay until each is removed (the removed ones are
-[at the end](#removed-workarounds)).
+[at the end](#removed-workarounds)). The measurements in this file were
+made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
+its inliner's surroundings after them (closure specialization, outlined
+drops), so the costs of the two anchor entries need one new measurement
+on `36a55a0f`; it is not made yet. What the port's gates showed
+(2026-11-18): `inline-anchors-check.sh` has the output of the base
+before. In the first gate, rrc and the link took more time for each
+program than on the base before, also with a warm texture cache; the
+largest measured cause was rrc's texture store, which rrc opened once
+for each texture
+([issue 29](../../../reussir-bugs/29-texture-store-open.md), patched in
+the series). Open build-time items on this base:
+
+- `RtOutlineStates` takes about 18 minutes in rrc and the link (1079 s
+  in the final gate, 984 s in the first one, with the same `.rr`; the
+  whole suite took 671 s on the base before). The cause is under
+  investigation.
+- On large programs rrc uses more time than on the base before (the
+  MLIR pipeline +18% for `RtTArrKinds` and +27% for lean-zip's
+  compress, one run each); the cause is not attributed.
+- The final gate's suite took 1582 s, about 690 s without
+  `RtOutlineStates`. That run had the patch, the texture store on a
+  memory file system and a quiet machine; their shares were not
+  separated.
+
 One cost here is current, with no entry in `reussir-bugs/`:
 [the inliner's copies of a callee into one function](#current-cost-the-inliner-copies-a-callee-into-every-call-of-one-function).
 The open issue files are in
@@ -213,34 +237,48 @@ lean2rr's files.
 
 ### Old issue 35 (cost): every texture was compiled again on every build
 
-- **What:** `scripts/l2r.py` sets `REUSSIR_FFI_CACHE_DIR` for rrc to
-  `runtime/leanrt/target/polyffi-cache` unless the caller sets it (empty:
-  off), so that rrc's texture cache (a local patch since 2026-10-04;
-  upstream Reussir #690, commit `84336b63`, reads the same variable) takes
-  the bitcode of
-  textures it compiled before from there. The `rustc-native-<hash>`
-  script's text names lean-runtime's build (`# lean-runtime build
-  <digest>`): rrc's key hashes the script (its path and text) and the
-  `--polyffi-libdir` directories, and cargo's build of lean-runtime (once
-  it has dependencies) puts its rlibs in none of them. The script is named
-  after a hash of its text and never changes once written (since
-  2026-10-27; before, one `rustc-native` per build directory, rewritten by
-  each build with other settings, so a concurrent build's rrc ran the
-  other build's script). A change of leanrt, lean-runtime, Reussir's runtime,
-  the texture flags or the toolchain makes a new set of entries (about 8 KB
-  each). rrc prunes
-  the directory (`llvm::pruneCache`): it removes the entries
-  (`llvmcache-*`) not read for a week and keeps their total at most
-  1 GiB. It does not remove other files, such as the `<hex>.bc` entries of
-  the old local patch (deleted once, at the move to Reussir `7954a367`).
-  A `%` in the directory's path makes #690's cache store nothing (the old
-  patch's review finding FCR-03, not in #690); lean2rr's default path
-  has none. The key hashes the rlibs' bytes, so `build_locked` runs
-  leanrt's rustc in the crate's directory (cargo, which builds
-  lean-runtime, runs rustc in lean-runtime's checkout): rustc records its
-  working directory in an rlib, and a rebuild from another directory would
-  otherwise change every key (the recorded source paths, which panic
-  messages show, stay absolute and unchanged).
+- **What:** rrc keeps the bitcode of each texture that it compiled in a
+  cache, so a later build does not run rustc for it again. On Reussir
+  `36a55a0f` the cache is always on (upstream #852): one store,
+  `rrc/cache.db` under the user's cache directory. `scripts/l2r.py` does
+  two things for it (`rrc_env`, `rustc_wrapper`):
+  - It sets `XDG_CACHE_HOME` for the rrc process to `L2R_POLYFFI_CACHE`
+    (default `runtime/leanrt/target/rrc-cache`; empty: a directory in
+    the build's temporary directory, so every texture is compiled and
+    nothing stays), and `XDG_CONFIG_HOME` to a directory inside it.
+    lean2rr's builds do not use `~/.cache/rrc`, and the settings of the
+    user's other rrc builds do not reach lean2rr's store.
+  - It names the runtime build in the path of the rustc that rrc gets.
+    rrc's key has the path of rustc, the texture's source and the rustc
+    options with the `--polyffi-libdir` paths; it does not have the
+    bytes of the libraries
+    ([issue 25](../../../reussir-bugs/25-texture-cache-key.md)). The
+    driver gives rrc the script `rustc-native-<hash of its text>`, and
+    the text has the lines `# leanrt build <digest>` and
+    `# lean-runtime build <digest>`. The leanrt digest covers leanrt's
+    sources, rustc's path and `rustc -vV`, the host CPU's features, the
+    flags, lean-runtime's digest and the name, size and time of
+    Reussir's runtime rlibs. So a
+    change of leanrt, lean-runtime, Reussir's runtime, the texture flags
+    or the toolchain gives another script path and a new set of
+    entries, and an unchanged runtime keeps the cache warm.
+  The script is named after a hash of its text and never changes once
+  written (since 2026-10-27; before, one `rustc-native` per build
+  directory, rewritten by each build with other settings, so a
+  concurrent build's rrc ran the other build's script). rrc prunes the
+  store by itself. `build_locked` runs leanrt's rustc in the crate's
+  directory (cargo, which builds lean-runtime, runs rustc in
+  lean-runtime's checkout): rustc records its working directory in an
+  rlib, and a rebuild from another directory would otherwise give other
+  bytes (the recorded source paths, which panic messages show, stay
+  absolute and unchanged).
+  History: on the bases up to `95d9a1c8` the cache was off unless
+  `REUSSIR_FFI_CACHE_DIR` named a directory (a local patch since
+  2026-10-04, then upstream #690), the driver set that variable to
+  `runtime/leanrt/target/polyffi-cache`, and rrc's key hashed the bytes
+  of the script and of the libraries, so only lean-runtime's digest
+  had to be in the script's text. rrc at `36a55a0f` does not read the
+  variable; the old directory is dead.
 - **Why:** rrc runs rustc once per texture, and lean2rr wrote the whole
   prelude into every program: about 470 rustc runs, 13 s of a small
   program's 16 s of rrc; with the cache full, 3 s (a cost, not a bug:
@@ -249,9 +287,15 @@ lean2rr's files.
   uses (a one-line program: 75 textures;
   [optional-passes.md](../optional-passes.md#only-the-prelude-functions-that-a-program-uses-are-kept-prelude-liveness)),
   so an empty cache costs much less; the cache still saves the rest.
-- **Where:** `scripts/l2r.py`: `main`, `rustc_wrapper`, `build_locked`.
-- **Remove only if:** n/a (not a workaround: it turns the cache on; an
-  rrc without a cache ignores the variable).
+- **Where:** `scripts/l2r.py`: `rrc_env`, `rrc_command`,
+  `rustc_wrapper`, `build_locked`; test
+  `tests/runtime/texture-cache-check.sh` (a changed
+  `#[inline(always)]` function of leanrt must reach the program).
+- **Remove only if:** the digest line: only if rrc's key covers the
+  contents of the library directories again. Without it a build after a
+  rebuild of leanrt or of Reussir's runtime links texture code of the
+  old runtime, with no message. The cache directory: never (it keeps
+  lean2rr's builds out of the user's shared store).
 
 ## Removed workarounds
 

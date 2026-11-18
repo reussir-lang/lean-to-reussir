@@ -5,18 +5,49 @@ never freed). With the acquire/drop expansion's default options, both
 tail-recursive and retcon drops off (TPDE mode's options), the drop of a
 cell guarded by a lock (`mutex`, `rwlock`, `flatlock`) releases the
 payload inside the critical section, and the payload's box is never
-freed. Fixed inside patch 23-e, which uses the locked-drop function
-under every option.
+freed. On the bases `l2r-base9` to `l2r-base12` it was fixed inside
+patch 23-e, which used the locked-drop function under every option.
+
+**Fixed upstream, to delete.** Upstream's drop series of 2026-11-01
+rewrote this code: its drop expansion calls a locked-drop function on
+every path (`AcquireDropExpansion.cpp`; the retcon path, the only other
+one, is deleted). Checked on 2026-11-17 on pristine upstream `36a55a0f`
+(no local patch): the repro's command gives one `reussir.token.free`,
+in `__reussir_locked_drop.backward`, which the critical section calls.
+That is the output that `run.sh` calls FIXED. Not checked again: the
+end-to-end program under ASan that first showed the 24 leaked bytes
+(it needed a local switch of rrc's pipeline to TPDE's drop options),
+and upstream's tests of locked cells. Nothing upstream names this bug;
+it went with the rewrite. The port's first gate ran `repros/run.sh` on
+pristine `36a55a0f` (2026-11-18): FIXED, one `token.free` in the
+locked-drop function. On the patched build the repro was skipped (a
+build of `rrc` and `reussir-rt` only has no `reussir-opt`); no patch of
+the series touches this code.
+
+By the README's policy, an entry that upstream fixed in full is deleted
+and its number retired. Not deleted yet (the coordinator decides). The
+deletion removes:
+
+- this file, `reussir-bugs/24-locked-drop-token-leak.md`;
+- `repros/bug24-locked-drop-token.mlir`, the function `bug24` of
+  `repros/run.sh` and `24` in its list of entries;
+- the entry's rows in the README (status table, review table);
+- the local report
+  `docs/local/reussir-bug-reports/24-locked-drop-token-leak.md`.
+
+It has no patch file of its own: its fix was a part of 23-e, which goes
+with entry 23. Number 24 is then retired. The text below is the entry
+as it was (history).
 
 ## Summary
 
-**Kind:** bug. **Status:** fixed by 23-e
-([issue 23](23-worklist-drops.md)), applied in `./reussir`'s series since
-2026-10-25 (branch `l2r-base12`, commit `09b68801`). lean2rr does not
+**Kind:** bug. **Status:** fixed upstream at `36a55a0f` (above). Before:
+fixed by 23-e ([issue 23](23-worklist-drops.md)), in the series from
+2026-10-25 to 2026-11-17 (branch `l2r-base12`, commit `09b68801`). lean2rr does not
 reach the bug: rrc's command line has no TPDE level (`-O` is `none`,
 `default`, `aggressive` or `size`), and lean2rr does not use the JIT.
 
-**Upstream (2026-10-25):** Open at 00906e38. Not reported. Found by the
+**Upstream (history, 2026-10-25):** Open at 00906e38. Not reported. Found by the
 review of 23-a to 23-j, which reached the path end to end with a local
 switch of rrc's pipeline to TPDE's drop options: ASan reports
 `24 byte(s) leaked in 1 allocation(s)` for a program that drops a
@@ -78,7 +109,7 @@ the separate function.
 ## Patch
 
 Inside 23-e
-([`patches/23-e-worklist-nullable-locked.patch`](patches/23-e-worklist-nullable-locked.patch),
+([`patches/parked/23-e-worklist-nullable-locked.patch`](patches/parked/23-e-worklist-nullable-locked.patch),
 commit `09b68801`): the critical section calls the locked-drop function
 under every option, not only under retcon drops. Inside worklist glue
 it calls a variant marked as glue, `__reussir_locked_drop.worklist`, so
@@ -102,7 +133,8 @@ and `-O aggressive`.
 
 ## Upstream note
 
-Not reported. A report would give the repro above: with retcon drops
+Not reported, and not needed any more: upstream's code at `36a55a0f`
+does what the report would ask for. A report would have given the repro above: with retcon drops
 off, `rewriteDropCell` expands the payload's drop inside the critical
 section, where its token is never freed; calling `__reussir_locked_drop`
 under every option, as the retcon path does, fixes it.

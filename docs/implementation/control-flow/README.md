@@ -7,7 +7,8 @@ to [§5.6](../../translation-plan.md#56-join-points), and "Build time" in
 [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features).
 
 - [calls-and-lets.md](calls-and-lets.md): arities, `let`s, constructors
-  that are calls, panics.
+  that are calls, boxes bound before a self call (tail recursion modulo
+  cons), panics.
 - [cases.md](cases.md): `cases` lowering and the match shapes that help
   Reussir reuse cells.
 - [join-points.md](join-points.md): the J1/J2/J1′/J3 strategy, sinking,

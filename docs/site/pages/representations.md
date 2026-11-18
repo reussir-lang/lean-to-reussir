@@ -85,7 +85,9 @@ Reussir's operators.
   box is a cell, as natively. An array of scalars is compact, and an
   array of records, numbers, strings or arrays can be typed (next
   sections). `ByteArray` and `FloatArray` hold raw bytes and floats.
-- **Reads.** Reussir has no borrowed parameters, so each read of an array
+- **Reads.** A runtime function takes its arguments owned (Reussir's
+  borrow analysis is for Reussir functions, not for the Rust body of a
+  runtime function), so each read of an array
   or string takes the container owned: an increment by the caller and a
   release in the runtime function. LLVM cancels the pair when nothing lies
   between them. Thus a read releases the container first: it gets a

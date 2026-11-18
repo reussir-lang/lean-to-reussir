@@ -8,7 +8,9 @@ outside the series ([parked option](#parked-option-16-a)). It does not
 affect lean2rr: lean2rr's builds set no address-space limit that rrc
 comes near ([lean2rr](#lean2rr)).
 
-**Upstream (2026-10-24):** Open at upstream 0378b744: the driver's stack
+**Upstream (2026-11-17):** Open at `36a55a0f`: `crates/reussir-compiler/src/main.rs` has no commit after `95d9a1c8`, and the driver's stack is still 1 GiB (read on 2026-11-17). The parked 16-a was not checked against the new base.
+
+**Upstream, earlier bases (history, 2026-10-24):** Open at upstream 0378b744: the driver's stack
 code (`crates/reussir-compiler/src/main.rs`) has no change since
 7954a367. Upstream #686
 (`3e34334f`) is our old patch 31-a, which fixed the stack overflow on

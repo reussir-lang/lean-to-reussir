@@ -18,7 +18,9 @@ back: `87654321`.
 What the test pins: the order policy of a free that starts in user code.
 A list drop that releases the head, frees the cell and then goes on to
 the tail (Reussir's drop glue), with each close done at once, closes the
-handles from the front (`12345678`). -/
+handles from the front (`12345678`: lean2rr's output on the Reussir base
+l2r-base12). lean2rr releases the list after the call of `ignore`, as one
+free that goes last pushed first: `87654321`, as natively. -/
 
 def path : System.FilePath := "dul-tmp.txt"
 

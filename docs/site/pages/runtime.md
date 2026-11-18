@@ -59,9 +59,11 @@ and several optional passes help token reuse (see
   runs the end work: promise dependents and other Lean code run only
   after the free. A release that comes while a free runs goes on the
   stack.
-- **Records.** Reussir frees a list in a loop. For other shapes (a tree,
-  a chain of closures) it releases the fields in field order and pushes
-  the child records that it must free. The last child goes on at once.
+- **Records.** Reussir frees a list in a loop. For another recursive
+  shape (a tree, a chain of closures) it puts each member that dies on
+  the pending stack, and the stack gives them back last pushed first.
+  So such a value is one free, last field first, as natively. A record
+  that is not recursive is taken apart in place, in field order.
 - **Objects of the runtime** (arrays, boxes, string blocks, task and thunk
   cells, file handles, promises) are `leanrt` types. `leanrt` pushes them
   on the same stack while a free runs. So a value deep through records,
@@ -69,26 +71,32 @@ and several optional passes help token reuse (see
 - **Order of releases.** Inside a free, file handles close (and flush) and
   promises resolve in Lean's order: last pushed, first freed. An array set
   or pop frees the record that it removes the same way. Two differences
-  stay (plan §10). When user code drops a record, no free runs at its top
-  levels, so the releases go in field order there. A value that two
+  stay (plan §10). When the generated code drops a record by itself, no
+  free runs at its top levels, so the releases go in field order there
+  (a release that lean2rr makes itself is in Lean's order). A value that two
   fields of one freed cell hold can come out at another place.
 - **Reference `set`.** `l2r_rc_set_ref` stores the new value first, then
   releases the old one as `lean_dec` does, and then the reference. So code
   that the release runs (the `sync` dependents of a promise it drops) sees
   the new value. When the set is the reference's last use, the old value is
   freed before the new one, as natively.
-- **Borrowed parameters.** Reussir has none. Natively a parameter that Lean
+- **Borrowed parameters.** Reussir source has no syntax for a borrowed
+  parameter. Natively a parameter that Lean
   borrows is released by the caller after the call. Only resources can show
   the difference (a file handle still open, a pipe not yet at end of file).
   So for a program that creates resources, lean2rr runs Lean's own borrow
   inference and keeps such arguments alive until the call returns.
+  Reussir has a borrow analysis of its own, which removes count updates
+  of an argument that the caller keeps. lean2rr's rule is not changed
+  for it yet.
 - **Values that die at the start of a branch.** When two or more values
   die at the start of a branch, Lean releases them there, the newest
   first. A matched value goes first in an arm that reads none of its
   fields, and last in an arm that reads a field. Reussir releases them
   the oldest first, and the matched value first. So for a program that
   creates resources, lean2rr releases such values itself, in Lean's
-  order (`l2r_release_after`). It does this only for the values that can
+  order (`l2r_release_after`). It releases one value that dies alone the
+  same way, so that the value is freed as Lean frees it. It does this only for the values that can
   hold a resource, by the same rule as for borrowed parameters. The step
   runs after `Outline`, on the generated code, with Reussir's liveness:
   two handles that die at the start of a branch close `21`, as natively,

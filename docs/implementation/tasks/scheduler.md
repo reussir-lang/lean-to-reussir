@@ -322,7 +322,9 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   - a handle that a drain reaches (in an array, a box, a record, list or
     tree that leanrt or Reussir's glue frees there): its close is pushed and runs at its
     place in the free (`close_deferred`), and the close asks for the end
-    work (`pending::want_end_work`). At the free's end `pending::drain`
+    work (`pending::want_end_work`). At the free's end, when the
+    outermost scope is over, Reussir's worklist calls leanrt's end work
+    (a scope-exit callback, `pending::end_work`), which
     calls `task::drained`, which runs the deferred resolutions
     (`run_deferred`) and then the hook. A free that puts off neither a
     close nor a promise runs no end work, so a program with neither pays
@@ -377,7 +379,7 @@ event loop). Paths: `runtime/leanrt/src/` unless they say otherwise. Plan
   writers point, as lean-runtime's contract says.
 - **Where:** `fs.rs`: `FileHandle`'s drop, `close_deferred`, `LastError`,
   `swap_last`; `sched.rs`: `switched`; `task.rs`: `drained`;
-  `pending.rs`: `drain`, `want_end_work`; lean-runtime's
+  `pending.rs`: `want_end_work`, `end_work`; lean-runtime's
   `src/sched/mod.rs` (`after_drain`) and `src/sched/drain.rs`
   (`run_deferred`, R4).
 - **Remove only if:** never.

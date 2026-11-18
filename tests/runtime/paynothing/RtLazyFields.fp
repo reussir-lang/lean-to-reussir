@@ -1,7 +1,7 @@
 # Pay-nothing baseline of RtLazyFields (tests/runtime/RtLazyFields.lean), arguments ''.
 # Written by tests/runtime/paynothing-check.sh --update; native allocations for comparison.
-allocs 50261
-bytes 2214160
+allocs 50364
+bytes 2219176
 native-allocs 64901
 native-bytes 2546035
 items 285
@@ -116,7 +116,7 @@ item l2r_init_done d6d469a6b8a6
 item l2r_init_failed 5c775e65f2dd
 item l2r_init_put_0 6c57e28306ae
 item l2r_io_err_«T_EST_Out_#~9fdb2bbcd367» 572330f53511
-item l2r_main_body 9573a64f2027
+item l2r_main_body eedb80edc72a
 item l2r_main_on_thread 4f4adafe091e
 item l2r_nullary_of_index_«T_List_#~aeda86a38d96» 94aed60e17ee
 item l2r_nullary_of_index_«T_T_#~88c57bff0e39» f990d51b2718
@@ -257,12 +257,12 @@ item l_balanceR___l2r_#_ 82ac5bf2f995
 item l_big___l2r_#_ 2055bd2864ce
 item l_instInhabitedT___l2r_#_ 7f674612a608
 item l_instInhabitedT___l2r_#__init 94fd285a8c68
-item l_main___l2r_#_ 6d0de1200920
+item l_main___l2r_#_ 188f0f17a118
 item l_main___l2r_#____closed__0 9908f072f8dd
 item l_main___l2r_#____closed__0_init a98d77754d15
 item l_main___l2r_#____closed__1 9565d3c59173
-item l_main___l2r_#____closed__13 804501f1be0c
-item l_main___l2r_#____closed__13_init 2c0faa7ddccc
+item l_main___l2r_#____closed__13 1c979aa4e81a
+item l_main___l2r_#____closed__13_init dc3b185201cd
 item l_main___l2r_#____closed__15 37b05420274c
 item l_main___l2r_#____closed__15_init 53c9bb1a5549
 item l_main___l2r_#____closed__17 73a77e7a835c
@@ -284,16 +284,16 @@ item l_main___l2r_#____closed__35 17f568b31d17
 item l_main___l2r_#____closed__35_init 39b590fd4994
 item l_main___l2r_#____closed__5 d56f30d7921f
 item l_main___l2r_#____closed__5_init f2268a393e78
-item l_main___l2r_#____closed__7 92ae330cefa4
-item l_main___l2r_#____closed__7_init d8e3a184f4a6
-item l_main___l2r_#____closed__9 7fcec5d4bfbd
-item l_main___l2r_#____closed__9_init edc9da0c1e2a
-item l_mergeLists___l2r_#_ ac5991352d78
+item l_main___l2r_#____closed__7 759dc5a7bd68
+item l_main___l2r_#____closed__7_init 3ec3c46a3f4e
+item l_main___l2r_#____closed__9 e72ecde680ef
+item l_main___l2r_#____closed__9_init 2444fb11d6bd
+item l_mergeLists___l2r_#_ 8be74e0a191e
 item l_mkPanicMessageWithDecl___l2r_#_ 9dc6fe993dc5
 item l_mkStdGen___l2r_#____l2r__flat dcd3cd6f3d00
 item l_mkU___l2r_#_ da7aa683dfa6
 item l_nested___l2r_#_ c2dcd6a80ea5
-item l_pairs___l2r_#_ 01e33cd4d9b7
+item l_pairs___l2r_#_ d03cff160edf
 item l_panic___at___00ByteArray_toUInt64LE_x21_spec__0___l2r_#_ 0bbcedca4180
 item l_subtrees___l2r_#____l2r__flat b3c9c34796b8
 item lean_main_entry cfcc2a3788db

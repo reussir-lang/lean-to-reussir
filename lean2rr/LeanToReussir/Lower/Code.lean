@@ -1,4 +1,5 @@
 import LeanToReussir.Lower.Hooks
+import LeanToReussir.Lower.PreBox
 
 /-! # Code -/
 
@@ -372,6 +373,9 @@ mutual
       -- `match` (Lower/IntMatch), its scrutinee and arms.
       let mut chain : Option (String × RR.Ty × IntArms) := none
       let mut litNames : Std.HashSet String := {}
+      -- The boxes bound before a self call for the constructor application
+      -- that is the next `let` (Lower/PreBox).
+      let mut preBoxed : Std.HashMap FVarId String := {}
       repeat
         let .let d k := c | break
         if (← read).intMatch then
@@ -396,7 +400,8 @@ mutual
             | some o => small.insert y (o, RR.Ty.named "Nat")
             | none => small
           | none => small
-        let ctx := { base with vars := small }
+        let ctx := { base with vars := small, preBoxed }
+        preBoxed := {}
         -- J4: a tail call that enters a state machine (`tailCallEntry`).
         if let .const f _ args _ := d.value then
           if let .return x := k then
@@ -418,7 +423,25 @@ mutual
         unless want.isEmpty do modify fun s => { s with indexWords := saved }
         for (w, n) in words do
           lets := lets.push (w, some (RR.Ty.named "u64"), .call "l2r_nat_index" #[] #[.var n])
+        -- A self call whose result the next `let`'s constructor takes, the
+        -- constructor's value being the result: the pure boxings of the
+        -- constructor's other arguments are bound before the call, so
+        -- that no call stands between the self call and the constructor
+        -- (Reussir's tail recursion modulo cons; Lower/PreBox).
+        -- The boxes are named after the call's variable (`hb815` for
+        -- `x815`, then `hb815_1`…), not by the program's counter: the
+        -- numbering of the rest of the program is as without the rule.
         let x ← fresh "x"
+        if ctx.ownFn then
+          for y in ← preBoxArgs ctx.decl retTy d k do
+            let some (n, yt) := runVars[y]? <|> outer[y]? | continue
+            if yt == RR.Ty.box then continue
+            let b ← coerce (.var n) yt RR.Ty.box
+            unless pureBoxExpr b do continue
+            noteVarUse ctx.decl y n yt
+            let hb := "hb" ++ (x.drop 1).toString ++ (if preBoxed.isEmpty then "" else s!"_{preBoxed.size}")
+            lets := lets.push (hb, some RR.Ty.box, b)
+            preBoxed := preBoxed.insert y hb
         lets := lets.push (x, some t, e)
         -- After the access, the index is its word's `Nat`: one per word,
         -- for every argument of that name (`small` holds this `let`'s).
@@ -518,7 +541,7 @@ mutual
         let vars := (params.zip (pnames.zip ptys)).foldl (fun m (p, nt) => m.insert p.fvarId nt) (unitVars ctx.vars)
         -- A function of its own: the names before a rebinding
         -- (`indexOrig`) are not captured.
-        let bodyCtx := { ctx with vars, indexOrig := {} }
+        let bodyCtx := { ctx with vars, indexOrig := {}, ownFn := false }
         let body ← lowerCode bodyCtx outlined retTy d.value
         let bound := pnames.foldl (·.insert ·) ({} : Std.HashSet String)
         -- Captured in the order of their first use in the body, not by
@@ -604,7 +627,7 @@ mutual
         t := c
       if layers.isEmpty then
         throwError "lean2rr: local function {d.binderName}: every domain of its type {d.type} is phantom (internal error: its last domain stays, `keptErasedHead`)"
-      let bodyCtx := { ctx with vars, indexOrig := {} }
+      let bodyCtx := { ctx with vars, indexOrig := {}, ownFn := false }
       let body ← lowerCode bodyCtx outlined t d.value
       let mut lam := RR.Expr.block { body with lets := pre ++ body.lets }
       for (n, lt) in layers.reverse do
@@ -862,6 +885,7 @@ def lowerDeclCode (d : Decl .pure) (su : DeclSetup) (sm? : Option StateMachine)
   let lc ← read
   let ctx : CodeCtx := { vars := su.vars, sm := sm?, loop := su.loop, used := codeUses su.body {},
                          boxedOnly := ← boxedOnlyVars su.body su.ret, decl := d.name, cycles,
+                         ownFn := sm?.isNone,
                          intInfo := if lc.intMatch then intMatchInfo lc.decls su.body else {},
                          loopAdds := loopCarriedAdds lc.keys d.name d.params su.body }
   -- The body of a declaration without parameters runs once: a constant

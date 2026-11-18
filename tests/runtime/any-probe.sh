@@ -54,34 +54,22 @@ PY
 WRAP=-Wl
 for s in mi_malloc mi_malloc_small mi_zalloc mi_zalloc_small mi_calloc mi_mallocn mi_malloc_aligned \
          mi_zalloc_aligned mi_realloc mi_realloc_aligned mi_free; do WRAP="$WRAP,--wrap=$s"; done
-# build OUT [RRC FLAGS...]: scripts/l2r.py's build of prog.rr (leanrt,
-# lean-runtime, Reussir's integer runtime before GMP, so that GMP is static
-# as there, lean2rr's rrc flags), plus the tracker.
+# build OUT [RRC FLAGS...]: scripts/l2r.py's build of prog.rr (its rrc
+# command line and environment: leanrt, lean-runtime, Reussir's integer
+# runtime before GMP, lean2rr's rrc flags), plus the tracker.
 build() {
 python3 - "$ROOT/scripts" "$WRAP" "$@" <<'PY'
 import os, subprocess, sys, tempfile
 sys.path.insert(0, sys.argv[1]); import l2r
-env = dict(os.environ)
-env.setdefault("REUSSIR_FFI_CACHE_DIR", str(l2r.LEANRT_OUT / "polyffi-cache"))
 rlib, lr = l2r.build_leanrt()
-rt, deps = l2r.rt_dirs()
-tl = l2r.run([str(l2r.RUSTC), "--print", "target-libdir"]).stdout.strip()
-libdirs = [rt, deps, l2r.Path(tl), rlib.parent]
 with tempfile.TemporaryDirectory(dir=".") as tmp:
-    cmd = ([str(l2r.REUSSIR / "build" / "bin" / "rrc"), os.path.abspath("prog.rr"), "-o", os.path.abspath(sys.argv[3]),
-            "--emit", "executable", "-O", "aggressive", "--polyffi-rust-path", str(l2r.rustc_wrapper(rlib, lr))]
-           + [a for d in libdirs for a in ("--polyffi-libdir", str(d))]
-           + ["--link-lib", str(rlib)]
-           + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
-           # Reussir's integer runtime before GMP, as scripts/l2r.py
-           # (rcgmp_runtime_link: GMP static by its place on the line).
-           + ["--link-lib", str(l2r.rcgmp_runtime_link(libdirs, os.path.abspath(tmp)))]
-           + ["--link-lib", str(l2r.gmp_archive()), "--no-pack-record-members",
-              "--relocation-mode", "pic", "--reuse-across-call",
-              "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")]
-           # Nat and Int: Reussir's core package, as scripts/l2r.py.
-           + ["--package-name", "prog", "--extern", f"core={l2r.core_interface()}"]
+    tmp = os.path.abspath(tmp)
+    # The driver's own rrc line and environment (l2r.rrc_command, l2r.rrc_env:
+    # the link order with GMP static, the drop order, the texture cache).
+    cmd = (l2r.rrc_command(os.path.abspath("prog.rr"), os.path.abspath(sys.argv[3]), rlib, lr, tmp)
+           + ["--reuse-across-call", "--link-arg=" + sys.argv[2], "--link-arg=" + os.path.abspath("alloclive.o")]
            + sys.argv[4:])
+    env = l2r.rrc_env(dict(os.environ), tmp)
     sys.exit(subprocess.run(cmd, env=env, cwd=tmp).returncode)
 PY
 }

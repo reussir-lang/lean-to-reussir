@@ -147,15 +147,18 @@ schedules native Lean can produce. See
   that starts at an object of the runtime: an array, a box, the old value
   of a reference, a task or thunk cell. An array set or pop that frees the
   last reference to a record releases its fields last first, as Lean
-  does. When user code drops a record of handles by itself, no runtime
-  free runs. Reussir releases the fields in field order, and each handle,
-  box or array that it reaches is a free of its own. So the order is
-  field order at every record level. A `List IO.FS.Handle` `L0 … L7`
-  closes `L0 L1 … L7` (natively `L0 L7 … L1` where Lean knows the
-  constructor, else `L7 … L0`). A structure
-  `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` of handles closes
-  `a b d c e` (natively `e d c b a`). Unresolved promises are resolved in
-  the same order. When a cell is used again for a new value, it releases
+  does. Where lean2rr releases a value itself (after a call that borrows
+  the value, or at the start of a branch), the order
+  is Lean's too. Lean releases a value whose constructor it knows field
+  by field, and any other value as one free. A `List IO.FS.Handle`
+  `L0 … L7` built where it is released closes `L0 L7 … L1`, and one from
+  another function closes `L7 … L0`. One difference stays. When the
+  generated code drops a matched value in its `match` by itself, no free
+  runs. Reussir releases the fields in field order, and each handle, box
+  or array that it reaches is a free of its own. So the order is field
+  order at every record level: a matched value `mk {x, y} h` of handles
+  whose arms read no field closes `x y h` (natively `h y x`). When a
+  cell is used again for a new value, it releases
   the fields that the code does not read. Lean releases them the last
   first, and lean2rr in field order: a structure of the handles `A` and
   `B` closes `AB` (natively `BA`).
@@ -180,9 +183,13 @@ schedules native Lean can produce. See
   there the matched value keeps its place in the order, and lean2rr counts
   it as the newest. And when lean2rr copies a join point's body to a jump
   under a `match` that Lean does not have around the join point, that
-  matched value counts as the newest there too. The order shows only when
-  the matched value holds a resource and another resource dies at the
-  same place.
+  matched value counts as the newest there too. In the last two shapes
+  the order shows only when the matched value holds a resource and
+  another resource dies at the same place. In the first shape the order
+  of the matched value's own fields shows too: in a branch that reads
+  no field, Lean releases the value as a whole, its fields in field
+  order, and lean2rr releases the fields that the `match` bound, the
+  newest first (`abc` natively, `cba` through lean2rr).
 - **Release time of pure tasks.** A pure task (`Task.spawn`, `Task.map`,
   `Task.bind`) that the program drops before a worker starts it is deleted
   and does not run, as natively. But lean2rr releases the task at another
@@ -238,7 +245,11 @@ all the fields of the value.
   Aborting.`, exit 134). lean2rr adds no recursion of its own: conversions,
   list folds and the constant walk are loops. Reussir frees records in a
   loop or through a pending stack, which the runtime shares for its own
-  objects.
+  objects. A recursion whose result goes into a constructor (a map over
+  a list written by hand) is a loop through lean2rr and a recursion
+  natively, when no call stands between the self call and the
+  constructor. So such a function also runs at depths where native Lean
+  reports a stack overflow.
 - **Build time.** rrc compiles about 80 small functions per second. A
   program with thousands of constants takes minutes (natively seconds).
 
@@ -279,7 +290,7 @@ all the fields of the value.
 | Reads take their container owned | an increment and a release per read, unless LLVM cancels them |
 | One-block arrays | a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late |
 | Constants read in a loop | one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load |
-| No borrowed parameters | a traversal that keeps the nodes it visits writes counts native Lean only reads (about 1.5×) |
+| Borrowed parameters | a traversal that keeps the nodes it visits wrote counts that native Lean only reads (about 1.5×). Reussir's borrow analysis is new; this cost is not measured again yet |
 | Dropping a deep value that is not a list (a snoc list, a tree deep along its left child) | Reussir's work list keeps one slot per level while it frees the value (heap memory, freed at the end); native Lean links its to-do list through the freed objects |
 
 ## Lean bugs we do not reproduce

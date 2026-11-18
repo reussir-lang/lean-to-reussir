@@ -742,9 +742,10 @@ impl Drop for Promise {
         // (test `RtPromiseDepFreeInDrain`). Otherwise nothing is pending on
         // the thread (`crate::pending`: the stack is empty while no free
         // runs), so it is resolved now and its dependents run, as natively
-        // where user code drops the promise itself. Where Reussir's glue reaches it in
-        // a record that user code frees, that is in field order, natively
-        // last field first (plan §10; test `RtPromiseDropRecordPending`).
+        // where user code drops the promise itself. A record that user
+        // code frees is released through its FFI release, which opens a
+        // free: a promise in it is put off like any other, in native's
+        // order (plan §10; test `RtPromiseDropRecordPending`).
         if crate::drop::active() {
             crate::drop::defer(self.cell, defer_promise_drop);
             return;
@@ -771,14 +772,16 @@ impl Drop for Promise {
 ///   (the drain's end work, `drained`). With the store made there too, the other contexts see
 ///   the promise unresolved until its dependents run, as natively (the
 ///   store-with-resolve shape of the design's review RW1-05).
-unsafe extern "C" fn defer_promise_drop(cell: usize) -> bool {
+unsafe extern "C" fn defer_promise_drop(cell: *mut std::ffi::c_void) -> crate::pending::StepStatus {
+    let cell = cell as usize;
     if promise_resolved(cell) {
-        return drop_promise_now(cell);
+        drop_promise_now(cell);
+        return crate::pending::StepStatus::Complete;
     }
     defer_to_drain_end(Deferred::Call(Box::new(move || unsafe {
         drop_promise_now(cell);
     })));
-    true
+    crate::pending::StepStatus::Complete
 }
 
 /// Put `d` off to the end of the running drain (lean-runtime's `defer`),

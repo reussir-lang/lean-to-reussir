@@ -17,7 +17,9 @@ bug 9 (fixed upstream, Reussir #653)) used the helper that 01-a added
 helper itself, so it no longer needs 01-a. 01-a, which adds the helper
 too, no longer applies as it is on `l2r-base2` (nor on `l2r-trim`).
 
-**Upstream (2026-10-24):** Not rechecked for this shape on upstream 7954a367 or 0378b744; open. No upstream commit from 7954a367 to 0378b744 changes `TokenReuse` or `RcDispatchFusion`. The parked 01-a does not apply to 0378b744 (checked 2026-10-24).
+**Upstream (2026-11-18):** Reproduces on `36a55a0f` (the port's first gate, 2026-11-18, `repros/run.sh`): 4.79x on pristine upstream, 4.71x on the patched base. No patch. Upstream changed token reuse after `95d9a1c8` (#968: the token compatibility rules moved to `lib/Analysis/TokenCompatibility.cpp`, and decrements whose token nothing can take are outlined); the issue is still there.
+
+**Upstream, earlier bases (history, 2026-10-24):** Not rechecked for this shape on upstream 7954a367 or 0378b744; open. No upstream commit from 7954a367 to 0378b744 changes `TokenReuse` or `RcDispatchFusion`. The parked 01-a does not apply to 0378b744 (checked 2026-10-24).
 
 **Verdict: missed optimization, not a bug.** The output is correct.
 `RcDispatchFusion`'s `fuseArm` stops at region-bearing or opaque ops before

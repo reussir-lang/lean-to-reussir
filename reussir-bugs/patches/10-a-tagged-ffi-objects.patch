@@ -1,77 +1,113 @@
-From f4cd7729fb41c5465bae79c199a8ffd4f2596941 Mon Sep 17 00:00:00 2001
+From 169d8db583a12f579752a4a9dfbb2b7588efd293 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Fri, 2 Oct 2026 23:42:56 -0400
-Subject: [PATCH 01/24] l2r-local: tagged FFI objects: an odd handle is an
- immediate, not counted
+Subject: [PATCH 01/12] [ffi] support tagged foreign handles
 
 `#[ffi(rust = "path", tagged)]` declares an opaque record whose handle may
-also be an odd word that is not a pointer: an immediate the foreign side
-encodes in the handle itself (lean2rr's one-word `Nat`/`Int`: a small value
-is `(v << 1) | 1`, a big one a pointer to a counted big number, as Lean's
-runtime boxes scalars).
+also be an immediate: an odd word that the foreign side encodes in the
+handle itself and that is not a pointer.
 
-The flag travels with the record (semi `Record::ffi_tagged`, HIR
-`{ ffi tagged "path" }`, MIR `RecordLayout::Opaque { tagged }` printed as
+The flag travels with the record (HIR `{ ffi tagged "path" }`, MIR
 `{ "path", @hook, tagged }`) to the dialect type
-`!reussir.ffi_object<"path", @hook, tagged = true>` (a default-valued
-parameter; the C API and the Rust bindings take it, and C++ code that
-builds the type without it, `FFIObjectType::get(ctx, name, hook)`, gets an
-untagged object). In the LLVM lowering,
-`rc.inc` of a tagged object updates the count only when the handle's low
-bit is clear, and `rc.dec` calls the cleanup hook only then; nothing is
-loaded from the handle before the test. Real boxes are at least 4-aligned
-(the `u32` count at offset 0), so the low bit is free. Untagged objects
-lower as before.
+`!reussir.ffi_object<"path", @hook, tagged = true>`, a default-valued
+parameter, so existing builders and textual IR give an untagged object.
+In the LLVM lowering, `rc.inc` updates the count and `rc.dec` calls the
+cleanup hook only when the handle's low bit is clear; nothing is loaded
+through the handle before the test. Untagged objects lower as before.
 
-The two other places that read the count of an arbitrary rc value skip
-tagged objects: the optional nonlinear-FFI instrumentation, and the
-unique-carrying recursion analysis (`rc.assume_unique` on a carried
-argument). Otherwise an `ffi_object` handle is never read through: it
-produces no reuse token, is not deferred by the drop glue, and reaches
-foreign code only as its Rust type, which knows the encoding.
+No other operation may access the count of a tagged object, and
+`RcType::isTaggedFFIObject` is the one predicate for it. The verifier
+rejects `rc.fetch`, `rc.fetch_sub`, `rc.set`, `rc.is_unique`,
+`rc.assume_unique` and `rc.defer` on such a value. The passes that emit
+them for an arbitrary rc value skip it: the nonlinear-FFI
+instrumentation, the unique-carrying recursion analysis, and the worklist
+drop expansion, which emits a plain `rc.dec` and, in the array task under
+forward drop order, sends every element to its release function. The
+checker and monomorphization reject `core::object::is_unique` on a tagged
+record; `unsafe_inc` and `unsafe_dec` stay allowed.
 
-Tests: conversion/tagged_ffi_object.mlir (guarded inc/dec, unguarded for
-an untagged object, the type's textual form),
-conversion/instrument_nonlinear_ffi_tagged.mlir, frontend/ffi_tagged.rr
-(the attribute through HIR, MIR and MLIR), HIR and MIR round-trip unit
+The foreign type must be a pointer-sized scalar that promises neither
+alignment nor dereferenceability: an integer or a raw pointer, not a
+reference, a `Box`, or an `Option` of one, whose `align` attribute would
+let LLVM fold the low-bit test. This is the declaration's contract. The
+texture of the drop hook checks only what it can: the type has the size
+and the alignment of `usize`.
+
+An atomic tagged object cannot come from the frontend but is valid MLIR,
+as an atomic untagged one is, so its paths are kept and tested.
+
+Tests: basic/failure/tagged_ffi_count_ops.mlir (the verifier rule);
+conversion/tagged_ffi_object.mlir, instrument_nonlinear_ffi_tagged.mlir,
+worklist_tagged_ffi.mlir, worklist_tagged_ffi_array.mlir (no count access,
+plain and atomic); frontend/ffi_tagged.rr (HIR, MIR, MLIR),
+ffi_tagged_worklist.rr and ffi_tagged_array.rr (records, enums and arrays
+of immediates run under both drop orders), ffi_tagged_is_unique.rr,
+ffi_tagged_word.rr (`u8` refused); HIR and MIR round-trip unit
 tests.
 ---
  crates/reussir-backend-sys/src/lib.rs         |  1 +
  crates/reussir-backend/src/dialect/ty.rs      |  6 +-
  crates/reussir-codegen/src/lower/ty.rs        | 11 ++-
+ crates/reussir-core/src/full/ffi.rs           | 14 ++-
  crates/reussir-core/src/full/mir.rs           |  5 +-
- crates/reussir-core/src/full/mir/build.rs     | 19 ++++++
- .../reussir-core/src/full/mir/grammar.lalrpop |  8 ++-
+ crates/reussir-core/src/full/mir/build.rs     | 20 ++++
+ .../reussir-core/src/full/mir/grammar.lalrpop |  8 +-
  crates/reussir-core/src/full/mir/print.rs     |  6 +-
  crates/reussir-core/src/full/mir/raw.rs       |  4 +-
- crates/reussir-core/src/full/mono.rs          |  1 +
+ crates/reussir-core/src/full/mono.rs          |  9 +-
  crates/reussir-core/src/ir_lex.rs             |  2 +
- crates/reussir-core/src/semi/ctxt.rs          | 38 +++++++----
+ crates/reussir-core/src/semi/check.rs         |  4 +-
+ crates/reussir-core/src/semi/ctxt.rs          | 41 ++++++---
  crates/reussir-core/src/semi/externs.rs       |  1 +
- crates/reussir-core/src/semi/hir/build.rs     | 29 ++++++--
- .../reussir-core/src/semi/hir/grammar.lalrpop |  9 ++-
- crates/reussir-core/src/semi/hir/print.rs     |  9 ++-
+ crates/reussir-core/src/semi/hir/build.rs     | 29 +++++-
+ .../reussir-core/src/semi/hir/grammar.lalrpop |  9 +-
+ crates/reussir-core/src/semi/hir/print.rs     |  9 +-
  crates/reussir-core/src/semi/hir/raw.rs       |  5 +-
  crates/reussir-core/src/semi/repl.rs          |  1 +
+ crates/reussir-core/src/semi/ty_eval.rs       | 19 ++++
  include/Reussir-c/Types.h                     |  7 +-
- include/Reussir/IR/ReussirTypes.td            | 21 +++++-
+ include/Reussir/IR/ReussirOps.td              |  2 +
+ include/Reussir/IR/ReussirTypes.td            | 23 ++++-
  lib/CAPI/Types.cpp                            |  4 +-
- .../BasicOpsLowering/BasicOpsLowering.cpp     | 57 ++++++++++++++++
- .../InstrumentNonlinearFFI.cpp                |  4 ++
- .../UniqueCarryingRecursionAnalysis.cpp       |  7 +-
- .../instrument_nonlinear_ffi_tagged.mlir      | 33 +++++++++
- .../conversion/tagged_ffi_object.mlir         | 68 +++++++++++++++++++
- tests/integration/frontend/ffi_tagged.rr      | 40 +++++++++++
- 26 files changed, 355 insertions(+), 41 deletions(-)
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 14 ++-
+ .../BasicOpsLowering/BasicOpsLowering.cpp     | 48 ++++++++++
+ .../InstrumentNonlinearFFI.cpp                |  2 +
+ lib/IR/ReussirOps.cpp                         | 22 ++++-
+ lib/IR/ReussirTypes.cpp                       |  5 +
+ .../UniqueCarryingRecursionAnalysis.cpp       |  2 +-
+ .../basic/failure/tagged_ffi_count_ops.mlir   | 91 +++++++++++++++++++
+ .../instrument_nonlinear_ffi_tagged.mlir      | 33 +++++++
+ .../conversion/tagged_ffi_object.mlir         | 68 ++++++++++++++
+ .../conversion/worklist_tagged_ffi.mlir       | 40 ++++++++
+ .../conversion/worklist_tagged_ffi_array.mlir | 55 +++++++++++
+ .../Inputs/ffi_tagged_is_unique_generic.rr    |  5 +
+ tests/integration/frontend/ffi_tagged.rr      | 40 ++++++++
+ tests/integration/frontend/ffi_tagged_array.c |  3 +
+ .../integration/frontend/ffi_tagged_array.rr  | 62 +++++++++++++
+ .../frontend/ffi_tagged_is_unique.rr          | 22 +++++
+ tests/integration/frontend/ffi_tagged_word.rr | 16 ++++
+ .../frontend/ffi_tagged_worklist.c            |  3 +
+ .../frontend/ffi_tagged_worklist.rr           | 21 +++++
+ 43 files changed, 742 insertions(+), 50 deletions(-)
+ create mode 100644 tests/integration/basic/failure/tagged_ffi_count_ops.mlir
  create mode 100644 tests/integration/conversion/instrument_nonlinear_ffi_tagged.mlir
  create mode 100644 tests/integration/conversion/tagged_ffi_object.mlir
+ create mode 100644 tests/integration/conversion/worklist_tagged_ffi.mlir
+ create mode 100644 tests/integration/conversion/worklist_tagged_ffi_array.mlir
+ create mode 100644 tests/integration/frontend/Inputs/ffi_tagged_is_unique_generic.rr
  create mode 100644 tests/integration/frontend/ffi_tagged.rr
+ create mode 100644 tests/integration/frontend/ffi_tagged_array.c
+ create mode 100644 tests/integration/frontend/ffi_tagged_array.rr
+ create mode 100644 tests/integration/frontend/ffi_tagged_is_unique.rr
+ create mode 100644 tests/integration/frontend/ffi_tagged_word.rr
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.c
+ create mode 100644 tests/integration/frontend/ffi_tagged_worklist.rr
 
 diff --git a/crates/reussir-backend-sys/src/lib.rs b/crates/reussir-backend-sys/src/lib.rs
-index f519f306..a5ceff86 100644
+index 0526ce22..2c5ec079 100644
 --- a/crates/reussir-backend-sys/src/lib.rs
 +++ b/crates/reussir-backend-sys/src/lib.rs
-@@ -393,6 +393,7 @@ unsafe extern "C" {
+@@ -511,6 +511,7 @@ unsafe extern "C" {
          context: MlirContext,
          ffi_name: MlirAttribute,
          cleanup_hook: MlirAttribute,
@@ -80,10 +116,10 @@ index f519f306..a5ceff86 100644
      pub fn reussirStrTypeGet(context: MlirContext, life_scope: ReussirLifeScope) -> MlirType;
      pub fn reussirConstSeqTypeGet(element_type: MlirType) -> MlirType;
 diff --git a/crates/reussir-backend/src/dialect/ty.rs b/crates/reussir-backend/src/dialect/ty.rs
-index f5116f30..f3a18e1d 100644
+index c5f3561e..82946045 100644
 --- a/crates/reussir-backend/src/dialect/ty.rs
 +++ b/crates/reussir-backend/src/dialect/ty.rs
-@@ -235,17 +235,21 @@ pub fn array<'c>(shape: &[i64], element: Type<'c>) -> Type<'c> {
+@@ -259,17 +259,21 @@ pub fn array<'c>(shape: &[i64], element: Type<'c>) -> Type<'c> {
      }
  }
  
@@ -107,10 +143,10 @@ index f5116f30..f3a18e1d 100644
      }
  }
 diff --git a/crates/reussir-codegen/src/lower/ty.rs b/crates/reussir-codegen/src/lower/ty.rs
-index fb24f3b0..3b11b53f 100644
+index 182a04ca..d688ecb4 100644
 --- a/crates/reussir-codegen/src/lower/ty.rs
 +++ b/crates/reussir-codegen/src/lower/ty.rs
-@@ -353,11 +353,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -400,11 +400,17 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
      }
  
      /// The `!reussir.ffi_object<…>` payload type of an opaque instance.
@@ -129,7 +165,7 @@ index fb24f3b0..3b11b53f 100644
          )
      }
  
-@@ -444,7 +450,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
+@@ -491,7 +497,8 @@ impl<'c, 'p, 'tcx> TypeCtx<'c, 'p, 'tcx> {
              mir::RecordLayout::Opaque {
                  rust_name,
                  drop_hook,
@@ -139,11 +175,45 @@ index fb24f3b0..3b11b53f 100644
          };
          let name = StringAttribute::new(self.context, self.program.symbol(rec.symbol));
          let record = record_incomplete(self.context, name, kind);
+diff --git a/crates/reussir-core/src/full/ffi.rs b/crates/reussir-core/src/full/ffi.rs
+index 839bfbc6..076f75eb 100644
+--- a/crates/reussir-core/src/full/ffi.rs
++++ b/crates/reussir-core/src/full/ffi.rs
+@@ -632,16 +632,28 @@ pub fn import_texture(
+ 
+ /// Render the drop-hook texture for one opaque `#[ffi]` record instance:
+ /// a wrapper that takes the foreign value by transparent pointer and drops
+-/// it. Called by the `rc.dec` lowering with the rc pointer.
++/// it. Called by the `rc.dec` lowering with the rc pointer. A `tagged`
++/// handle is one word; that its type promises neither alignment nor
++/// dereferenceability is the declaration's contract, which is not checked.
+ pub fn drop_texture(
+     decls: &BTreeMap<String, WrapperDecl<'_>>,
+     hook: &str,
+     rust_name: &str,
++    tagged: bool,
+ ) -> String {
+     let mut out = texture_head(&[]);
+     for decl in decls.values() {
+         out.push_str(&decl.render());
+     }
++    if tagged {
++        let _ = writeln!(
++            out,
++            "const _: () = assert!(\n    \
++             ::std::mem::size_of::<{rust_name}>() == ::std::mem::size_of::<usize>()\n        \
++             && ::std::mem::align_of::<{rust_name}>() == ::std::mem::align_of::<usize>(),\n    \
++             \"a tagged foreign type must be a pointer-sized integer or raw pointer\"\n);"
++        );
++    }
+     let _ = write!(
+         out,
+         "#[linkage = \"weak_odr\"]\n#[unsafe(no_mangle)]\n\
 diff --git a/crates/reussir-core/src/full/mir.rs b/crates/reussir-core/src/full/mir.rs
-index 61ee1dab..a305b111 100644
+index 17fafac1..3f24b538 100644
 --- a/crates/reussir-core/src/full/mir.rs
 +++ b/crates/reussir-core/src/full/mir.rs
-@@ -204,10 +204,13 @@ pub enum RecordLayout<'tcx> {
+@@ -209,10 +209,13 @@ pub enum RecordLayout<'tcx> {
      Compound(&'tcx [Member<'tcx>]),
      Variant(&'tcx [VariantDef<'tcx>]),
      /// An opaque `#[ffi]` record instance: the rendered Rust type name (the
@@ -159,10 +229,10 @@ index 61ee1dab..a305b111 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mir/build.rs b/crates/reussir-core/src/full/mir/build.rs
-index 82c7ef5f..be718288 100644
+index 8be85670..0d7deee6 100644
 --- a/crates/reussir-core/src/full/mir/build.rs
 +++ b/crates/reussir-core/src/full/mir/build.rs
-@@ -203,9 +203,11 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -208,9 +208,11 @@ impl<'tcx> Builder<'_, 'tcx> {
              raw::RecordBody::Opaque {
                  rust_name,
                  drop_hook,
@@ -174,11 +244,12 @@ index 82c7ef5f..be718288 100644
              },
          };
          mir::RecordInstance {
-@@ -1243,6 +1245,23 @@ mod tests {
-         );
+@@ -1326,6 +1328,24 @@ mod tests {
+         });
      }
  
 +    #[test]
++
 +    fn roundtrips_tagged_ffi_records() {
 +        // A `tagged` opaque layout (a handle may be an odd immediate word)
 +        // keeps its flag through the textual form.
@@ -199,10 +270,10 @@ index 82c7ef5f..be718288 100644
      fn roundtrips_ffi_trait_glue() {
          let text = concat!(
 diff --git a/crates/reussir-core/src/full/mir/grammar.lalrpop b/crates/reussir-core/src/full/mir/grammar.lalrpop
-index 08dc9156..8792cf13 100644
+index bdc90b15..4d60c081 100644
 --- a/crates/reussir-core/src/full/mir/grammar.lalrpop
 +++ b/crates/reussir-core/src/full/mir/grammar.lalrpop
-@@ -83,11 +83,13 @@ RecordBody: (raw::Ty, raw::RecordBody, bool) = {
+@@ -101,11 +101,13 @@ RecordBody: (raw::Ty, raw::RecordBody, bool) = {
      "struct" <t:Ty> "{" <ms:Comma<Member>> "}" => (t, raw::RecordBody::Compound(ms), false),
      "enum" <fixed:"fixed"?> <t:Ty> "{" <vs:Comma<Variant>> "}"
          => (t, raw::RecordBody::Variant(vs), fixed.is_some()),
@@ -218,7 +289,7 @@ index 08dc9156..8792cf13 100644
          }, false),
  };
  
-@@ -135,6 +137,7 @@ BareName: &'input str = {
+@@ -211,6 +213,7 @@ BareName: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -226,7 +297,7 @@ index 08dc9156..8792cf13 100644
      "texture" => "texture",
      "glue" => "glue",
      "trait" => "trait",
-@@ -498,6 +501,7 @@ extern {
+@@ -601,6 +604,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -235,10 +306,10 @@ index 08dc9156..8792cf13 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/full/mir/print.rs b/crates/reussir-core/src/full/mir/print.rs
-index 9c74bffb..922e87a1 100644
+index 26f092d6..50985f99 100644
 --- a/crates/reussir-core/src/full/mir/print.rs
 +++ b/crates/reussir-core/src/full/mir/print.rs
-@@ -237,13 +237,15 @@ impl Render<'_> {
+@@ -255,13 +255,15 @@ impl Render<'_> {
              mir::RecordLayout::Opaque {
                  rust_name,
                  drop_hook,
@@ -257,10 +328,10 @@ index 9c74bffb..922e87a1 100644
              }
          };
 diff --git a/crates/reussir-core/src/full/mir/raw.rs b/crates/reussir-core/src/full/mir/raw.rs
-index fd85b28f..82f68441 100644
+index 0b63968e..31e77ab6 100644
 --- a/crates/reussir-core/src/full/mir/raw.rs
 +++ b/crates/reussir-core/src/full/mir/raw.rs
-@@ -114,10 +114,12 @@ pub enum RecordBody {
+@@ -115,10 +115,12 @@ pub enum RecordBody {
      Compound(Vec<Member>),
      /// An enum: one compound sub-record per variant, in declaration order.
      Variant(Vec<Variant>),
@@ -275,22 +346,40 @@ index fd85b28f..82f68441 100644
  }
  
 diff --git a/crates/reussir-core/src/full/mono.rs b/crates/reussir-core/src/full/mono.rs
-index 242a1872..d7db2d5b 100644
+index b036304a..ca3663af 100644
 --- a/crates/reussir-core/src/full/mono.rs
 +++ b/crates/reussir-core/src/full/mono.rs
-@@ -810,6 +810,7 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+@@ -819,10 +819,12 @@ pub fn monomorphize<'a, 'tcx>(input: &MonoInput<'a, 'tcx>) -> (mir::Program<'tcx
+             let layout = match fctx.rust_name(ty, &mut decls) {
+                 Ok(rust_name) => {
+                     let hook_name = format!("{}_ffi_drop", driver.symbols.resolve(&symbol.0));
+-                    let texture = ffi_render::drop_texture(&decls, &hook_name, &rust_name);
++                    let texture =
++                        ffi_render::drop_texture(&decls, &hook_name, &rust_name, record.ffi_tagged);
                      let layout = mir::RecordLayout::Opaque {
                          rust_name: mir::Symbol(driver.symbols.get_or_intern(&rust_name)),
                          drop_hook: mir::Symbol(driver.symbols.get_or_intern(&hook_name)),
 +                        tagged: record.ffi_tagged,
                      };
                      ffi_textures.push(mir::FfiTexture {
-                         anchor: symbol,
+                         release_bindings: decls
+@@ -3117,7 +3119,10 @@ impl<'a, 'tcx> Driver<'a, 'tcx> {
+                         |def| self.record_defs.get(&def).map(|r| r.default_cap),
+                         ty,
+                         func,
+-                    ) {
++                    )
++                    .or_else(|| {
++                        crate::semi::ty_eval::tagged_handle_rejection(self.record_defs, ty, func)
++                    }) {
+                         self.error(span, format!("`core::object::{}` can only be applied to an RC-managed object; rejected in this instantiation: {reason}", func.as_str()));
+                     }
+                 }
 diff --git a/crates/reussir-core/src/ir_lex.rs b/crates/reussir-core/src/ir_lex.rs
-index 57d7b1b2..e38bafca 100644
+index 6fda9e0c..983dd05e 100644
 --- a/crates/reussir-core/src/ir_lex.rs
 +++ b/crates/reussir-core/src/ir_lex.rs
-@@ -36,6 +36,8 @@ pub enum Token<'a> {
+@@ -40,6 +40,8 @@ pub enum Token<'a> {
      Field,
      #[token("fixed")]
      Fixed,
@@ -299,22 +388,40 @@ index 57d7b1b2..e38bafca 100644
      #[token("extern")]
      Extern,
      #[token("trampoline")]
+diff --git a/crates/reussir-core/src/semi/check.rs b/crates/reussir-core/src/semi/check.rs
+index 87116527..735ef5dd 100644
+--- a/crates/reussir-core/src/semi/check.rs
++++ b/crates/reussir-core/src/semi/check.rs
+@@ -5166,7 +5166,9 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+             |def| self.records.get(&def).map(|r| r.default_cap),
+             ty,
+             func,
+-        ) {
++        )
++        .or_else(|| crate::semi::ty_eval::tagged_handle_rejection(&self.records, ty, func))
++        {
+             self.error(arg.span, format!("`core::object::{name}` can only be applied to an RC-managed object; found `{}` ({reason})", self.ty_display(ty)));
+             return self.poison(span);
+         }
 diff --git a/crates/reussir-core/src/semi/ctxt.rs b/crates/reussir-core/src/semi/ctxt.rs
-index 1f5f9af4..c3805710 100644
+index 3c77ce28..6c92469e 100644
 --- a/crates/reussir-core/src/semi/ctxt.rs
 +++ b/crates/reussir-core/src/semi/ctxt.rs
-@@ -83,7 +83,9 @@ enum FfiSpec {
+@@ -83,7 +83,12 @@ enum FfiSpec {
      Import,
      /// `#[ffi(rust = "path")]` — an opaque record aliasing the Rust type
      /// at `path` (a `#[repr(transparent)]` wrapper over `reussir_rt`'s `Rc`).
 -    Opaque(String),
 +    /// With `#[ffi(rust = "path", tagged)]` (the flag) a handle may also be
-+    /// an odd immediate word, which reference counting skips.
++    /// an odd immediate word, which reference counting skips. The Rust type
++    /// must then be a pointer-sized scalar that promises neither alignment
++    /// nor dereferenceability: an integer or a raw pointer, not a reference,
++    /// a `Box`, or an `Option` of one.
 +    Opaque(String, bool),
  }
  
  /// One `import` binding: within `file`, reference paths headed by `name`
-@@ -199,6 +201,10 @@ pub struct Record<'tcx> {
+@@ -199,6 +204,10 @@ pub struct Record<'tcx> {
      /// `#[ffi(rust = "path")]`: the Rust type path this opaque record
      /// aliases. Set exactly when `fields` is [`RecordFields::Opaque`].
      pub ffi: Option<String>,
@@ -325,7 +432,7 @@ index 1f5f9af4..c3805710 100644
      pub fields: Option<RecordFields<'tcx>>,
      /// Generics that must be instantiated regional because they appear as the
      /// element of a `[field]` link (e.g. `inner: [field] T`). Checked at the
-@@ -2526,9 +2532,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2769,9 +2778,10 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
          seen && valid
      }
  
@@ -339,7 +446,7 @@ index 1f5f9af4..c3805710 100644
      fn ffi_attr(&mut self, attrs: &[surface::Attribute]) -> Option<FfiSpec> {
          let mut spec = None;
          for attr in attrs {
-@@ -2543,12 +2550,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2786,12 +2796,15 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              match (attr.args.as_slice(), attr.values.as_slice()) {
                  ([arg], []) if self.sym(*arg) == "import" => spec = Some(FfiSpec::Import),
                  ([], [(k, path)]) if self.sym(*k) == "rust" => {
@@ -358,7 +465,7 @@ index 1f5f9af4..c3805710 100644
                  ),
              }
          }
-@@ -2654,13 +2664,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2899,13 +2912,14 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      }
  
      /// Check the `#[ffi(rust = "path")]` rules on a record and return the
@@ -375,7 +482,7 @@ index 1f5f9af4..c3805710 100644
          let opaque = matches!(rec.fields, surface::RecordFields::Opaque);
          let Some(spec) = ffi else {
              if opaque {
-@@ -2672,7 +2683,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2917,7 +2931,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              }
              return None;
          };
@@ -384,7 +491,7 @@ index 1f5f9af4..c3805710 100644
              self.error(span, "`#[ffi(import)]` may only be attached to a function");
              return None;
          };
-@@ -2689,7 +2700,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -2934,7 +2948,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              self.error(span, "an `#[ffi(rust = ...)]` record is always `[shared]`");
              return None;
          }
@@ -393,7 +500,7 @@ index 1f5f9af4..c3805710 100644
      }
  
      /// Check the `#[ffi(import)]` rules on a function; returns whether the
-@@ -2888,7 +2899,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -3133,7 +3147,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
      fn scan_record(
          &mut self,
          rec: &surface::Record,
@@ -402,7 +509,7 @@ index 1f5f9af4..c3805710 100644
          span: Option<Span>,
      ) -> Option<DefId> {
          let ty_params = self.collect_generics(&rec.ty_params, span);
-@@ -2937,7 +2948,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -3182,7 +3196,8 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
              repr_fixed,
              placement: rec.placement.clone(),
              launch: rec.launch,
@@ -413,10 +520,10 @@ index 1f5f9af4..c3805710 100644
              regional_generics: Vec::new(),
              span,
 diff --git a/crates/reussir-core/src/semi/externs.rs b/crates/reussir-core/src/semi/externs.rs
-index 13a3aac0..a1e3bf14 100644
+index cabccb69..14cdec6c 100644
 --- a/crates/reussir-core/src/semi/externs.rs
 +++ b/crates/reussir-core/src/semi/externs.rs
-@@ -273,6 +273,7 @@ impl<'tcx> Elaborator<'_, 'tcx> {
+@@ -283,6 +283,7 @@ impl<'tcx> Elaborator<'_, 'tcx> {
                  placement: rec.placement.clone(),
                  launch: rec.launch,
                  ffi: rec.ffi.clone(),
@@ -425,10 +532,10 @@ index 13a3aac0..a1e3bf14 100644
                  regional_generics: remap.generic_ids(&rec.regional_generics),
                  span: rec.span,
 diff --git a/crates/reussir-core/src/semi/hir/build.rs b/crates/reussir-core/src/semi/hir/build.rs
-index 85090047..1c336d46 100644
+index 9dde44bc..582dbe36 100644
 --- a/crates/reussir-core/src/semi/hir/build.rs
 +++ b/crates/reussir-core/src/semi/hir/build.rs
-@@ -643,11 +643,11 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -670,11 +670,11 @@ impl<'tcx> Builder<'_, 'tcx> {
                      })
                      .collect(),
              ),
@@ -444,7 +551,7 @@ index 85090047..1c336d46 100644
          };
          let record = Record {
              def,
-@@ -664,6 +664,7 @@ impl<'tcx> Builder<'_, 'tcx> {
+@@ -691,6 +691,7 @@ impl<'tcx> Builder<'_, 'tcx> {
              placement: r.placement.clone(),
              launch: r.launch,
              ffi,
@@ -452,7 +559,7 @@ index 85090047..1c336d46 100644
              fields: Some(fields),
              regional_generics,
              span: span_of(r.span),
-@@ -1764,6 +1765,26 @@ mod tests {
+@@ -1865,6 +1866,26 @@ mod tests {
          );
      }
  
@@ -480,10 +587,10 @@ index 85090047..1c336d46 100644
      fn roundtrips_cells() {
          roundtrip(
 diff --git a/crates/reussir-core/src/semi/hir/grammar.lalrpop b/crates/reussir-core/src/semi/hir/grammar.lalrpop
-index 3488ae0b..08ee0519 100644
+index 49af7214..46fac1d2 100644
 --- a/crates/reussir-core/src/semi/hir/grammar.lalrpop
 +++ b/crates/reussir-core/src/semi/hir/grammar.lalrpop
-@@ -79,9 +79,10 @@ RecordDecl: raw::Record = {
+@@ -83,9 +83,10 @@ RecordDecl: raw::Record = {
          span: loc.and_then(|l| l.1),
          body: raw::RecordBody::Compound(ms),
      },
@@ -496,7 +603,7 @@ index 3488ae0b..08ee0519 100644
      => raw::Record {
          lang,
          placement: placement.map(|p| unescape_debug_str(p).into_owned()), launch,
-@@ -93,7 +94,7 @@ RecordDecl: raw::Record = {
+@@ -97,7 +98,7 @@ RecordDecl: raw::Record = {
          generics: generics.unwrap_or_default(),
          file: loc.map(|l| l.0),
          span: loc.and_then(|l| l.1),
@@ -505,7 +612,7 @@ index 3488ae0b..08ee0519 100644
      },
      // Only an enum may carry the `fixed` marker (`#[repr(fixed)]`).
      <lang:LangAttr?> <placement:("placement" <"quoted">)?> <launch:LaunchConfig?> <p:"pub"?> <default_cap:DefaultCap> "enum" <fixed:"fixed"?> "#" <path:QPath> <generics:Generics?> <loc:ItemLoc?>
-@@ -375,6 +376,7 @@ Name: &'input str = {
+@@ -401,6 +402,7 @@ Name: &'input str = {
      "transform_anchor" => "transform_anchor",
      "import" => "import",
      "ffi" => "ffi",
@@ -513,7 +620,7 @@ index 3488ae0b..08ee0519 100644
      "texture" => "texture",
      "glue" => "glue",
      "interface" => "interface",
-@@ -689,6 +691,7 @@ extern {
+@@ -791,6 +793,7 @@ extern {
          "shared" => Token::Shared,
          "field" => Token::Field,
          "fixed" => Token::Fixed,
@@ -522,10 +629,10 @@ index 3488ae0b..08ee0519 100644
          "trampoline" => Token::Trampoline,
          "import" => Token::Import,
 diff --git a/crates/reussir-core/src/semi/hir/print.rs b/crates/reussir-core/src/semi/hir/print.rs
-index 47e15a57..fea53db3 100644
+index 689d93f5..af1f4106 100644
 --- a/crates/reussir-core/src/semi/hir/print.rs
 +++ b/crates/reussir-core/src/semi/hir/print.rs
-@@ -508,8 +508,13 @@ impl<'a> Printer<'a> {
+@@ -527,8 +527,13 @@ impl<'a> Printer<'a> {
                      .collect();
                  comma_sep(parts)
              }
@@ -542,10 +649,10 @@ index 47e15a57..fea53db3 100644
              None => Doc::Null,
          }
 diff --git a/crates/reussir-core/src/semi/hir/raw.rs b/crates/reussir-core/src/semi/hir/raw.rs
-index dbf38010..33273498 100644
+index 8ae68273..621ee292 100644
 --- a/crates/reussir-core/src/semi/hir/raw.rs
 +++ b/crates/reussir-core/src/semi/hir/raw.rs
-@@ -208,8 +208,9 @@ pub enum RecordBody {
+@@ -220,8 +220,9 @@ pub enum RecordBody {
      Compound(Vec<Member>),
      /// An enum's variants, in declaration order.
      Variant(Vec<Variant>),
@@ -558,10 +665,10 @@ index dbf38010..33273498 100644
  
  /// One compound field: a `pub` visibility marker, an optional source name
 diff --git a/crates/reussir-core/src/semi/repl.rs b/crates/reussir-core/src/semi/repl.rs
-index 9c51a65e..6886bda4 100644
+index ae9aa4c2..e3278846 100644
 --- a/crates/reussir-core/src/semi/repl.rs
 +++ b/crates/reussir-core/src/semi/repl.rs
-@@ -404,6 +404,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
+@@ -410,6 +410,7 @@ impl<'a, 'tcx> Elaborator<'a, 'tcx> {
                  placement: None,
                  launch: None,
                  ffi: None,
@@ -569,11 +676,41 @@ index 9c51a65e..6886bda4 100644
                  fields: Some(RecordFields::Named(vec![(
                      field,
                      self.tcx.mk_generic(generic),
+diff --git a/crates/reussir-core/src/semi/ty_eval.rs b/crates/reussir-core/src/semi/ty_eval.rs
+index 3cf28434..c8631de0 100644
+--- a/crates/reussir-core/src/semi/ty_eval.rs
++++ b/crates/reussir-core/src/semi/ty_eval.rs
+@@ -1080,6 +1080,25 @@ pub fn object_operand_rejection(
+     }
+ }
+ 
++/// `is_unique` reads the count through the handle; a `tagged` foreign handle
++/// may be an immediate, which has none. Retain and release test the handle.
++pub fn tagged_handle_rejection(
++    records: &rustc_hash::FxHashMap<DefId, super::ctxt::Record<'_>>,
++    ty: Ty<'_>,
++    op: crate::intrinsic::ObjectFn,
++) -> Option<&'static str> {
++    match *ty.kind() {
++        TyKind::Arc(inner) => tagged_handle_rejection(records, inner, op),
++        TyKind::Record { def, .. }
++            if op == crate::intrinsic::ObjectFn::IsUnique
++                && records.get(&def).is_some_and(|r| r.ffi_tagged) =>
++        {
++            Some("a tagged foreign handle may be an immediate")
++        }
++        _ => None,
++    }
++}
++
+ /// Why a value of `ty` cannot be read or written through a pointer, or
+ /// `None` when it can: the accessed types are the integers, the
+ /// floating-point numbers, `bool`, `char`, the pointers themselves, and
 diff --git a/include/Reussir-c/Types.h b/include/Reussir-c/Types.h
-index d1fe8804..d8bce1ad 100644
+index 614138fd..2d674713 100644
 --- a/include/Reussir-c/Types.h
 +++ b/include/Reussir-c/Types.h
-@@ -146,10 +146,11 @@ MLIR_CAPI_EXPORTED MlirType reussirArrayTypeGetWithTarget(intptr_t nDims,
+@@ -163,10 +163,11 @@ MLIR_CAPI_EXPORTED MlirType reussirArrayTypeGetWithTarget(intptr_t nDims,
  MlirType reussirArrayTypeGet(intptr_t nDims, int64_t const *shape,
                               MlirType elementType);
  
@@ -588,29 +725,51 @@ index d1fe8804..d8bce1ad 100644
  
  // `!reussir.str<lifeScope>`.
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope);
+diff --git a/include/Reussir/IR/ReussirOps.td b/include/Reussir/IR/ReussirOps.td
+index fe168410..12b18fe2 100644
+--- a/include/Reussir/IR/ReussirOps.td
++++ b/include/Reussir/IR/ReussirOps.td
+@@ -613,6 +613,8 @@ def ReussirRcFetchOp
+   let assemblyFormat = [{
+     `(` $rcPtr `:` qualified(type($rcPtr)) `)` `:` type($refCount) attr-dict
+   }];
++
++  let hasVerifier = 1;
+ }
+ 
+ def ReussirRcFetchSubOp : ReussirRcOp<"fetch_sub", []> {
 diff --git a/include/Reussir/IR/ReussirTypes.td b/include/Reussir/IR/ReussirTypes.td
-index 602c61a3..33fe7f6c 100644
+index a876a250..2df14e7b 100644
 --- a/include/Reussir/IR/ReussirTypes.td
 +++ b/include/Reussir/IR/ReussirTypes.td
-@@ -728,10 +728,27 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
+@@ -324,6 +324,9 @@ def ReussirRcType
+     /// top byte, and a nonatomic refcount. Decrementing refcount stores on
+     /// such values must be steered when the scheme is enabled.
+     bool mayCarrySpecialPointerTag() const;
++    /// Whether the payload is a `tagged` FFI object. Its handle may be an
++    /// immediate, so only `rc.inc` and `rc.dec` may access its refcount.
++    bool isTaggedFFIObject() const;
+   }];
+ }
+ //===----------------------------------------------------------------------===//
+@@ -731,10 +734,26 @@ def ReussirFFIObjectType : ReussirType<"FFIObject", "ffi_object",
      refcount the foreign `Rc` wrapper pins at offset 0. The payload behind
      the header stays opaque — debug info describing a boxed variable is the
      client, and it renders the box as that visible header.
 +
-+    A `tagged` object (`#[ffi(rust = "...", tagged)]`) may also be an odd
-+    word that is not a pointer at all: an immediate the foreign side
-+    encodes in the handle itself (e.g. a small integer `(v << 1) | 1`, as
-+    Lean's runtime boxes scalars). Its `rc.inc` touches the refcount only
-+    when the low bit is clear, and its `rc.dec` calls the cleanup hook only
-+    then; an immediate is never dereferenced. Real boxes are at least
-+    4-aligned (the `u32` refcount), so the low bit is free.
++    The handle of a `tagged` object (`#[ffi(rust = "...", tagged)]`) may
++    also be an immediate: an odd word that is not a pointer. `rc.inc` and
++    `rc.dec` test the low bit and leave an immediate alone; no other
++    operation may access the refcount. The foreign type must be a
++    pointer-sized scalar that promises neither alignment nor
++    dereferenceability: an integer or a raw pointer, not a reference, a
++    `Box`, or an `Option` of one.
    }];
    let parameters = (ins "::mlir::StringAttr":$ffiName,
 -      "::mlir::FlatSymbolRefAttr":$cleanupHook);
 -  let assemblyFormat = "`<` $ffiName `,` $cleanupHook `>`";
 +      "::mlir::FlatSymbolRefAttr":$cleanupHook,
 +      DefaultValuedParameter<"bool", "false">:$tagged);
-+  // Without the flag (the type's form before `tagged`): an untagged object.
 +  let builders = [
 +    TypeBuilder<(ins "::mlir::StringAttr":$ffiName,
 +                     "::mlir::FlatSymbolRefAttr":$cleanupHook), [{
@@ -623,10 +782,10 @@ index 602c61a3..33fe7f6c 100644
  
  def ReussirStrType : ReussirType<"Str", "str",
 diff --git a/lib/CAPI/Types.cpp b/lib/CAPI/Types.cpp
-index cb9115e6..1cb126cc 100644
+index 00bc3041..f776c7d7 100644
 --- a/lib/CAPI/Types.cpp
 +++ b/lib/CAPI/Types.cpp
-@@ -252,10 +252,10 @@ MlirType reussirArrayTypeGet(intptr_t nDims, int64_t const *shape,
+@@ -296,10 +296,10 @@ MlirType reussirArrayTypeGet(intptr_t nDims, int64_t const *shape,
  }
  
  MlirType reussirFFIObjectTypeGet(MlirContext context, MlirAttribute ffiName,
@@ -639,20 +798,56 @@ index cb9115e6..1cb126cc 100644
  }
  
  MlirType reussirStrTypeGet(MlirContext context, ReussirLifeScope lifeScope) {
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index f1f0fb93..7ceeb564 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -383,6 +383,9 @@ public:
+             builder, loc, nullable.getPtrTy(), child));
+       });
+     auto type = llvm::cast<RcType>(child.getType());
++    // The release of a tagged handle tests it.
++    if (type.isTaggedFFIObject())
++      return mlir::arith::ConstantIntOp::create(builder, loc, i1, 1);
+     auto test = [&]() -> mlir::Value {
+       bool atomic = type.getAtomicKind() == AtomicKind::atomic;
+       mlir::Value count =
+@@ -527,7 +530,9 @@ public:
+   mlir::func::FuncOp releaseFunction(RcType type) {
+     return function(type, WorklistRole::Release, [&](mlir::Value arg) {
+       if (llvm::isa<FFIObjectType, ClosureType>(type.getElementType())) {
+-        if (type.getAtomicKind() == AtomicKind::atomic)
++        // No `rc.fetch_sub` precedes the release of a tagged handle.
++        if (type.getAtomicKind() == AtomicKind::atomic &&
++            !type.isTaggedFFIObject())
+           ReussirRcIncOp::create(builder, loc, arg);
+         auto dec = ReussirRcDecOp::create(builder, loc, NullableType{}, arg,
+                                           mlir::IntegerAttr{},
+@@ -744,6 +749,13 @@ void emitWorklistDecrement(mlir::Value rc, mlir::Location loc,
+                            mlir::SymbolTableCollection *symbols, bool run,
+                            bool tailRecursiveDrops) {
+   auto type = llvm::cast<RcType>(rc.getType());
++  if (type.isTaggedFFIObject()) {
++    auto dec =
++        ReussirRcDecOp::create(rewriter, loc, NullableType{}, rc,
++                               mlir::IntegerAttr{}, mlir::DenseI64ArrayAttr{});
++    dec->setAttr(REUSSIR_NO_DEFER, rewriter.getUnitAttr());
++    return;
++  }
+   auto module = rewriter.getInsertionBlock()
+                     ->getParentOp()
+                     ->getParentOfType<mlir::ModuleOp>();
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 1440c929..48fe2248 100644
+index ac1774ef..7f8a8128 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-@@ -267,6 +267,45 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
+@@ -268,6 +268,37 @@ void emitGuardedStore(mlir::ConversionPatternRewriter &rewriter,
    rewriter.setInsertionPointToStart(contBlock);
  }
  
-+// A `tagged` ffi_object handle whose low bit is set is an immediate (an
-+// odd word the foreign side encodes in the handle itself), not a box:
-+// reference counting must neither touch nor free it. Splits the current
-+// block so that what the caller emits next runs only for a real box (low
-+// bit clear) and returns the block to resume at; the caller closes the
-+// guard with `endRealBoxGuard`. Nothing is dereferenced before the test.
++// Splits the block so that what the caller emits next runs only when the
++// tagged FFI handle `ptr` is a box (low bit clear), not an immediate. Returns
++// the block to resume at, for `endRealBoxGuard`.
 +mlir::Block *beginRealBoxGuard(mlir::ConversionPatternRewriter &rewriter,
 +                               mlir::Location loc, mlir::Value ptr) {
 +  auto i64 = rewriter.getI64Type();
@@ -681,27 +876,21 @@ index 1440c929..48fe2248 100644
 +  rewriter.setInsertionPointToStart(contBlock);
 +}
 +
-+bool isTaggedFFIObject(RcType rcType) {
-+  auto ffiTy = mlir::dyn_cast<FFIObjectType>(rcType.getElementType());
-+  return ffiTy && ffiTy.getTagged();
-+}
-+
  void ensureRuntimeFunctions(mlir::ModuleOp module,
                              const mlir::LLVMTypeConverter &converter);
  
-@@ -1648,6 +1687,11 @@ struct ReussirRcIncConversionPattern
+@@ -1693,6 +1724,10 @@ struct ReussirRcIncConversionPattern
        return mlir::success();
      }
      mlir::Value refcntPtr;
-+    // A tagged FFI object may be an immediate: the increment below runs only
-+    // for a real box.
++    // An immediate has no count to increment.
 +    mlir::Block *taggedCont = nullptr;
-+    if (isTaggedFFIObject(rcPtrTy))
++    if (rcPtrTy.isTaggedFFIObject())
 +      taggedCont = beginRealBoxGuard(rewriter, op.getLoc(), adaptor.getRcPtr());
      // If inner element type is a FFI object, we do not reuse gep to expose
      // the struct.
      if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
-@@ -1722,6 +1766,8 @@ struct ReussirRcIncConversionPattern
+@@ -1767,6 +1802,8 @@ struct ReussirRcIncConversionPattern
            isTaggedImmediate(top, op.getLoc(), rewriter));
      }
      mlir::LLVM::AssumeOp::create(rewriter, op.getLoc(), geOne);
@@ -710,12 +899,12 @@ index 1440c929..48fe2248 100644
  
      rewriter.eraseOp(op);
      return mlir::success();
-@@ -2510,6 +2556,17 @@ struct ReussirRcDecOpConversionPattern
+@@ -2545,6 +2582,17 @@ struct ReussirRcDecOpConversionPattern
      }
-     if (auto eleTy = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
-       mlir::FlatSymbolRefAttr cleanupHook = eleTy.getCleanupHook();
-+      if (eleTy.getTagged()) {
-+        // An immediate is not a box: only a real one reaches the hook.
+     if (auto ffi = mlir::dyn_cast<FFIObjectType>(rcPtrTy.getElementType())) {
+       mlir::FlatSymbolRefAttr cleanupHook = ffi.getCleanupHook();
++      if (ffi.getTagged()) {
++        // Only a box reaches the hook.
 +        mlir::Block *cont =
 +            beginRealBoxGuard(rewriter, op.getLoc(), adaptor.getRcPtr());
 +        mlir::func::CallOp::create(rewriter, op.getLoc(), cleanupHook,
@@ -729,38 +918,219 @@ index 1440c929..48fe2248 100644
            op, cleanupHook, mlir::TypeRange{},
            mlir::ValueRange{adaptor.getRcPtr()});
 diff --git a/lib/Conversion/InstrumentNonlinearFFI/InstrumentNonlinearFFI.cpp b/lib/Conversion/InstrumentNonlinearFFI/InstrumentNonlinearFFI.cpp
-index 50f73cc7..06170a82 100644
+index 50f73cc7..ed7c011d 100644
 --- a/lib/Conversion/InstrumentNonlinearFFI/InstrumentNonlinearFFI.cpp
 +++ b/lib/Conversion/InstrumentNonlinearFFI/InstrumentNonlinearFFI.cpp
-@@ -179,6 +179,10 @@ struct InstrumentNonlinearFFIPass
+@@ -179,6 +179,8 @@ struct InstrumentNonlinearFFIPass
            continue;
          if (!llvm::isa<FFIObjectType, ArrayType>(rcType.getElementType()))
            continue;
-+        // A tagged object may be an immediate, which has no count to read.
-+        if (auto ffiTy = llvm::dyn_cast<FFIObjectType>(rcType.getElementType());
-+            ffiTy && ffiTy.getTagged())
++        if (rcType.isTaggedFFIObject())
 +          continue;
          instrumentOperand(module, call, operand);
        }
      }
+diff --git a/lib/IR/ReussirOps.cpp b/lib/IR/ReussirOps.cpp
+index 3decf670..de733efc 100644
+--- a/lib/IR/ReussirOps.cpp
++++ b/lib/IR/ReussirOps.cpp
+@@ -512,6 +512,13 @@ static mlir::LogicalResult verifyNonnegativeCount(mlir::Operation *op,
+   return mlir::success();
+ }
+ 
++// Only `rc.inc` and `rc.dec` test a tagged FFI handle for an immediate.
++static mlir::LogicalResult verifyCountAccess(mlir::Operation *op, RcType type) {
++  if (type.isTaggedFFIObject())
++    return op->emitOpError("cannot access the count of a tagged FFI object");
++  return mlir::success();
++}
++
+ mlir::LogicalResult ReussirRcIncOp::verify() {
+   if (mlir::failed(verifyNonnegativeCount(getOperation(), getDelta(),
+                                           "acquisition delta")))
+@@ -547,6 +554,10 @@ void ReussirRcIsUniqueOp::getEffects(
+   getRcCountReadEffects(getRcPtrMutable(), effects);
+ }
+ 
++mlir::LogicalResult ReussirRcFetchOp::verify() {
++  return verifyCountAccess(getOperation(), getRcPtr().getType());
++}
++
+ //===----------------------------------------------------------------------===//
+ // RcFetchSubOp verification
+ //===----------------------------------------------------------------------===//
+@@ -558,7 +569,7 @@ mlir::LogicalResult ReussirRcFetchSubOp::verify() {
+   if (rcType.getCapability() == reussir::Capability::flex ||
+       rcType.getCapability() == reussir::Capability::rigid)
+     return emitOpError("fetch_sub requires a shared RC pointer");
+-  return mlir::success();
++  return verifyCountAccess(getOperation(), rcType);
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -569,7 +580,7 @@ mlir::LogicalResult ReussirRcSetOp::verify() {
+   // atomic boxes decrement through `rc.fetch_sub` instead.
+   if (getRcPtr().getType().getAtomicKind() == AtomicKind::atomic)
+     return emitOpError("cannot blind-store the count of an atomic RC pointer");
+-  return mlir::success();
++  return verifyCountAccess(getOperation(), getRcPtr().getType());
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -1230,7 +1241,7 @@ mlir::LogicalResult ReussirRcIsUniqueOp::verify() {
+                        "(shared capability), ")
+            << "got: " << stringifyCapability(rcType.getCapability());
+ 
+-  return mlir::success();
++  return verifyCountAccess(getOperation(), rcType);
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -1244,7 +1255,7 @@ mlir::LogicalResult ReussirRcAssumeUniqueOp::verify() {
+                        "(shared capability), ")
+            << "got: " << stringifyCapability(rcType.getCapability());
+ 
+-  return mlir::success();
++  return verifyCountAccess(getOperation(), rcType);
+ }
+ 
+ //===----------------------------------------------------------------------===//
+@@ -4326,6 +4337,9 @@ mlir::LogicalResult
+ ReussirRcDeferOp::verifySymbolUses(mlir::SymbolTableCollection &symbols) {
+   if (getBox().getType().getCapability() != Capability::shared)
+     return emitOpError("requires a shared RC box");
++  // The pending links live in the box header.
++  if (mlir::failed(verifyCountAccess(getOperation(), getBox().getType())))
++    return mlir::failure();
+   return verifyDropCallback(*this, getReleaseAttr(),
+                             mlir::TypeRange{getBox().getType()}, symbols);
+ }
+diff --git a/lib/IR/ReussirTypes.cpp b/lib/IR/ReussirTypes.cpp
+index 61622e0b..73f97ace 100644
+--- a/lib/IR/ReussirTypes.cpp
++++ b/lib/IR/ReussirTypes.cpp
+@@ -1106,6 +1106,11 @@ RcBoxType RcType::getInnerBoxType() const {
+   return RcBoxType::get(getContext(), eleTy, isFlexOrRigid);
+ }
+ 
++bool RcType::isTaggedFFIObject() const {
++  auto ffi = llvm::dyn_cast<FFIObjectType>(getElementType());
++  return ffi && ffi.getTagged();
++}
++
+ bool RcType::mayCarrySpecialPointerTag() const {
+   // Plain shared boxes only: the frontend leaves their capability
+   // `unspecified` (regional flavors are the annotated ones), and every other
 diff --git a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-index d096b2c4..66837180 100644
+index 561ec25f..34626799 100644
 --- a/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
 +++ b/lib/Transformation/UniqueCarryingRecursionAnalysis/UniqueCarryingRecursionAnalysis.cpp
-@@ -211,7 +211,12 @@ static bool isRcType(mlir::Type type) { return llvm::isa<RcType>(type); }
+@@ -212,7 +212,7 @@ static bool isRcType(mlir::Type type) { return llvm::isa<RcType>(type); }
  
  static bool isAssumableRcType(mlir::Type type) {
    auto rcType = llvm::dyn_cast<RcType>(type);
 -  return rcType && !rcType.isRegional();
-+  if (!rcType || rcType.isRegional())
-+    return false;
-+  // `rc.assume_unique` reads the count: a tagged FFI object may be an
-+  // immediate, which has none.
-+  auto ffiTy = llvm::dyn_cast<FFIObjectType>(rcType.getElementType());
-+  return !(ffiTy && ffiTy.getTagged());
++  return rcType && !rcType.isRegional() && !rcType.isTaggedFFIObject();
  }
  
  static bool hasRcResults(mlir::TypeRange types) {
+diff --git a/tests/integration/basic/failure/tagged_ffi_count_ops.mlir b/tests/integration/basic/failure/tagged_ffi_count_ops.mlir
+new file mode 100644
+index 00000000..d1410239
+--- /dev/null
++++ b/tests/integration/basic/failure/tagged_ffi_count_ops.mlir
+@@ -0,0 +1,91 @@
++// RUN: %reussir-opt %s -verify-diagnostics --split-input-file
++
++// A tagged FFI handle may be an immediate, which has no count: only `rc.inc`
++// and `rc.dec` test for one.
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++!plain = !reussir.rc<!reussir.ffi_object<"Plain", @plain_drop>>
++
++module {
++  func.func private @word_drop(!word)
++  func.func private @plain_drop(!plain)
++  func.func @allowed(%w : !word, %p : !plain) -> index {
++    reussir.rc.inc(%w : !word)
++    reussir.rc.dec(%w : !word)
++    %c = reussir.rc.fetch(%p : !plain) : index
++    reussir.rc.set(%p : !plain, %c : index)
++    return %c : index
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++module {
++  func.func private @word_drop(!word)
++  func.func @fetch(%w : !word) -> index {
++    // expected-error @+1 {{'reussir.rc.fetch' op cannot access the count of a tagged FFI object}}
++    %c = reussir.rc.fetch(%w : !word) : index
++    return %c : index
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true> shared atomic>
++module {
++  func.func private @word_drop(!word)
++  func.func @fetch_sub(%w : !word) -> index {
++    // expected-error @+1 {{'reussir.rc.fetch_sub' op cannot access the count of a tagged FFI object}}
++    %c = reussir.rc.fetch_sub(%w : !word) : index
++    return %c : index
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++module {
++  func.func private @word_drop(!word)
++  func.func @set(%w : !word, %c : index) {
++    // expected-error @+1 {{'reussir.rc.set' op cannot access the count of a tagged FFI object}}
++    reussir.rc.set(%w : !word, %c : index)
++    return
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++module {
++  func.func private @word_drop(!word)
++  func.func @is_unique(%w : !word) -> i1 {
++    // expected-error @+1 {{'reussir.rc.is_unique' op cannot access the count of a tagged FFI object}}
++    %u = reussir.rc.is_unique(%w : !word) : i1
++    return %u : i1
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++module {
++  func.func private @word_drop(!word)
++  func.func @assume_unique(%w : !word) {
++    // expected-error @+1 {{'reussir.rc.assume_unique' op cannot access the count of a tagged FFI object}}
++    reussir.rc.assume_unique(%w : !word)
++    return
++  }
++}
++
++// -----
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true> shared>
++module {
++  func.func private @word_drop(!word)
++  func.func @defer(%w : !word) {
++    // expected-error @+1 {{'reussir.rc.defer' op cannot access the count of a tagged FFI object}}
++    reussir.rc.defer @word_drop(%w : !word)
++    return
++  }
++}
 diff --git a/tests/integration/conversion/instrument_nonlinear_ffi_tagged.mlir b/tests/integration/conversion/instrument_nonlinear_ffi_tagged.mlir
 new file mode 100644
 index 00000000..93422c76
@@ -874,9 +1244,127 @@ index 00000000..275984dc
 +    return
 +  }
 +}
+diff --git a/tests/integration/conversion/worklist_tagged_ffi.mlir b/tests/integration/conversion/worklist_tagged_ffi.mlir
+new file mode 100644
+index 00000000..3e6ec43c
+--- /dev/null
++++ b/tests/integration/conversion/worklist_tagged_ffi.mlir
+@@ -0,0 +1,40 @@
++// RUN: %reussir-opt %s --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' --verify-each | %FileCheck %s
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++!ref = !reussir.ref<!word unspecified>
++!nullable = !reussir.nullable<!word>
++!nullable_ref = !reussir.ref<!nullable unspecified>
++
++module attributes {reussir.drop_order = "backward"} {
++  func.func private @word_drop(!word)
++
++  // CHECK-LABEL: func.func @direct
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @direct(%w: !word) attributes {reussir.worklist_drop} {
++    reussir.rc.dec(%w : !word)
++    return
++  }
++
++  // CHECK-LABEL: func.func @from_ref
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @from_ref(%w: !ref) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%w : !ref)
++    return
++  }
++
++  // CHECK-LABEL: func.func @from_nullable_ref
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: reussir.rc.dec
++  // CHECK-NOT: reussir.rc.fetch
++  // CHECK: return
++  func.func @from_nullable_ref(%w: !nullable_ref) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%w : !nullable_ref)
++    return
++  }
++}
+diff --git a/tests/integration/conversion/worklist_tagged_ffi_array.mlir b/tests/integration/conversion/worklist_tagged_ffi_array.mlir
+new file mode 100644
+index 00000000..e33518c0
+--- /dev/null
++++ b/tests/integration/conversion/worklist_tagged_ffi_array.mlir
+@@ -0,0 +1,55 @@
++// RUN: %reussir-opt %s --split-input-file --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true drop-order=forward' --verify-each | %FileCheck %s
++
++// An array of tagged handles: no element's count is read or written. Each
++// element goes to its release function, whose `rc.dec` tests the handle.
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true>>
++!array = !reussir.array<? x !word>
++
++module {
++  func.func private @word_drop(!word)
++  func.func @drop_array(%ref: !reussir.ref<!array>) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%ref : !reussir.ref<!array>)
++    return
++  }
++}
++
++// CHECK-LABEL: func.func private @_RNvC{{[0-9]+}}REUSSIR_DROP_release_forward{{[A-Za-z0-9_]+}}(
++// CHECK-NOT: reussir.rc.inc
++// CHECK: reussir.rc.dec
++// CHECK-LABEL: func.func private @_RNvC{{[0-9]+}}REUSSIR_DROP_array_forward{{[A-Za-z0-9_]+}}(
++// CHECK: scf.while
++// CHECK: reussir.ref.load
++// CHECK-NOT: reussir.rc.fetch
++// CHECK-NOT: reussir.rc.set
++// CHECK: reussir.drop.defer_indexed
++// CHECK-NEXT: reussir.drop.defer @_RNvC{{[0-9]+}}REUSSIR_DROP_release_forward{{[A-Za-z0-9_]+}}
++// CHECK-NOT: reussir.rc.fetch
++// CHECK-NOT: reussir.rc.set
++// CHECK: scf.yield
++
++// -----
++
++// Atomic: no `rc.fetch_sub` precedes the release, so it retains nothing.
++
++!word = !reussir.rc<!reussir.ffi_object<"Word", @word_drop, tagged = true> shared atomic>
++!nullable = !reussir.nullable<!word>
++!array = !reussir.array<? x !nullable>
++
++module {
++  func.func private @word_drop(!word)
++  func.func @drop_nullable_array(%ref: !reussir.ref<!array unspecified atomic>) attributes {reussir.worklist_drop} {
++    reussir.ref.drop(%ref : !reussir.ref<!array unspecified atomic>)
++    return
++  }
++}
++
++// CHECK-LABEL: func.func private @_RNvC{{[0-9]+}}REUSSIR_DROP_release_forward{{[A-Za-z0-9_]+}}(
++// CHECK-NOT: reussir.rc.inc
++// CHECK: reussir.rc.dec
++// CHECK-LABEL: func.func private @_RNvC{{[0-9]+}}REUSSIR_DROP_array_forward{{[A-Za-z0-9_]+}}(
++// CHECK: reussir.nullable.check
++// CHECK-NOT: reussir.rc.fetch_sub
++// CHECK: reussir.drop.defer @_RNvC{{[0-9]+}}REUSSIR_DROP_release_forward{{[A-Za-z0-9_]+}}
++// CHECK-NOT: reussir.rc.fetch_sub
++// CHECK: scf.yield
+diff --git a/tests/integration/frontend/Inputs/ffi_tagged_is_unique_generic.rr b/tests/integration/frontend/Inputs/ffi_tagged_is_unique_generic.rr
+new file mode 100644
+index 00000000..d98d5583
+--- /dev/null
++++ b/tests/integration/frontend/Inputs/ffi_tagged_is_unique_generic.rr
+@@ -0,0 +1,5 @@
++#[ffi(rust = "usize", tagged)]
++pub struct Word;
++
++fn generic<T>(x: T) -> bool { core::object::is_unique(x) }
++pub fn word(w: Word) -> bool { generic(w) }
 diff --git a/tests/integration/frontend/ffi_tagged.rr b/tests/integration/frontend/ffi_tagged.rr
 new file mode 100644
-index 00000000..2c79d82d
+index 00000000..0573366c
 --- /dev/null
 +++ b/tests/integration/frontend/ffi_tagged.rr
 @@ -0,0 +1,40 @@
@@ -889,20 +1377,20 @@ index 00000000..2c79d82d
 +// RUN: %rrc %s --emit hir -o - | %FileCheck %s --check-prefix=HIR
 +// RUN: %rrc %s --emit mir -o - | %FileCheck %s --check-prefix=MIR
 +
-+#[ffi(rust = "::reussir_rt::rc::Rc<u64>", tagged)]
++#[ffi(rust = "usize", tagged)]
 +pub struct Word;
 +
 +#[ffi(rust = "::reussir_rt::rc::Rc<u32>")]
 +pub struct Plain;
 +
 +#[ffi(import)]
-+pub fn word(x : u64) -> Word [{ ::reussir_rt::rc::Rc::new(x) }];
++pub fn word(x : u64) -> Word [{ (x as usize) << 1 | 1 }];
 +
 +#[ffi(import)]
 +pub fn plain(x : u32) -> Plain [{ ::reussir_rt::rc::Rc::new(x) }];
 +
 +#[ffi(import)]
-+pub fn both(w : Word, p : Plain) -> u64 [{ *w + (*p as u64) }];
++pub fn both(w : Word, p : Plain) -> u64 [{ (w >> 1) as u64 + (*p as u64) }];
 +
 +pub fn main() -> u64 {
 +    let w = word(3);
@@ -912,11 +1400,177 @@ index 00000000..2c79d82d
 +
 +extern "C" trampoline "reussir_main" = main;
 +
-+// CHECK-DAG: !reussir.rc<!reussir.ffi_object<"::reussir_rt::rc::Rc<u64>", @{{.*}}_ffi_drop, tagged = true>>
++// CHECK-DAG: !reussir.rc<!reussir.ffi_object<"usize", @{{.*}}_ffi_drop, tagged = true>>
 +// CHECK-DAG: !reussir.rc<!reussir.ffi_object<"::reussir_rt::rc::Rc<u32>", @{{.*}}_ffi_drop>>
 +
-+// HIR-DAG: { ffi tagged "::reussir_rt::rc::Rc<u64>" }
++// HIR-DAG: { ffi tagged "usize" }
 +// HIR-DAG: { ffi "::reussir_rt::rc::Rc<u32>" }
 +
-+// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u64>", @{{.*}}_ffi_drop, tagged }
++// MIR-DAG: ffi {{.*}} { "usize", @{{.*}}_ffi_drop, tagged }
 +// MIR-DAG: ffi {{.*}} { "::reussir_rt::rc::Rc<u32>", @{{[A-Za-z0-9_]*}}_ffi_drop }
+diff --git a/tests/integration/frontend/ffi_tagged_array.c b/tests/integration/frontend/ffi_tagged_array.c
+new file mode 100644
+index 00000000..2c170755
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_array.c
+@@ -0,0 +1,3 @@
++#include <stdint.h>
++extern uint64_t holder(uint64_t), tree(uint64_t);
++int main(void) { return holder(4) == 6 && tree(3) == 17 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_tagged_array.rr b/tests/integration/frontend/ffi_tagged_array.rr
+new file mode 100644
+index 00000000..8ad38dc9
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_array.rr
+@@ -0,0 +1,62 @@
++// UNSUPPORTED: darwin
++// Arrays of tagged handles that are all immediates, inside records and a
++// recursive enum: no drop order reads a count through an element.
++
++// RUN: %rrc %s -o %t.fwd.o -Onone --drop-order forward --relocation-mode pic
++// RUN: %cc %t.fwd.o %S/ffi_tagged_array.c -o %t.fwd.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.fwd.exe
++// RUN: %rrc %s -o %t.o -Oaggressive --relocation-mode pic
++// RUN: %cc %t.o %S/ffi_tagged_array.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++import core::intrinsic::array;
++
++#[ffi(rust = "usize", tagged)]
++pub struct Word;
++
++pub enum Opt { None, Some(Word) }
++pub struct Holder { arr: [Word; ?], tag: u64 }
++pub enum Tree { Leaf, Node([Word; 3], [Opt; ?], Tree, Tree) }
++
++#[ffi(import)]
++fn word(x: u64) -> Word [{ (x as usize) << 1 | 1 }];
++
++#[ffi(import)]
++fn peek(w: Word) -> u64 [{ (w >> 1) as u64 }];
++
++fn tag(h: Holder) -> u64 { h.tag }
++fn discard(t: Tree, k: u64) -> u64 { k }
++
++fn build(n: u64) -> Tree {
++    if n == 0 {
++        Tree::Leaf
++    } else {
++        Tree::Node{
++            array::splat<[Word; 3]>(word(n)),
++            array::splat<[Opt; ?]>(n, Opt::Some{word(n)}),
++            build(n - 1),
++            build(n - 1)
++        }
++    }
++}
++
++fn sum(t: Tree) -> u64 {
++    match t {
++        Tree::Leaf => 0,
++        Tree::Node(a, o, l, r) => peek(array::get(a, 1)) + sum(l) + sum(r)
++    }
++}
++
++pub fn holder(n: u64) -> u64 {
++    let h = Holder { arr: array::splat<[Word; ?]>(n, word(n)), tag: 1 };
++    let g = h;
++    peek(array::get(h.arr, 0)) + tag(g) + tag(h)
++}
++
++pub fn tree(n: u64) -> u64 {
++    let t = build(n);
++    sum(t) + discard(t, 1) + discard(build(n), 5)
++}
++
++extern "C" trampoline "holder" = holder;
++extern "C" trampoline "tree" = tree;
+diff --git a/tests/integration/frontend/ffi_tagged_is_unique.rr b/tests/integration/frontend/ffi_tagged_is_unique.rr
+new file mode 100644
+index 00000000..fe4aca85
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_is_unique.rr
+@@ -0,0 +1,22 @@
++// A `tagged` handle may be an immediate, which has no count to read:
++// `core::object::is_unique` rejects it, directly and in a generic's
++// instantiation. The manual retain and release stay: their lowering tests
++// the handle.
++
++// RUN: %not %rrc %s --emit hir -o - 2>&1 | %FileCheck %s
++// RUN: %rrc %S/Inputs/ffi_tagged_is_unique_generic.rr --emit hir -o %t.hir
++// RUN: %not %rrc %t.hir --emit mir -o - 2>&1 | %FileCheck %s --check-prefix=MONO
++
++#[ffi(rust = "usize", tagged)]
++pub struct Word;
++
++#[ffi(rust = "::reussir_rt::rc::Rc<u64>")]
++pub struct Plain;
++
++// CHECK: `core::object::is_unique` can only be applied to an RC-managed object; found `Word` (a tagged foreign handle may be an immediate)
++pub fn direct(w: Word) -> bool { core::object::is_unique(w) }
++// CHECK-NOT: found `Plain`
++pub fn plain(p: Plain) -> bool { core::object::is_unique(p) }
++pub fn manual(w: Word) { core::object::unsafe_inc(w); core::object::unsafe_dec(w); }
++
++// MONO: `core::object::is_unique` can only be applied to an RC-managed object; rejected in this instantiation: a tagged foreign handle may be an immediate
+diff --git a/tests/integration/frontend/ffi_tagged_word.rr b/tests/integration/frontend/ffi_tagged_word.rr
+new file mode 100644
+index 00000000..af22b72a
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_word.rr
+@@ -0,0 +1,16 @@
++// UNSUPPORTED: darwin
++// A tagged handle is one word: a foreign type of another size is refused
++// when its drop hook is compiled.
++
++// RUN: %not %rrc %s -o %t.o 2>&1 | %FileCheck %s
++
++#[ffi(rust = "u8", tagged)]
++pub struct Word;
++
++#[ffi(import)]
++fn word() -> Word [{ 3 }];
++
++pub fn main() -> u64 { let w = word(); 0 }
++extern "C" trampoline "reussir_main" = main;
++
++// CHECK: a tagged foreign type must be a pointer-sized integer or raw pointer
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.c b/tests/integration/frontend/ffi_tagged_worklist.c
+new file mode 100644
+index 00000000..43afad36
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.c
+@@ -0,0 +1,3 @@
++#include <stdint.h>
++extern uint64_t reussir_main(void);
++int main(void) { return reussir_main() == 84 ? 0 : 1; }
+diff --git a/tests/integration/frontend/ffi_tagged_worklist.rr b/tests/integration/frontend/ffi_tagged_worklist.rr
+new file mode 100644
+index 00000000..9bae9e54
+--- /dev/null
++++ b/tests/integration/frontend/ffi_tagged_worklist.rr
+@@ -0,0 +1,21 @@
++// UNSUPPORTED: darwin
++// RUN: %rrc %s -o %t.o -Oaggressive --relocation-mode pic
++// RUN: %cc %t.o %S/ffi_tagged_worklist.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++
++#[ffi(rust = "usize", tagged)]
++pub struct Word;
++
++pub struct Node { word: Word }
++pub enum Nodes { Nil, Cons(Word, Word, Nodes) }
++
++#[ffi(import)]
++fn word() -> Word [{ 3 }];
++
++#[ffi(import)]
++fn discard<T>(x: T) -> u64 [{ ::std::mem::drop(x); 42 }];
++
++pub fn main() -> u64 {
++    discard(Node { word: word() }) + discard(Nodes::Cons{word(), word(), Nodes::Nil})
++}
++extern "C" trampoline "reussir_main" = main;
+-- 
+2.43.0
+

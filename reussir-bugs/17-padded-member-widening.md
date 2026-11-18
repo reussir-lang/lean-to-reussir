@@ -12,7 +12,9 @@ it. Not patched. It shows only with
 `--no-pack-record-members`, which lean2rr's driver passes; Reussir's
 default packed order has no padding between members.
 
-**Upstream (2026-10-24):** Found on upstream 7954a367 with the series
+**Upstream (2026-11-18):** Reproduces on `36a55a0f` (the port's first gate, 2026-11-18, `repros/run.sh`): 2 stack slots, on pristine upstream and on the patched base. No patch.
+
+**Upstream, earlier bases (history, 2026-10-24):** Found on upstream 7954a367 with the series
 (`l2r-base3`, 2026-10-19). Unchanged at 0378b744: the type converter
 only adds the rcgmp types, and the lowering of field stores has no
 change (the repro was not run again). Not reported upstream.

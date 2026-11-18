@@ -1,0 +1,171 @@
+From 1c8674898109b8e3b8b1a5420f09c6b52f1c4448 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 18 Nov 2026 02:58:54 -0500
+Subject: [PATCH] [rrc] open the polyffi cache store once per module
+
+compileRustSourceToBitcode opened and closed the compcache store for
+every texture. Each open takes the store-wide initialization lock, runs
+`PRAGMA quick_check` over the whole database and syncs it, and each
+close checkpoints the WAL: 6 fsync per texture, and a full read of the
+database per texture.
+
+compilePolymorphicFFI now opens the store for its loop over the
+module's textures and passes the handle down; it is closed when the
+loop ends. Without a handle compileRustSourceToBitcode opens one for
+the call, as before. Lookups keep their per-key lock and every
+fallback. A failed open is reported once per module, and each texture
+then compiles directly.
+
+rrc to an executable, 124 textures, aarch64 Linux, wall seconds, median
+of 3, before -> after:
+
+  warm, 1 MB store                        5.05 -> 3.16 s
+  warm, 140 MB store                     10.21 -> 3.09 s
+  cold, empty store                       7.92 -> 6.69 s
+  two processes on one store, warm, each:
+    1 MB store                            7.00 -> 3.46 s
+    140 MB store                         15.48 -> 3.49 s
+
+strace of the first case: fsync 744 -> 129, pread64 36313 -> 5209; with
+the 140 MB store pread64 4631383 -> 47801.
+---
+ include/Reussir/RustCompiler.h                | 14 +++++++++++-
+ .../CompilePolymorphicFFI.cpp                 |  7 +++++-
+ lib/RustCompiler/RustCompiler.cpp             | 22 ++++++++++++++-----
+ .../frontend/polyffi_cache_deps.rr            | 15 +++++++++++++
+ 4 files changed, 50 insertions(+), 8 deletions(-)
+
+diff --git a/include/Reussir/RustCompiler.h b/include/Reussir/RustCompiler.h
+index e0883519..2e944d79 100644
+--- a/include/Reussir/RustCompiler.h
++++ b/include/Reussir/RustCompiler.h
+@@ -23,7 +23,16 @@
+ #include <memory>
+ #include <string>
+ 
++struct ReussirPolyffiCache;
++
+ namespace reussir {
++struct PolyffiCacheCloser {
++  void operator()(ReussirPolyffiCache *cache) const;
++};
++/// The polyffi bitcode store; empty when it cannot be opened.
++using PolyffiCache = std::unique_ptr<ReussirPolyffiCache, PolyffiCacheCloser>;
++/// Open the store. A failure is reported on stderr.
++PolyffiCache openPolyffiCache();
+ /// Locate the `rustc` used to compile FFI textures. A non-empty `preferred`
+ /// path (an explicit `--polyffi-rust-path` threaded down from the driver) is
+ /// returned verbatim; otherwise the `REUSSIR_RUSTC` environment variable and
+@@ -44,11 +53,14 @@ compileRustSource(llvm::LLVMContext &context, llvm::StringRef sourceCode,
+                   llvm::ArrayRef<llvm::StringRef> additionalArgs = {},
+                   llvm::StringRef rustcPath = {},
+                   llvm::ArrayRef<llvm::StringRef> rustcDepsDirs = {});
++/// Compile a texture to bitcode through `cache`, directly when it is empty.
++/// Without `cache`, a store is opened for this call.
+ std::unique_ptr<llvm::MemoryBuffer>
+ compileRustSourceToBitcode(llvm::LLVMContext &context,
+                            llvm::StringRef sourceCode,
+                            llvm::ArrayRef<llvm::StringRef> additionalArgs = {},
+                            llvm::StringRef rustcPath = {},
+-                           llvm::ArrayRef<llvm::StringRef> rustcDepsDirs = {});
++                           llvm::ArrayRef<llvm::StringRef> rustcDepsDirs = {},
++                           const PolyffiCache *cache = nullptr);
+ } // namespace reussir
+ #endif // REUSSIR_RUSTCOMPILER_H
+diff --git a/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp b/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
+index d45be585..d1f6ec03 100644
+--- a/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
++++ b/lib/Conversion/CompilePolymorphicFFI/CompilePolymorphicFFI.cpp
+@@ -240,10 +240,15 @@ compilePolymorphicFFI(mlir::ModuleOp moduleOp, bool optimized,
+     additionalArgs.push_back(targetTriple);
+   }
+ 
++  // One store for the module's textures: an open checks and syncs the whole
++  // database.
++  PolyffiCache cache;
++  if (!uncompiledOps.empty())
++    cache = openPolyffiCache();
+   for (ReussirPolyFFIOp op : uncompiledOps) {
+     std::string monomorphized = monomorphize(moduleOp, op);
+     std::unique_ptr<llvm::MemoryBuffer> bitcode = compileRustSourceToBitcode(
+-        context, monomorphized, additionalArgs, rustPath, libDirs);
++        context, monomorphized, additionalArgs, rustPath, libDirs, &cache);
+     if (!bitcode)
+       return mlir::failure();
+     llvm::ArrayRef<char> buffer(bitcode->getBufferStart(),
+diff --git a/lib/RustCompiler/RustCompiler.cpp b/lib/RustCompiler/RustCompiler.cpp
+index 7840bdd2..0e0d5a6b 100644
+--- a/lib/RustCompiler/RustCompiler.cpp
++++ b/lib/RustCompiler/RustCompiler.cpp
+@@ -246,10 +246,18 @@ struct Compilation {
+ };
+ } // namespace
+ 
++void PolyffiCacheCloser::operator()(ReussirPolyffiCache *cache) const {
++  reussir_polyffi_cache_close(cache);
++}
++
++PolyffiCache openPolyffiCache() {
++  return PolyffiCache(reussir_polyffi_cache_open(cacheDiagnostic, nullptr));
++}
++
+ std::unique_ptr<llvm::MemoryBuffer> compileRustSourceToBitcode(
+     llvm::LLVMContext &context, llvm::StringRef sourceCode,
+     llvm::ArrayRef<llvm::StringRef> additionalArgs, llvm::StringRef rustcPath,
+-    llvm::ArrayRef<llvm::StringRef> rustcDepsDirs) {
++    llvm::ArrayRef<llvm::StringRef> rustcDepsDirs, const PolyffiCache *cache) {
+   rustcPath = findRustCompiler(rustcPath);
+   // ExecuteAndWait does not search PATH: its Program parameter is expected to
+   // have come from findProgramByName. Resolve explicit/env bare names as well
+@@ -317,15 +325,17 @@ std::unique_ptr<llvm::MemoryBuffer> compileRustSourceToBitcode(
+     hashField(hasher, option);
+   auto key = hasher.final();
+ 
+-  std::unique_ptr<ReussirPolyffiCache, decltype(&reussir_polyffi_cache_close)>
+-      cache(reussir_polyffi_cache_open(cacheDiagnostic, nullptr),
+-            reussir_polyffi_cache_close);
+-  if (!cache)
++  PolyffiCache opened;
++  if (!cache) {
++    opened = openPolyffiCache();
++    cache = &opened;
++  }
++  if (!*cache)
+     return invokeRustc(sourceCode, rustcPath, options);
+ 
+   Compilation request{sourceCode, rustcPath, options, nullptr};
+   uint32_t status = reussir_polyffi_cache_get_or_produce(
+-      cache.get(), key.data(), Compilation::produce, Compilation::receive,
++      cache->get(), key.data(), Compilation::produce, Compilation::receive,
+       cacheDiagnostic, &request);
+   if (status == 1)
+     return invokeRustc(sourceCode, rustcPath, options);
+diff --git a/tests/integration/frontend/polyffi_cache_deps.rr b/tests/integration/frontend/polyffi_cache_deps.rr
+index 35c2e558..f015ac1b 100644
+--- a/tests/integration/frontend/polyffi_cache_deps.rr
++++ b/tests/integration/frontend/polyffi_cache_deps.rr
+@@ -20,6 +20,21 @@
+ // RUN: cd %t/v2 && env REAL_RUSTC=%rustc_path REUSSIR_RUSTC_DEPS=%library_path:crate=. XDG_CONFIG_HOME=%t/config XDG_CACHE_HOME=%t/cache NO_COMPILE=1 \
+ // RUN:   %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive -o %t/v2-warm.ll
+ // RUN: diff %t/v2.ll %t/v2-warm.ll
++// One open serves the module's textures: the store logs each open.
++// RUN: cd %t/v1 && env REAL_RUSTC=%rustc_path REUSSIR_RUSTC_DEPS=%library_path:crate=. XDG_CONFIG_HOME=%t/config XDG_CACHE_HOME=%t/once \
++// RUN:   %rrc %s -v --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive -o %t/once.ll 2>&1 | %FileCheck %s --check-prefix=OPEN
++// RUN: cd %t/v1 && env REAL_RUSTC=%rustc_path REUSSIR_RUSTC_DEPS=%library_path:crate=. XDG_CONFIG_HOME=%t/config XDG_CACHE_HOME=%t/once NO_COMPILE=1 \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive -o %t/once-warm.ll
++// RUN: diff %t/v1.ll %t/once-warm.ll
++// A failed open is reported once, and each texture compiles directly.
++// RUN: touch %t/not-a-directory
++// RUN: cd %t/v1 && env REAL_RUSTC=%rustc_path REUSSIR_RUSTC_DEPS=%library_path:crate=. XDG_CONFIG_HOME=%t/config XDG_CACHE_HOME=%t/not-a-directory \
++// RUN:   %rrc %s --polyffi-rust-path %t/rustc --emit llvm-ir -O aggressive -o %t/v1-direct.ll 2>&1 | %FileCheck %s --check-prefix=ONCE
++// RUN: diff %t/v1.ll %t/v1-direct.ll
++// OPEN: cache opened
++// OPEN-NOT: cache opened
++// ONCE: Polyffi cache:
++// ONCE-NOT: Polyffi cache:
+ // V1-DAG: add i64 %x, 1111
+ // V1-DAG: add i64 %x, 1113
+ // V2-DAG: add i64 %x, 2222
+-- 
+2.43.0
+

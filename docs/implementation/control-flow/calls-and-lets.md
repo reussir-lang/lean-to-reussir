@@ -90,6 +90,76 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
 - **Where:** `Lower/Code.lean`: `lowerCode` (the `.let` case).
 - **Remove only if:** never.
 
+### The boxes of a constructor that takes a self call's result are bound before the call
+
+- **What:** Lean's code for `x :: xs => (x + 1) :: inc xs` is
+  `let y := x + 1; let r := inc xs; let c := List.cons y r`. The cell's
+  field is a `Box`, and the boxing of `y` is written inside the
+  constructor (`lowerArg`), after the self call:
+  `let r = l_inc(xs); T_List::c_cons{l2r_any_of_nat(y), r}`. When a `let`
+  is a saturated call of the declaration being lowered, in the code of
+  its own function, the next `let` is a saturated constructor
+  application that takes the call's result as a field, and the code
+  after it returns that constructor's value as it is, each other
+  argument of that constructor that is a variable, taken once, at a field
+  of type `Box`, with a type of its own that is not `Box`, and whose
+  conversion is a pure boxing, has its box bound before the self call:
+  `let hb = l2r_any_of_nat(y); let r = l_inc(xs); T_List::c_cons{hb, r}`.
+  A pure boxing (`pureBoxExpr`) is a call of the prelude's boxing
+  functions (`l2r_any_of_nat`, `l2r_any_of<T>`, `l2r_any_of_ptr<T>`,
+  `l2r_any_of_u64`, `l2r_any_of_f64`, `l2r_any_imm`, `l2r_any_unit`, the
+  scalars'), of a generated `l2r_box_T`, of an enumeration's index
+  function or of a boxed constant's accessor, on variables, literals,
+  numeric casts, a `[value]` struct's field and an `ElemBox` around the
+  value. Every other conversion stays in the constructor. The box is
+  named after the call's variable (`hb815` before `x815`), not by the
+  program's counter, so the numbering of the rest of the program does not
+  change.
+- **Why:** Reussir turns a self call whose result only goes into a
+  constructor into a loop (tail recursion modulo cons). Since upstream
+  #984 it keeps the self call in place when a call stands between it and
+  the constructor, which is correct: a traced or panicking call written
+  after the recursion must run after it (test `RtTrmcCallOrder`: `g2 g1
+  g0`; the base before #984 printed `g0 g1 g2`). Reussir cannot know that
+  a boxing has no effect (it ends in an FFI function), so every list or
+  tree map with a boxed element lost its loop: of 57 functions with a
+  loop on the old base in 26 programs (the classic corpus and 8 others),
+  10 kept it; with this rule 54 have one (classic corpus: 30, 7, 29).
+  The other 3 are right without one: two apply a closure after the self
+  call, and `AssocList.foldrM` builds a pair after it (Lean's order of
+  `let`s is kept).
+  With an 8 MiB stack (`LEAN_STACK_SIZE_KB=8192`) a map over 10^6
+  elements runs again; without the rule it stops with native Lean's
+  "Stack overflow detected", as native does. A boxing reads the variable
+  and makes a box: an immediate, a new cell around a word (`Float`, a
+  `UInt64` from 2^63), or the value's own pointer with a payload number.
+  It cannot panic, print, run code of the program or release anything
+  (the box takes the variable's reference, or a retained copy when the
+  variable is used again), and the number of references to the value
+  during the self call is the same. So only an allocation moves. An
+  unboxing is not moved: it can release its box, and in a program that
+  casts it can end in a panic. Cost: where Reussir makes no loop and the
+  box is a cell, the cell is made before the recursion and not after it,
+  so one more cell is live per level while the recursion runs; the number
+  of allocations is the same. Measured without the `return` condition: a
+  map of 4 x 10^6 `Float`s that passes each new cell to a call peaked at
+  412.9 MB for 349.3 MB (16 bytes per level; native Lean 506.7 MB). So
+  the rule asks for the `return`: a constructor whose value the function
+  uses again never gives a loop, and that program is translated as
+  before.
+- **Where:** `Lower/PreBox.lean`: `preBoxArgs`, `pureBoxExpr`,
+  `pureBoxFns`; `Lower/Code.lean`: `lowerCode` (the `.let` case),
+  `lowerDeclCode` (`CodeCtx.ownFn`: off in a state machine, an outlined
+  join point's function and a local function); `Lower/Decls.lean`:
+  `lowerArg` (`CodeCtx.preBoxed`); test `RtTrmcCallOrder`;
+  `tests/runtime/trmc-helper-check.sh` (the `.trmc` helpers of
+  `TrmcHelper.lean`: present for the box-only shapes, absent after a
+  traced call).
+- **Remove only if:** Reussir's tail recursion modulo cons learns that a
+  callee is pure and total (an attribute on functions and FFI imports), or
+  boxes are no longer calls. Without the rule the programs are still
+  correct; the functions recurse, as natively.
+
 ### Constructors implemented by the runtime are calls
 
 - **What:** Constructors of builtin types that carry an `@[extern]`

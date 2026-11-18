@@ -36,7 +36,11 @@ So, in a program that makes resources, lean2rr releases such values
 itself where the order shows, with `l2r_release_after` (an effectful FFI
 call that consumes the value: Reussir takes it as the value's last use and
 adds no release of its own), as it emulates Lean's borrowed parameters
-(Lower/Borrow). This step of the core runs over the generated functions
+(Lower/Borrow). A value whose constructor native Lean knows there (bound
+by a constructor, or the scrutinee inside a constructor's arm) is
+released as Lean's `lean_dec_ref_known` does, its fields in field order,
+each completely, by its type's function (`Info.knownAt`, `releaseAt`;
+Lower/Borrow's `knownReleaseFn?`). This step of the core runs over the generated functions
 right after `Outline`, before the optional passes over them, and computes
 Reussir's liveness on them (free variables; the rules of Reussir's
 `ownership.rs` for `If`, `Match` and argument lists): the values that die
@@ -47,8 +51,8 @@ lowering gave a variable of `armReleaseVars`, Lower/Borrow, one that may
 hold a resource by the rule of the borrow emulation, `mayHoldAt`: the flow
 analysis, which follows closures, thunks and tasks, or in a program that
 casts the type, where every closure, thunk and task may; and that the code
-owns), and releases them at the arm's start, newest first, when there are
-at least two. Order: each name has its Lean variable's binding order (its
+owns), and releases them at the arm's start, newest first (one value
+alone too: `releaseAt` says why). Order: each name has its Lean variable's binding order (its
 place in the declaration's code, the order of native Lean's indices:
 `armWalk`), also a name lean2rr gives the variable later (a field converted
 to its own type, a field `lazy-fields` binds where it is used, a join
@@ -98,8 +102,8 @@ structure's projection into the branches that use the projected value, and
 a release counts as such a use (its projection comes first, then the
 releases in their order); `merge-fns` merges only functions whose code,
 releases included, is the same up to names. Programs that make no
-resources come out unchanged, and so do arms where fewer than two such
-values die. Arms that only reach `l2r_unreachable` are left alone.
+resources come out unchanged, and so do arms where no such value dies
+(or only one that a `reset` of Lean's releases). Arms that only reach `l2r_unreachable` are left alone.
 Natively Lean's `pushProj` moves the projections at an alternative's start
 into the branches of a `cases` that follows at once, so the scrutinee dies
 in the branches that read no field (at their start) and after the
@@ -142,6 +146,12 @@ structure Info where
   that die at the branch's start, in this order (a `match` arm's:
   `Arm.lasts`). -/
   iteLasts : Std.HashMap (String × String) (Array String) := {}
+  /-- The names whose variable a constructor binds that native Lean knows
+  where it releases the value (`LoweredProgram.armKnown`). -/
+  known : Std.HashSet String := {}
+  /-- By type name: the function that releases a value of the type as
+  `lean_dec_ref_known` does (`LoweredProgram.armKnownFns`). -/
+  knownFns : Std.HashMap String (String × Item) := {}
 
 /-- The free names of a `.var` operand: the name, or the identifiers of a
 verbatim operand (`L2RUnit::u{}`; `atomIdents`), as `Outline.exprFvs` reads them. -/
@@ -190,22 +200,51 @@ renumbered variables at its call (each part has one call). -/
 structure St where
   next : Nat := 0
   partSeeds : Std.HashMap String (Std.HashMap Nat Nat) := {}
+  /-- The types whose `Info.knownFns` function a release calls. -/
+  knownUsed : Std.HashSet String := {}
 
 abbrev M := StateM St
 
 /-- Whether `f` names a part that `Outline` cut out (`Outline.freshName`). -/
 def isPart (f : String) : Bool := (f.splitOn "_l2rpart").length > 1
 
-/-- `b` with `vs` released at its start, in that order, when there are at
-least two. -/
-def releaseAt (I : Info) (vs : Array String) (b : Block) : M Block := do
-  if vs.size < 2 then return b
+/-- Whether native Lean knows the constructor of the value named `v` at
+`p`, and so releases it there with `lean_dec_ref_known`: its fields in
+field order, each completely. Its variable is bound by a constructor
+(`Info.known`), or `p` is inside a constructor's arm of a `match` on it
+(its order is renumbered there, `Pos.moved`: Lean's `withCtorAlt`). -/
+def Info.knownAt (I : Info) (p : Pos) (v : String) : Bool :=
+  I.known.contains v || p.moved.contains (I.order v)
+
+/-- `b` with `vs` released at its start, in that order. A value whose
+constructor native Lean knows at `p` (`Info.knownAt`) is released by its
+type's function of `Info.knownFns`, when the type has one; not a value
+of `resets`, which natively a `reset` releases, not a `dec`.
+
+One value alone has no order with others, but how it is released shows:
+Reussir's own drop takes a record without a cycle apart in place (its
+fields in the record's order, each runtime object a free of its own) and
+frees a list in a loop from its head, where native Lean's `dec` is one
+free, last pushed first (`lean_dec`), or the fields in field order
+(`lean_dec_ref_known`). So one value is released here too. Not one of
+`resets`: Reussir's drop of it is where the cell is reused in place
+(Lean's `reset`; the fields it frees there: plan §10). -/
+def releaseAt (I : Info) (p : Pos) (vs : Array String) (b : Block) (resets : Array String := #[]) : M Block := do
+  if vs.isEmpty || (vs.size == 1 && resets.contains vs[0]!) then return b
   let mut lets := #[]
   for v in vs do
     let k := (← get).next
     modify fun s => { s with next := k + 1 }
-    lets := lets.push (s!"l2rrel{k}", some (Ty.named "u64"),
-      Expr.call "l2r_release_after" #[((I.names.get? v).map (·.1)).getD .unit] #[.var v])
+    let t := ((I.names.get? v).map (·.1)).getD .unit
+    let fn? : Option String := match t with
+      | .named n => if I.knownAt p v && !resets.contains v then (I.knownFns.get? n).map (·.1) else none
+      | _ => none
+    let rel ← match fn?, t with
+      | some f, .named n =>
+        modify fun s => { s with knownUsed := s.knownUsed.insert n }
+        pure (Expr.call f #[] #[.var v])
+      | _, _ => pure (Expr.call "l2r_release_after" #[t] #[.var v])
+    lets := lets.push (s!"l2rrel{k}", some (Ty.named "u64"), rel)
   return { b with lets := lets ++ b.lets }
 
 /-- Names with their order keys, newest first. -/
@@ -267,8 +306,10 @@ mutual
       let dying (other own : Names) : Array String :=
         newestFirst <| other.fold (init := #[]) fun acc v =>
           if I.names.contains v && !own.contains v && !live p.L v then acc.push (v, I.key p v) else acc
-      let t ← if unreachableBlock t then pure t else releaseAt I (lastAfter (dying ff ft) (I.iteLastsAt c "true")) t
-      let f ← if unreachableBlock f then pure f else releaseAt I (lastAfter (dying ft ff) (I.iteLastsAt c "false")) f
+      let t ← if unreachableBlock t then pure t else
+        releaseAt I p (lastAfter (dying ff ft) (I.iteLastsAt c "true")) t (I.iteLastsAt c "true")
+      let f ← if unreachableBlock f then pure f else
+        releaseAt I p (lastAfter (dying ft ff) (I.iteLastsAt c "false")) f (I.iteLastsAt c "false")
       return (.ite c t f, union fc (union ft ff))
     | .mtch s arms => goMatch I s arms p
 
@@ -389,7 +430,7 @@ mutual
           lastAfter (newestFirst (if pres[i]! then others.push (sv, keys[i]!) else others) ++
             (if posts[i]! then #[sv] else #[])) (if posts[i]! then lasts[i]!.push sv else lasts[i]!)
         | _, _ => lastAfter (newestFirst others) lasts[i]!
-      out := out.push { arm with body := ← releaseAt I vs body }
+      out := out.push { arm with body := ← releaseAt I (posOf arm) vs body lasts[i]! }
     return (.mtch s' out, union fs treeFree)
 end
 
@@ -427,6 +468,14 @@ def armReleaseFns (I : Info) (cutSeeds : Std.HashMap String (Array (Nat × Nat))
     for h : i in [:fns.size] do
       if done.contains i then continue
       if let .fn .. := fns[i] then out := out.set! i (← visit fns[i] {})
+    -- The functions of `Info.knownFns` that the releases call and the
+    -- lowering did not make already (Lower/Borrow's `knownRelease`).
+    let present : Std.HashSet String := fns.foldl (init := {}) fun s it => match it with
+      | .fn n .. => s.insert n
+      | _ => s
+    for n in (← get).knownUsed.toArray.qsort (· < ·) do
+      if let some (f, item) := I.knownFns.get? n then
+        unless present.contains f do out := out.push item
     return out
   go.run' {}
 
@@ -436,6 +485,7 @@ end ArmRelease
 that makes resources (`armNames` not empty), every generated function. -/
 def LoweredProgram.armRelease (p : LoweredProgram) : LoweredProgram :=
   if p.armNames.isEmpty then p else
-  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields, iteLasts := p.armIteLasts } p.armCutSeeds p.fns }
+  { p with fns := ArmRelease.armReleaseFns { names := p.armNames, fields := p.armFields, iteLasts := p.armIteLasts,
+                                             known := p.armKnown, knownFns := p.armKnownFns } p.armCutSeeds p.fns }
 
 end LeanToReussir

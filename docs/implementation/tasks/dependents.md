@@ -98,7 +98,8 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   no context switches there either, checked in `LeanrtGlue::switched`).
 - **Why:** The other contexts would push their frees onto the suspended
   one's (2d21a0a: one free stack per thread, then shared with Reussir's
-  glue, then leanrt's own, now Reussir's drop stack shared again); lean-runtime's
+  glue, then leanrt's own, then Reussir's drop stack shared again, since
+  Reussir `36a55a0f` upstream's scoped worklists); lean-runtime's
   glue item 11, which asks for its no-suspend scope over the whole free
   path (review RSIO-03; RS4-04, test `RtPromiseDropInFreeWait`: a
   promise's store inside a free waited for a stream's writer, and another
@@ -109,11 +110,14 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   drain them (audit Q6 of the destructor port, found by inspection; not
   reproduced). Now nothing is pending outside a drain, and the
   promise is resolved where Reussir's glue reaches it, in field order
-  (plan
+  on Reussir l2r-base12 (test `RtPromiseDropRecordPending`, a
+  `Holder` that user code frees: `q`'s dependent ran before `p`'s there,
+  natively after). On `36a55a0f` the `Holder` is released after the call
+  that borrows it, as one free that goes last field first: `p`'s
+  dependent runs first, as natively (the port's first gate, 2026-11-18;
+  plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
-  "Order of releases in one free"; test `RtPromiseDropRecordPending`, a
-  `Holder` that user code frees: `q`'s dependent runs before `p`'s,
-  natively after). On Reussir base l2r-base9 without local patches 23-k
+  "Order of releases in one free"). On Reussir base l2r-base9 without local patches 23-k
   to 23-m, Reussir's drain kept its pending drops per thread beside
   leanrt's stack, and a promise dropped inside it (a tree's child that
   user code frees) was resolved at once, its `sync` dependents run inside
@@ -140,8 +144,9 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
 - **What:** The resolutions a free put off run as soon as it is
   over, in the order the free reached their promises, on the context that
   freed them (lean-runtime's `run_deferred`, core 3.3). The outermost
-  drain (`pending::drain`, or a drain of Reussir's glue) ends with its end work when a release
-  asked for it (`pending::want_end_work`, called by
+  drain (the scope that the outermost free opens, leanrt's or Reussir's glue's) ends with its end work when a release
+  asked for it (`pending::want_end_work`, a scope-exit callback of
+  Reussir's worklist, called by
   `task::defer_promise_drop` and by a close the free puts off):
   `task::drained` calls `run_deferred`, then lean-runtime's
   drain-end hook `after_drain` (the writers of the streams the context
@@ -185,7 +190,7 @@ runtime. Plan [§5.14](../../translation-plan.md#514-thunks-and-tasks)
   own end, so lean2rr needs no Reussir hook.
 - **Where:** `runtime/leanrt/src/task.rs`: `Promise` (`Drop`),
   `defer_promise_drop`, `resolve_with`, `drained`;
-  `runtime/leanrt/src/pending.rs`: `drain`, `want_end_work`.
+  `runtime/leanrt/src/pending.rs`: `want_end_work`, `end_work`.
 - **Remove only if:** never. Remaining differences: the
   dependents see the rest of the container released too (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),

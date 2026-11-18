@@ -1,0 +1,405 @@
+From 25c44d225c9e1fb8b8b4a83e92bfe4a9534e77d6 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 17 Nov 2026 23:31:18 -0500
+Subject: [PATCH 10/12] [trmc] keep a self call in place across a release with
+ an observable cleanup
+
+TRMC re-creates a linearized self call at its leaf and so moves it past
+the releases between the two, which it took for bookkeeping. A release
+that runs a foreign cleanup hook, or drops a closure that may have
+captured a foreign object, is observable: the hook then ran before the
+recursion instead of after it, so a handle that the source keeps open
+during the recursive call was closed first.
+
+Such a release now keeps the call in place and its leaf takes the apply
+fallback. Inside an expanded decrement every operation that is neither
+read-only nor count bookkeeping is tested by the types of its operands:
+the `rc.dec` of the foreign object, a call of drop glue, a drop callback
+such as `drop.run`. A record that reports an observable cleanup is asked
+member by member, and an arbitrary-precision integer is not observable,
+so a release that only reaches integers does not pin the call.
+
+On the benchmark suite, core and std (33 units, -Oaggressive
+--reuse-across-call) all 18 `.trmc` helpers and 114 calls of a helper
+are kept and the lowered MLIR is byte-identical.
+---
+ include/Reussir/Transformation/Passes.td      |  6 +-
+ .../TRMCRecursionAnalysis.cpp                 | 90 ++++++++++++++++---
+ .../conversion/trmc_reordering.mlir           | 70 +++++++++++++++
+ .../conversion/trmc_reordering_rcgmp.mlir     | 52 +++++++++++
+ .../integration/frontend/trmc_cleanup_order.c | 12 +++
+ .../frontend/trmc_cleanup_order.rr            | 66 ++++++++++++++
+ 6 files changed, 283 insertions(+), 13 deletions(-)
+ create mode 100644 tests/integration/conversion/trmc_reordering_rcgmp.mlir
+ create mode 100644 tests/integration/frontend/trmc_cleanup_order.c
+ create mode 100644 tests/integration/frontend/trmc_cleanup_order.rr
+
+diff --git a/include/Reussir/Transformation/Passes.td b/include/Reussir/Transformation/Passes.td
+index 1ccc0530..1367dfd8 100644
+--- a/include/Reussir/Transformation/Passes.td
++++ b/include/Reussir/Transformation/Passes.td
+@@ -268,8 +268,10 @@ def ReussirTRMCRecursionAnalysisPass
+     leaf is speculatable and has no effect that conflicts with the callee's:
+     pure operations, reads of immutable memory, and the bookkeeping of retains
+     and releases. Otherwise the call stays in place, as it does across a manual
+-    count change (an `unsafe` retain or release) and across a release when the
+-    call borrows a value that only this function keeps alive.
++    count change (an `unsafe` retain or release), across a release whose
++    cleanup is observable (a foreign hook, the drop of a closure), and across
++    a release when the call borrows a value that only this function keeps
++    alive.
+     Because every return leaf has a sound rewrite, mixed functions — where
+     some arms pass the recursive result through another call first — keep
+     full coverage of their constructor arms.
+diff --git a/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp b/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
+index aa920ebf..a6983803 100644
+--- a/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
++++ b/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
+@@ -285,31 +285,99 @@ static bool lendsLocalValue(mlir::func::CallOp call) {
+   return false;
+ }
+ 
++// Whether releasing a value of `type` can run code this pass cannot see: a
++// foreign cleanup hook, the drop of a closure, the release of a lock or of a
++// device buffer. A token is raw memory and an integer only returns its limbs,
++// so a record that reports an observable cleanup is asked member by member.
++static bool hasObservableCleanup(mlir::Type type,
++                                 llvm::SmallPtrSetImpl<mlir::Type> &seen) {
++  for (;;) {
++    if (!type)
++      return true;
++    if (auto rc = llvm::dyn_cast<RcType>(type)) {
++      type = rc.getElementType();
++    } else if (auto ref = llvm::dyn_cast<RefType>(type)) {
++      type = ref.getElementType();
++    } else if (auto nullable = llvm::dyn_cast<NullableType>(type)) {
++      type = nullable.getPtrTy();
++    } else if (auto cell = llvm::dyn_cast<CellType>(type)) {
++      if (cell.getMutex() || cell.getFlatlock() || cell.getRwlock())
++        return true;
++      type = cell.getElementType();
++    } else if (auto array = llvm::dyn_cast<ArrayType>(type);
++               array && !array.hasTargetAttr()) {
++      type = array.getElementType();
++    } else {
++      break;
++    }
++  }
++  if (isRCGMPIntegerType(type) || llvm::isa<TokenType>(type))
++    return false;
++  auto record = llvm::dyn_cast<RecordType>(type);
++  if (!record)
++    return !isTriviallyCopyable(type);
++  if (!record.getComplete())
++    return true;
++  if (!record.hasObservableCleanup() || !seen.insert(record).second)
++    return false;
++  return llvm::any_of(record.getMembers(), [&](mlir::Type member) {
++    return hasObservableCleanup(member, seen);
++  });
++}
++
++// Whether `op` only changes counts, tokens, or allocation.
++static bool isCountBookkeeping(mlir::Operation *op) {
++  return llvm::isa<ReussirRcIncOp, ReussirRcFetchOp, ReussirRcFetchSubOp,
++                   ReussirRcSetOp, ReussirRcReinterpretOp, ReussirRcCreateOp,
++                   ReussirRcCreateCompoundOp, ReussirRcCreateVariantOp,
++                   ReussirRefAcquireOp, ReussirRefSpilledOp,
++                   ReussirTokenAllocOp, ReussirTokenFreeOp,
++                   ReussirTokenEnsureOp, ReussirTokenLaunderOp,
++                   ReussirTokenReallocOp>(op);
++}
++
++// Whether `op`, or an op nested in it, may release a value with such a
++// cleanup. Every op that is neither read-only nor count bookkeeping counts:
++// the decrement itself, a call of drop glue, a drop callback.
++static bool runsObservableCleanup(mlir::Operation *op) {
++  return op
++      ->walk([](mlir::Operation *nested) {
++        if (leavesCountsAlone(nested) || isCountBookkeeping(nested))
++          return mlir::WalkResult::advance();
++        llvm::SmallPtrSet<mlir::Type, 8> seen;
++        return llvm::any_of(nested->getOperandTypes(),
++                            [&](mlir::Type type) {
++                              return hasObservableCleanup(type, seen);
++                            })
++                   ? mlir::WalkResult::interrupt()
++                   : mlir::WalkResult::advance();
++      })
++      .wasInterrupted();
++}
++
+ // Whether running `op` before a self call it used to follow is unobservable.
+ // The op must be speculatable, since the call may not return, and its effects
+ // must not conflict with the callee's. Besides pure ops, that admits reads of
+ // immutable memory and the bookkeeping of retains and releases: counts,
+ // tokens, and allocation. Another call, a store, or a read of memory the
+ // callee may write does not qualify, and neither does a manual count change
+-// (an `unsafe` retain or release), whose place the program chose. When the
+-// call borrows a value that only this function keeps alive (`lends`), an op
+-// that may release has to follow it as well.
++// (an `unsafe` retain or release), whose place the program chose, nor a
++// release with an observable cleanup. When the call borrows a value that only
++// this function keeps alive (`lends`), an op that may release has to follow
++// it as well.
+ static bool canPrecedeSelfCall(mlir::Operation *op, bool lends) {
+   if (llvm::isa<mlir::CallOpInterface>(op) || isUnsafeRcOperation(op))
+     return false;
+   if (auto load = llvm::dyn_cast<ReussirRefLoadOp>(op))
+     return readsImmutableMemory(load);
+-  if (llvm::isa<ReussirRcIncOp, ReussirRcDecOp, ReussirRcFetchOp,
+-                ReussirRcFetchSubOp, ReussirRcSetOp, ReussirRcReinterpretOp,
+-                ReussirRcCreateOp, ReussirRcCreateCompoundOp,
+-                ReussirRcCreateVariantOp, ReussirRefAcquireOp, ReussirRefDropOp,
+-                ReussirRefSpilledOp, ReussirTokenAllocOp, ReussirTokenFreeOp,
+-                ReussirTokenEnsureOp, ReussirTokenLaunderOp,
+-                ReussirTokenReallocOp>(op) ||
+-      op->hasAttr(kExpandedDecrementAttr))
++  if (llvm::isa<ReussirRcDecOp, ReussirRefDropOp>(op) ||
++      isCountBookkeeping(op) || op->hasAttr(kExpandedDecrementAttr)) {
++    if (runsObservableCleanup(op))
++      return false;
+     return !lends || leavesCountsAlone(op) ||
+            llvm::isa<ReussirRcCreateOp, ReussirRcCreateCompoundOp,
+                      ReussirRcCreateVariantOp, ReussirTokenAllocOp>(op);
++  }
+   if (op->getNumRegions() == 0)
+     return mlir::isPure(op);
+   // Nested ops are judged one by one, so the region op only has to defer
+diff --git a/tests/integration/conversion/trmc_reordering.mlir b/tests/integration/conversion/trmc_reordering.mlir
+index 22e602ce..1877f9db 100644
+--- a/tests/integration/conversion/trmc_reordering.mlir
++++ b/tests/integration/conversion/trmc_reordering.mlir
+@@ -9,6 +9,8 @@
+ !rc_list = !reussir.rc<!list>
+ !box = !reussir.rc<i64>
+ !cell = !reussir.rc<!reussir.cell<i64>>
++!handle = !reussir.rc<!reussir.ffi_object<"Handle", @handle_drop>>
++!holder = !reussir.rc<!reussir.record<compound "Holder" {i64, !handle}>>
+ 
+ module {
+   // Linearizing the self call would run the store before the recursion.
+@@ -224,4 +226,72 @@ module {
+     }
+     return %result : !rc_list
+   }
++
++  func.func private @handle_drop(!handle)
++  func.func private @holder_release(!holder)
++
++  // A release that runs a foreign cleanup hook stays after the recursion.
++  // CHECK-LABEL: func.func @foreign_release_after(
++  // CHECK-NOT: .trmc
++  // CHECK: call @foreign_release_after(
++  // CHECK-NEXT: reussir.rc.dec
++  func.func @foreign_release_after(%n: i64, %owned: !handle) -> !rc_list {
++    %zero = arith.constant 0 : i64
++    %done = arith.cmpi eq, %n, %zero : i64
++    %result = scf.if %done -> (!rc_list) {
++      reussir.rc.dec(%owned : !handle) cleanup(@handle_drop)
++      %nil = reussir.record.compound : !list_nil
++      %variant = reussir.record.variant[1] (%nil : !list_nil) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    } else {
++      %one = arith.constant 1 : i64
++      %next = arith.subi %n, %one : i64
++      reussir.rc.inc(%owned : !handle)
++      %rest = func.call @foreign_release_after(%next, %owned) : (i64, !handle) -> !rc_list
++      reussir.rc.dec(%owned : !handle) cleanup(@handle_drop)
++      %cons = reussir.record.compound(%n, %rest : i64, !rc_list) : !list_cons
++      %variant = reussir.record.variant[0] (%cons : !list_cons) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    }
++    return %result : !rc_list
++  }
++
++  // So does the release of a record that holds one, here by a drop callback
++  // in the unique branch of an expanded decrement.
++  // CHECK-LABEL: func.func @worklist_release_after(
++  // CHECK-NOT: .trmc
++  // CHECK: call @worklist_release_after(
++  // CHECK: reussir.drop.run
++  func.func @worklist_release_after(%n: i64, %owned: !holder) -> !rc_list {
++    %zero = arith.constant 0 : i64
++    %done = arith.cmpi eq, %n, %zero : i64
++    %result = scf.if %done -> (!rc_list) {
++      reussir.rc.dec(%owned : !holder) cleanup(@handle_drop)
++      %nil = reussir.record.compound : !list_nil
++      %variant = reussir.record.variant[1] (%nil : !list_nil) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    } else {
++      %one = arith.constant 1 : i64
++      %next = arith.subi %n, %one : i64
++      reussir.rc.inc(%owned : !holder)
++      %rest = func.call @worklist_release_after(%next, %owned) : (i64, !holder) -> !rc_list
++      %count = reussir.rc.fetch(%owned : !holder) : index
++      %single = arith.constant 1 : index
++      %unique = arith.cmpi eq, %count, %single : index
++      scf.if %unique {
++        reussir.drop.run @holder_release(%owned : !holder)
++      } else {
++        %less = arith.subi %count, %single : index
++        reussir.rc.set(%owned : !holder, %less : index)
++      } {reussir.expanded_decrement}
++      %cons = reussir.record.compound(%n, %rest : i64, !rc_list) : !list_cons
++      %variant = reussir.record.variant[0] (%cons : !list_cons) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    }
++    return %result : !rc_list
++  }
+ }
+diff --git a/tests/integration/conversion/trmc_reordering_rcgmp.mlir b/tests/integration/conversion/trmc_reordering_rcgmp.mlir
+new file mode 100644
+index 00000000..8413f8ab
+--- /dev/null
++++ b/tests/integration/conversion/trmc_reordering_rcgmp.mlir
+@@ -0,0 +1,52 @@
++// REQUIRES: rcgmp
++// RUN: %reussir-opt %s \
++// RUN:   --reussir-rc-create-fusion \
++// RUN:   --reussir-trmc-recursion-analysis | %FileCheck %s
++
++!list_ = !reussir.record<variant "List" incomplete>
++!list_cons = !reussir.record<compound "List::Cons" [value] {i64, !list_}>
++!list_nil = !reussir.record<compound "List::Nil" [value] {}>
++!list = !reussir.record<variant "List" {!list_cons, !list_nil}>
++!rc_list = !reussir.rc<!list>
++!counted = !reussir.record<compound "Counted" {i64, !rcgmp.mpz}>
++!rc_counted = !reussir.rc<!counted>
++
++module {
++  func.func private @counted_drop(!reussir.ref<!counted>)
++
++  // The release of an integer only returns memory, so drop glue for a record
++  // that holds one does not block the rewrite.
++  // CHECK-LABEL: func.func @integer_release_after(
++  // CHECK: call @integer_release_after.trmc(
++  func.func @integer_release_after(%n: i64, %owned: !rc_counted) -> !rc_list {
++    %zero = arith.constant 0 : i64
++    %done = arith.cmpi eq, %n, %zero : i64
++    %result = scf.if %done -> (!rc_list) {
++      reussir.rc.dec(%owned : !rc_counted)
++      %nil = reussir.record.compound : !list_nil
++      %variant = reussir.record.variant[1] (%nil : !list_nil) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    } else {
++      %one = arith.constant 1 : i64
++      %next = arith.subi %n, %one : i64
++      reussir.rc.inc(%owned : !rc_counted)
++      %rest = func.call @integer_release_after(%next, %owned) : (i64, !rc_counted) -> !rc_list
++      %count = reussir.rc.fetch(%owned : !rc_counted) : index
++      %single = arith.constant 1 : index
++      %unique = arith.cmpi eq, %count, %single : index
++      scf.if %unique {
++        %ref = reussir.rc.borrow(%owned : !rc_counted) : !reussir.ref<!counted>
++        func.call @counted_drop(%ref) : (!reussir.ref<!counted>) -> ()
++      } else {
++        %less = arith.subi %count, %single : index
++        reussir.rc.set(%owned : !rc_counted, %less : index)
++      } {reussir.expanded_decrement}
++      %cons = reussir.record.compound(%n, %rest : i64, !rc_list) : !list_cons
++      %variant = reussir.record.variant[0] (%cons : !list_cons) : !list
++      %list = reussir.rc.create value(%variant : !list) : !rc_list
++      scf.yield %list : !rc_list
++    }
++    return %result : !rc_list
++  }
++}
+diff --git a/tests/integration/frontend/trmc_cleanup_order.c b/tests/integration/frontend/trmc_cleanup_order.c
+new file mode 100644
+index 00000000..58783403
+--- /dev/null
++++ b/tests/integration/frontend/trmc_cleanup_order.c
+@@ -0,0 +1,12 @@
++#include <assert.h>
++#include <stdint.h>
++
++const void *live_slot;
++extern uint64_t held(uint64_t n);
++extern uint64_t captured(uint64_t n);
++
++int main(void) {
++  assert(held(3) == 3);
++  assert(captured(3) == 3);
++  return 0;
++}
+diff --git a/tests/integration/frontend/trmc_cleanup_order.rr b/tests/integration/frontend/trmc_cleanup_order.rr
+new file mode 100644
+index 00000000..97da2acd
+--- /dev/null
++++ b/tests/integration/frontend/trmc_cleanup_order.rr
+@@ -0,0 +1,66 @@
++// UNSUPPORTED: darwin
++// RUN: %rrc %s -Onone --relocation-mode pic -o %t.o
++// RUN: %cc %t.o %S/trmc_cleanup_order.c -o %t.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.exe
++// RUN: %rrc %s -Oaggressive --relocation-mode pic -o %t.opt.o
++// RUN: %cc %t.opt.o %S/trmc_cleanup_order.c -o %t.opt.exe -L%library_path -lreussir_rt %rpath_flag %extra_sys_libs
++// RUN: %t.opt.exe
++
++extern "rust" [{
++    use reussir_rt::rc::Rc;
++    use std::sync::Arc;
++    extern "C" { static mut live_slot: *const (); }
++    // Shared by every texture: its strong count is 1 + the open handles.
++    fn live() -> Arc<()> {
++        unsafe {
++            if live_slot.is_null() { live_slot = Arc::into_raw(Arc::new(())); }
++            Arc::increment_strong_count(live_slot);
++            Arc::from_raw(live_slot)
++        }
++    }
++}];
++
++#[ffi(rust = "::reussir_rt::rc::Rc<::std::sync::Arc<()>>")]
++pub struct Handle;
++
++#[ffi(import)]
++fn open() -> Handle [{ Rc::new(live()) }];
++
++#[ffi(import)]
++fn open_count() -> u64 [{ (Arc::strong_count(&live()) - 2) as u64 }];
++
++struct Holder { id: u64, handle: Handle }
++enum List { Nil, Cons(u64, List) }
++
++// `holder` is used after the recursion, so its handle is open during it.
++fn hold(n: u64) -> List {
++    if n == 0 { List::Cons { open_count(), List::Nil } } else {
++        let holder = Holder { n, open() };
++        let rest = hold(n - 1);
++        List::Cons { holder.id, rest }
++    }
++}
++
++// So is a handle that a closure captured.
++fn capture(n: u64) -> List {
++    if n == 0 { List::Cons { open_count(), List::Nil } } else {
++        let handle = open();
++        let keep = |x: u64| { let h = handle; x };
++        let rest = capture(n - 1);
++        List::Cons { keep(n), rest }
++    }
++}
++
++fn last(l: List) -> u64 {
++    match l {
++        List::Nil => 0,
++        List::Cons(x, rest) => match rest {
++            List::Nil => x,
++            List::Cons(y, more) => last(List::Cons { y, more })
++        }
++    }
++}
++fn held(n: u64) -> u64 { last(hold(n)) }
++extern "C" trampoline "held" = held;
++fn captured(n: u64) -> u64 { last(capture(n)) }
++extern "C" trampoline "captured" = captured;
+-- 
+2.43.0
+

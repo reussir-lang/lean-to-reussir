@@ -25,7 +25,9 @@ calls where it matters:
   casts by the mono type, `mayHoldRelease`, and never in a declaration that
   flatten-structs rewrote there), keeps the
   argument until the call returns (`l2r_release_after`), as Lean's
-  `explicitRC` puts the caller's `dec` after the call; an argument the
+  `explicitRC` puts the caller's `dec` after the call; where Lean knows
+  the argument's constructor there, the release is field by field, as its
+  `lean_dec_ref_known` (`knownAt`, `knownReleaseFn?`); an argument the
   caller only borrows itself (a borrowed parameter, a field or array
   element of one, the value of a constant, a constructor without relevant
   fields: `borrowedVars`) is left alone, as natively (whoever lent it holds
@@ -189,6 +191,41 @@ partial def impureWalk (c : Code .impure) («at» : Option (Nat × Name)) (w : I
   | .oset _ _ _ k _ | .setTag _ _ k _ | .del _ k _ => impureWalk k «at» w
   | _ => w
 
+/-- The variables whose constructor native Lean knows wherever it releases
+them, by declaration and variable: those bound by a constructor
+application that is still one in Lean's impure code, with a constructor
+that is a cell (`CtorInfo.isRef`). Lean's `ExplicitRC` keeps the
+constructor of such a `let` (`withLetDecl`) and its `addDec` then makes
+the release a `dec` with the number of object fields, which `EmitC`
+prints as `lean_dec_ref_known(x, n)`: when the cell is not shared, `n`
+times `lean_dec` of a field, in field order, each a free of its own that
+is complete before the next one, then the cell; when it is shared, one
+decrement. A plain `dec` (`lean_dec`) frees the whole value as one free,
+last pushed first. A constructor that `insertResetReuse` turned into a
+`reuse` is not one any more (Lean then emits `lean_dec`), and neither is a
+trivial structure's or a scalar constructor's: so the copies are read
+after the passes, not lean2rr's code. Read with `inferBorrowedParams`'
+copies, after `inferBorrow` (the passes between it and `explicitRc` keep
+a constructor's `let`). The other place where Lean knows the constructor,
+the scrutinee inside a constructor's alternative (`withCtorAlt`), is by
+position: `knownAt`, and Emit/ArmRelease's renumbered scrutinees. -/
+abbrev KnownCtors := Std.HashSet (Name × FVarId)
+
+/-- The variables of impure code `c` (added to `acc`) that a `let` binds
+to a constructor that is a cell (`KnownCtors`). -/
+partial def impureCtorLets (c : Code .impure) (acc : Array FVarId) : Array FVarId :=
+  match c with
+  | .let d k =>
+    let acc := match d.value with
+      | .ctor info _ => if info.isRef then acc.push d.fvarId else acc
+      | _ => acc
+    impureCtorLets k acc
+  | .jp d k => impureCtorLets k (impureCtorLets d.value acc)
+  | .cases cs => cs.alts.foldl (fun acc alt => impureCtorLets alt.getCode acc) acc
+  | .uset _ _ _ k _ | .sset _ _ _ _ _ k _ | .inc _ _ _ _ k _ | .dec _ _ _ _ _ k _
+  | .oset _ _ _ k _ | .setTag _ _ k _ | .del _ k _ => impureCtorLets k acc
+  | _ => acc
+
 /-- For each `cases` of an impure copy (`ImpureWalk.cases`, its scrutinee
 led back to the declaration's variable where `impureTags` can), the
 declaration's own `cases` it comes from (`pureCases`): the next one in
@@ -225,12 +262,13 @@ would silently get Reussir's release times. Also where `insertResetReuse`
 resets matched values in the copies (`ResetSites`); with `resetsOnly`, the
 copies stop there (no borrow flags), and only the declarations `only`
 names (all without it) go through the passes (their callees give their
-signatures to `toImpure`). -/
-def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) (resetsOnly : Bool := false)
+signatures to `toImpure`). Third, the variables whose constructor Lean
+knows wherever it releases them (`KnownCtors`; empty with `resetsOnly`). -/
+def inferBorrowedParamsK (decls : Array (Decl .pure)) (keys : NameMap InstKey) (resetsOnly : Bool := false)
     (only : Option NameSet := none) :
-    CoreM (NameMap (Array Bool) × ResetSites) := do
+    CoreM (NameMap (Array Bool) × ResetSites × KnownCtors) := do
   withoutModifyingEnv do
-    let fail (why : MessageData) : CoreM (NameMap (Array Bool) × ResetSites) :=
+    let fail (why : MessageData) : CoreM (NameMap (Array Bool) × ResetSites × KnownCtors) :=
       throwError m!"lean2rr: Lean's borrow inference failed on this program ({why}), so the release \
         times of borrowed resources (files, child processes, promises) cannot be emulated (Lower/Borrow, \
         translation plan §5.8); internal error"
@@ -325,15 +363,32 @@ def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) (r
                 if k.2.isNone && counts.getD k.1 0 > 1 then continue
                 let key := (d.name, k, ctor)
                 sites := sites.insert key ((sites.getD key #[]).push x)
-            if resetsOnly then return ({}, sites)
+            if resetsOnly then return ({}, sites, {})
         let st := state
         let out ← st.fst.withAssertPurity .impure fun h => pure (h ▸ st.snd)
         let flags := out.foldl (init := ({} : NameMap (Array Bool))) fun m d =>
           match d.value with
           | .code _ => m.insert d.name (d.params.map (·.borrow))
           | _ => m
-        return (flags, sites)
+        -- The constructors' `let`s that are left (`KnownCtors`), led back to
+        -- the declarations' own variables by the binders' tags.
+        let mut known : KnownCtors := {}
+        for d in out do
+          let .code c := d.value | continue
+          let xs := impureCtorLets c #[]
+          if xs.isEmpty then continue
+          let bk := impureTags c {}
+          for x in xs do
+            if let some v := bk[x]? then known := known.insert (d.name, v)
+        return (flags, sites, known)
     catch e => fail (← e.toMessageData.toString)
+
+/-- `inferBorrowedParamsK` without its third result. -/
+def inferBorrowedParams (decls : Array (Decl .pure)) (keys : NameMap InstKey) (resetsOnly : Bool := false)
+    (only : Option NameSet := none) :
+    CoreM (NameMap (Array Bool) × ResetSites) := do
+  let (flags, sites, _) ← inferBorrowedParamsK decls keys resetsOnly only
+  return (flags, sites)
 
 /-- The variables of declaration `d` that it only borrows (given which of
 its parameters are borrowed), the values Lean's inference does not make
@@ -574,11 +629,11 @@ def borrowInfo : LowerM (NameMap (Array Bool) × Std.HashSet (Name × FVarId)) :
   if let some r := (← get).borrowInfo then return r
   let ctx ← read
   let r ← if ← programMakesResources ctx.decls ctx.keys then
-      let (flags, resets) ← inferBorrowedParams (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
+      let (flags, resets, known) ← inferBorrowedParamsK (ctx.decls.foldl (fun a _ d => a.push d) #[]) ctx.keys
       let (replaced, fresets) ← flattenResets.get
       let resets := fresets.fold (init := resets.filter fun (d, _, _) _ => !replaced.contains d)
         fun m k v => m.insert k v
-      modify fun s => { s with armResets := resets }
+      modify fun s => { s with armResets := resets, knownCtors := known }
       let initSlots := (← get).initSlots
       let isConst (f : Name) : Bool :=
         initSlots.contains f || (ctx.decls.find? f).any (·.params.isEmpty)
@@ -874,6 +929,114 @@ def keepsAt (f : Name) (p : Param .pure) : LowerM Bool := do
       Lean's code there (Lower/Borrow, keepsAt; translation plan §5.8); internal error"
   return keep
 
+/-- The function that releases a value of type `t` as native Lean's
+`lean_dec_ref_known` does (`KnownCtors`), with its name
+(`l2r_release_known_<type>`), when the order can differ from the release
+of the whole value: `t` is a shared record of the program (not a `[value]`
+type, not an enumeration) with a constructor of two or more fields that
+can hold something whose release shows.
+
+```
+fn l2r_release_known_T(x : T) -> u64 {
+    match x {
+        T::c_node(f0, f1, f2) => {
+            let r0 : u64 = l2r_release_after<T>(f0);
+            let r1 : u64 = l2r_release_after<LAny>(f1);
+            let r2 : u64 = l2r_release_after<T>(f2);
+            0
+        },
+        T::c_leaf => 0
+    }
+}
+```
+
+The fields go in Lean's field order (`CtorLayout.fields`; a Reussir
+record can hold them at other positions), each with `l2r_release_after`,
+which is a free of its own when no free runs: complete before the next
+field, last pushed first inside, as `lean_dec` of the field. A field that
+holds nothing to release (a scalar, an enumeration, a `Nat`, an `Int`, a
+string) is not bound: Reussir drops it with the cell. A shared value:
+Reussir's `match` on a shared cell retains the fields it binds and
+decrements the cell, and each field's release then takes its retain
+back, so only the cell is decremented, as `lean_dec_ref_known` does
+there. A structure is read by projections, all before the first release:
+the cell dies after the last one, where a cell that is not shared gives
+its fields up to the projections' copies.
+
+Every constructor of the type gets an arm (the function does not know
+the constructor; the caller does), so it is one function per type.
+`none`, and the plain `l2r_release_after` of the whole value, also for a
+type with a field that cannot be a type argument of an FFI function
+(`isBoundaryTy`: a `[value]` struct, a closure type): there the order
+stays that of one free (plan §10). -/
+def knownReleaseFn? (t : RR.Ty) : LowerM (Option (String × RR.Item)) := do
+  let .named n := t | return none
+  let some info := (← get).typeInfos[n]? | return none
+  if info.shape == .enumLike || info.value then return none
+  let u64 := RR.Ty.named "u64"
+  let zero : RR.Expr := .atom "0"
+  -- Per constructor: its layout and the fields to release, in Lean's order.
+  let mut ctors : Array (CtorLayout × Array (Nat × RR.Ty)) := #[]
+  for c in info.ctorOrder do
+    let some l := info.ctors.find? c | return none
+    let mut rel := #[]
+    for f in l.fields do
+      let some (j, ft) := f | continue
+      if (← boxPlainScalar ft) || ft == .named "Nat" || ft == .named "Int" || ft == .named "LStr" then continue
+      unless ← isBoundaryTy ft do return none
+      rel := rel.push (j, ft)
+    ctors := ctors.push (l, rel)
+  unless ctors.any (·.2.size ≥ 2) do return none
+  let releases (rel : Array (Nat × RR.Ty)) : Array (String × Option RR.Ty × RR.Expr) :=
+    rel.map fun (j, ft) => (s!"r{j}", some u64, .call "l2r_release_after" #[ft] #[.var s!"f{j}"])
+  let name := s!"l2r_release_known_{n}"
+  let body : RR.Block ← match info.shape with
+    | .struct =>
+      let some (_, rel) := ctors[0]? | return none
+      let projs := rel.map fun (j, ft) => (s!"f{j}", some ft, RR.Expr.field (.var "x") j)
+      pure ⟨projs ++ releases rel, zero⟩
+    | _ =>
+      let arms : Array RR.Arm := ctors.map fun (l, rel) =>
+        let nrec := (l.fields.filter (·.isSome)).size
+        let binders := rel.foldl (fun bs (j, _) => bs.set! j (some s!"f{j}")) (Array.replicate nrec (none : Option String))
+        { ty := n, ctor := some l.variant, binders, body := ⟨releases rel, zero⟩ }
+      pure (.ofExpr (.mtch (.var "x") arms))
+  return some (name, .fn name #[("x", t)] u64 body)
+
+/-- The release of `v` (of type `t`) where native Lean knows its
+constructor: a call of `knownReleaseFn?`'s function, made when it is not
+there yet, or the plain release where the type has none. -/
+def knownRelease (v : String) (t : RR.Ty) : LowerM RR.Expr := do
+  match ← knownReleaseFn? t with
+  | some (name, item) =>
+    unless (← hasFn name) do modify fun s => { s with fns := s.fns.push item }
+    return .call name #[] #[.var v]
+  | none => return .call "l2r_release_after" #[t] #[.var v]
+
+/-- `knownReleaseFn?`'s functions for the types of the recorded names
+(`armNames`), by type name: Emit/ArmRelease adds the ones it calls. -/
+def armKnownFns : LowerM (Std.HashMap String (String × RR.Item)) := do
+  let mut out : Std.HashMap String (String × RR.Item) := {}
+  for (_, (t, _)) in (← get).armNames do
+    let .named n := t | continue
+    if out.contains n then continue
+    if let some r ← knownReleaseFn? t then out := out.insert n r
+  return out
+
+/-- Whether native Lean knows the constructor of variable `x` where the
+code of `ctx` is: `x` is bound by a constructor (`KnownCtors`), or the
+code is inside a constructor's alternative of a `cases` on `x` that is
+one natively (two or more alternatives that can run: `ArmOrders.alts`,
+by the alternative's first field; Lean's `withCtorAlt`). Lean then
+releases `x` with `lean_dec_ref_known`. As for the release order at a
+branch's start (Emit/ArmRelease), a join point's body counts as inside
+the alternatives around the place where lean2rr lowers it. -/
+def knownAt (ctx : CodeCtx) (x : FVarId) : LowerM Bool := do
+  if ← getPart (·.knownCtors.contains (ctx.decl, x)) then return true
+  let some ps := ctx.altParams[x]? | return false
+  let some p := ps[0]? | return false
+  getPart (·.armAlts.contains (ctx.decl, p))
+
 /-- The arguments of a call of declaration `f` (arguments `args`, the
 first `n` passed to `f`) that the caller keeps until the call returns: the
 variables (name, type) the caller owns (not lent to its declaration,
@@ -883,9 +1046,10 @@ borrows (at any position: `f x x` with the second parameter borrowed keeps
 is passed to; in a program that casts, also by the argument's own mono type,
 `armVars`). In the order of their first occurrence in
 `args`, as Lean's `addDecAfterFullApp` visits them (`releaseAfter`
-releases them in reverse). -/
+releases them in reverse). Each with whether native Lean knows its
+constructor at the call (`knownAt`), for `releaseAfter`. -/
 def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) :
-    LowerM (Array (String × RR.Ty)) := do
+    LowerM (Array (String × RR.Ty × Bool)) := do
   let (flags, lent) ← borrowInfo
   let some bs := flags.find? f | return #[]
   let d? := (← read).decls.find? f
@@ -909,7 +1073,7 @@ def borrowKeeps (ctx : CodeCtx) (f : Name) (args : Array (Arg .pure)) (n : Nat) 
     if out.any (·.1 == v) then continue
     -- The borrowed parameter it is passed to.
     let some p := (d?.bind (·.params[j]?)) | continue
-    if ← keepsAt f p then out := out.push (v, t)
+    if ← keepsAt f p then out := out.push (v, t, ← knownAt ctx x)
   return out
 
 /-- `call` (of type `ret`) followed by the release of `keeps`: the value of
@@ -919,13 +1083,16 @@ each `dec` to the code after the call, so the `dec`s run in the reverse
 order of the arguments' first occurrences: `put3 a b c` with three dead
 borrowed handles closes `c`, then `b`, then `a` (cross-test XT-1). Lean's
 `_boxed` functions get the same treatment (`explicitRc` runs on them), so
-`boxedTarget`'s wrappers release last parameter first too. -/
-def releaseAfter (call : RR.Expr) (ret : RR.Ty) (keeps : Array (String × RR.Ty)) : LowerM RR.Expr := do
+`boxedTarget`'s wrappers release last parameter first too. A kept variable
+whose constructor native Lean knows at the call (the flag `borrowKeeps`
+gives it) is released as `lean_dec_ref_known` does (`knownRelease`). -/
+def releaseAfter (call : RR.Expr) (ret : RR.Ty) (keeps : Array (String × RR.Ty × Bool)) : LowerM RR.Expr := do
   if keeps.isEmpty then return call
   let r ← fresh "bw"
   let mut lets := #[(r, some ret, call)]
-  for (v, t) in keeps.reverse do
-    lets := lets.push (← fresh "bk", some (.named "u64"), .call "l2r_release_after" #[t] #[.var v])
+  for (v, t, known) in keeps.reverse do
+    let rel ← if known then knownRelease v t else pure (.call "l2r_release_after" #[t] #[.var v])
+    lets := lets.push (← fresh "bk", some (.named "u64"), rel)
   return .block ⟨lets, .var r⟩
 
 /-- The function a function value of declaration `f` (Reussir function
@@ -952,7 +1119,8 @@ def boxedTarget (f : Name) (fn : String) (params : Array RR.Ty) (keep : Array Bo
   let name := fn ++ "_boxed"
   unless (← hasFn name) do
     let ps := taken.mapIdx fun k (t, _) => (s!"a{k}", t)
-    let body ← releaseAfter (.call fn #[] (ps.map (.var ·.1))) ret (kept.map fun k => (s!"a{k}", taken[k]!.1))
+    -- A wrapper's parameters: native Lean does not know their constructors.
+    let body ← releaseAfter (.call fn #[] (ps.map (.var ·.1))) ret (kept.map fun k => (s!"a{k}", taken[k]!.1, false))
     modify fun s => { s with fns := s.fns.push (.fn name ps ret (.ofExpr body)) }
   return name
 

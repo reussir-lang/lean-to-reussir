@@ -407,6 +407,13 @@ structure LoweredProgram where
   /-- The renumbered scrutinees in each outlined join point's function
   (`LowerState.armCutSeeds`). -/
   armCutSeeds : Std.HashMap String (Array (Nat × Nat)) := {}
+  /-- The names of `armNames` whose variable is bound by a constructor
+  that native Lean knows where it releases the value
+  (`LowerState.armKnown`), and the functions that release a value of a
+  type of `armNames` as `lean_dec_ref_known` does, by type name with
+  their names (Lower/Borrow's `armKnownFns`). -/
+  armKnown : Std.HashSet String := {}
+  armKnownFns : Std.HashMap String (String × RR.Item) := {}
 
 /-- What passes over the generated functions see of the program. -/
 def LoweredProgram.rrProgram (p : LoweredProgram) : RRProgram :=
@@ -763,8 +770,10 @@ def lowerProgram (cfg : PassConfig) (prelude : String) (mainInst errStr : Name)
       pure (items, st)
     else pure (fnItems, st)
   let (boxItem, st) ← (boxTypeItems.run ctx).run st
+  let (armKnownFns, st) ← (armKnownFns.run ctx).run st
   timingMark "lowering: live functions, types" s!"{st.fns.size} functions"
   return { prelude, preludeFns, typeItems := st.typeItems, fnItems, boxItem, fns := liveFns st.fns, strLits := st.strLits, anchored,
-           armNames := st.armNames, armFields := st.armFields, armIteLasts := st.armIteLasts.fold (init := {}) (fun m k v => match v with | some ns => m.insert k ns | none => m), armCutSeeds := st.armCutSeeds }
+           armNames := st.armNames, armFields := st.armFields, armIteLasts := st.armIteLasts.fold (init := {}) (fun m k v => match v with | some ns => m.insert k ns | none => m), armCutSeeds := st.armCutSeeds,
+           armKnown := st.armKnown, armKnownFns }
 
 end LeanToReussir

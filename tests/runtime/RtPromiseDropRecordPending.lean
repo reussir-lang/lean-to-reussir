@@ -7,12 +7,14 @@ it, so the record exists and `main` drops it.
 Natively `main` frees it with `lean_dec`, which frees a cell's fields last
 first: `p` goes first, and its `sync` dependent runs inside the free (`p
 start`, the length of a fresh list that it frees itself, `p end`); then
-the list `qs` and its promise `q` (`q`). With lean2rr, Reussir's glue
-frees a record that user code drops first field first, and each promise
-is resolved where the glue reaches it, its dependents run at once: `q`
-before `p start` (plan §10, the order of releases in a free that user
-code starts; RtPromiseDropRecordPending.l2r.out). The free inside `p`'s
-dependent is a free of its own in both. -/
+the list `qs` and its promise `q` (`q`). lean2rr releases the record
+after the call of `consume`, as one free that goes last field first too:
+the same output (plan §10, the order of releases in a free that user
+code starts). On the Reussir base l2r-base12, Reussir's glue freed a
+record that user code drops first field first, and each promise was
+resolved where the glue reached it, its dependents run at once: `q`
+before `p start`. The free inside `p`'s dependent is a free of its own
+in both. -/
 
 structure Holder where
   qs : List (IO.Promise Unit)

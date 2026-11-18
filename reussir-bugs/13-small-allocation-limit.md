@@ -5,7 +5,9 @@
 **Kind:** bug (on 32-bit targets). **Status:** not patched; it does not
 affect lean2rr (unreachable: lean2rr builds only for 64-bit targets).
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744: the compiler's limit (`kSmallAllocationLimit` = 1024, `include/Reussir/Support/AllocatorBinModel.h`) and `alloc_small` have no change since 7954a367 (#771 adds only rcgmp's allocation hooks to `alloc.rs`). Checked on upstream 7954a367 on 2026-10-19; open.
+**Upstream (2026-11-17):** Unchanged at `36a55a0f`: `include/Reussir/Support/AllocatorBinModel.h` and `crates/reussir-rt/src/alloc.rs` have no commit after `95d9a1c8` (checked on 2026-11-17).
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744: the compiler's limit (`kSmallAllocationLimit` = 1024, `include/Reussir/Support/AllocatorBinModel.h`) and `alloc_small` have no change since 7954a367 (#771 adds only rcgmp's allocation hooks to `alloc.rs`). Checked on upstream 7954a367 on 2026-10-19; open.
 
 **Verdict: bug.** For an allocation whose size is a constant, rrc emits
 a call to `__reussir_allocate_small(size)` instead of

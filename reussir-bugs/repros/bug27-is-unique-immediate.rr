@@ -1,0 +1,14 @@
+import core::object;
+enum E { A, B(u64) }
+
+fn fresh() -> bool { object::is_unique(E::A) }
+extern "C" trampoline "fresh_immediate" = fresh;
+
+fn boxed() -> bool { object::is_unique(E::B{1}) }
+extern "C" trampoline "fresh_box" = boxed;
+
+fn retain(e: E, n: u64) -> bool {
+    if n == 0 { object::is_unique(e) } else { object::unsafe_inc(e); retain(e, n - 1) }
+}
+fn after(n: u64) -> bool { retain(E::A, n) }
+extern "C" trampoline "after_retains" = after;

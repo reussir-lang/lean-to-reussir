@@ -155,14 +155,17 @@ accepted and does nothing, `--int-backend leanrt` and
     rcgmp/leanrt 1.056 to 1.032). Tests `RtNatBoxBig` (with
     tests/runtime/int-backend-check.sh) and `RtBoxBigReuse` (peak memory).
   - leanrt's part is `leanrt::rcgmp`: the box cells
-    (of `reussir_rt::rcgmp::Mpz`, the owned handle that local Reussir patch
-    R2 renders at polyffi type arguments, re-exported), decimal text
+    (of `reussir_rt::rcgmp::Mpz`, the owned handle that Reussir renders
+    at polyffi type arguments (once local patch R2, upstream since #824
+    and #843), re-exported), decimal text
     (`repr`), `replicate_len`. It calls
     rcgmp's public C API only. A generic box texture at `Mpz`
     (`l2r_any_of<Nat>`) ends the program with a message
     (`generic_mpz_box`): it cannot keep small values immediates.
-  - rcgmp needs Reussir's local patches R1 and R2:
-    `scripts/l2r.py` checks for them (`RCGMP_REUSSIR_PATCHES`). With R2, a
+  - rcgmp needs Reussir's local patch R1 (20-a) and upstream's `Mpz`
+    (once local patch R2):
+    `scripts/l2r.py` checks for them (`RCGMP_REUSSIR_PATCHES`), and for
+    the glue patches 20-c and 20-d (`REQUIRED_REUSSIR_PATCHES`). With R2, a
     typed `Array Nat`, a once-cell constant and every generic texture at
     `Nat` hold `Mpz` values, counted by rcgmp's C calls (test
     `RtNatGenericBig`).
@@ -469,7 +472,7 @@ accepted and does nothing, `--int-backend leanrt` and
     `crossed` and `nonTail`, whose increments are not loop-carried, read
     the rebinding) and allows the loop-carried increments in
     `RtNatIdxRebind`'s check.
-- **Why:** upstream Reussir (without local patch R2) renders a built-in
+- **Why:** Reussir before #824 and #843 (without the then local patch R2) rendered a built-in
   integer at a polyffi type argument as the raw handle and releases it after the call (its `rcgmp_handle`
   comes from the substituted parameter type): `l2r_once_put<Nat>` stored a
   handle that the wrapper then released, `l2r_array_push<Nat>` the same,
@@ -500,8 +503,8 @@ accepted and does nothing, `--int-backend leanrt` and
   `RtNatGenericBig`, `RtNatIdxWord`, `RtNatIdxRebind`,
   `tests/runtime/int-backend-check.sh`.
 - **Remove only if:** never while lean2rr builds on Reussir's built-in
-  integers. `Nat` and `Int` at type arguments need Reussir's local patch R2
-  (scripts/l2r.py requires it). Guard mode (rows 10, 11, 19 of the plan: a
+  integers. `Nat` and `Int` at type arguments need R2, which is upstream
+  Reussir's code since #824 and #843 (scripts/l2r.py requires its `Mpz`). Guard mode (rows 10, 11, 19 of the plan: a
   lowering without `--rcgmp-type-args` that kept them out, on a Reussir with
   R2 that it did not use, and its check) existed until 2026-10-25, for
   measurements.

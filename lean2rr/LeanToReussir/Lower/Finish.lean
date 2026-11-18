@@ -711,11 +711,138 @@ def finishPersistFns : LowerM Bool := do
   modify fun s => { s with persistDone := some (n, vc.1 + vc.2 * 1000003) }
   return true
 
+/-- What the release of a value of type `t` in place can meet
+(`payloadJoins`), added to `r`: `(cyc, shows)`. `cyc`: a record type that
+is part of a cycle of record members (`t` itself included), which Reussir
+may free by a drop run of its own (`__reussir_drop_run`; its Worklist
+kind) and not in place. `shows`: something that is no record of the
+program and no plain value, so its release can show: a runtime object (a
+box, an array, a reference, a handle, a promise) or a function value.
+Decided on the Reussir types, through the fields of the program's records
+(`typeInfos`, every constructor; the tuples and `ElemBox`es, `tupleKeys`;
+a reference's record, whose cell holds its element, `refElem?`),
+not through runtime objects: their releases are leanrt's, which defer.
+Too much is safe, so a closure type and a type that is not known here
+count as both; a function value is walked through what its variants can
+hold (`fnVariants`, complete here: the box API is emitted last). One
+depth-first walk: `seen` has the record and function types visited,
+`true` while the walk is below them (a type met again there is on a
+cycle). -/
+partial def payloadReach (t : RR.Ty) (r : Bool × Bool) (seen : Std.HashMap String Bool) :
+    LowerM ((Bool × Bool) × Std.HashMap String Bool) := do
+  match t with
+  | .app .. => return ((r.1, true), seen)
+  | .cls .. => return ((true, true), seen)
+  | .fn .. =>
+    -- A function value: an enum whose variants hold the arguments of a
+    -- partial application (`part`: at most the target's first `j`
+    -- parameters), a function value of another representation (`wrap`),
+    -- or a Reussir closure (`raw`), a runtime object here.
+    let n := RR.fnTypeName t
+    match seen[n]? with
+    | some below => return ((r.1 || below, true), seen)
+    | none =>
+      let st ← get
+      let mut r := (r.1, true)
+      let mut seen := seen.insert n true
+      for v in st.fnVariants.getD t.rt #[] do
+        let ms : Option (Array RR.Ty) := match v with
+          | .part id j => (st.fnTargets[id]?).map (·.params.extract 0 j)
+          | .wrap src _ => some #[src]
+        let some ms := ms | return ((true, true), seen)
+        for m in ms do
+          let (r', seen') ← payloadReach m r seen
+          r := r'
+          seen := seen'
+      return (r, seen.insert n false)
+  | .named n =>
+    if n ∈ ["Nat", "Int", "LStr"] || (← boxPlainScalar t) then return (r, seen)
+    if n ∈ ["LHandle", "LPromise", boxName] then return ((r.1, true), seen)
+    match seen[n]? with
+    | some below => return ((r.1 || below, r.2), seen)
+    | none =>
+      let st ← get
+      -- A reference's record holds Reussir's cell of its element.
+      let refElem ← refElem? t
+      let members : Option (Array RR.Ty) := match st.typeInfos[n]? with
+        | some info => some (info.ctorOrder.foldl (fun a c => a ++ ((info.ctors.find? c).map (·.posTys)).getD #[]) #[])
+        | none => match refElem with
+          | some e => some #[e]
+          | none => (st.tupleKeys[n]?).map (·.filter (· != .named "__elem_box"))
+      let some ms := members | return ((true, true), seen)
+      let mut r := r
+      let mut seen := seen.insert n true
+      for m in ms do
+        let (r', seen') ← payloadReach m r seen
+        r := r'
+        seen := seen'
+      return (r, seen.insert n false)
+
+/-- The Reussir types (run-time type, rendered) of the program's variables
+that may hold a resource and that their code owns: the types of the
+recorded names (`armNames`: every name the lowering gave a variable of
+`armVars`, by the rule of the borrow emulation, `mayHoldAt`). A value
+that holds a resource is bound where it is made (a constructor's or a
+call's `let`, which its code owns) and named where it is used, so its
+type is here; a type that is not here has no value that holds one, and
+the order inside its release cannot show. In a program without
+resources the set is empty. Only for a program that does not cast
+(`payloadJoins`): there a value of an inductive is never rebuilt, so
+every value has such a variable. -/
+def resourceTypes : LowerM (Std.HashSet String) := do
+  return (← get).armNames.fold (init := {}) fun s _ (t, _) => s.insert t.rt.render
+
+/-- Whether the release of a box's payload of type `t` goes through the
+type's FFI release (`l2r_release_after<T>`, a Rust `drop` of the handle)
+and not through a drop of `t` in place.
+
+leanrt calls a payload's release inside a running free (the pop of the
+payload's cell, or an array's step). A drop in place releases the members
+where it reaches them: a runtime object's release defers its work onto
+the free's worklist (leanrt), a record without a cycle is taken apart in
+place, a list is a loop; all of that is pushed and comes out last pushed
+first, native Lean's order. But a member of a record type with a cycle
+that Reussir frees through a worklist is a drop run of its own
+(`__reussir_drop_run`), and upstream Reussir completes a run that starts
+inside a running free before it returns (a nested scope): a tree of
+handles in a structure's first field closed its handles before the
+structure's later fields were reached (`{t : Tr, h : Handle}` in an
+array: `T` then `H`, natively `H` then `T`; test
+`RtDropNestedRunOrder`). The FFI release of a record joins the running
+free (the release's bridge, `drop.join`), and defers every member: the
+order is native's.
+
+So: in a program that makes resources (only their releases show, as for
+the borrow emulation), a payload type of which some value may hold a
+resource (`held`, `resourceTypes`; every type in a program that casts),
+whose release in place can reach a
+record type with a cycle and something whose release can show
+(`payloadReach`). Every other payload keeps the drop in place, which is
+cheaper (no deferral per member): every program without resources, and
+in the others a payload without a recursive record below it (an
+`Option`, a structure of handles, a reference to a box, a stream), or
+without anything observable (an expression tree of numbers). The rule is
+wider than needed (a list, whose drop in place is a loop, also goes
+through the FFI release when it holds boxes): it does not depend on how
+Reussir classifies a recursive type. -/
+def payloadJoins (held : Std.HashSet String) (t : RR.Ty) : LowerM Bool := do
+  if (← borrowInfo).1.isEmpty then return false
+  unless ← isBoundaryTy t do return false
+  -- The type the payload holds (an `ElemBox` wraps it).
+  let inner := (← elemBoxOf? t).getD t
+  -- Not in a program that casts: a cast between two inductives rebuilds a
+  -- value node by node (`structConv`), and the nodes below the top have
+  -- no variable of their own.
+  if (← read).resourceHeld?.isSome && !held.contains inner.rt.render then return false
+  let ((cyc, shows), _) ← payloadReach t (false, false) {}
+  return cyc && shows
+
 /-- The program's side of the box (the box API, emitted last, when every
 payload type and every variant of a function type is known):
 
 - its release of each payload type: `fn l2r_any_rel_<n>(x : T) -> unit { }`
-  (Reussir drops `x` at its type), exported to leanrt as
+  (Reussir drops `x` at its type; through the type's FFI release where
+  the order of releases can show, `payloadJoins`), exported to leanrt as
   `l2r_any_rel_<n>_c(cell)` by a trampoline;
 - the table of those releases by payload number: the texture
   `l2r_any_releases`, which installs it in leanrt (`leanrt::any::install`),
@@ -736,12 +863,14 @@ def boxTypeItems : LowerM RR.Item := do
   let mut decls := ""
   let mut rels := ""
   let mut count := 0
+  let held ← resourceTypes
   for (t, _) in ← boxPayloads do
     if let .prog n st .. ← boxKind t then
       unless seen.contains n do
         seen := seen.insert n
         count := count + 1
-        text := text ++ s!"fn l2r_any_rel_{n}(x : {st.render}) -> unit \{ }\n" ++
+        let body := if ← payloadJoins held st then s!"\{ let bk : u64 = l2r_release_after<{st.render}>(x); }" else "{ }"
+        text := text ++ s!"fn l2r_any_rel_{n}(x : {st.render}) -> unit {body}\n" ++
           s!"extern \"C\" trampoline \"l2r_any_rel_{n}_c\" = l2r_any_rel_{n};\n"
         decls := decls ++ s!"        fn l2r_any_rel_{n}_c(cell: *mut u8);\n"
         rels := rels ++ s!"        leanrt::any::Rel({n}, l2r_any_rel_{n}_c),\n"

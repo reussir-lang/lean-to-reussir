@@ -1,0 +1,91 @@
+// Issue 2 (release order; not a bug): a drop that user code starts inside
+// a running drop scope completes as a scope of its own.
+//
+// `Tag` is a host resource. Its release prints its number: at once outside
+// a drop scope, deferred onto the scope's worklist inside one (as a host
+// runtime's handle close; leanrt does the same).
+// `Mix { t : Tree, h : Tag }`: `Tree` has two recursive members (Worklist).
+// `rel` is user code that drops a `Mix` (lean2rr's release function of a
+// box's payload, `l2r_any_rel_N`). The host calls it inside a drop scope
+// (`host_free`: `drop_stack::run`, as leanrt's free of an array or a box).
+// `glue_free` releases the same value in the same scope through the
+// record's own FFI release (the bridge, which joins the scope).
+//
+// Command: rrc THIS -O aggressive --drop-order backward (polyffi dirs).
+// Upstream 36a55a0f (+ l2r-base13 series): prints
+//   1 2     host_free: the tree's tag 1 first. `rel` drops `t` with
+//           `__reussir_drop_run`, a nested scope that finishes before it
+//           returns; the tag 2 was not yet reached.
+//   2 1     glue_free: last member first (native Lean's order).
+// l2r-base12 (entry 23's stack): a nested run joined the running scope,
+// and both orders were `2 1` (lean2rr's test RtDropNestedRunOrder shows the
+// same through a box's payload).
+extern "rust" [{
+    use reussir_rt::rc::Rc;
+    use reussir_rt::drop_stack;
+}];
+
+// The Rust type is a boxed `dyn Any`: its drop is the drop of the value
+// that `tag` puts in it.
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::boxed::Box<dyn std::any::Any>>")]
+pub struct Tag;
+
+#[ffi(import)]
+fn tag(n : u64) -> Tag [{ {
+    struct TagBox(u64);
+    unsafe extern "C" fn tag_say(p: *mut u8) { print!("{} ", p as usize) }
+    impl Drop for TagBox {
+        fn drop(&mut self) {
+            if drop_stack::releasing() {
+                unsafe { drop_stack::defer(self.0 as usize as *mut u8, tag_say) }
+            } else {
+                print!("{} ", self.0)
+            }
+        }
+    }
+    Rc::new(::std::boxed::Box::new(TagBox(n)) as ::std::boxed::Box<dyn std::any::Any>)
+} }];
+
+#[ffi(import)]
+fn newline() -> u64 [{ { println!(); 0 } }];
+
+pub enum Tree { Leaf, Node(Tree, Tag, Tree) }
+pub struct Mix { t: Tree, h: Tag }
+
+fn rel(x : Mix) -> unit { }
+extern "C" trampoline "b1_rel_c" = rel;
+
+// The host frees `x` inside a drop scope with the program's release function.
+#[ffi(import)]
+fn host_free(x : Mix) -> u64 [{ {
+    extern "C" { fn b1_rel_c(cell: *mut u8); }
+    unsafe extern "C" fn call_rel(p: *mut u8) { unsafe { b1_rel_c(p) } }
+    let p = unsafe { ::std::mem::transmute_copy::<_, usize>(&x) };
+    ::std::mem::forget(x);
+    unsafe { drop_stack::run(p as *mut u8, call_rel) };
+    0
+} }];
+
+// The host frees `x` inside a drop scope with the record's FFI release.
+#[ffi(import)]
+fn glue_free<T>(x : T) -> u64 [{ {
+    // The release of the record through its Rust handle: `Mix_ffi_release`.
+    unsafe extern "C" fn drop_it<X>(p: *mut u8) {
+        let w = p as usize;
+        drop(unsafe { ::std::mem::transmute_copy::<usize, X>(&w) })
+    }
+    let p = unsafe { ::std::mem::transmute_copy::<_, usize>(&x) };
+    ::std::mem::forget(x);
+    unsafe { drop_stack::run(p as *mut u8, drop_it::<[:T:]>) };
+    0
+} }];
+
+fn mk(a : u64, b : u64) -> Mix { Mix{Tree::Node{Tree::Leaf, tag(a), Tree::Leaf}, tag(b)} }
+
+#[main]
+fn main() {
+    let r1 = host_free(mk(1, 2));
+    let n1 = newline();
+    let r2 = glue_free<Mix>(mk(1, 2));
+    let n2 = newline();
+}

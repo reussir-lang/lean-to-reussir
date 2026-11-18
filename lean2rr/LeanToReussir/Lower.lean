@@ -15,6 +15,7 @@ import LeanToReussir.Lower.Values
 import LeanToReussir.Lower.JoinPoints
 import LeanToReussir.Lower.StateMachine
 import LeanToReussir.Lower.BoxedUses
+import LeanToReussir.Lower.PreBox
 import LeanToReussir.Lower.Hooks
 import LeanToReussir.Lower.IntMatch
 import LeanToReussir.Lower.Code

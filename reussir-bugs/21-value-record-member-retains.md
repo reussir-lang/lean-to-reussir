@@ -8,18 +8,111 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 
 ## Summary
 
-**Kind:** missed optimization. **Status:** patched (21-a), applied in
-`./reussir`'s series since 2026-10-25 (branch `l2r-base12`, commit
-`5a15f745`; made as `8e9a6293`, `l2r-stepd` plus 21-a, the same code).
-No workaround in lean2rr. It shows because lean2rr's `Nat` and `Int` are
-Reussir's built-in integers (step D; the default since 2026-10-25, the
-only representation since D8, 2026-10-26). With the leanrt backend of
-the time (`--int-backend leanrt`, removed in D8), `Nat` and `Int` were
-tagged FFI handles (10-a), whose retains are `rc.inc` and already
-cancel.
+**Kind:** missed optimization. **Status:** patched (21-a), patch 8 of
+the series on upstream `36a55a0f` (Reussir branch `l2r-base13-final`,
+commit `3db9b817`; 6 files, +418/-2, without `tests/` +16/-2). The
+patch was reworked for this base
+([below](#21-a-on-36a55a0f-reworked)): its rule is smaller than the one
+of `l2r-base12` (commit `5a15f745`; made as `8e9a6293`, `l2r-stepd`
+plus 21-a). Measured on this base: fewer instructions, statically and
+executed; wall time is pending the timing run.
+No workaround in lean2rr.**Upstream (2026-11-18):** Not upstream at `36a55a0f` (source read):
+`EquivalenceAnalysis::decideLoadedEquivalent` still needs a load on both
+sides, and the counted-word scan stops at `ref.spilled`. The
+maintainer's port of lean2rr left 21-a out of the series. Upstream
+changed the same pass after `95d9a1c8` (#919, #983), and it has a
+borrow analysis now; the pattern is still there with both (measured,
+below).
 
-**Upstream (2026-10-25):** Not upstream at 00906e38. Prepared as a pull
-request candidate; not opened.
+**Upstream, earlier base (history, 2026-10-25):** Not upstream at
+00906e38. Prepared as a pull request candidate; not opened.
+
+## 21-a on 36a55a0f (reworked)
+
+The patch of the final series is not the patch of `l2r-base12` moved.
+It was moved, reviewed and made smaller in two steps (2026-11-17 and
+2026-11-18; local notes `port13/reviews/RV5`).
+
+**Why the old form could not be moved as it was.** The old patch
+widened the predicate `leavesCountsAlone` (which operations the scan of
+the cancellation may cross). On `95d9a1c8` that function was local to
+`IncDecCancellation.cpp`. Upstream moved it to `lib/IR/ReussirOps.cpp`
+and uses it in three more passes: the borrow analysis, the borrow
+specialization and the TRMC recursion analysis. A wider predicate there
+is no memory-safety hole (each caller was read), but it changes what
+those passes do: with it, the borrow specialization makes a borrowed
+copy of a traversal that ends in a conversion to `Nat`, a function that
+it leaves owned today (one repro; nobody measured or reviewed that
+change, and 21-a's claim does not need it).
+
+**The rule now.** Two changes, 16 lines of code:
+
+- `EquivalenceAnalysis::decideLoadedEquivalent` (values of the types
+  other than ref, rc and nullable) also accepts the same field of the
+  same by-value record, read by `record.extract` on one side and through
+  the record's spill on the other. rc pointers have this rule already.
+- The counted-word scan (`cancelCountedWordRetains`, and only it) also
+  passes `reussir.ref.spilled`, which only fills a new stack slot and
+  changes no count. `leavesCountsAlone` itself is upstream's, unchanged.
+
+Both parts are needed: with the scan change alone, the optimized IR of
+the three programs below is the baseline's. Gone from the old patch:
+the rule "an operation that allocates new storage and writes only into
+it" (`onlyWritesFreshStorage`), and the stop at
+`rcgmp.bridge.mpz.is_unique` (`isRCGMPCountObserver`). The review
+counted the cancelled pairs with an instrumented build: every extra
+pair crosses only the spill, so the one-line rule cancels the same
+pairs as the effect-based rule did (the optimized LLVM IR of the three
+programs is byte-identical between the two forms).
+
+**Measured on `36a55a0f`** (aarch64, `-O aggressive`, borrow analysis
+on, the flags of `scripts/l2r.py`; the same `.rr` compiled without and
+with the patch). L12 is the classic Sieve, L17 Strings, Z01c lean-zip's
+compress.
+
+Static, optimized LLVM IR and object ("release slow paths" are calls of
+`rcgmp_mpz_free`, one for each release site that stays):
+
+| Program | IR instructions | release slow paths | `.text` bytes | pairs cancelled by the pass |
+|---|---|---|---|---|
+| L12 | 25,660 to 24,808 (-3.3%) | 123 to 93 | 112,149 to 107,313 (-4.3%) | 49 to 95 |
+| L17 | 87,485 to 85,888 (-1.8%) | 616 to 561 | 379,450 to 368,962 (-2.8%) | 124 to 265 |
+| Z01c | 407,488 to 368,828 (-9.5%) | 7063 to 5232 | 1,880,872 to 1,651,480 (-12.2%) | 2071 to 4359 |
+
+In Z01c 97 functions change and 5 of them grow (LLVM inlines in another
+way). The patch's own test program: 3008 to 2657 lines of assembly, 49
+to 35 release slow paths.
+
+Executed instructions (cachegrind, builds without SVE and RCPC, reduced
+sizes, identical output):
+
+| Program | without | with | change | the figure on `l2r-base12` (full size) |
+|---|---|---|---|---|
+| L12, 5·10^6 | 1,863,640,806 | 1,761,003,311 | -5.5% | -9.6% |
+| L17, 10^5 | 2,431,295,586 | 2,269,968,300 | -6.6% | -7.8% |
+| Z01c | not run | | | -6.0% |
+
+So the gain is smaller than on `l2r-base12` for L12 and still there.
+**Wall time: pending the timing run.** Until then, "21-a makes these
+programs faster" is a hypothesis that instruction counts support.
+
+On other code: the patch changes nothing in upstream's benchmark suite,
+core and std (33 units, lowered MLIR; no by-value record of integers is
+taken apart there). In 14 lean2rr programs of the runtime suite, every
+difference between the series without and with 21-a is a net removal
+(for example `RtCArrKinds` 495,466 to 469,737 instructions, -5.2%); the
+other patches of the series change no instruction of those programs.
+
+**Checks** (2026-11-18, aarch64): the conversion and bigint lit subset
+with the patch's MLIR test and `frontend/bigint_value_record_members.rr`:
+281 pass, 2 unsupported, 1 fails for a missing tool of the build
+machine (not the patch). The ASan twin cannot run there. The review
+ran its own probes on two builds with 8 option sets and found no
+erroneous behaviour.
+
+The rest of this entry describes the patch as it was reviewed on the
+earlier bases; where it names the wider scan rule or the `is_unique`
+stop, the text above is the current one.
 
 ## Context
 
@@ -125,7 +218,7 @@ and L17 compile to the same instructions with and without the patch
 
 Patch file
 [`patches/21-a-value-record-member-retains.patch`](patches/21-a-value-record-member-retains.patch)
-(commit `5a15f745` on `l2r-base12`, `8e9a6293` on `l2r-base8`). Its
+(commit `3db9b817` on `l2r-base13-final`; `5a15f745` on `l2r-base12`, `8e9a6293` on `l2r-base8`). Its
 rule: a counted word's retain cancels against the member release of a
 record's expanded drop under the rules that hold for an rc member.
 

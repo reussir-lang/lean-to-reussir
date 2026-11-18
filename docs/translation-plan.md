@@ -803,8 +803,8 @@ below 2^63, an `Int` in the `int32` range; it also holds an `Int` in
 [2^32, 2^62) or [-2^62, -2^31) as a wider immediate, `2v + 1`
 (`l2r_int_box_wide`); any other value is a cell that holds the heap
 integer), and passes them at the type arguments of the
-runtime's generic FFI functions as owned handles (Reussir's local patch
-R2): a once-cell, a polymorphic extern's value, a typed array or cell
+runtime's generic FFI functions as owned handles (Reussir's `Mpz`; once
+the local patch R2, upstream Reussir's code since 2026-10-26): a once-cell, a polymorphic extern's value, a typed array or cell
 holds the handle itself. So `Nat` and `Int` are ordinary counted handles
 to lean2rr: records, constructors and closures hold them as one word.
 (Until 2026-10-25 a lowering for measurements, which did not use R2, kept
@@ -1340,6 +1340,12 @@ application appears.
   reorders them, because a `let` can run a function that panics. It does
   add bindings of its own: representation conversions, placeholders, and
   the bodies of duplicated join points (one copy per path).
+  One conversion is bound earlier than its use: when a self call's result
+  goes into a constructor that the function returns, the boxes of the
+  constructor's other arguments are bound before the self call (a boxing
+  has no effect), so that Reussir can turn the recursion into a loop
+  (tail recursion modulo cons;
+  [implementation notes](implementation/control-flow/calls-and-lets.md#the-boxes-of-a-constructor-that-takes-a-self-calls-result-are-bound-before-the-call)).
 - Literals:
   - A `Nat` literal of any size becomes Reussir's literal
     (`{ let nl4 : Nat = 18446744073709551616; nl4 }`, `natLiteral`): rcgmp
@@ -2161,8 +2167,9 @@ Rules:
   `sync` dependents of an unresolved promise run). So, in a program that
   creates resources, a step of the core after `Outline`
   (Emit/ArmRelease) releases them with `l2r_release_after` at the arm's
-  start in native's order, where two or more values that may hold a
-  resource (decided as for borrowing: by the flow analysis, which counts a
+  start in native's order, where values that may hold a
+  resource (one alone too, so that it is released as natively and not by
+  Reussir's drop in place, §10; decided as for borrowing: by the flow analysis, which counts a
   closure, a thunk or a task only when it may have captured one, or, in a
   program that casts, by mono type, where every closure, thunk and task
   counts) and that the code owns die there, and puts the scrutinee last
@@ -2857,7 +2864,8 @@ dropping thread, wherever that happens):
   its promises' dependents run when it ends, before the dependent goes
   on, as natively (test `RtPromiseNestedFreeOrder`). The runtime's
   outermost free runs these resolutions at its end
-  (`leanrt::pending::drain`, then `task::drained`).
+  (the end work that `leanrt::pending::want_end_work` asks for:
+  `task::drained`).
 
 A reference's `set` stores the new value before it releases the old one,
 as `lean_st_ref_set` does (Reussir's `cell::set` releases first): code that
@@ -3026,7 +3034,8 @@ tasks are mutable by design).
 **Room kept open.** Each of these can change later without changing when
 work runs or what the program computes:
 - `[value]` for small non-recursive structs;
-- borrowed parameters, if Reussir adds them;
+- borrowed parameters, if Reussir gets a way to state them in source
+  (Reussir's own borrow analysis is automatic and has no syntax);
 - globals for constants (done without them: a constant's read is one
   load from a runtime table at a fixed address, §5.12);
 - re-running Lean's `specialize` after monomorphization.
@@ -3097,7 +3106,7 @@ Probe results (Reussir at the pinned commit):
   moved as that aggregate, so bytes of another arm that fall on the
   representative's padding or on a `bool` field were lost (`enum [value] M { A(u8), B(bool) }` read `A(42)`
   back as 0). Reussir has the fix since `7954a367` (lean2rr's base is
-  `95d9a1c8`), and since 2026-10-19 lean2rr no longer avoids the shape:
+  `36a55a0f`), and since 2026-10-19 lean2rr no longer avoids the shape:
   `Outline`'s step enums are `[value]` whatever their fields (before, they were shared unless a
   layout model showed that the representative arm carried every byte of
   the other arms), and so is the entry enum of a `state-machines` state
@@ -3372,6 +3381,19 @@ Each item says what differs and when.
 - *Build time*: rrc compiles about 80 small functions per second; a program
   with thousands of constants (each an initializer and an accessor, plus its
   closed terms) takes minutes to build where native takes seconds.
+  (On the Reussir base since 2026-11-17, in the port's first gate, a
+  build took more time than on the base before, also when every texture
+  was in rrc's cache: a sample of 20 small tests took 10.7 s for each
+  test, where the last gate on the base before took about 7.1 s for
+  each test with 8 runs in parallel. The largest measured cause was the
+  store of rrc's texture cache, which rrc opened once for each texture;
+  a patch of the series opens it once for a module. In the port's final
+  gate the same 20 tests took 4.8 s each, with that patch, the store on
+  a memory file system and a quiet machine; their shares were not
+  separated. Two things are open: one runtime test, `RtOutlineStates`,
+  takes about 18 minutes in rrc and the link on this base (cause under
+  investigation), and on large programs rrc uses more time than on the
+  base before (cause not attributed).)
   Polymorphic recursion through type functions (monad transformer towers)
   makes hundreds of representations of a few function types, with
   conversions between them, and several rrc costs grow superlinearly on
@@ -3525,39 +3547,64 @@ Each item says what differs and when.
   `RtNestedArrayFreeOrder`, `RtArraySetFreeOrder`,
   `RtArrayPopFreeOrder`, `RtRefSetOrder`). An element of an array, a
   reference or a thunk or task value is a box (rule 1), so a record
-  replaced in an array is freed in Lean's order too. The difference is a
-  free that starts when user code drops a record by itself (a list, tree
-  or structure of handles). No runtime free runs around it, so each
-  runtime object that Reussir's glue reaches (a handle, a promise, a box,
-  an array) is a free of its own, done before the glue goes on to the
-  next field. So the order is field order at every record level from the
-  root, and Lean's order again below the first runtime object. Natively
-  the order depends on where the value is dropped: where Lean's code
-  knows the constructor (`lean_dec_ref_known`, e.g. a structure it has
-  just built), the fields go in field order too, each completely;
-  elsewhere (`lean_dec`) they go last first. lean2rr's code does not drop
-  values where Lean's does: where Lean borrows a parameter and drops the
-  value in the caller, lean2rr's function takes the value and releases it
-  as it destructures it. So no fixed order matches both cases. Examples
-  (test `RtDepDropOrderBoxed`, with expectation files): a
-  `List IO.FS.Handle` `L0 … L7` dropped by itself closes `L0 L1 … L7`
-  (natively `L0 L7 … L1` where Lean knows the constructor, `L7 … L0`
-  elsewhere); `{inner := ⟨a, b⟩, arr := #[c, d], opt := some e}` over
-  handles closes `a b d c e` (natively `e d c b a`); a structure
-  `{a : Array Handle, l : List Handle}` as the field of a monomorphic list
-  type dropped by itself closes `A1 A0 L0 L1` (natively `L1 L0 A1 A0`).
-  In a `List` that structure is a box's payload, released inside a free
-  of the runtime, so it closes `L1 L0 A1 A0` as natively. A tree of
-  handles closes its left subtree before its handle and its right
-  subtree. Unresolved promises reached this way are resolved in the same
-  order, each before the glue goes on (natively when the free pops them),
-  so Lean code in their dependents can see the difference: a dependent
-  of a promise in a record's first field that reads a file written
-  through a handle in a later field reads it before that handle is
-  closed, natively after (test `RtPromiseDropRecordPending`, with
-  expectation files: `q`'s dependent before `p`'s).
-  (`RtDepDropOrderBoxed`'s and `RtDropUserListHandles`' expectation
-  files: `12345678` where native gives `87654321`.) A value whose cell is
+  replaced in an array is freed in Lean's order too. A box's payload is
+  released inside such a free through its record's FFI release, which
+  joins the free, when its release in place could start a drop run of
+  Reussir's own (a recursive record below it): upstream Reussir completes
+  a run that starts inside a free before it returns there, so a tree in a
+  structure's first field would close its handles before the structure's
+  later fields (test `RtDropNestedRunOrder`).
+  A free that starts in the program's code: natively the order depends on
+  where the value is released. Where Lean's code knows the constructor
+  (`lean_dec_ref_known`: a value bound by a constructor application in
+  the same function, or a matched value inside a constructor's
+  alternative), a cell that is not shared releases its fields in field
+  order, each completely, and a shared one is only decremented; elsewhere
+  (`lean_dec`) the whole value is one free, last pushed first. lean2rr
+  does the same where it releases a value itself: after a call that
+  borrows the value natively (§5.8) and where values die at the start of
+  a branch (one value alone too). The plain release (`l2r_release_after`) goes
+  through the record's FFI release, one free from the root; where Lean
+  knows the constructor, a function per type releases the fields one
+  after the other in Lean's field order (`l2r_release_known_<type>`,
+  `knownReleaseFn?`). Lean's constructors are read from the copies of
+  the declarations that went through Lean's own passes, so a constructor
+  that reset/reuse turned into a reuse counts as natively: not known.
+  Examples (tests `RtDropKnownCtorOrder`, `RtDepDropOrderBoxed`,
+  `RtDropUserListHandles`, all identical to native): a
+  `List IO.FS.Handle` `L0 … L7` built where it is released closes
+  `L0 L7 … L1`, one from another function `L7 … L0`;
+  `node (node leaf A leaf) R (node leaf B leaf)` built there closes
+  `A R B`, from another function `B R A`; `{i := {x, y}, h}` built there
+  closes `y x h`, from another function `h y x`; the same when the value
+  dies alone at the start of a branch.
+  The differences that are left:
+  - A value that Reussir's own code drops: a matched value that dies in
+    its `match` with nothing released before it (Reussir consumes it
+    there), and a value that Lean's reset/reuse resets. Reussir takes a
+    record without a cycle apart in place, in the order of its fields in
+    the Reussir record, at every level, each runtime object a free of its
+    own; natively a field is one free, last pushed first. A value
+    `mk {x, y} h` from another function, matched by arms that read no
+    field, closes `x y h`, natively `h y x`.
+  - A type whose known-constructor release has no function: a `[value]`
+    struct (no cell here), and a record with a field that cannot be an
+    argument of an FFI function (a `[value]` struct, a closure type). Such
+    a value is released as a whole.
+  - Two places where lean2rr takes the constructor as known and native
+    Lean does not, so lean2rr releases field by field and native as one
+    free. A join point's body counts as inside the alternatives around
+    the place where lean2rr lowers it (inlined or copied at a jump, or
+    left in the code after `jp-sink` moved its declaration into an arm),
+    natively around its declaration. And alternatives that Lean's
+    `simpCase` folds into a default alternative only after `toImpure`
+    (bodies that become equal there) are a default alternative natively,
+    where the matched value's constructor is not known (as for the
+    release order at the start of a branch, below).
+  Unresolved promises reached in a free are resolved in the free's
+  order, after the free is over (the end work), so Lean code in their
+  dependents sees the same order of the dependents as natively (test
+  `RtPromiseDropRecordPending`). A value whose cell is
   rebuilt in place (Lean's reset/reuse, Reussir's token reuse) releases
   the fields the code does not read: natively always last first
   (`expandResetReuse`'s fast path), here in field order, as Reussir's
@@ -3565,7 +3612,14 @@ Each item says what differs and when.
   files: a structure of handles `A`, `B` and a number, rebuilt from its
   number, closes `AB`, natively `BA`, and so does the arm of an
   inductive). A fix would route Reussir's token path through the drop
-  stack (parked). Before the port to upstream Reussir's drop design,
+  stack (parked).
+  History: on the Reussir base before upstream's scoped worklists
+  (l2r-base12, until 2026-11-17), a record released through its FFI
+  release went through the root's fields in field order, each dead child
+  a free of its own: the order of `lean_dec_ref_known` at the root
+  whatever native Lean did, so a list from another function closed
+  `L0 … L7` (natively `L7 … L0`), a documented difference then. Before
+  the port to upstream Reussir's drop design (Phase 2, 2026-10-25),
   Reussir's glue pushed record members on a stack shared with the
   runtime, and only the first two cells of such a free came out in field
   order (the list: `L0 L1 L7 … L2`).
@@ -3578,7 +3632,8 @@ Each item says what differs and when.
   `R{a : Y{x : W, h}, b : W}`, with `W` held by `Y.x` and `R.b`, native
   closes `Y.h` before `W.h`; lean2rr closes `W.h` first (`W` dies at
   `b`, is pushed last and popped first; test `RtDropSharedSubtree`, with
-  expectation files). The base before the port gave the same order here.
+  expectation files). The base before the port of Phase 2 gave the same
+  order here.
 - *Release time of borrowed parameters* (§5.8): emulated for values that
   may hold a resource, with Lean's inference run on lean2rr's monomorphic
   instances: where Lean infers a polymorphic declaration or one of its own
@@ -3616,8 +3671,18 @@ Each item says what differs and when.
   declaration into an arm, J2) counts that `match`'s scrutinee as bound
   there, where natively the body has the scrutinee's index at the join
   point; an outlined join point (J3, J4) has the renumberings of its
-  declaration in Lean's code. In each case the order shows only when the
-  scrutinee holds a resource and another one dies at the same place.
+  declaration in Lean's code. In the last two cases the order shows only
+  when the scrutinee holds a resource and another one dies at the same
+  place. In the first case (`pushProj`) the order of the scrutinee's own
+  fields shows too, also when the scrutinee dies alone: natively a
+  branch that reads no field does not project the fields, so the
+  scrutinee dies there as a whole, its constructor known
+  (`lean_dec_ref_known`: the fields in field order); lean2rr binds the
+  fields at the `match` and releases them at the branch's start, the
+  newest first. `match w with | .three a b c => if k then consume
+  (.three c b a) else println "x"`: in the `else` branch native closes
+  `abc`, lean2rr `cba` (review probe; the Reussir base before
+  2026-11-17 gave the same).
   Natively the scrutinee and the first `let` of a constructor's
   alternative get one index (`withCtorAlt` and that `let`), so when both
   die at the start of a nested branch their order is not specified (it
@@ -3679,6 +3744,18 @@ Each item says what differs and when.
   another order than natively, because Lean's closed-term extraction may
   group them differently in lean2rr's instances. stdout and results are the
   same.
+- *Stack depth* of a recursion whose result goes into a constructor (a
+  map over a list written by hand: `x :: xs => f x :: go xs`): natively
+  plain recursion; through lean2rr a loop where Reussir's tail recursion
+  modulo cons applies (§5.4), so it also runs at depths where native
+  Lean reports a stack overflow (10^6 elements at
+  `LEAN_STACK_SIZE_KB=8192`: native aborts, lean2rr gives the result).
+  It applies only when nothing with an effect stands between the self
+  call and the constructor: a call written after the self call (an
+  application of a function value, an extern) keeps the recursion, as
+  natively, and the order of the effects is native's (test
+  `RtTrmcCallOrder`; on the Reussir base before 2026-11-17 such a call
+  ran before the recursion, a wrong order).
 - *Stack depth* in general: frame sizes differ from native. lean2rr adds
   no recursion of its own, except in the conversion of a value cast to
   another inductive whose layout differs (§5.1, recursive through
@@ -3714,7 +3791,13 @@ Each item says what differs and when.
   turn); natively the to-do list is linked through the freed objects and
   takes no memory at all. The runtime's own pending cells take 8 bytes
   each in a run, a 24-byte entry when a run starts (heap memory, cut back
-  when the drain ends). Reussir's glue
+  when the drain ends). (These sizes are of the base before 2026-11-17,
+  whose stack was lean2rr's local patches. Upstream Reussir's stack has
+  the same design; by reading, a run's entry is 32 bytes there. The
+  deep-free tests keep their allocation bounds on it: the port's first
+  gate, 2026-11-18, and again in its final gate. One row moved:
+  `RtListDropWhole`'s array of 10^6 lists peaks at 68.1 MB, 53.7 MB on
+  the base before, inside the test's allowance; it came with the base.) Reussir's glue
   and the runtime share that stack, so one drain frees both in one
   order. The depth at which
   `Stack overflow detected. Aborting.` (exit 134) happens is not native's,
@@ -3739,7 +3822,10 @@ Each item says what differs and when.
   here, so a traversal that keeps the nodes it visits (an `Expr.replace`
   over a DAG that replaces nothing) increments and releases the fields of
   every node it keeps, and every `ptrEq` operand: 1.5x native on such a
-  traversal (adv4 RP4-09).
+  traversal (adv4 RP4-09). (Measured before Reussir had a borrow
+  analysis. On the base since 2026-11-17 Reussir removes such count
+  updates itself where the caller keeps the argument; the cost there is
+  pending the timing run.)
 - *Casts between layouts that differ* (§5.1): a value cast to another
   inductive whose layout differs (a field holding an `Int` where the
   source's holds a `Nat`) is rebuilt, O(size), at each such cast, where

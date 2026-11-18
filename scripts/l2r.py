@@ -2,7 +2,7 @@
 """Compile a compiled Lean module to a native executable through Reussir.
 
     l2r.py MODULE -o EXE [--lean-path DIR[:DIR...]] [-O LEVEL] [--keep-rr FILE]
-           [--disable-opt NAME]... [--enable-opt NAME]... [--emit llvm-ir]
+           [--disable-opt NAME]... [--enable-opt NAME]... [--emit llvm-ir|mlir-llvm]
     l2r.py path/to/File.lean -o EXE [...]
 
 MODULE must already be compiled by the Lean toolchain lean2rr is built with
@@ -40,11 +40,14 @@ try a branch), L2R_INT_BACKEND (unset, empty or `rcgmp`: `Nat` and `Int`
 are Reussir's built-in integers; `leanrt`, removed on 2026-10-26 by
 clean-integration D8, is refused),
 L2R_RRC_FLAGS (extra rrc flags, split on spaces, for experiments such as
-`--nullary-variant-encoding arch-independent`), REUSSIR_FFI_CACHE_DIR
-(where rrc keeps the compiled textures; default
-runtime/leanrt/target/polyffi-cache, empty to turn the cache off).
+`--nullary-variant-encoding arch-independent`), L2R_POLYFFI_CACHE
+(the directory where rrc keeps the compiled textures; default
+runtime/leanrt/target/rrc-cache; empty: no cache that outlives the build;
+see `rrc_env`), L2R_KEEP_RUSTC_WRAPPER (`1`: cargo's build of lean-runtime
+keeps the environment's rustc wrapper, e.g. sccache; see
+`build_lean_runtime_cargo`).
 """
-import argparse, fcntl, hashlib, json, os, subprocess, sys, tempfile, tomllib
+import argparse, fcntl, hashlib, json, os, platform, subprocess, sys, tempfile, tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,7 +73,9 @@ LEAN_RUNTIME = Path(os.environ.get("L2R_LEAN_RUNTIME", LEAN_RUNTIME_PIN)).resolv
 # through the packed-argument FFI boundary (float or `str` arguments, four or
 # more parameters) keep an escaping stack slot in the caller and block
 # tail-call elimination of Reussir loops.
-NATIVE_FLAGS = ["-C", "target-cpu=native", "-C", "target-feature=-outline-atomics"]
+NATIVE_FLAGS = ["-C", "target-cpu=native"]
+if platform.machine() == "aarch64":
+    NATIVE_FLAGS += ["-C", "target-feature=-outline-atomics"]
 
 
 def run(cmd, env=None, cwd=None, show_stderr=False):
@@ -90,6 +95,11 @@ def rt_dirs():
     return rt, rt / "deps"
 
 
+# The digest of each leanrt rlib that `build_leanrt` returned in this run,
+# by the rlib's path: what `rustc_wrapper` names in its script.
+LEANRT_BUILDS = {}
+
+
 def rustc_wrapper(rlib, lr):
     """A rustc wrapper script adding NATIVE_FLAGS and L2R_TEXTURE_RUSTFLAGS (rrc takes one executable)
     and `leanrt` as an extern crate (and edition 2018 when rrc gives none,
@@ -101,10 +111,21 @@ def rustc_wrapper(rlib, lr):
     directories of its rlibs as dependency search paths (where rustc finds
     it, and its own dependencies, when it loads leanrt).
 
-    The script's text names lean-runtime's build (`lr.digest`): rrc's
-    texture cache (`REUSSIR_FFI_CACHE_DIR`) hashes the
-    script's text and the libraries in the `--polyffi-libdir` directories,
-    and cargo's build of lean-runtime puts its rlibs in none of them.
+    The script's text names leanrt's build (`LEANRT_BUILDS`, the digest
+    `build_leanrt` gave this rlib: leanrt's sources, rustc's path and its
+    version report, the host CPU's features, the flags, lean-runtime's
+    build and Reussir's runtime rlibs) and lean-runtime's
+    (`lr.digest`). rrc's texture cache keys an entry by the path of this
+    script, the texture and rustc's options, and not by the bytes of the
+    libraries the texture is compiled against (`rrc_env`), while leanrt and
+    Reussir's runtime are rebuilt in place, at the same paths. The script's
+    name is a hash of its text, so a rebuilt runtime gives another script
+    path and another key for every texture. Without the digests a texture
+    compiled against an older leanrt (its inlined and generic functions are
+    in the bitcode) would be linked next to the new rlib, with no error:
+    old code, or a read at an old field offset. An unchanged runtime keeps
+    its script and its entries. tests/runtime/texture-cache-check.sh checks
+    both.
 
     The script is named after a hash of its text (`rustc-native-<sha12>` in
     leanrt's build directory) and written only when it is missing (or does
@@ -116,12 +137,14 @@ def rustc_wrapper(rlib, lr):
     `rustc-native` per directory, rewritten by the last build: a build
     paused at rrc's start while another ran with L2R_TEXTURE_RUSTFLAGS
     compiled its textures with the other build's target features."""
+    if rlib not in LEANRT_BUILDS:
+        sys.exit(f"l2r: rustc_wrapper: {rlib} is not an rlib that build_leanrt returned in this run")
     flags = "%s --extern leanrt='%s'%s%s" % (
         " ".join(NATIVE_FLAGS + TEXTURE_FLAGS), rlib, "".join(" --extern '%s'" % e for e in lr.externs),
         "".join(" -L dependency='%s'" % d for d in lr.dirs))
-    text = ("#!/bin/sh\n# lean-runtime build %s\n"
+    text = ("#!/bin/sh\n# leanrt build %s\n# lean-runtime build %s\n"
             "case \" $* \" in *--edition*) exec '%s' \"$@\" %s ;; esac\n"
-            "exec '%s' \"$@\" %s --edition 2018\n" % (lr.digest, RUSTC, flags, RUSTC, flags))
+            "exec '%s' \"$@\" %s --edition 2018\n" % (LEANRT_BUILDS[rlib], lr.digest, RUSTC, flags, RUSTC, flags))
     w = rlib.parent / ("rustc-native-" + hashlib.sha256(text.encode()).hexdigest()[:12])
     if not w.exists() or w.read_text() != text:
         fd, tmp = tempfile.mkstemp(dir=rlib.parent, prefix=".rustc-native-")
@@ -157,7 +180,7 @@ if INT_BACKEND != "rcgmp":
 # Under rcgmp, `Nat` and `Int` are type arguments of the runtime's generic
 # textures (typed arrays and cells of them, once-cell constants, the boxes
 # of big values): the Reussir that rcgmp needs renders them there as an
-# owned handle (local patch R2, which `check_rcgmp` requires). (Until
+# owned handle (upstream since #824 and #843, which `check_rcgmp` requires). (Until
 # 2026-10-25, L2R_RCGMP_TYPE_ARGS=0 kept them out, for measurements; the
 # variable is ignored now, with a warning.)
 if os.environ.get("L2R_RCGMP_TYPE_ARGS") is not None:
@@ -193,13 +216,30 @@ LEAN_RUNTIME_EXTRA_FEATURES = [f.strip() for f in os.environ.get("L2R_LEAN_RUNTI
 LEAN_RUNTIME_FEATURES = LEAN_RUNTIME_BASE_FEATURES + [f for f in LEAN_RUNTIME_EXTRA_FEATURES if f not in LEAN_RUNTIME_BASE_FEATURES]
 
 
+# The variables through which cargo takes a program to run in place of
+# rustc. Cargo's build of lean-runtime does not see them: leanrt is a plain
+# rustc build that no wrapper ever sees, and nothing in the environment may
+# make the two crates' compilations differ (`build_lean_runtime_cargo`).
+# L2R_KEEP_RUSTC_WRAPPER=1 keeps them, for a compiler cache such as sccache,
+# which runs the rustc it is given with the arguments it is given. The
+# driver cannot check that a wrapper is one of that kind: the user who sets
+# the variable states it. Such a build has a directory of its own
+# (`leanrt_out`), so its rlibs are never those of a build without the
+# wrapper.
+RUSTC_WRAPPER_VARS = ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+                      "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER")
+KEPT_RUSTC_WRAPPERS = ([f"{v}={os.environ[v]}" for v in RUSTC_WRAPPER_VARS if os.environ.get(v)]
+                       if os.environ.get("L2R_KEEP_RUSTC_WRAPPER") == "1" else [])
+
+
 def leanrt_out():
     """Where leanrt and lean-runtime are built: leanrt links against the
     Reussir checkout's runtime crates, so another checkout (L2R_REUSSIR, e.g.
     a patched Reussir) gets its own directory, and so do another rustc
     (L2R_RUSTC), extra flags (L2R_LEANRT_RUSTFLAGS), another lean-runtime
-    checkout (L2R_LEAN_RUNTIME) and extra features
-    (L2R_LEAN_RUNTIME_FEATURES): a build with other settings never rebuilds
+    checkout (L2R_LEAN_RUNTIME), extra features
+    (L2R_LEAN_RUNTIME_FEATURES) and a kept rustc wrapper
+    (L2R_KEEP_RUSTC_WRAPPER): a build with other settings never rebuilds
     the rlibs that a concurrent build's rrc is reading or linking."""
     def key(text):
         return hashlib.sha256(text.encode()).hexdigest()[:12]
@@ -214,6 +254,8 @@ def leanrt_out():
         out = out / ("lr-" + key(str(LEAN_RUNTIME)))
     if LEAN_RUNTIME_EXTRA_FEATURES:
         out = out / ("feat-" + key(",".join(LEAN_RUNTIME_EXTRA_FEATURES)))
+    if KEPT_RUSTC_WRAPPERS:
+        out = out / ("wrap-" + key(" ".join(KEPT_RUSTC_WRAPPERS)))
     return out
 
 
@@ -226,8 +268,7 @@ def build_locked(out, stamp, outputs, digest, cmd, cwd, digest_after=None):
 
     `cwd` is the crate's directory, not the caller's: rustc records its
     working directory in the rlib's metadata, so a rebuild from another
-    directory would give an rlib with other bytes, and rrc's texture cache,
-    which hashes the rlibs, would miss on every texture.
+    directory would give an rlib with other bytes for the same digest.
     The paths in `cmd` are absolute (so are the source paths rustc records,
     which panic messages show)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -235,6 +276,10 @@ def build_locked(out, stamp, outputs, digest, cmd, cwd, digest_after=None):
         fcntl.flock(lock, fcntl.LOCK_EX)
         if all(o.exists() for o in outputs) and stamp.exists() and stamp.read_text() == digest:
             return
+        # No stamp while the outputs are being written: a build that stops
+        # half-way, or whose `digest_after` refuses its inputs, must not
+        # leave the stamp of an earlier build next to newer outputs.
+        stamp.unlink(missing_ok=True)
         run(cmd, cwd=cwd)
         stamp.write_text(digest_after() if digest_after else digest)
 
@@ -319,15 +364,16 @@ def build_lean_runtime_cargo(out, cargo):
     # RUSTFLAGS), change the release profile (CARGO_PROFILE_*: leanrt, a
     # plain rustc build, never sees them, so the two crates would be
     # compiled differently, e.g. lean-runtime at another opt-level), turn on
-    # unstable cargo features (CARGO_UNSTABLE_*), wrap rustc, or move the
+    # unstable cargo features (CARGO_UNSTABLE_*), wrap rustc
+    # (RUSTC_WRAPPER_VARS, unless L2R_KEEP_RUSTC_WRAPPER=1), or move the
     # build (CARGO_BUILD_BUILD_DIR moves its intermediate files out of the
     # target directory). Also used for `cargo metadata` (cargo_link_order).
     env = dict(os.environ, RUSTC=str(RUSTC), RUSTFLAGS=" ".join(NATIVE_FLAGS + LEANRT_FLAGS))
     for v in list(env):
-        if v in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
+        if v in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET",
                  "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS", "CARGO_BUILD_RUSTC",
-                 "CARGO_BUILD_RUSTC_WRAPPER", "CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER",
                  "CARGO_BUILD_BUILD_DIR", "CARGO_INCREMENTAL") \
+                or (v in RUSTC_WRAPPER_VARS and not KEPT_RUSTC_WRAPPERS) \
                 or v.startswith(("CARGO_PROFILE_", "CARGO_UNSTABLE_")) \
                 or (v.startswith("CARGO_TARGET_") and v.endswith("_RUSTFLAGS")):
             del env[v]
@@ -414,58 +460,96 @@ def build_lean_runtime(out):
     return build_lean_runtime_cargo(out, lean_runtime_manifest())
 
 
-# Local Reussir patches whose absence would not show as a build error at the
-# right place: (patch, file of the Reussir checkout, a text the patch adds
-# there). A patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch
-# (NN: its entry, reussir-bugs/NN-*.md); the base is upstream Reussir
-# 95d9a1c8 plus reussir-bugs/patches/series. Plain upstream fails the first
-# check. 23-f: rrc's lowering pipeline (through the C API; the C++ bridge
-# has a copy) frees the records of a recursive type that is neither Direct
-# nor TailLoop through the per-thread drop stack of 23-a to 23-e (worklist
-# drops), not through upstream's retcon coroutines, whose memory grows by
-# one suspended frame per level of the value being freed
-# (reussir-bugs/23-worklist-drops.md). The check also refuses the checkout
-# of a base before Phase 2, whose drop glue pushed onto a stack that leanrt
-# no longer reads (patches 02-a to 02-e and 09-a, now out of the series).
-# 23-k and 23-m: that drop stack is shared with leanrt, whose pending stack
-# is built on it (runtime/leanrt/src/pending.rs): the end work after the
-# outermost drain (23-k: set_end_work, want_end_work) and steps, depth and
-# drain for a host (23-m; 23-l, the runs of cells, comes between them).
-# leanrt would also fail to compile without them.
-# 21-a (entry 21, inc/dec cancellation of integer members of [value]
-# records) is an optimization of code with rcgmp integers, 23-p (one
-# release function's pending records as cells, fewer instructions than
-# links) an optimization of the drops, and mlir-rcgmp's pin cc73b218
-# (quotient-only division; upstream since #844, before as patch 20-f) a
-# faster dependency: nothing needs them, so they are not checked.
+# What lean2rr requires of the Reussir checkout and whose absence would not
+# show as a build error at the right place: (name, file of the checkout, a
+# text that must be there). The base is the upstream commit in
+# reussir-bugs/patches/base plus the patches of reussir-bugs/patches/series;
+# a patch is named NN-x, as its file reussir-bugs/patches/NN-x-*.patch (NN:
+# its entry, reussir-bugs/NN-*.md).
+#
+# The first two are upstream code, not patches: they refuse the checkout of
+# a base before upstream's scoped drop worklists (2026-11-01), such as
+# 95d9a1c8 with the old series, whose drop stack had other entry points
+# (local patches 23-a to 23-p, which upstream's worklists replace). leanrt's
+# pending work is a layer over that drop stack (runtime/leanrt/src/pending.rs):
+# its steps join the active free or run in a scope of their own
+# (`join_or_run_step`), and the end work after the outermost free is a
+# scope-exit callback (`defer_until_scope_exit`). leanrt would also fail to
+# compile without them, but with a less useful message.
 REQUIRED_REUSSIR_PATCHES = [
-    ("23-f", "lib/CAPI/Passes.cpp", "options.worklistDrops = worklistDrops"),
-    ("23-k", "crates/reussir-rt/src/drop_stack.rs", "pub fn set_end_work"),
-    ("23-m", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_step"),
-    # 23-n and 23-o: the glue's pending records wait linked through their
-    # own headers (defer_wide), not one stack entry each: without them a
-    # chain whose levels each leave a record of another type pending takes
-    # 24 bytes per level (RtAltTreeFree's bounds are native's).
-    ("23-n", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn defer_wide"),
-    ("23-o", "lib/Conversion/BasicOpsLowering/DropStackLowering.cpp", "__reussir_drop_defer_wide"),
-    # The one-word box `LAny` keeps its payload's type number in the top 16
-    # bits of a tagged handle (reussir-bugs/07-tagged-top-bits.md).
+    ("upstream's scoped drop worklists", "crates/reussir-rt/src/drop_stack.rs", "pub unsafe fn join_or_run_step"),
+    ("upstream's scope-exit callbacks", "crates/reussir-rt/src/drop_stack.rs", "pub fn defer_until_scope_exit"),
+    # 10-a: the one-word box `LAny` is a tagged FFI object: an odd handle is
+    # an immediate and owns no memory (reussir-bugs/10-tagged-ffi-objects.md).
+    # rrc without the `tagged` attribute refuses the prelude, which is a
+    # build error. This text is the patch's rule in the worklist drops, at
+    # the places that use it (a record member, an array element, the
+    # entry): a tagged handle goes to its own release, which tests the low
+    # bit, and its count is never read by the worklist. Without it the
+    # build succeeds and a free reads an immediate, or a handle with data
+    # in its top bits, as the address of a count. (The draft series on
+    # 44abd17c had the rule at one place, under no name, and is refused.)
+    ("10-a", "lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp", "isTaggedFFIObject("),
+    # 07-a: `LAny` keeps its payload's type number in the top 16 bits of a
+    # tagged handle (reussir-bugs/07-tagged-top-bits.md): a copy of the box
+    # clears them before it reads the count. Without it a program stops
+    # with SIGSEGV at the first copy of a boxed pointer.
     ("07-a", "lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp", "taggedBoxAddress"),
+    # 20-c: the textures' handle of a `Nat` or an `Int`
+    # (`reussir_rt::rcgmp::Mpz`) copies and releases through glue that the
+    # compiler emits into the program (`__reussir_rcgmp_ffi_acquire`,
+    # `_release`) and LLVM inlines into the textures: a small number costs
+    # a bit test, not a call (reussir-bugs/20-rcgmp-integration.md). The
+    # one check here of a patch whose absence alone is no error (programs
+    # would be slower, with the same results): 20-d is built on its glue,
+    # so a series without it is not the series, and the message names the
+    # first patch that is missing.
+    ("20-c", "crates/reussir-rt/src/rcgmp.rs", "__reussir_rcgmp_ffi_acquire"),
+    # 20-d: `Mpz::is_shared`, which leanrt's shared check of a `Nat` or an
+    # `Int` calls (runtime/leanrt/src/lib.rs). leanrt fails to compile
+    # without it; the check names the patch.
+    ("20-d", "crates/reussir-rt/src/rcgmp.rs", "pub fn is_shared"),
+    # 26-a: a self call that Reussir's TRMC pass moves to the end of a
+    # recursion stays behind a release that runs foreign code (a stream's
+    # close, a promise's drop). Without it the build succeeds and such a
+    # release runs before the recursion where the source has it after: a
+    # wrong release order with no message.
+    ("26-a", "lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp", "runsObservableCleanup"),
+    # 28-a: on an aarch64 host with SVE, rrc's pipeline makes the storage
+    # of scalable vectors legal with a pass that fails a big function with
+    # a long chain of blocks (no vector needed): `lowering pipeline failed:
+    # RunPass`, with no other message. The patch runs the pass's patterns
+    # alone. The check is made on every host: the series always has the
+    # patch.
+    ("28-a", "lib/CAPI/Passes.cpp", "createReussirLegalizeVectorStoragePass"),
 ]
-REUSSIR_HELP = ("build with upstream Reussir 95d9a1c8 plus the patches of "
-                "reussir-bugs/patches/series (reussir-bugs/README.md)")
+# Not checked, as nothing breaks without them:
+# - 20-g: Nat divisions marked non-negative (faster small path);
+# - 20-e: long integer literals written in hexadecimal (rrc's time for a
+#   literal of many thousand digits);
+# - 21-a: retain/release pairs of integer members of [value] records
+#   cancelled (fewer count operations);
+# - 29-a: rrc opens its texture cache's store once per module, not once
+#   per texture (`PolyffiCache openPolyffiCache()` in
+#   include/Reussir/RustCompiler.h; without it builds are only slower);
+# - 27-a: `core::object::is_unique` of a nullary immediate under TBI
+#   (a wrong answer upstream; lean2rr's programs do not call it);
+# - the patches out of the series (reussir-bugs/patches/parked).
+REUSSIR_HELP = ("build Reussir from the upstream commit in reussir-bugs/patches/base with all "
+                "patches of reussir-bugs/patches/series (reussir-bugs/README.md)")
 
 
 def check_reussir_patches():
-    """The Reussir checkout (L2R_REUSSIR) is one, and has the local patches
-    lean2rr requires (REQUIRED_REUSSIR_PATCHES)."""
+    """The Reussir checkout (L2R_REUSSIR) is one, of the current base, and
+    has the local patches lean2rr requires (REQUIRED_REUSSIR_PATCHES)."""
     if not (REUSSIR / "crates" / "reussir-rt" / "src").is_dir():
         sys.exit(f"l2r: no Reussir checkout at {REUSSIR} (no crates/reussir-rt/src there): "
                  "set L2R_REUSSIR to a Reussir checkout (default: reussir/ in the lean2rr checkout)")
     for patch, rel, symbol in REQUIRED_REUSSIR_PATCHES:
         src = REUSSIR / rel
         if not src.is_file() or symbol not in src.read_text():
-            sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks the local Reussir patch {patch} "
+            what = f"the local Reussir patch {patch}" if patch[:2].isdigit() else patch
+            sys.exit(f"l2r: the Reussir checkout {REUSSIR} lacks {what} "
                      f"(`{symbol}` in {rel}), which lean2rr requires: {REUSSIR_HELP}")
 
 
@@ -473,42 +557,76 @@ def build_leanrt():
     """Build lean-runtime, then runtime/leanrt against it, as rlibs (leanrt
     cached by a hash of its sources, of lean-runtime's build and of the
     Reussir runtime it links against). Returns leanrt's rlib and the
-    LeanRuntime."""
+    LeanRuntime, and records the hash for the rlib (`LEANRT_BUILDS`): it
+    names the build in the rustc-native script, and so in the key of every
+    cached texture (`rustc_wrapper`)."""
     check_reussir_patches()
     rt, deps = rt_dirs()
     out = leanrt_out()
     lr = build_lean_runtime(out)
+    def sources():
+        s = hashlib.sha256()
+        for f in sorted(LEANRT_SRC.rglob("*.rs")):
+            s.update(f.name.encode())
+            s.update(f.read_bytes())
+        return s.hexdigest()
+    src = sources()
     h = hashlib.sha256()
-    for f in sorted(LEANRT_SRC.rglob("*.rs")):
-        h.update(f.name.encode())
-        h.update(f.read_bytes())
+    h.update(src.encode())
     h.update(str(RUSTC).encode())
+    # The compiler itself, not only its path (`rustc -vV`: version, commit,
+    # host, LLVM): a toolchain updated in place, or a path that is rustup's
+    # proxy, is another compiler. rrc's texture cache keys rustc by path
+    # alone, and gets the compiler from here (`rustc_wrapper`).
+    h.update(run([str(RUSTC), "-vV"]).stdout.encode())
+    # The host CPU as rustc sees it: leanrt and the textures are compiled
+    # with `-C target-cpu=native` (NATIVE_FLAGS), whose text is the same on
+    # every machine. The target features rustc turns on for these flags
+    # tell machines apart, for a build directory or a texture cache on a
+    # shared file system or copied to another machine.
+    h.update(run([str(RUSTC), "--print", "cfg", *NATIVE_FLAGS]).stdout.encode())
     h.update(" ".join(NATIVE_FLAGS + LEANRT_FLAGS).encode())
     h.update(lr.digest.encode())
-    for f in sorted(deps.glob("libreussir_rt*.rlib")):
-        h.update(f.name.encode())
-        h.update(str(f.stat().st_mtime_ns).encode())
+    # Reussir's runtime, rebuilt in place by its own build: the rlib that
+    # leanrt and the textures load (deps/) and the copy next to it (rt/),
+    # by name, size and time. A rebuild of one of its dependencies rebuilds
+    # it too (cargo).
+    for f in sorted(deps.glob("libreussir_rt*.rlib")) + sorted(rt.glob("libreussir_rt*.rlib")):
+        st = f.stat()
+        h.update(f"{f.name} {st.st_size} {st.st_mtime_ns}\n".encode())
     rlib = out / "libleanrt.rlib"
-    build_locked(out, out / "libleanrt.stamp", [rlib], h.hexdigest(),
+    digest = h.hexdigest()
+    LEANRT_BUILDS[rlib] = digest
+    def unchanged():
+        # The digest was made before rustc read the sources (and before the
+        # wait for the lock, which can be another driver's whole build). If
+        # they changed meanwhile, the rlib is not the digest's, and this
+        # run's textures would be kept in the cache under the digest of
+        # other sources: stop, with no stamp (`build_locked`), so the next
+        # run builds again.
+        if sources() != src:
+            sys.exit(f"l2r: leanrt's sources ({LEANRT_SRC}) changed while leanrt was built; run again")
+        return digest
+    build_locked(out, out / "libleanrt.stamp", [rlib], digest,
                  [str(RUSTC), "--edition", "2021", "--crate-type", "rlib", "--crate-name", "leanrt",
                   "-C", "opt-level=3", *NATIVE_FLAGS, *LEANRT_FLAGS, "-L", str(rt), "-L", str(deps),
                   *[a for e in lr.externs for a in ("--extern", e)],
                   *[a for d in lr.dirs for a in ("-L", f"dependency={d}")],
                   str(LEANRT_SRC / "lib.rs"), "-o", str(rlib)],
-                 LEANRT_SRC.parent)
+                 LEANRT_SRC.parent, digest_after=unchanged)
     return rlib, lr
 
 
 # What Nat and Int (rcgmp) need of the Reussir checkout beyond its rcgmp
-# feature: local patch R1 (20-a: Lean's division modes and `floormod2expi`
-# as bigint intrinsics, which the prelude calls) and R2 (`Nat` and `Int` at
-# polyffi type arguments as `reussir_rt::rcgmp::Mpz`, which leanrt
-# re-exports; upstream since #824 and #843, so its marker is upstream code
-# and refuses only a Reussir from before them): (patch, file, symbol), as
+# feature: local patch 20-a (Lean's division modes and `floormod2expi` as
+# bigint intrinsics, which the prelude calls) and `Nat` and `Int` at polyffi
+# type arguments as `reussir_rt::rcgmp::Mpz`, which leanrt re-exports
+# (upstream since #824 and #843: not a patch; its text refuses only a
+# Reussir from before them): (name, file, text), as
 # REQUIRED_REUSSIR_PATCHES.
 RCGMP_REUSSIR_PATCHES = [
-    ("R1", "library/core/src/intrinsic/bigint.rr", "divsi_lean"),
-    ("R2", "crates/reussir-rt/src/rcgmp.rs", "pub struct Mpz"),
+    ("20-a", "library/core/src/intrinsic/bigint.rr", "divsi_lean"),
+    ("upstream's Mpz handle", "crates/reussir-rt/src/rcgmp.rs", "pub struct Mpz"),
 ]
 
 
@@ -524,7 +642,8 @@ def check_rcgmp():
     for patch, rel, symbol in RCGMP_REUSSIR_PATCHES:
         src = REUSSIR / rel
         if not src.is_file() or symbol not in src.read_text():
-            sys.exit(f"l2r: lean2rr needs the Reussir change {patch} (Nat and Int) "
+            what = f"the local Reussir patch {patch}" if patch[:2].isdigit() else patch
+            sys.exit(f"l2r: lean2rr needs {what} (Nat and Int) "
                      f"(`{symbol}` in {rel}), which the Reussir checkout {REUSSIR} lacks")
 
 
@@ -547,6 +666,9 @@ def core_interface():
     rri = out / "core.rri"
     build_locked(out, out / "core.rri.stamp", [rri], h.hexdigest(),
                  [str(rrc), "--package-root", str(src), "--package-name", "core", "--builtin",
+                  # The interface records the drop order it was built with:
+                  # the program's (`rrc_command`), named for the same reason.
+                  "--drop-order", "backward",
                   "--emit", "rri", "-o", str(rri)], src)
     return rri
 
@@ -591,6 +713,144 @@ def rcgmp_runtime_link(libdirs, tmp):
             return link
     sys.exit(f"l2r: no {RCGMP_RUNTIME} (Reussir's integer runtime) in "
              + ", ".join(str(d) for d in libdirs))
+
+
+def polyffi_libdirs(rlib):
+    """The --polyffi-libdir directories: where rustc finds the crates a
+    texture names (Reussir's runtime and its dependencies, Rust's standard
+    library, leanrt), and where rrc looks for Reussir's runtime to link.
+    rrc passes each one to rustc as `-L`, and each path is a field of the
+    texture cache's key (`rrc_env`).
+
+    Reussir's `build/lib` is not among them: its integer runtime
+    (`RCGMP_RUNTIME`) is there, but the `reussir-rt` build target also
+    copies it into `target-rt/release/deps` (crates/reussir-rt/CMakeLists.txt),
+    where rrc and `rcgmp_runtime_link` find it, and `build/lib` holds every
+    library of the compiler."""
+    rt, deps = rt_dirs()
+    target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
+    return [rt, deps, Path(target_libdir), rlib.parent]
+
+
+def rrc_command(rr, output, rlib, lr, tmp, emit="executable", opt="aggressive"):
+    """The rrc command line of a lean2rr program: `rr` to `output`, with
+    leanrt (`rlib`) and lean-runtime (`lr`), as `build_leanrt` returns them.
+    `tmp` is the build's temporary directory. Without `--reuse-across-call`
+    and L2R_RRC_FLAGS, which `main` adds; tests/runtime/any-probe.sh builds
+    its program with this line too."""
+    libdirs = polyffi_libdirs(rlib)
+    return ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(output),
+             "--emit", emit, "-O", opt,
+             "--polyffi-rust-path", str(rustc_wrapper(rlib, lr))]
+            + [a for d in libdirs for a in ("--polyffi-libdir", str(d))]
+            # In dependency order: GNU ld reads each archive once, where
+            # it stands, and takes from it only the members that define
+            # a symbol still undefined there. leanrt, then lean-runtime,
+            # which leanrt calls, and its dependencies, then Reussir's
+            # integer runtime, which the program and leanrt call, then
+            # GMP, which that runtime calls. rrc links the integer
+            # runtime itself, but after every --link-lib, followed by
+            # `-l dylib=gmp` (`-Bdynamic -lgmp`, as needed): with GMP's
+            # archive first, nothing took a member from it, the
+            # runtime's GMP symbols stayed undefined until `-lgmp`, and
+            # the first -L directory with a libgmp decided. That was
+            # the toolchain's lib/, which has no libgmp.so, so GMP was
+            # static by accident; with L2R_GMP=/usr/lib/<triple>/libgmp.a
+            # (a directory that has libgmp.so too) the executable needed
+            # libgmp.so.10. Passed here before GMP, the integer runtime
+            # brings in its members, libgmp.a defines every GMP symbol
+            # they use, and `-lgmp` and rrc's own copy of the runtime
+            # add nothing: GMP is static whatever directories hold a
+            # libgmp.so (tests/runtime/run.sh checks that an executable
+            # needs no libgmp).
+            + ["--link-lib", str(rlib)]
+            + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
+            + ["--link-lib", str(rcgmp_runtime_link(libdirs, tmp))]
+            + ["--link-lib", str(gmp_archive())]
+            # Reussir's in-place variant reuse skips stores of fields that
+            # the packed record layout moves (RcCreateFusion copy
+            # avoidance): keep declaration-order layouts until that is fixed.
+            + ["--no-pack-record-members"]
+            # Before upstream Reussir ea240b19 (#758), rrc compiled with
+            # LLVM's static relocation model unless told otherwise, but
+            # linked a position-independent executable, so read-only data
+            # with absolute addresses (closure vtables) needed text
+            # relocations (DT_TEXTREL) with GNU ld and failed with lld
+            # (Reussir issue 5, now retired; once patch 05-a). Since
+            # ea240b19, PIC is rrc's default for executables: the flag is
+            # redundant there but harmless, and kept for older bases.
+            # Native Lean executables are PIEs without text relocations.
+            + ["--relocation-mode", "pic"]
+            # The order in which a freed value's members are released.
+            # `backward` is the order for a whole value that lean2rr's
+            # earlier Reussir base (95d9a1c8 with its series) gave, before
+            # upstream had this option: the dead members of a freed cell are
+            # pushed and the last one pushed is released first. It is not
+            # native Lean's order in every case; where the two differ,
+            # lean2rr's own code gives the native order or the difference
+            # is documented (docs/translation-plan.md section 10, "Order of
+            # releases in one free"), and those rules and their tests
+            # assume `backward`. It is rrc's default today; it is named here
+            # so that a change of that default cannot change lean2rr's
+            # programs silently. `forward` (source order) must not be used.
+            # The value is also part of each texture's rustc line.
+            + ["--drop-order", "backward"]
+            # The built-in integers (Nat and Int) are declared in
+            # Reussir's core package, which rrc loads as an interface in
+            # package mode (`core_interface`).
+            + ["--package-name", "prog", "--extern", f"core={core_interface()}"])
+
+
+def rrc_env(env, tmp):
+    """The environment of an rrc run: `env` with rrc's texture cache in a
+    directory of lean2rr's. `tmp` is the build's temporary directory.
+
+    rrc compiles each texture of the program with its own rustc run, most
+    of its time on a small program, and keeps the bitcode in a cache
+    (upstream Reussir #852): one SQLite store, `rrc/cache.db` under the
+    user's cache directory (`XDG_CACHE_HOME`, else `~/.cache`), shared by
+    every rrc of the user. rrc has no option and no variable of its own for
+    the place (the `REUSSIR_FFI_CACHE_DIR` of older bases is gone), so the
+    driver sets `XDG_CACHE_HOME` for rrc's process: L2R_POLYFFI_CACHE, by
+    default `rrc-cache` in runtime/leanrt/target; the store is then
+    `<dir>/rrc`. Nothing of a lean2rr build lands in `~/.cache`, and the
+    user's other rrc builds do not share entries with lean2rr's. An empty
+    L2R_POLYFFI_CACHE gives a directory inside `tmp`: every texture is
+    compiled, and nothing outlives the build (rrc has no switch that turns
+    the cache off). A path that cannot be a directory, or cannot be made,
+    is an error.
+
+    The key of an entry is the request, not what the request reads: the
+    path of rustc (here the rustc-native script), the texture's source and
+    rustc's options, among them one `-L <path>` per --polyffi-libdir
+    directory (lib/RustCompiler/RustCompiler.cpp, compileRustSourceToBitcode).
+    The bytes of the libraries are not in it. `rustc_wrapper` therefore
+    names the build of leanrt, of lean-runtime and of Reussir's runtime in
+    the script's text, which names the script: all builds can share one
+    store, and a rebuilt runtime never gets another build's bitcode. rrc
+    prunes the store by itself (entries not read for a week, once it is
+    above 4 GiB)."""
+    cache = os.environ.get("L2R_POLYFFI_CACHE")
+    if cache is None:
+        cache = LEANRT_OUT / "rrc-cache"
+    elif cache == "":
+        cache = Path(tmp) / "rrc-cache"
+    # Absolute: a relative XDG_CACHE_HOME is ignored (the XDG rule, which
+    # rrc's store follows), and rrc runs in `tmp`.
+    cache = Path(cache).resolve()
+    # rrc reads the store's settings (when and what to prune) from
+    # `rrc/config.ncl` under the user's configuration directory
+    # (`XDG_CONFIG_HOME`, else `~/.config`). lean2rr's store keeps rrc's
+    # defaults whatever the user's other rrc builds are set to: the
+    # directory rrc is given holds no such file.
+    config = cache / "config"
+    try:
+        config.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        sys.exit(f"l2r: L2R_POLYFFI_CACHE: cannot use {cache} as the directory of rrc's texture cache ({e}); "
+                 "name a directory that can be written, or set the variable to the empty string "
+                 "for no cache that outlives the build")
+    return dict(env, XDG_CACHE_HOME=str(cache), XDG_CONFIG_HOME=str(config))
 
 
 def checkout_of(lean2rr):
@@ -655,7 +915,10 @@ def main():
     # What rrc writes to -o: the executable, or the program's LLVM IR (after
     # rrc's optimizations, textures linked in), for checks such as
     # tests/runtime/ffi-inline-check.sh.
-    ap.add_argument("--emit", default="executable", choices=["executable", "llvm-ir"])
+    # `mlir-llvm`: the program in MLIR's LLVM dialect, before LLVM's passes
+    # (its inliner hides the functions Reussir's passes made:
+    # tests/runtime/trmc-helper-check.sh).
+    ap.add_argument("--emit", default="executable", choices=["executable", "llvm-ir", "mlir-llvm"])
     ap.add_argument("--root", default="main")
     # Reuse a matched cell for a constructor after intervening calls (like
     # Lean's reset/reuse); `--no-reuse-across-call` turns it off.
@@ -688,20 +951,6 @@ def main():
     shim = shim_dir()
     env["L2R_SHIM_DIR"] = str(shim)
     note_mixed_checkouts(shim)
-    # rrc compiles each of the prelude's textures with its own rustc run,
-    # most of its time on a small program; this directory keeps the bitcode
-    # (rrc's texture cache, a local patch on the old stack and upstream
-    # Reussir #690; an rrc without a cache ignores the variable). rrc keys
-    # each entry by everything the bitcode depends on, the texture, rustc
-    # (here the rustc-native script, whose text names the rlibs and the
-    # flags), its options and the libraries in the --polyffi-libdir
-    # directories (leanrt's build directory among them), so all builds share
-    # one directory. rrc prunes it (llvm::pruneCache): it removes entries
-    # (llvmcache-*) not read for a week and keeps the total at most 1 GiB.
-    # It never removes other files, such as the <hex>.bc entries of the old
-    # local patch. An empty value turns the cache off.
-    env.setdefault("REUSSIR_FFI_CACHE_DIR", str(LEANRT_OUT / "polyffi-cache"))
-
     check_rcgmp()
     rlib, lr = build_leanrt()
     with tempfile.TemporaryDirectory() as tmp:
@@ -714,59 +963,12 @@ def main():
              "--prelude", str(PRELUDE), "-o", str(rr)]
             + [a for n in disabled for a in ("--disable-opt", n)]
             + [a for n in enabled for a in ("--enable-opt", n)], env=env, show_stderr=True)
-        rt, deps = rt_dirs()
-        target_libdir = run([str(RUSTC), "--print", "target-libdir"]).stdout.strip()
-        libdirs = [rt, deps, Path(target_libdir), rlib.parent]
-        # rrc runs in the temporary directory: it leaves its polymorphic-FFI
-        # scratch files (reussir_rust_module_*) in the current directory.
-        rrc = ([str(REUSSIR / "build" / "bin" / "rrc"), str(rr), "-o", str(Path(args.output).resolve()),
-                "--emit", args.emit, "-O", args.opt,
-                "--polyffi-rust-path", str(rustc_wrapper(rlib, lr))]
-               + [a for d in libdirs for a in ("--polyffi-libdir", str(d))]
-               # In dependency order: GNU ld reads each archive once, where
-               # it stands, and takes from it only the members that define
-               # a symbol still undefined there. leanrt, then lean-runtime,
-               # which leanrt calls, and its dependencies, then Reussir's
-               # integer runtime, which the program and leanrt call, then
-               # GMP, which that runtime calls. rrc links the integer
-               # runtime itself, but after every --link-lib, followed by
-               # `-l dylib=gmp` (`-Bdynamic -lgmp`, as needed): with GMP's
-               # archive first, nothing took a member from it, the
-               # runtime's GMP symbols stayed undefined until `-lgmp`, and
-               # the first -L directory with a libgmp decided. That was
-               # the toolchain's lib/, which has no libgmp.so, so GMP was
-               # static by accident; with L2R_GMP=/usr/lib/<triple>/libgmp.a
-               # (a directory that has libgmp.so too) the executable needed
-               # libgmp.so.10. Passed here before GMP, the integer runtime
-               # brings in its members, libgmp.a defines every GMP symbol
-               # they use, and `-lgmp` and rrc's own copy of the runtime
-               # add nothing: GMP is static whatever directories hold a
-               # libgmp.so (tests/runtime/run.sh checks that an executable
-               # needs no libgmp).
-               + ["--link-lib", str(rlib)]
-               + [a for r in lr.rlibs for a in ("--link-lib", str(r))]
-               + ["--link-lib", str(rcgmp_runtime_link(libdirs, tmp))]
-               + ["--link-lib", str(gmp_archive())]
-               # Reussir's in-place variant reuse skips stores of fields that
-               # the packed record layout moves (RcCreateFusion copy
-               # avoidance): keep declaration-order layouts until that is fixed.
-               + ["--no-pack-record-members"]
-               # Before upstream Reussir ea240b19 (#758), rrc compiled with
-               # LLVM's static relocation model unless told otherwise, but
-               # linked a position-independent executable, so read-only data
-               # with absolute addresses (closure vtables) needed text
-               # relocations (DT_TEXTREL) with GNU ld and failed with lld
-               # (Reussir issue 5, now retired; once patch 05-a). Since
-               # ea240b19, PIC is rrc's default for executables: the flag is
-               # redundant there but harmless, and kept for older bases.
-               # Native Lean executables are PIEs without text relocations.
-               + ["--relocation-mode", "pic"]
-               # The built-in integers (Nat and Int) are declared in
-               # Reussir's core package, which rrc loads as an interface in
-               # package mode (`core_interface`).
-               + ["--package-name", "prog", "--extern", f"core={core_interface()}"]
+        rrc = (rrc_command(rr, Path(args.output).resolve(), rlib, lr, tmp, emit=args.emit, opt=args.opt)
                # Extra rrc flags for experiments (L2R_RRC_FLAGS, split on spaces).
                + os.environ.get("L2R_RRC_FLAGS", "").split())
+        # rrc runs in the temporary directory: it leaves its polymorphic-FFI
+        # scratch files (reussir_rust_module_*) in the current directory.
+        env = rrc_env(env, tmp)
         if args.no_reuse_across_call:
             run(rrc, env=env, cwd=tmp)
         else:

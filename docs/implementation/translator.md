@@ -143,8 +143,9 @@ relative to `lean2rr/` unless they start with `scripts/`.
   The driver reads `L2R_REUSSIR`,
   `L2R_RUSTC`, `L2R_INT_BACKEND` (only to refuse `leanrt`),
   `L2R_GMP`, `L2R_LEAN2RR`, `L2R_DISABLE_OPTS`, `L2R_ENABLE_OPTS`,
-  `L2R_RRC_FLAGS`, and `REUSSIR_FFI_CACHE_DIR`, which it sets for rrc
-  unless given (rrc's texture cache, for a Reussir cost:
+  `L2R_RRC_FLAGS`, `L2R_KEEP_RUSTC_WRAPPER`, and `L2R_POLYFFI_CACHE`,
+  the directory that it gives rrc as `XDG_CACHE_HOME` (rrc's texture
+  cache, for a Reussir cost:
   [reussir-workarounds/build-time.md](reussir-workarounds/build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
 - **Why:** Debugging aids; the switches keep the repros meaningful while
   the workarounds stay on by default.

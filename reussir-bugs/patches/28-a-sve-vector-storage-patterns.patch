@@ -1,0 +1,306 @@
+From d62797ac6242c1273b9e120362bb5ec876b83a5b Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 18 Nov 2026 01:51:48 -0500
+Subject: [PATCH 12/12] [conversion] legalize the storage of scalable vectors
+ with the patterns alone
+
+On a target with SVE the pipeline ran MLIR's
+`arm-sve-legalize-vector-storage` on every function. The cause of the
+failure is in that MLIR pass: it applies its patterns with the greedy
+driver's default configuration, which also folds and simplifies the
+regions of the function, and it fails when the driver has not reached a
+fixpoint after ten iterations. Dropping the redundant arguments of a
+chain of blocks takes one iteration per block when the blocks are laid
+out last first, so a large function without any vector made the whole
+compilation fail with `RunPass` and no diagnostic. The pass has no
+option for the driver's configuration; no LLVM report has been filed.
+
+`reussir-legalize-vector-storage` applies the same patterns with
+folding, constant CSE and region simplification off, and like MLIR's
+pass it fails, with a diagnostic, when a use of a legalized allocation
+is left that the patterns cannot rewrite. The pipeline and the vector
+lowering test use it.
+---
+ crates/reussir-backend-sys/build.rs           |  1 +
+ include/Reussir/Conversion/Passes.td          | 18 ++++++
+ lib/CAPI/CMakeLists.txt                       |  1 +
+ lib/CAPI/Passes.cpp                           |  3 +-
+ lib/Conversion/CMakeLists.txt                 |  2 +
+ .../LegalizeVectorStorage/CMakeLists.txt      | 15 +++++
+ .../LegalizeVectorStorage.cpp                 | 61 +++++++++++++++++++
+ .../conversion/legalize_vector_storage.mlir   | 52 ++++++++++++++++
+ .../conversion/vector_lowering.mlir           |  2 +-
+ tool/reussir-opt/main.cpp                     |  3 +
+ 10 files changed, 155 insertions(+), 3 deletions(-)
+ create mode 100644 lib/Conversion/LegalizeVectorStorage/CMakeLists.txt
+ create mode 100644 lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
+ create mode 100644 tests/integration/conversion/legalize_vector_storage.mlir
+
+diff --git a/crates/reussir-backend-sys/build.rs b/crates/reussir-backend-sys/build.rs
+index b8f4c924..04cf84c8 100644
+--- a/crates/reussir-backend-sys/build.rs
++++ b/crates/reussir-backend-sys/build.rs
+@@ -38,6 +38,7 @@ const REUSSIR_ARCHIVES: &[&str] = &[
+     "MLIRReussirInstrumentNonlinearFFI",
+     "MLIRReussirAttachNativeTarget",
+     "MLIRReussirFixVectorScale",
++    "MLIRReussirLegalizeVectorStorage",
+     "MLIRReussirIFRTJustInTimeTransform",
+     "MLIRReussirClosureBetaReduction",
+     "MLIRReussirDefaultInliner",
+diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
+index 66170846..68585ffe 100644
+--- a/include/Reussir/Conversion/Passes.td
++++ b/include/Reussir/Conversion/Passes.td
+@@ -392,6 +392,24 @@ def ReussirFixVectorScalePass
+                            "::mlir::vector::VectorDialect"];
+ }
+ 
++//===----------------------------------------------------------------------===//
++// LegalizeVectorStorage
++//===----------------------------------------------------------------------===//
++def ReussirLegalizeVectorStoragePass
++    : Pass<"reussir-legalize-vector-storage", "::mlir::func::FuncOp"> {
++  let summary = "make the storage of scalable vectors legal for SVE";
++  let description = [{
++    `reussir-legalize-vector-storage` applies the patterns of MLIR's
++    `arm-sve-legalize-vector-storage` without the greedy driver's cleanup.
++    That pass also folds and simplifies the regions of every function it
++    visits, and fails when this cleanup is not done after ten iterations,
++    which a large function without any vector can need. Like that pass, this
++    one fails when a use of a legalized allocation is left that the patterns
++    cannot rewrite.
++  }];
++  let dependentDialects = ["::mlir::arm_sve::ArmSVEDialect"];
++}
++
+ //===----------------------------------------------------------------------===//
+ // AttachNativeTarget
+ //===----------------------------------------------------------------------===//
+diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
+index baa35ab4..932bb544 100644
+--- a/lib/CAPI/CMakeLists.txt
++++ b/lib/CAPI/CMakeLists.txt
+@@ -48,6 +48,7 @@ set(REUSSIR_BACKEND_ARCHIVES
+   MLIRReussirInstrumentNonlinearFFI
+   MLIRReussirAttachNativeTarget
+   MLIRReussirFixVectorScale
++  MLIRReussirLegalizeVectorStorage
+   MLIRReussirIFRTJustInTimeTransform
+   # transformations
+   MLIRReussirClosureBetaReduction
+diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
+index faa00ee2..5f08ba4d 100644
+--- a/lib/CAPI/Passes.cpp
++++ b/lib/CAPI/Passes.cpp
+@@ -43,7 +43,6 @@
+ #include <mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h>
+ #include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
+ #include <mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h>
+-#include <mlir/Dialect/ArmSVE/Transforms/Passes.h>
+ #include <mlir/Dialect/DLTI/DLTI.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ #include <mlir/Dialect/LLVMIR/LLVMDialect.h>
+@@ -268,7 +267,7 @@ MlirPass reussirCreateFixVectorScalePass(unsigned scale) {
+   return wrapOwned(reussir::createReussirFixVectorScalePass(options));
+ }
+ MlirPass reussirCreateArmSVELegalizeVectorStoragePass(void) {
+-  return wrapOwned(mlir::arm_sve::createLegalizeVectorStoragePass());
++  return wrapOwned(reussir::createReussirLegalizeVectorStoragePass());
+ }
+ MlirPass reussirCreateConvertToLLVMPass(void) {
+   return wrapOwned(reussir::createReussirConvertToLLVMPass());
+diff --git a/lib/Conversion/CMakeLists.txt b/lib/Conversion/CMakeLists.txt
+index 393c61b3..35c4b46d 100644
+--- a/lib/Conversion/CMakeLists.txt
++++ b/lib/Conversion/CMakeLists.txt
+@@ -10,6 +10,7 @@ add_subdirectory(CompilePolymorphicFFI)
+ add_subdirectory(InstrumentNonlinearFFI)
+ add_subdirectory(AttachNativeTarget)
+ add_subdirectory(FixVectorScale)
++add_subdirectory(LegalizeVectorStorage)
+ add_subdirectory(IFRTJustInTimeTransform)
+ 
+ set(REUSSIR_CONVERSION_AGGREGATE_LIBS
+@@ -25,6 +26,7 @@ set(REUSSIR_CONVERSION_AGGREGATE_LIBS
+   MLIRReussirInstrumentNonlinearFFI
+   MLIRReussirAttachNativeTarget
+   MLIRReussirFixVectorScale
++  MLIRReussirLegalizeVectorStorage
+   MLIRReussirIFRTJustInTimeTransform
+ )
+ 
+diff --git a/lib/Conversion/LegalizeVectorStorage/CMakeLists.txt b/lib/Conversion/LegalizeVectorStorage/CMakeLists.txt
+new file mode 100644
+index 00000000..b4444a09
+--- /dev/null
++++ b/lib/Conversion/LegalizeVectorStorage/CMakeLists.txt
+@@ -0,0 +1,15 @@
++add_mlir_conversion_library(MLIRReussirLegalizeVectorStorage
++  LegalizeVectorStorage.cpp
++
++  DEPENDS
++  MLIRReussirConversionPassIncGen
++
++  LINK_COMPONENTS
++  Core
++  Support
++
++  LINK_LIBS PUBLIC
++  MLIRArmSVEDialect
++  MLIRArmSVETransforms
++  MLIRFuncDialect
++)
+diff --git a/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp b/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
+new file mode 100644
+index 00000000..fcdccc6d
+--- /dev/null
++++ b/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
+@@ -0,0 +1,61 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// This file implements the pass that makes the storage of scalable vectors
++/// legal for SVE.
++///
++//===----------------------------------------------------------------------===//
++
++#include "Reussir/Conversion/Passes.h"
++
++#include <mlir/Dialect/ArmSVE/IR/ArmSVEDialect.h>
++#include <mlir/Dialect/ArmSVE/Transforms/Passes.h>
++#include <mlir/Dialect/Func/IR/FuncOps.h>
++#include <mlir/IR/BuiltinOps.h>
++#include <mlir/Pass/Pass.h>
++#include <mlir/Transforms/GreedyPatternRewriteDriver.h>
++
++namespace reussir {
++#define GEN_PASS_DEF_REUSSIRLEGALIZEVECTORSTORAGEPASS
++#include "Reussir/Conversion/Passes.h.inc"
++
++namespace {
++struct ReussirLegalizeVectorStoragePass
++    : public impl::ReussirLegalizeVectorStoragePassBase<
++          ReussirLegalizeVectorStoragePass> {
++  void runOnOperation() override {
++    mlir::RewritePatternSet patterns(&getContext());
++    mlir::arm_sve::populateLegalizeVectorStoragePatterns(patterns);
++    // The patterns alone reach a fixpoint; the driver's cleanup of the rest
++    // of the function may not within its iteration limit.
++    mlir::GreedyRewriteConfig config;
++    config.enableFolding(false).enableConstantCSE(false);
++    config.setRegionSimplificationLevel(
++        mlir::GreedySimplifyRegionLevel::Disabled);
++    if (mlir::failed(mlir::applyPatternsGreedily(
++            getOperation(), std::move(patterns), config)))
++      return signalPassFailure();
++    // The patterns give a legalized allocation its old type back through a
++    // cast between memrefs, for the uses they then rewrite. One that is left
++    // has a use they cannot rewrite, such as a call.
++    getOperation().walk([&](mlir::UnrealizedConversionCastOp cast) {
++      if (cast.getNumOperands() != 1 || cast.getNumResults() != 1 ||
++          !llvm::isa<mlir::MemRefType>(cast.getOperand(0).getType()) ||
++          !llvm::isa<mlir::MemRefType>(cast.getResult(0).getType()))
++        return;
++      cast.emitError("the storage of a scalable vector is used by an "
++                     "operation that cannot be legalized");
++      signalPassFailure();
++    });
++  }
++};
++} // namespace
++} // namespace reussir
+diff --git a/tests/integration/conversion/legalize_vector_storage.mlir b/tests/integration/conversion/legalize_vector_storage.mlir
+new file mode 100644
+index 00000000..af10d626
+--- /dev/null
++++ b/tests/integration/conversion/legalize_vector_storage.mlir
+@@ -0,0 +1,52 @@
++// RUN: %reussir-opt %s --split-input-file --verify-diagnostics \
++// RUN:   --reussir-legalize-vector-storage | %FileCheck %s
++
++// A function without any vector, whose blocks are listed last first. Block k
++// gets two arguments that are equal only once block k-1 has lost its own, so
++// the greedy driver's region simplification clears one block per iteration
++// and is not done after ten. MLIR's `arm-sve-legalize-vector-storage` fails
++// on it; the patterns alone leave it as it is.
++
++// CHECK-LABEL: func.func @chain(
++// CHECK: cf.br ^[[FIRST:.+]](%{{.+}}, %{{.+}} : i64, i64)
++// CHECK: arith.addi
++// CHECK: cf.cond_br
++func.func @chain(%p: i1, %c: i64) -> i64 {
++  cf.br ^d0(%c, %c : i64, i64)
++^d10(%v10: i64, %w10: i64):
++  %r = arith.addi %v10, %w10 : i64
++  return %r : i64
++^d9(%v9: i64, %w9: i64):
++  cf.cond_br %p, ^d10(%v9, %w9 : i64, i64), ^d10(%w9, %v9 : i64, i64)
++^d8(%v8: i64, %w8: i64):
++  cf.cond_br %p, ^d9(%v8, %w8 : i64, i64), ^d9(%w8, %v8 : i64, i64)
++^d7(%v7: i64, %w7: i64):
++  cf.cond_br %p, ^d8(%v7, %w7 : i64, i64), ^d8(%w7, %v7 : i64, i64)
++^d6(%v6: i64, %w6: i64):
++  cf.cond_br %p, ^d7(%v6, %w6 : i64, i64), ^d7(%w6, %v6 : i64, i64)
++^d5(%v5: i64, %w5: i64):
++  cf.cond_br %p, ^d6(%v5, %w5 : i64, i64), ^d6(%w5, %v5 : i64, i64)
++^d4(%v4: i64, %w4: i64):
++  cf.cond_br %p, ^d5(%v4, %w4 : i64, i64), ^d5(%w4, %v4 : i64, i64)
++^d3(%v3: i64, %w3: i64):
++  cf.cond_br %p, ^d4(%v3, %w3 : i64, i64), ^d4(%w3, %v3 : i64, i64)
++^d2(%v2: i64, %w2: i64):
++  cf.cond_br %p, ^d3(%v2, %w2 : i64, i64), ^d3(%w2, %v2 : i64, i64)
++^d1(%v1: i64, %w1: i64):
++  cf.cond_br %p, ^d2(%v1, %w1 : i64, i64), ^d2(%w1, %v1 : i64, i64)
++^d0(%v0: i64, %w0: i64):
++  cf.cond_br %p, ^d1(%v0, %w0 : i64, i64), ^d1(%w0, %v0 : i64, i64)
++}
++
++// -----
++
++// A predicate slot that a call takes cannot change its type.
++func.func private @use(memref<vector<[4]xi1>>)
++func.func @escape(%m: vector<[4]xi1>) -> vector<[4]xi1> {
++  // expected-error@+1 {{the storage of a scalable vector is used by an operation that cannot be legalized}}
++  %a = memref.alloca() : memref<vector<[4]xi1>>
++  memref.store %m, %a[] : memref<vector<[4]xi1>>
++  call @use(%a) : (memref<vector<[4]xi1>>) -> ()
++  %r = memref.load %a[] : memref<vector<[4]xi1>>
++  return %r : vector<[4]xi1>
++}
+diff --git a/tests/integration/conversion/vector_lowering.mlir b/tests/integration/conversion/vector_lowering.mlir
+index 45e36c8a..9a4b1725 100644
+--- a/tests/integration/conversion/vector_lowering.mlir
++++ b/tests/integration/conversion/vector_lowering.mlir
+@@ -1,5 +1,5 @@
+ // RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,convert-vector-to-llvm,reussir-convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %FileCheck %s
+-// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,func.func(arm-sve-legalize-vector-storage),convert-vector-to-llvm{enable-arm-sve},reussir-convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %FileCheck %s
++// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-attach-native-target,func.func(reussir-legalize-vector-storage),convert-vector-to-llvm{enable-arm-sve},reussir-convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %FileCheck %s
+ 
+ // CHECK-LABEL: define <8 x float> @fixed(
+ // CHECK-SAME: <8 x float> %[[A:.*]], float %[[X:.*]])
+diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
+index d8f92bce..36e2d9bb 100644
+--- a/tool/reussir-opt/main.cpp
++++ b/tool/reussir-opt/main.cpp
+@@ -148,6 +148,9 @@ int main(int argc, char **argv) {
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirFixVectorScalePass();
+   });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return reussir::createReussirLegalizeVectorStoragePass();
++  });
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirInvariantGroupAnalysisPass();
+   });
+-- 
+2.43.0
+

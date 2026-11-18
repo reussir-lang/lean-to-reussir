@@ -1,5 +1,119 @@
 # 23. Freeing a deep recursive value keeps one coroutine frame per level
 
+**Fixed upstream, to delete.** Upstream Reussir took the design of
+this entry: its drop series (#872 to #914) deleted the retcon drop
+lowering and frees recursive records through scoped worklists. Upstream
+closed our issue #760 with it. lean2rr's base since 2026-11-17, upstream
+`36a55a0f`, carries no patch of this entry: 23-a to 23-p are parked as
+history ([`patches/parked/`](patches/parked/)). The next section maps
+each patch to upstream's code. Everything after it describes the
+patches as they were on `l2r-base9` to `l2r-base12` (history).
+
+The port's first gate confirmed it (2026-11-18): the repro prints FIXED
+on pristine `36a55a0f` and on the patched base (0 KiB of peak growth in
+all four shapes), and the deep-free tests of lean2rr's runtime suite
+keep their allocation bounds.
+
+By the README's policy, an entry that upstream fixed in full is deleted
+and its number retired. Not deleted yet (the coordinator decides). The
+deletion removes:
+
+- this file, `reussir-bugs/23-worklist-drops.md` (with the mapping of
+  23-a to 23-p below, which is then only in git history and in the
+  README's history section);
+- the sixteen files `patches/parked/23-a-drop-stack-runtime.patch` to
+  `23-p-same-release-cells.patch`;
+- `repros/bug23-deep-free.rr` and `bug23-deep-free.c`, the function
+  `bug23` of `repros/run.sh` and `23` in its list of entries;
+- the entry's rows in the README (status table, parked table, review
+  table) and in `docs/implementation/reussir-workarounds/README.md`;
+  links to this file from entries 2, 19 and 24, from
+  `docs/implementation/ownership.md` and from `runtime/README.md`.
+
+Number 23 is then retired. One thing would be lost with 23-g: our test
+of the peak memory of a deep free of alternating types
+(`worklist_drop_depth.rr`), which has no upstream equal; lean2rr's
+`RtAltTreeFree` checks the same through lean2rr.
+
+## On upstream 36a55a0f
+
+Upstream's code: `crates/reussir-rt/src/drop_stack.rs` and
+`drop_stack/wide.rs` (the runtime), and
+`lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`,
+`AcquireDropExpansion.cpp`, `lib/IR/RecordDrop.cpp`,
+`lib/Conversion/BasicOpsLowering/DropStackLowering.cpp` (the glue). The
+mapping below is from reading that code on 2026-11-17; nothing in it
+was measured.
+
+| Ours | Upstream at `36a55a0f` | Result |
+|---|---|---|
+| 23-a the runtime stack | `drop_stack.rs` | covered. A nested `run` is a scope that finishes before it returns (ours joined the running drain) |
+| 23-b the ops `rc.defer`, `drop.run` | the same two, and `drop.defer`, `drop.join`, `drop.defer_indexed` | covered |
+| 23-c `emitBoxFree` | `TailDrop.cpp`, `emitBoxFree` | covered |
+| 23-d the option `worklist-drops` | no option: always on with `outline-record`; the retcon lowering is deleted | covered in another way (this also closes the open item "delete the retcon lowering") |
+| 23-e nullable members, locked cells; entry 24 | `deadTest` handles nullable members; a locked-drop function on every path | covered ([entry 24](24-locked-drop-token-leak.md)) |
+| 23-f the pipelines | the pass option `drop-order`; the C API takes `tailRecursiveDrops` and `dropOrder` | covered |
+| 23-g tests | `frontend/worklist_deep.rr`, `conversion/worklist_recursive_order`, `worklist_observable_order`, `worklist_drop_order` | covered in another way. Not found upstream: a test like our `worklist_drop_depth.rr`, which bounds the peak memory of a deep free of alternating types |
+| 23-h leaf arms | `dispatchLeaf`, in the entry and in the release | covered |
+| 23-i, 23-j the tail call, the last two children | `releasePure`, only for records with no observable cleanup | covered in another way: narrower (see the risks below) |
+| 23-k end work | `defer_until_scope_exit(fn())` | covered in another way: a queue of callbacks, no `set`/`want` pair, a request is not deduplicated |
+| 23-l runs | the active run and its `cells` | covered |
+| 23-m steps, depth, drain | steps (`StepStatus`) and `depth()` covered; no `drain()` (not needed: outside a scope, `defer` and `run_step` complete at once) | covered in another way |
+| 23-n `defer_wide` | `wide.rs`: a 40-bit offset in 8-byte units, an 8-bit index, a table of 255 release functions | covered |
+| 23-o the glue's use of it | `hasWideHeader`: a fused variant of at most 2^16 arms, or a compound payload aligned to 8 or more | covered |
+| 23-p same release function: a cell; the cache | `mark_cell`, a 16-slot cache | covered |
+
+What differs from the patches, for a host runtime such as leanrt:
+
+- A step is `unsafe extern "C" fn(*mut c_void) -> StepStatus`
+  (`Pending` or `Complete`), not `fn(usize) -> bool`. A null object or
+  step argument is undefined behaviour (ours took 0).
+- `run_step` is `join_or_run_step`.
+- The end work is `defer_until_scope_exit(fn())`: a queue, run in the
+  order of the requests after the outermost scope. leanrt asks once for
+  each outermost scope through a thread-local flag
+  (`runtime/leanrt/src/pending.rs`).
+- Memory of pending work, by reading: a linked record takes no memory,
+  a record in a run of cells 8 bytes, a suspended run 32 bytes (24 with
+  our patches).
+
+What the port's first gate measured (2026-11-18, lean2rr's
+`tests/runtime/alloc-check.sh`, 81 tests, 191 rows, all inside their
+bounds):
+
+- **The deep-free tests keep their bounds:** `RtClosureChainFree`,
+  `RtDeepTreeFree`, `RtArrayPileFree`, `RtAltTreeFree`; their allocation
+  counts are within 3 of the last gate's on `l2r-base12`.
+- **One row moved by more:** `RtListDropWhole`, an array of 10^6 lists:
+  peak 53.7 MB on `l2r-base12`, 68.1 MB now (the same allocation count;
+  bytes +36.0 MB to +48.6 MB). Inside the test's allowance. The cause
+  is not found; a hypothesis is the scoped worklist's buffer for an
+  array of 10^6 elements.
+- The repro (`repros/bug23-deep-free.rr` with its C driver): FIXED on
+  pristine `36a55a0f` and on the patched base, 0 KiB in all four shapes.
+- The port's final gate (the final series, the new translator) gave
+  the same `alloc-check` rows: the deep-free tests keep their bounds,
+  and `RtListDropWhole`'s `arr` row keeps its 68.1 MB, so that row's
+  +14 MB of peak came with the base and not with lean2rr's changes.
+  The repro is FIXED there too (172 to 192 KiB of growth on the
+  series' build, 0 on pristine; the limit is 16 MiB).
+
+Still hypotheses, not measured:
+
+- **The tail call is narrower.** Upstream marks a record with a member
+  that is not a record, nullable, rc, array or cell, and not trivially
+  copyable, as having observable cleanup. An rcgmp integer is such a
+  member. So for a record with a `Nat` or `Int` member, the tail call on
+  the last child and the finish in line are off: each dead child is a
+  deferral and a pop. 23-i and 23-j gave up the tail call only when a
+  member after the children could push. The cost per freed cell on
+  lean2rr's programs: pending the timing run.
+- **The order of releases** is upstream's `backward` policy. Two of its
+  rules differ from these patches'; lean2rr's emitter answers both
+  ([entry 2](02-native-drop-order.md#on-upstream-36a55a0f)).
+
+## The entry as it was on l2r-base12 (history)
+
 **Kind:** cost (memory and run time of frees). Not a bug by Reussir's
 rules: upstream promises that a drop runs at a bounded stack depth, and
 it does. But the heap state of a drop grows with the depth of the value:
@@ -23,8 +137,9 @@ waits, as in Lean's to-do list.
 
 **Kind:** cost (memory and run time), with a fix that bounds the
 memory: the patches are optimizations, and 23-k to 23-m the features a
-host runtime needs to share the stack. **Status:** patched (23-a to
-23-p), applied in `./reussir`'s series since 2026-10-25 (branch
+host runtime needs to share the stack. **Status (history; now fixed
+upstream, see the top of this file):** patched (23-a to
+23-p), applied in `./reussir`'s series from 2026-10-25 to 2026-11-17 (branch
 `l2r-base12`, commits `f42c9366` to `c1170ff9`). `scripts/l2r.py`
 requires the patches: it stops with an error when the Reussir checkout
 lacks 23-f (the switch of rrc's pipeline to worklist drops), 23-k (the
@@ -33,7 +148,7 @@ end work), 23-m (steps, depth and drain), 23-n (`defer_wide`) or 23-o
 stack does not compile without 23-k to 23-m. 23-p, an optimization of
 instructions, is not checked.
 
-**Upstream (2026-10-25):** Open at 00906e38, by design: upstream's drops
+**Upstream (history, 2026-10-25):** Open at 00906e38, by design: upstream's drops
 of Worklist types are retcon coroutines (#678, #679), with a bounded
 stack depth and a heap frame per suspended level. Not reported. The
 patches are made for Reussir's maintainer, who takes Reussir-side
@@ -152,22 +267,22 @@ the JIT front ends select) keeps plain recursive drops, as before.
 
 | Patch | Commit | Kind | What it does |
 |---|---|---|---|
-| [23-a](patches/23-a-drop-stack-runtime.patch) | `f42c9366` | optimization (runtime) | a per-thread stack of pending drops in Reussir's runtime: `drop_stack.rs`, `__reussir_drop_run` and `__reussir_drop_defer` |
-| [23-b](patches/23-b-drop-stack-ops.patch) | `d8161831` | optimization (IR) | ops `reussir.rc.defer` and `reussir.drop.run`, verified and lowered to the two runtime calls |
-| [23-c](patches/23-c-tail-drop-box-free.patch) | `fff903d3` | refactor | TailDrop's free of a box as a shared helper, `emitBoxFree` (no change in what TailDrop emits) |
-| [23-d](patches/23-d-worklist-drops-option.patch) | `8148c05d` | optimization | worklist drops behind a new option of the acquire/drop expansion, `worklist-drops` |
-| [23-e](patches/23-e-worklist-nullable-locked.patch) | `09b68801` | optimization and bug fix | nullable members and locked cells deferred by the glue too; the locked-drop function under every option, which also fixes [issue 24](24-locked-drop-token-leak.md) |
-| [23-f](patches/23-f-pipelines-worklist-drops.patch) | `41b644ab` | optimization | rrc's pipeline, the C API and the C++ bridge use worklist drops where they used retcon drops |
-| [23-g](patches/23-g-worklist-drop-tests.patch) | `75462ca2` | tests | deep frees on a small stack, under ASan, and the release order |
-| [23-h](patches/23-h-worklist-leaf-arms.patch) | `923e9da3` | optimization | a leaf arm dropped from user code is released in place, without the drain |
-| [23-i](patches/23-i-worklist-tail-release.patch) | `a26aaf1f` | optimization | the last dead child of a freed cell continues as a `musttail` call |
-| [23-j](patches/23-j-worklist-tail-two-children.patch) | `563a38c2` | optimization | the tail call takes the last dead of the arm's last two such members |
-| [23-k](patches/23-k-drop-stack-end-work.patch) | `8e061140` | feature (for a host; fixes a regression with leanrt) | end work: one function that the outermost drain calls once it has ended (`set_end_work`, `want_end_work`) |
-| [23-l](patches/23-l-drop-stack-runs.patch) | `bc14bc66` | optimization (runtime) | runs of drops with one release function: 8 bytes per pending cell in a run instead of a 16-byte entry |
-| [23-m](patches/23-m-drop-stack-steps.patch) | `0ffbe4c0` | feature (for a host) | steps (`defer_step`, `run_step`), `depth()` and `drain()`, so that a host frees its own objects on the same stack |
-| [23-n](patches/23-n-drop-stack-linked-runs.patch) | `44f8184f` | optimization (memory) | `defer_wide` (C: `__reussir_drop_defer_wide`): a box with a wide header waits linked through its header, in a linked run of the stack |
-| [23-o](patches/23-o-defer-wide-headers.patch) | `9b326f5d` | optimization (memory) | the glue defers boxes with a wide header (variants, compound records aligned to 8) through `defer_wide` |
-| [23-p](patches/23-p-same-release-cells.patch) | `c1170ff9` | optimization (instructions) | in a linked run, a box after one of the same release function joins the run's cells; only a change of function links; a cache of the release table |
+| [23-a](patches/parked/23-a-drop-stack-runtime.patch) | `f42c9366` | optimization (runtime) | a per-thread stack of pending drops in Reussir's runtime: `drop_stack.rs`, `__reussir_drop_run` and `__reussir_drop_defer` |
+| [23-b](patches/parked/23-b-drop-stack-ops.patch) | `d8161831` | optimization (IR) | ops `reussir.rc.defer` and `reussir.drop.run`, verified and lowered to the two runtime calls |
+| [23-c](patches/parked/23-c-tail-drop-box-free.patch) | `fff903d3` | refactor | TailDrop's free of a box as a shared helper, `emitBoxFree` (no change in what TailDrop emits) |
+| [23-d](patches/parked/23-d-worklist-drops-option.patch) | `8148c05d` | optimization | worklist drops behind a new option of the acquire/drop expansion, `worklist-drops` |
+| [23-e](patches/parked/23-e-worklist-nullable-locked.patch) | `09b68801` | optimization and bug fix | nullable members and locked cells deferred by the glue too; the locked-drop function under every option, which also fixes [issue 24](24-locked-drop-token-leak.md) |
+| [23-f](patches/parked/23-f-pipelines-worklist-drops.patch) | `41b644ab` | optimization | rrc's pipeline, the C API and the C++ bridge use worklist drops where they used retcon drops |
+| [23-g](patches/parked/23-g-worklist-drop-tests.patch) | `75462ca2` | tests | deep frees on a small stack, under ASan, and the release order |
+| [23-h](patches/parked/23-h-worklist-leaf-arms.patch) | `923e9da3` | optimization | a leaf arm dropped from user code is released in place, without the drain |
+| [23-i](patches/parked/23-i-worklist-tail-release.patch) | `a26aaf1f` | optimization | the last dead child of a freed cell continues as a `musttail` call |
+| [23-j](patches/parked/23-j-worklist-tail-two-children.patch) | `563a38c2` | optimization | the tail call takes the last dead of the arm's last two such members |
+| [23-k](patches/parked/23-k-drop-stack-end-work.patch) | `8e061140` | feature (for a host; fixes a regression with leanrt) | end work: one function that the outermost drain calls once it has ended (`set_end_work`, `want_end_work`) |
+| [23-l](patches/parked/23-l-drop-stack-runs.patch) | `bc14bc66` | optimization (runtime) | runs of drops with one release function: 8 bytes per pending cell in a run instead of a 16-byte entry |
+| [23-m](patches/parked/23-m-drop-stack-steps.patch) | `0ffbe4c0` | feature (for a host) | steps (`defer_step`, `run_step`), `depth()` and `drain()`, so that a host frees its own objects on the same stack |
+| [23-n](patches/parked/23-n-drop-stack-linked-runs.patch) | `44f8184f` | optimization (memory) | `defer_wide` (C: `__reussir_drop_defer_wide`): a box with a wide header waits linked through its header, in a linked run of the stack |
+| [23-o](patches/parked/23-o-defer-wide-headers.patch) | `9b326f5d` | optimization (memory) | the glue defers boxes with a wide header (variants, compound records aligned to 8) through `defer_wide` |
+| [23-p](patches/parked/23-p-same-release-cells.patch) | `c1170ff9` | optimization (instructions) | in a linked run, a box after one of the same release function joins the run's cells; only a change of function links; a cache of the release table |
 
 ### The runtime stack (23-a)
 

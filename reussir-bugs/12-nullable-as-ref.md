@@ -6,7 +6,9 @@
 (unreachable: nothing calls the function, and no `Nullable` value reaches
 Rust code).
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `crates/reussir-rt/src/nullable.rs`. On upstream 7954a367 its repro failed both tests (2026-10-19); open.
+**Upstream (2026-11-17):** Unchanged at `36a55a0f`: `crates/reussir-rt/src/nullable.rs` has no commit after `95d9a1c8`, and `as_ref` still takes the address of the local copy (read on 2026-11-17). The repro fails both tests there, on pristine upstream and on the patched base (the port's first gate, 2026-11-18): reproduces.
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `crates/reussir-rt/src/nullable.rs`. On upstream 7954a367 its repro failed both tests (2026-10-19); open.
 
 **Verdict: bug.** `reussir_rt::nullable::Nullable<T>` is the Rust side of
 Reussir's `Nullable<T>` (a pointer that may be null, one word).

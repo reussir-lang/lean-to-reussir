@@ -524,7 +524,7 @@ Paths are relative to the repository root.
   `thunk_wait_busy`), `once.rs` (`claim_cold`, `set_raw`), `refs.rs`,
   `task.rs` (`Promise`, `defer_promise_drop`, `resolve_with`,
   `drained`), `drop.rs` (`run`, `assert_not_in_free`), `pending.rs`
-  (`drain`, `want_end_work`).
+  (`want_end_work`, `end_work`).
   Implementation notes: [../tasks/cells.md](../tasks/cells.md),
   [../tasks/dependents.md](../tasks/dependents.md),
   [../tasks/scheduler.md](../tasks/scheduler.md).

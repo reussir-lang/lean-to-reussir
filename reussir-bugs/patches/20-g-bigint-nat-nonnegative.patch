@@ -1,0 +1,287 @@
+From c9e433ea84fc6feb17c69bab012096b5e761e2ee Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Tue, 17 Nov 2026 23:48:48 -0500
+Subject: [PATCH 04/12] [bigint] divide Nats as nonnegative integers
+
+Divisions of `Nat`s now set rcgmp's `nonnegative` attribute: both operands
+are nonnegative, so immediates untag by a logical shift and divide
+unsigned, with no test of the quotient, and every rounding agrees. This
+covers `/` and `%` at `Nat` and every division intrinsic at `Nat`
+(`edivsi`, `emodsi`, `floordivsi`, `floormodsi`, `divsi_exact` and the
+`_lean` ones); `Int` divisions are unchanged. A `Nat` cannot be negative:
+no cast from `Int` or a signed integer exists, and `-` on `Nat` truncates
+at zero.
+
+`DivisionMode` gains the `nonnegative` field and `rcgmp::divsi_exact` a
+`nonnegative` parameter.
+
+AArch64 instructions at -Oaggressive, from the entry to the first `ret`
+(the immediate path) and in the whole function:
+
+- `if b == 0 { 0 } else { a / b }` at Nat: 23 to 16, 81 to 74 (`sdiv` to
+  `udiv`);
+- `divsi_lean` at Nat: 15 to 11, 28 to 24;
+- `remsi_lean` at Nat: 13 to 12, 26 to 25;
+- `a % ipowi(2, w)` at Nat: 18 to 15, 41 to 38.
+
+Tests: frontend/bigint_nat_division.rr (the -O LLVM IR of a Nat `/` and a
+Nat `remsi_lean` divides the untagged immediates unsigned, an Int `/`
+signed), the `nonnegative` spelling of the Nat divisions in
+frontend/bigint_intrinsics.rr.
+---
+ crates/reussir-backend/src/rcgmp.rs           | 32 +++++++++----
+ .../reussir-codegen/src/lower/expr/bigint.rs  | 48 +++++++++++++------
+ .../integration/frontend/bigint_intrinsics.rr | 16 ++++++-
+ .../frontend/bigint_nat_division.rr           | 38 +++++++++++++++
+ 4 files changed, 110 insertions(+), 24 deletions(-)
+ create mode 100644 tests/integration/frontend/bigint_nat_division.rr
+
+diff --git a/crates/reussir-backend/src/rcgmp.rs b/crates/reussir-backend/src/rcgmp.rs
+index 7958d8ad..493171d5 100644
+--- a/crates/reussir-backend/src/rcgmp.rs
++++ b/crates/reussir-backend/src/rcgmp.rs
+@@ -135,19 +135,28 @@ pub fn binary<'c>(
+         .unwrap_or_else(|_| panic!("valid {}", op.name()))
+ }
+ 
+-/// How a division treats its operands, beyond the dialect's default: a zero
+-/// divisor terminates the program.
++/// How a division treats its operands, beyond the dialect's defaults: a zero
++/// divisor terminates the program, and the operands have either sign.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct DivisionMode {
+     /// `divzero<lean>`: a zero divisor gives the quotient zero and the
+     /// remainder the dividend, as Lean's integer division does.
+     pub lean: bool,
++    /// `nonnegative`: both operands are nonnegative, as `Nat`s are, so
++    /// immediates divide unsigned and every rounding agrees.
++    pub nonnegative: bool,
+ }
+ 
+ impl DivisionMode {
+     /// The attributes setting this mode on a division.
+     fn attributes<'c>(self, context: &'c Context) -> Vec<(Identifier<'c>, Attribute<'c>)> {
+         let mut attributes = Vec::new();
++        if self.nonnegative {
++            attributes.push((
++                Identifier::new(context, "nonnegative"),
++                Attribute::unit(context),
++            ));
++        }
+         if self.lean {
+             attributes.push((
+                 Identifier::new(context, "divZero"),
+@@ -158,8 +167,8 @@ impl DivisionMode {
+     }
+ }
+ 
+-/// `<op> <lhs>, <rhs> [divzero<lean>]`: a quotient or remainder `op` in
+-/// `mode`, consuming both operands.
++/// `<op> <lhs>, <rhs> [nonnegative] [divzero<lean>]`: a quotient or remainder
++/// `op` in `mode`, consuming both operands.
+ pub fn division<'c>(
+     context: &'c Context,
+     op: Binary,
+@@ -200,17 +209,24 @@ pub fn unary<'c>(op: Unary, operand: Value<'c, '_>, location: Location<'c>) -> O
+         .unwrap_or_else(|_| panic!("valid {name}"))
+ }
+ 
+-/// `rcgmp.divsi <lhs>, <rhs> exact`: the quotient of an exact division,
+-/// consuming both operands. `lhs` must be a multiple of `rhs`; a zero divisor
+-/// terminates the program.
++/// `rcgmp.divsi <lhs>, <rhs> exact [nonnegative]`: the quotient of an exact
++/// division, consuming both operands. `lhs` must be a multiple of `rhs`; a
++/// zero divisor terminates the program.
+ pub fn divsi_exact<'c>(
+     context: &'c Context,
+     lhs: Value<'c, '_>,
+     rhs: Value<'c, '_>,
++    nonnegative: bool,
+     location: Location<'c>,
+ ) -> Operation<'c> {
++    let mut attributes = vec![(Identifier::new(context, "exact"), Attribute::unit(context))];
++    let mode = DivisionMode {
++        nonnegative,
++        ..DivisionMode::default()
++    };
++    attributes.extend(mode.attributes(context));
+     OperationBuilder::new("rcgmp.divsi", location)
+-        .add_attributes(&[(Identifier::new(context, "exact"), Attribute::unit(context))])
++        .add_attributes(&attributes)
+         .add_operands(&[lhs, rhs])
+         .add_results(&[lhs.r#type()])
+         .build()
+diff --git a/crates/reussir-codegen/src/lower/expr/bigint.rs b/crates/reussir-codegen/src/lower/expr/bigint.rs
+index 506987b1..84a12ce7 100644
+--- a/crates/reussir-codegen/src/lower/expr/bigint.rs
++++ b/crates/reussir-codegen/src/lower/expr/bigint.rs
+@@ -124,7 +124,8 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// Integer arithmetic, consuming both operands. Subtraction on `Nat` is
+     /// truncated at zero, so the type stays closed under it. Division and
+     /// remainder truncate, as they do for fixed-width integers, and a zero
+-    /// divisor terminates the program. Bitwise operations act on the infinite
++    /// divisor terminates the program; on `Nat` they are `nonnegative`, so
++    /// immediates divide unsigned. Bitwise operations act on the infinite
+     /// two's complement, so `>>` rounds toward negative infinity.
+     pub(super) fn bigint_arith<'b>(
+         &self,
+@@ -139,6 +140,21 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+             (ArithOp::Sub, BigIntTy::Nat) => Binary::Monus,
+             (ArithOp::Sub, BigIntTy::Int) => Binary::Sub,
+             (ArithOp::Mul, _) => Binary::Mul,
++            (ArithOp::Div | ArithOp::Mod, BigIntTy::Nat) => {
++                let division = if matches!(op, ArithOp::Div) {
++                    Binary::Div
++                } else {
++                    Binary::Rem
++                };
++                let mode = DivisionMode {
++                    nonnegative: true,
++                    ..DivisionMode::default()
++                };
++                return Ok(self.append(
++                    block,
++                    rcgmp::division(self.context, division, lv, rv, mode, self.loc()),
++                ));
++            }
+             (ArithOp::Div, _) => Binary::Div,
+             (ArithOp::Mod, _) => Binary::Rem,
+             (ArithOp::BitAnd, _) => Binary::And,
+@@ -220,7 +236,7 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+     /// A `core::intrinsic::bigint` call. The borrowing operations leave their
+     /// integer operand with the caller, which releases it afterwards when
+     /// this was its last use, through the temporary recorded here; the others
+-    /// consume their integer operands.
++    /// consume their integer operands. Divisions of `Nat`s are `nonnegative`.
+     pub(super) fn lower_bigint_intrinsic<'b>(
+         &self,
+         block: &'b Block<'c>,
+@@ -242,22 +258,26 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+         }
+         let loc = self.loc();
+         let binary = |op| Ok(self.append(block, rcgmp::binary(op, operands[0], operands[1], loc)));
+-        let lean = DivisionMode { lean: true };
+-        let divide = |op| {
++        let nonnegative = args
++            .first()
++            .and_then(|a| a.ty.bigint())
++            .is_some_and(|(int, _)| int == BigIntTy::Nat);
++        let divide = |op, lean| {
++            let mode = DivisionMode { lean, nonnegative };
+             Ok(self.append(
+                 block,
+-                rcgmp::division(self.context, op, operands[0], operands[1], lean, loc),
++                rcgmp::division(self.context, op, operands[0], operands[1], mode, loc),
+             ))
+         };
+         match func {
+             BigIntFn::Gcdi => binary(Binary::Gcd),
+-            BigIntFn::Edivsi => binary(Binary::EuclidDiv),
+-            BigIntFn::Emodsi => binary(Binary::EuclidRem),
+-            BigIntFn::Floordivsi => binary(Binary::FloorDiv),
+-            BigIntFn::Floormodsi => binary(Binary::FloorRem),
++            BigIntFn::Edivsi => divide(Binary::EuclidDiv, false),
++            BigIntFn::Emodsi => divide(Binary::EuclidRem, false),
++            BigIntFn::Floordivsi => divide(Binary::FloorDiv, false),
++            BigIntFn::Floormodsi => divide(Binary::FloorRem, false),
+             BigIntFn::DivsiExact => Ok(self.append(
+                 block,
+-                rcgmp::divsi_exact(self.context, operands[0], operands[1], loc),
++                rcgmp::divsi_exact(self.context, operands[0], operands[1], nonnegative, loc),
+             )),
+             BigIntFn::Ipowi => Ok(self.append(block, rcgmp::ipowi(operands[0], operands[1], loc))),
+             BigIntFn::Absi => Ok(self.append(block, rcgmp::unary(Unary::Abs, operands[0], loc))),
+@@ -293,10 +313,10 @@ impl<'c, 'p, 'tcx> Lowerer<'c, 'p, 'tcx> {
+                 let ty = self.tys.mlir_ty(e.ty)?;
+                 Ok(self.append(block, rcgmp::limb(operands[0], index, ty, loc)))
+             }
+-            BigIntFn::DivsiLean => divide(Binary::Div),
+-            BigIntFn::RemsiLean => divide(Binary::Rem),
+-            BigIntFn::EdivsiLean => divide(Binary::EuclidDiv),
+-            BigIntFn::EmodsiLean => divide(Binary::EuclidRem),
++            BigIntFn::DivsiLean => divide(Binary::Div, true),
++            BigIntFn::RemsiLean => divide(Binary::Rem, true),
++            BigIntFn::EdivsiLean => divide(Binary::EuclidDiv, true),
++            BigIntFn::EmodsiLean => divide(Binary::EuclidRem, true),
+             BigIntFn::Floormod2expi => Ok(self.append(
+                 block,
+                 rcgmp::shift(Shift::FloorMod2Exp, operands[0], operands[1], loc),
+diff --git a/tests/integration/frontend/bigint_intrinsics.rr b/tests/integration/frontend/bigint_intrinsics.rr
+index d6fea3cf..96ec1d30 100644
+--- a/tests/integration/frontend/bigint_intrinsics.rr
++++ b/tests/integration/frontend/bigint_intrinsics.rr
+@@ -39,13 +39,25 @@ pub fn lean(a : Int, b : Int, k : u64) -> Int {
+         + core::intrinsic::bigint::floormod2expi(a, k)
+ }
+ 
++// The divisions of `Nat`s are `nonnegative`, those of `Int`s above are not.
++pub fn natural(a : Nat, b : Nat) -> Nat {
++    core::intrinsic::bigint::remsi_lean(a, b) + core::intrinsic::bigint::floordivsi(a, b)
++        + core::intrinsic::bigint::divsi_exact(a, b) + a / b + a % b
++}
++
+ // MIR-DAG: intrinsic#bigint#edivsi#0
+ // MIR-DAG: intrinsic#bigint#trunci_overflow#0
+ // MIR-DAG: intrinsic#bigint#divsi_lean#0
+ // MIR-DAG: intrinsic#bigint#floormod2expi#0
+ 
+-// The Lean divisions first: a pattern below without `divzero` would also
+-// match one of them, and leave its namesake unmatched.
++// The `Nat` divisions first, then the Lean divisions: a pattern below without
++// `nonnegative` or `divzero` would also match one of them, and leave its
++// namesake unmatched.
++// CHECK-DAG: rcgmp.remsi {{.*}} nonnegative divzero<lean>
++// CHECK-DAG: rcgmp.floordivsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
++// CHECK-DAG: rcgmp.divsi {{.*}} exact nonnegative :
++// CHECK-DAG: rcgmp.divsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
++// CHECK-DAG: rcgmp.remsi %{{[^ ]*}} %{{[^ ]*}} nonnegative :
+ // CHECK-DAG: rcgmp.divsi {{.*}} divzero<lean>
+ // CHECK-DAG: rcgmp.remsi {{.*}} divzero<lean>
+ // CHECK-DAG: rcgmp.edivsi {{.*}} divzero<lean>
+diff --git a/tests/integration/frontend/bigint_nat_division.rr b/tests/integration/frontend/bigint_nat_division.rr
+new file mode 100644
+index 00000000..37f4068c
+--- /dev/null
++++ b/tests/integration/frontend/bigint_nat_division.rr
+@@ -0,0 +1,38 @@
++// The divisions of `Nat`s are `nonnegative`: their immediates untag by a
++// logical shift and divide unsigned. An `Int` division divides signed. Each
++// function's checks run as their own prefix, independent of the order of the
++// functions.
++
++// REQUIRES: rcgmp
++// RUN: %rrc --package-root %S/../../../library/core/src --package-name core --builtin --emit rri -o %t.core.rri
++// RUN: %rrc %s --package-name bigint --extern core=%t.core.rri -t llvm-ir -Oaggressive -o %t.ll
++// RUN: %FileCheck %s --check-prefix=NATDIV --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=NATREM --input-file=%t.ll
++// RUN: %FileCheck %s --check-prefix=INTDIV --input-file=%t.ll
++
++pub fn nat_div(x : Nat, m : Nat) -> Nat { x / m }
++
++pub fn nat_rem(x : Nat, m : Nat) -> Nat { core::intrinsic::bigint::remsi_lean(x, m) }
++
++pub fn int_div(x : Int, m : Int) -> Int { x / m }
++
++// NATDIV: define {{.*}}@{{.*}}7nat_div(
++// NATDIV-NOT: sdiv
++// NATDIV: lshr i64 %{{[0-9]+}}, 2
++// NATDIV: udiv i64
++// NATDIV-NOT: sdiv
++// NATDIV: {{^}}}
++
++// NATREM: define {{.*}}@{{.*}}7nat_rem(
++// NATREM-NOT: srem
++// NATREM: lshr i64 %{{[0-9]+}}, 2
++// NATREM: urem i64
++// NATREM-NOT: srem
++// NATREM: {{^}}}
++
++// INTDIV: define {{.*}}@{{.*}}7int_div(
++// INTDIV-NOT: udiv
++// INTDIV: ashr i64 %{{[0-9]+}}, 2
++// INTDIV: sdiv i64
++// INTDIV-NOT: udiv
++// INTDIV: {{^}}}
+-- 
+2.43.0
+

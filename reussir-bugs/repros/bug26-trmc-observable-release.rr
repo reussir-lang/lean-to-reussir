@@ -1,0 +1,54 @@
+extern "rust" [{
+    use reussir_rt::rc::Rc;
+    use std::sync::Arc;
+    extern "C" { static mut live_slot: *const (); }
+    // One shared counter for every texture: its strong count is 1 + open handles.
+    fn live() -> Arc<()> {
+        unsafe {
+            if live_slot.is_null() { live_slot = Arc::into_raw(Arc::new(())); }
+            Arc::increment_strong_count(live_slot);
+            Arc::from_raw(live_slot)
+        }
+    }
+}];
+
+// A foreign handle; releasing it runs the foreign type's Drop.
+#[ffi(rust = "::reussir_rt::rc::Rc<::std::sync::Arc<()>>")]
+pub struct Handle;
+
+#[ffi(import)]
+fn open() -> Handle [{ Rc::new(live()) }];
+
+// How many handles are open now.
+#[ffi(import)]
+fn open_count() -> u64 [{ (Arc::strong_count(&live()) - 2) as u64 }];
+
+struct Holder { id: u64, h: Handle }
+enum List { Nil, Cons(u64, List) }
+
+// `b` is used after the recursive call, so its handle is open during it.
+fn build(n: u64) -> List {
+    if n == 0 { List::Cons { open_count(), List::Nil } } else {
+        let b = Holder { id: n, h: open() };
+        let rest = build(n - 1);
+        List::Cons { b.id, rest }
+    }
+}
+
+fn last(l: List) -> u64 {
+    match l { List::Nil => 99, List::Cons(x, rest) => match rest { List::Nil => x, List::Cons(y, r) => last(List::Cons{y, r}) } }
+}
+
+pub fn main() -> i64 { last(build(3)) as i64 }
+extern "C" trampoline "reussir_main" = main;
+
+// Control: the same order of operations with no constructor to build.
+fn depth(n: u64) -> u64 {
+    if n == 0 { open_count() } else {
+        let b = Holder { id: n, h: open() };
+        let rest = depth(n - 1);
+        b.id * 0 + rest
+    }
+}
+pub fn control() -> i64 { depth(3) as i64 }
+extern "C" trampoline "reussir_control" = control;

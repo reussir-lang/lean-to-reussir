@@ -1,8 +1,8 @@
-From 5a15f7450d090587c45132254015cbb009a96e54 Mon Sep 17 00:00:00 2001
+From 3db9b8179bacd94ccf99d78ecaa3e3162f777582 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 07:38:16 -0400
-Subject: [PATCH 08/24] l2r-local: entry 21: cancel rcgmp retains of [value]
- record members against the record's drop
+Subject: [PATCH 08/12] [rc] cancel rcgmp retains of by-value record members
+ against the record's drop
 
 A by-value record (or tuple) taken apart retains each member it extracts
 and then drops the record:
@@ -24,19 +24,13 @@ and the load at [i] through `ref.spilled %t` are the same value (its rule
 for rc pointers, `valueRecordField`). With integer members (`!rcgmp.mpz`)
 every retain and every member release stayed, for two reasons:
 
-- cancelCountedWordRetains (#801) scans from the retain only across
-  retains and operations that are pure or only read memory
-  (`leavesCountsAlone`). `ref.spilled` allocates its stack slot and writes
-  the value into it, so the scan stopped there, before every member
-  release.
+- cancelCountedWordRetains scans from the retain only across operations
+  that leave counts alone (`leavesCountsAlone`: retains, pure operations,
+  reads). `ref.spilled` allocates its stack slot and writes the value into
+  it, so the scan stopped there, before every member release.
 - EquivalenceAnalysis applied the extract/spill rule to rc pointers only.
   Values of other types were equivalent only when both were loads, so the
   retained extract and the released load were never MustAlias.
-
-So a loop that builds a [value] record or a tuple of Nats and takes it
-apart in every step kept a retain and a release per member and step, each
-with its immediate test: 20 tag branches in the loop of a four-member
-record, where the same loop with rc members has none.
 
 The change:
 
@@ -44,47 +38,52 @@ The change:
   than ref, rc and nullable) also accepts the same field of the same
   by-value record read by extract on one side and through the record's
   spill on the other, the rule rc pointers already have.
-- leavesCountsAlone also accepts an operation whose only effects other
-  than reads are an Allocate and a Write on its own result: it changes no
-  count and no stored value. That is `ref.spilled`, which the record's
-  drop releases its members through, but the scan now also crosses the
-  other operations of that kind: `reussir.token.alloc`,
-  `reussir.region.create`, `rcgmp.extsi`/`extui`/`fptosi`,
-  `rcgmp.bridge.mpz.promote`, `memref.alloc`/`alloca`.
-- leavesCountsAlone rejects `rcgmp.bridge.mpz.is_unique`, which it
-  accepted before as a read: it reads the count that the retain makes
-  shared, so the scan stops there, as the rc scan stops at `rc.is_unique`.
-  No pipeline reaches it today (the op appears only in the
-  `__reussir_rcgmp_ffi_is_unique` glue, inside an `scf.if`); the stop is
-  defensive.
+- The counted-word scan (cancelCountedWordRetains, and only it) also
+  passes `reussir.ref.spilled`, which only fills a fresh stack slot and
+  changes no count. `leavesCountsAlone` itself is unchanged: borrow
+  analysis, borrow specialization and the TRMC reordering also use it,
+  and a wider predicate there changes their decisions.
+
+Both parts are needed: with the scan change alone the optimized IR of
+the programs below is the baseline's.
 
 The other rules stay: the scan stops at the first release of any word, at
-calls, at operations with regions and at every operation that writes or
-frees other memory (an operation with a fresh result that consumes its
-operands, such as `rcgmp.addi`, or `reussir.token.free`), and the release
+calls, at operations with regions and at every other operation that
+writes, allocates or frees memory (`rcgmp.extui`, `rcgmp.addi`,
+`reussir.token.free`), and the release
 must be MustAlias the retained word. As for rc members, a member
 extracted out of field order keeps its pair (the scan meets another
 member's release first). The equivalence change only reaches the alias
 queries of the counted-word cancellation: the other users of the analysis
 ask about refs, rc pointers and nullables, or compare loads with loads.
 
-Effect: the four-member loop (and its tuple twin) loses its 4 member
-retains and 4 member releases (asm at -O aggressive 384 to 295 lines, 36
-to 22 test-and-branch instructions), on this base (l2r-stepd, with the
-drop patches) as on l2r-base7: the first acquire/drop expansion releases a
-by-value record's integer members through its spill here too. lean2rr dev
-2c4083d9 under --int-backend rcgmp, the same .rr compiled with and without
-this patch (valgrind builds, instruction counts; the native outputs
-identical): L12 (sieve, 5*10^7) 11.739G to 10.617G (-9.6%), L17 17.544G to
-16.170G (-7.8%), Z01c 22.910G to 21.525G (-6.0%).
+Effect on upstream 36a55a0f with borrow analysis on (aarch64, -O
+aggressive, the same source compiled without and with the change):
+
+- frontend/bigint_value_record_members.rr: 3008 to 2657 lines of
+  assembly, 354 to 286 test-and-branch instructions, 49 to 35 release
+  slow paths (calls of rcgmp_mpz_free).
+- Three programs with integers in value records (Nat and Int in tuples
+  that join points return), optimized LLVM IR and object:
+    sieve        25660 to  24808 instructions, 123 to   93 release slow
+                 paths, .text 112149 to 107313 bytes
+    strings      87485 to  85888, 616 to 561, 379450 to 368962
+    zip compress 407488 to 368828, 7063 to 5232, 1880872 to 1651480
+  Executed instructions (cachegrind, builds without SVE and RCPC,
+  identical output): sieve 5*10^6 1,863,640,806 to 1,761,003,311
+  (-5.5%), strings 10^5 2,431,295,586 to 2,269,968,300 (-6.6%).
+  Wall time is not measured here.
+  Pairs cancelled by the pass in these programs (an instrumented build
+  of the review): sieve 95, strings 265, zip compress 4359, against 49,
+  124 and 2071 without the change; every extra pair crosses only the
+  spill.
 
 Tests: conversion/inc_dec_cancellation_counted_word_value_record.mlir (a
 four-member record, a tuple, a record with a trivial member: nothing left;
 one extracted member: only the other member's release; a member used
-twice: one retain left; an `rcgmp.extui` between the retain and the drop
-is crossed; the pair stays when an `rcgmp.addi` of other words or a
-`reussir.token.free` sits between them, when the member's count is read by
-`rcgmp.bridge.mpz.is_unique`, when the member escapes into a call, the
+twice: one retain left; the pair stays when an `rcgmp.extui`, an
+`rcgmp.addi` of other words or a `reussir.token.free` sits between the
+retain and the drop, when the member escapes into a call, the
 record escapes into a call, the member is consumed while the record is
 read again, the dropped record is another one, or the release is another
 field's), frontend/bigint_value_record_members.rr (+ .c: the loop with a
@@ -96,35 +95,18 @@ to a constant; run at the default level and at -O aggressive) and its ASan
 twin sanitizer/bigint-value-record-members-asan.rr (counts balanced: no
 use after free, no leak).
 ---
- include/Reussir/IR/ReussirOps.h               |   4 +
  lib/Analysis/EquivalenceAnalysis.cpp          |  10 +
- lib/IR/RCGMPMembers.cpp                       |   7 +
- .../IncDecCancellation/IncDecCancellation.cpp |  32 ++-
- ...ancellation_counted_word_value_record.mlir | 263 ++++++++++++++++++
+ .../IncDecCancellation/IncDecCancellation.cpp |   8 +-
+ ...ancellation_counted_word_value_record.mlir | 242 ++++++++++++++++++
  .../frontend/bigint_value_record_members.c    |  38 +++
  .../frontend/bigint_value_record_members.rr   | 112 ++++++++
  .../bigint-value-record-members-asan.rr       |  10 +
- 8 files changed, 473 insertions(+), 3 deletions(-)
+ 6 files changed, 418 insertions(+), 2 deletions(-)
  create mode 100644 tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
  create mode 100644 tests/integration/frontend/bigint_value_record_members.c
  create mode 100644 tests/integration/frontend/bigint_value_record_members.rr
  create mode 100644 tests/integration/sanitizer/bigint-value-record-members-asan.rr
 
-diff --git a/include/Reussir/IR/ReussirOps.h b/include/Reussir/IR/ReussirOps.h
-index c3b27536..c6fe7959 100644
---- a/include/Reussir/IR/ReussirOps.h
-+++ b/include/Reussir/IR/ReussirOps.h
-@@ -105,6 +105,10 @@ void emitRCGMPRelease(mlir::OpBuilder &builder, mlir::Location loc,
- mlir::Value getRCGMPRetainedValue(mlir::Operation *op);
- mlir::Value getRCGMPReleasedValue(mlir::Operation *op);
- 
-+// Whether `op` reads the count of an `!rcgmp.mpz` handle
-+// (`rcgmp.bridge.mpz.is_unique`).
-+bool isRCGMPCountObserver(mlir::Operation *op);
-+
- /// The memref type `reussir.array.view` produces for an array: identity
- /// layout for a static shape, a fully dynamic strided layout for a
- /// dynamic-extent one (the box header carries the strided encoding).
 diff --git a/lib/Analysis/EquivalenceAnalysis.cpp b/lib/Analysis/EquivalenceAnalysis.cpp
 index ec52ffa3..b946bcef 100644
 --- a/lib/Analysis/EquivalenceAnalysis.cpp
@@ -147,107 +129,38 @@ index ec52ffa3..b946bcef 100644
    auto lhsOp = llvm::dyn_cast_if_present<ReussirRefLoadOp>(lhs.getDefiningOp());
    auto rhsOp = llvm::dyn_cast_if_present<ReussirRefLoadOp>(rhs.getDefiningOp());
    if (!lhsOp || !rhsOp || lhs.getType() != rhs.getType())
-diff --git a/lib/IR/RCGMPMembers.cpp b/lib/IR/RCGMPMembers.cpp
-index da8c57a0..104c13dc 100644
---- a/lib/IR/RCGMPMembers.cpp
-+++ b/lib/IR/RCGMPMembers.cpp
-@@ -25,6 +25,7 @@
- #include "Reussir/IR/ReussirTypes.h"
- 
- #ifdef REUSSIR_ENABLE_RCGMP
-+#include "RCGMP/IR/RCGMPBridgeOps.h"
- #include "RCGMP/IR/RCGMPDialect.h"
- #include "RCGMP/IR/RCGMPOps.h"
- #include "RCGMP/IR/RCGMPTypes.h"
-@@ -92,6 +93,10 @@ mlir::Value getRCGMPReleasedValue(mlir::Operation *op) {
-   auto release = llvm::dyn_cast<mlir::rcgmp::ReleaseOp>(op);
-   return release ? release.getValue() : mlir::Value{};
- }
-+
-+bool isRCGMPCountObserver(mlir::Operation *op) {
-+  return llvm::isa<mlir::rcgmp::bridge::MpzIsUniqueOp>(op);
-+}
- #else
- void registerRCGMPExternalModels(mlir::DialectRegistry &) {}
- 
-@@ -107,6 +112,8 @@ void emitRCGMPRelease(mlir::OpBuilder &, mlir::Location, mlir::Value) {
- mlir::Value getRCGMPRetainedValue(mlir::Operation *) { return {}; }
- 
- mlir::Value getRCGMPReleasedValue(mlir::Operation *) { return {}; }
-+
-+bool isRCGMPCountObserver(mlir::Operation *) { return false; }
- #endif
- 
- } // namespace reussir
 diff --git a/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp b/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
-index 86741392..509050c3 100644
+index fa514235..cde23621 100644
 --- a/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
 +++ b/lib/Transformation/IncDecCancellation/IncDecCancellation.cpp
-@@ -20,6 +20,7 @@
- #include "Reussir/IR/ReussirOps.h"
- #include "Reussir/IR/ReussirTypes.h"
- 
-+#include <llvm/ADT/SmallPtrSet.h>
- #include <mlir/Dialect/SCF/IR/SCF.h>
- #include <mlir/IR/Dominance.h>
- #include <mlir/IR/Value.h>
-@@ -197,8 +198,15 @@ mlir::Operation *findPostDominantAliasedRelease(
- }
- 
- // Whether `op` leaves every count and every stored value alone: it only
--// adds references or at most reads memory.
-+// adds references, reads memory, or allocates fresh storage and writes into
-+// it (`reussir.ref.spilled`, which a by-value record's expanded drop releases
-+// its members through, but also e.g. `reussir.token.alloc` or `rcgmp.extui`).
-+// A count observer (`rcgmp.bridge.mpz.is_unique`) does not: as at
-+// `rc.is_unique` for rc pointers, the retain is what makes it see the word as
-+// shared.
- bool leavesCountsAlone(mlir::Operation *op) {
-+  if (isRCGMPCountObserver(op))
-+    return false;
-   if (llvm::isa<ReussirRcIncOp>(op) || getRCGMPRetainedValue(op))
-     return true;
-   if (op->getNumRegions() > 0 || llvm::isa<mlir::CallOpInterface>(op))
-@@ -206,13 +214,31 @@ bool leavesCountsAlone(mlir::Operation *op) {
-   if (mlir::isMemoryEffectFree(op))
-     return true;
-   auto effects = llvm::dyn_cast<mlir::MemoryEffectOpInterface>(op);
--  return effects && effects.onlyHasEffect<mlir::MemoryEffects::Read>();
-+  if (!effects)
-+    return false;
-+  llvm::SmallVector<mlir::MemoryEffects::EffectInstance> instances;
-+  effects.getEffects(instances);
-+  llvm::SmallPtrSet<mlir::Value, 2> fresh;
-+  for (const mlir::MemoryEffects::EffectInstance &instance : instances)
-+    if (llvm::isa<mlir::MemoryEffects::Allocate>(instance.getEffect()) &&
-+        instance.getValue() && instance.getValue().getDefiningOp() == op)
-+      fresh.insert(instance.getValue());
-+  return llvm::all_of(
-+      instances, [&](const mlir::MemoryEffects::EffectInstance &instance) {
-+        if (llvm::isa<mlir::MemoryEffects::Read>(instance.getEffect()))
-+          return true;
-+        return llvm::isa<mlir::MemoryEffects::Allocate,
-+                         mlir::MemoryEffects::Write>(instance.getEffect()) &&
-+               fresh.contains(instance.getValue());
-+      });
- }
- 
+@@ -236,7 +236,11 @@ mlir::Operation *findPostDominantAliasedRelease(
  // A counted word's retain cancels with a release of the same word under the
  // rules `rc.inc` follows: a release in the unique branch of an expanded
  // decrement moves the retain into the shared branch, and a directly
 -// following release cancels it outright.
-+// following release cancels it outright. The latter covers a member of a
-+// by-value record retained on its extract and released by the record's
-+// expanded drop through the record's spill, as for an rc member.
++// following release cancels it outright. The scan to that release also
++// passes `reussir.ref.spilled`, which only fills a fresh stack slot: the
++// expanded drop of a by-value record reads the members back through the
++// record's spill, so a member retained on its extract meets its release
++// there, as an rc member does.
  void cancelCountedWordRetains(mlir::func::FuncOp func,
                                mlir::AliasAnalysis &aliasAnalysis,
                                mlir::PostDominanceInfo &postDominanceInfo) {
+@@ -275,7 +279,7 @@ void cancelCountedWordRetains(mlir::func::FuncOp func,
+         }
+         break;
+       }
+-      if (!leavesCountsAlone(next))
++      if (!leavesCountsAlone(next) && !llvm::isa<ReussirRefSpilledOp>(next))
+         break;
+     }
+   }
 diff --git a/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir b/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
 new file mode 100644
-index 00000000..54480ee9
+index 00000000..66b3ffa5
 --- /dev/null
 +++ b/tests/integration/conversion/inc_dec_cancellation_counted_word_value_record.mlir
-@@ -0,0 +1,263 @@
+@@ -0,0 +1,242 @@
 +// REQUIRES: rcgmp
 +// RUN: %reussir-opt %s --pass-pipeline='builtin.module(reussir-acquire-drop-expansion,func.func(reussir-inc-dec-cancellation))' | %FileCheck %s
 +
@@ -363,15 +276,12 @@ index 00000000..54480ee9
 +    return %r : !rcgmp.mpz
 +  }
 +
-+  // The scan crosses an operation that only allocates its result and writes
-+  // into it, like the record's spill: here a new integer from an i64.
++  // Of the operations that write memory the scan passes only the record's
++  // spill: a new integer from an i64 stops it, and the pair stays.
 +  // CHECK-LABEL: func.func @fresh_result_between
-+  // CHECK-NOT: rcgmp.retain
++  // CHECK: rcgmp.retain
 +  // CHECK: rcgmp.extui
-+  // CHECK: reussir.ref.project({{.*}}) [1]
-+  // CHECK-NEXT: %[[F1:.+]] = reussir.ref.load
-+  // CHECK-NEXT: rcgmp.release %[[F1]]
-+  // CHECK-NOT: rcgmp.release
++  // CHECK-COUNT-2: rcgmp.release
 +  // CHECK: return
 +  func.func @fresh_result_between(%t : !pair, %i : i64) -> !rcgmp.mpz {
 +    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
@@ -383,8 +293,7 @@ index 00000000..54480ee9
 +    return %r : !rcgmp.mpz
 +  }
 +
-+  // An operation with a fresh result that consumes other words still stops
-+  // the scan: the pair stays.
++  // So does an operation with a fresh result that consumes other words.
 +  // CHECK-LABEL: func.func @fresh_result_consumed_operands
 +  // CHECK: rcgmp.retain
 +  // CHECK: rcgmp.addi
@@ -400,7 +309,7 @@ index 00000000..54480ee9
 +    return %r : !rcgmp.mpz
 +  }
 +
-+  // So does an operation that frees other memory.
++  // And an operation that frees other memory.
 +  // CHECK-LABEL: func.func @free_between
 +  // CHECK: rcgmp.retain
 +  // CHECK: reussir.token.free
@@ -413,23 +322,6 @@ index 00000000..54480ee9
 +    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
 +    reussir.ref.drop(%s : !reussir.ref<!pair>)
 +    return %a : !rcgmp.mpz
-+  }
-+
-+  // A uniqueness test of the member reads its count, which the retain makes
-+  // shared: the pair stays, as for `rc.is_unique`.
-+  // CHECK-LABEL: func.func @count_observed
-+  // CHECK: rcgmp.retain
-+  // CHECK: rcgmp.bridge.mpz.is_unique
-+  // CHECK-COUNT-2: rcgmp.release
-+  // CHECK: return
-+  func.func @count_observed(%t : !pair) -> i1 {
-+    %a = reussir.record.extract(%t : !pair) [0] : !rcgmp.mpz
-+    rcgmp.retain %a : !rcgmp.mpz
-+    %u = rcgmp.bridge.mpz.is_unique %a : !rcgmp.mpz
-+    %s = reussir.ref.spilled(%t : !pair) : !reussir.ref<!pair>
-+    reussir.ref.drop(%s : !reussir.ref<!pair>)
-+    func.call @consume(%a) : (!rcgmp.mpz) -> ()
-+    return %u : i1
 +  }
 +
 +  // The member escapes into a call before the record's drop: the call may
@@ -689,3 +581,6 @@ index 00000000..a24b8ac0
 +// Integer members of by-value records and tuples whose extract retains cancel
 +// against the record's drop: ASan reports a cancelled retain that was still
 +// needed as a use after free, and its leak check a lost release.
+-- 
+2.43.0
+

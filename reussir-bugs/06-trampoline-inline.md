@@ -19,7 +19,9 @@ so at such a site they stay calls; `tests/runtime/ffi-inline-check.sh`
 allows these calls in `RtReadsDeep` and nowhere else
 ([What lean2rr does](#what-lean2rr-does)).
 
-**Upstream (2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `rewriteImport` or the import-trampoline inliner (`lib/LLVMPass/`); the repro was not run again. On upstream 7954a367 with the series it still reproduced (2026-10-19: the cold call site still calls the trampoline); open. The parked 06-a and 06-b do not apply to 0378b744 (checked 2026-10-24).
+**Upstream (2026-11-18):** Reproduces on `36a55a0f` (the port's first gate, 2026-11-18, `repros/run.sh`), on pristine upstream and on the patched base. No patch. lean2rr's `tests/runtime/ffi-inline-check.sh` has the same output as on `l2r-base12`.
+
+**Upstream, earlier bases (history, 2026-10-24):** Unchanged at upstream 0378b744: no upstream commit since 7954a367 changes `rewriteImport` or the import-trampoline inliner (`lib/LLVMPass/`); the repro was not run again. On upstream 7954a367 with the series it still reproduced (2026-10-19: the cold call site still calls the trampoline); open. The parked 06-a and 06-b do not apply to 0378b744 (checked 2026-10-24).
 
 **Verdict: missed optimization.** Reussir code calls a texture (an
 `#[ffi(import)]` function with a Rust body) through an import trampoline

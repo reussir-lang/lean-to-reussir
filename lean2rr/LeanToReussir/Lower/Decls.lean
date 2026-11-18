@@ -81,6 +81,10 @@ def calleeOf (f : Name) : LowerM Callee := do
 def lowerArg (ctx : CodeCtx) (a : Arg .pure) (expected : RR.Ty) : LowerM RR.Expr := do
   match a with
   | .fvar x =>
+    -- Its box is bound before the self call whose result the constructor
+    -- takes (Lower/PreBox; the use of `x` was noted there).
+    if expected == RR.Ty.box then
+      if let some hb := ctx.preBoxed[x]? then return .var hb
     match ctx.vars[x]? with
     | some (n, t) => noteVarUse ctx.decl x n t; coerce (.var n) t expected
     | none => throwError "lean2rr: unbound variable {x.name} (internal error)"

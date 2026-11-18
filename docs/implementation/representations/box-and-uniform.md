@@ -350,7 +350,7 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
 
 - **What:** For each program payload type `T` with number `n`, lean2rr
   emits `fn l2r_any_rel_<n>(x : T) -> unit { }` (Reussir drops `x` at its
-  type) and the trampoline `l2r_any_rel_<n>_c`, whose C signature is
+  type, in place) and the trampoline `l2r_any_rel_<n>_c`, whose C signature is
   `void (cell)`, the type of a release on leanrt's pending stack
   (`pending::defer_cell`). A
   texture, `l2r_any_releases`, holds a static table of
@@ -358,7 +358,49 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   (`leanrt::any::install`). The trampoline `l2r_any_init_c` calls it;
   leanrt calls that once at the start of `rt::run_main2`, before the
   initializers and before any other thread (`any::init_releases`; a weak
-  symbol, absent in a program without program payloads).
+  symbol, absent in a program without program payloads). In a program
+  that makes resources, a payload type of which some value may hold a
+  resource and whose drop in place can reach a
+  recursive record of the program and something whose release shows has
+  the body `{ let bk : u64 = l2r_release_after<T>(x); }`: the release
+  goes through the type's FFI release (`payloadJoins`).
+- **Why (the FFI release):** leanrt calls a payload's release inside a
+  running free. A drop in place releases runtime objects through
+  leanrt's hooks, which push their work, takes records without a cycle
+  apart and frees a list in a loop: all pushed, popped last first,
+  native's order. A member of a recursive type that Reussir frees with
+  its worklist is a drop run of its own (`__reussir_drop_run`), and
+  upstream Reussir (`36a55a0f`) completes a run that starts inside a
+  free before it returns (`drop_stack.rs`, `scoped`; on l2r-base12 it
+  joined the free). So `{t : Tr, h : Handle}` in an array closed the
+  tree's handles before `h` (natively after; the port's gate 53:
+  `RtDropOrderRec`, `RtDropOrderMix`). The FFI release of a record is a
+  bridge that joins the running free and defers every dead member. The
+  rule, `payloadReach`, walks the Reussir types through record fields
+  (not through runtime objects): `cyc`, a record type on a cycle of
+  record members is reached; `shows`, a runtime object or a function
+  value is reached. Both, and the type is one of `resourceTypes` (the
+  types of the variables that may hold a resource and that their code
+  owns, `armNames`: a value that holds a resource is bound where it is
+  made and named where it is used, so a type that is not there has no
+  such value; in a program that casts, where a cast can rebuild a value
+  without variables for its nodes, every type counts): the FFI release. Without the last condition every list of
+  boxes in a program that opens one file took the FFI release (58
+  payload types of the Cedar benchmark, 2 of lean-zip; none with it). It asks for more than needed
+  (a list of boxes, whose drop in place is a loop, also takes it; a
+  closure type counts as both; a function value is walked through what
+  its variants can hold): it does not depend on how Reussir
+  classifies a recursive type, so it stays complete when that changes.
+  Programs without resources, and payloads without a cycle below them
+  (an `Option`, a structure of handles, a reference) or without
+  anything that shows (an expression tree of numbers), keep the drop in
+  place. Static cost in `RtDropOrderRec`: the release of
+  `{l : List Handle, t : Tr, a : Array Handle, h : Handle}` is 11
+  instructions and a call of the type's glue (76 instructions: three
+  deferrals and the handle's hook) for 90 instructions in place; a
+  list's and a tree's are 15 instructions and one call, as before (17
+  and 16). Run-time cost: the glue defers a list's cells one by one
+  (a deferral and a pop per cell) where the drop in place is a loop.
 - **Why:** Only the program knows its types' drop glue. A function per
   type, found by number in a table, replaces one release with a `match` on
   the number (`l2r_any_drop`, called through `l2r_any_drop_c` and leanrt's
@@ -370,7 +412,8 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   varies from run to run; outputs equal native): monadic-interp 1008.1 to
   917.3 M instructions (-9.0 %), unionfind -3.3 %, liasolver -1.1 %,
   typeclass-generic -0.9 %.
-- **Where:** `Lower/Finish.lean`: `boxTypeItems`; `Emit/Program.lean`:
+- **Where:** `Lower/Finish.lean`: `boxTypeItems`, `payloadJoins`,
+  `payloadReach`, `resourceTypes`; `Emit/Program.lean`:
   `lowerProgram` (after `liveDrop`, with every payload type known);
   `runtime/leanrt/src/any.rs`: `Rel`, `RELEASES`, `install`,
   `init_releases`; `runtime/leanrt/src/rt.rs`: `run_main2`; the probe's
@@ -610,12 +653,19 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
 
 - **What:** the stack of pending drops (Reussir's `drop_stack`, which
   leanrt uses through `pending.rs`; the runs were leanrt's own design,
-  Reussir's local patch 23-l) keeps a payload's cell only as a pointer: it never reads or writes the cell, so
+  then Reussir's local patch 23-l, and are upstream's code since Reussir
+  `36a55a0f`) keeps a payload's cell only as a pointer: it never reads or writes the cell, so
   it does not depend on Reussir's layout of the cell. Cells deferred one
   after the other with the same release function form one run: one entry
   (the function, the last cell, the number of cells), and the run's other
   cells go on a second vector, one pointer (8 bytes) each. A cell with
-  another release function starts a new run (one 24-byte entry).
+  another release function starts a new run (one entry: 24 bytes on
+  l2r-base12, 32 bytes in upstream's worklist by reading). The memory
+  numbers of this entry were measured on l2r-base12. On `36a55a0f`
+  (the port's first gate, 2026-11-18) `RtListDropWhole.alloc` passes
+  with its bounds; its `arr` row (10^6 lists in an array) peaks at
+  68.1 MB, where l2r-base12 gave 53.7 MB, with the same allocation
+  count (the cause is not found).
   Example: an `IO.Ref (List (Nat × Nat))` whose `set` frees the old list.
   The set's release is a drain. Reussir's glue for
   `T_List(LAny, T_List)` releases each head (the box of a
@@ -652,8 +702,8 @@ A typed local never pays for it. `Box` is the prelude's `LAny`
   factor 1. Without runs (one 24-byte entry per cell, before the links;
   hunt HMEM-01): n = 4M, 391 MB against native's 258 MB.
 - **Where:** `runtime/leanrt/src/pending.rs`: `defer_cell`; reussir-rt's
-  `drop_stack.rs` (Reussir's local patch 23-l): `State::try_defer`,
-  `State::joins`, the cells vector (`Parts`);
+  `drop_stack.rs` (upstream's): `defer`, the active run and the `cells`
+  vector of `Pending`;
   `runtime/leanrt/src/any.rs`: `release_last`;
   `runtime/leanrt/src/drop.rs`: `free_deferred`; `LowerBase.lean`:
   `boxNum`. Tests: leanrt's

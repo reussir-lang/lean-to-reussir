@@ -94,8 +94,9 @@ The native builds (`oracle.py build`, `tests/runtime/run.sh`,
 `tests/runtime/flatten-match-check.sh`,
 `tests/runtime/flatten-cast-check.sh`,
 `tests/runtime/inline-anchors-check.sh`,
-`tests/runtime/box-leaf-check.sh`, `tests/reussir-benchmark/run.sh`,
-`reussir-bugs/repros/run.sh`) and
+`tests/runtime/box-leaf-check.sh`, `tests/runtime/texture-cache-check.sh`,
+`tests/runtime/trmc-helper-check.sh`,
+`tests/reussir-benchmark/run.sh`, `reussir-bugs/repros/run.sh`) and
 `scripts/l2r.py`'s GMP use the Lean toolchain lean2rr is pinned to
 (`lean2rr/lean-toolchain`, the elan toolchain
 `~/.elan/toolchains/leanprover--lean4---v4.34.0`), not elan's default:
@@ -422,7 +423,17 @@ twice, under both of Reussir's
 nullary-variant encodings; the second run must give its result and free
 every block it allocates exactly once. A third run unboxes at the wrong
 number and must end with Lean's internal panic. It needs a Reussir with
-patch 07-a (`L2R_REUSSIR`).
+patches 10-a and 07-a (`L2R_REUSSIR`); it takes its rrc command line and
+environment from `scripts/l2r.py` (`rrc_command`, `rrc_env`).
+`tests/runtime/texture-cache-check.sh` checks that rrc's cache of
+compiled textures never gives a program the code of an older runtime
+(Reussir issue 25: rrc keys the cache on paths, not on the libraries'
+contents). It builds one program four times with a cache directory of
+its own (`L2R_POLYFFI_CACHE`): a first build; the same again (no new
+cache entry); with one `#[inline(always)]` function of a copy of
+leanrt's sources changed (the program must print the changed answer,
+and the cache must get new entries); with the sources put back (the
+first answer, no new entry).
 `tests/runtime/allow-missing-check.sh` builds `tests/runtime/AllowMissing.lean`
 (refused externs of the program used directly, partially applied, as a
 closure, through an instance and through the `ptrAddrUnsafe` shortcut) with
@@ -537,7 +548,38 @@ text of numbers). A row whose `deviations` name an `LB-nn` of lean-runtime's
 docs/lean-bugs.md expects the Lean definition's result, which lean2rr must
 give (native's outcome, in the row's `native`, is not compared); a row
 naming a difference of lean2rr's own (none so far) is listed, not
-failed.
+failed. The oracle's largest function is the largest single function of
+all tests. On an aarch64 host with SVE it needs a Reussir with patch
+28-a (Reussir issue 28): without it rrc stops with `lowering pipeline
+failed: RunPass`, and the script says that the oracle did not build
+(the port's gate 53; with the patch: 13 rows files, 5488 rows, `every
+row agrees`).
+
+`RtTrmcCallOrder` checks a self call whose result goes into a constructor
+(the shape Reussir can turn into a loop, tail recursion modulo cons). Part
+1 is the order of a traced call written after the self call: natively the
+recursion runs first (`g2 g1 g0` for a closure applied after it, `e2 e1 e0`
+for a function called after it), and a traced call written before it runs
+first (`b0 b1 b2`). The Reussir base before upstream #984 moved the self
+call past the later call and printed `g0 g1 g2` and `e0 e1 e2`; the test
+fails there. Part 2 is the results of the box-only shape, where the only
+work after the self call is the box of an element: a `Nat` (small and
+big), a `Float`, a `UInt64`, a pair, a structure, an enumeration, a
+`String`, a closure, a `Unit`, an element that the self call reads too,
+one element in two fields, and a tree with two self calls. For these
+lean2rr binds the element's box before the self call (Lower/PreBox), so
+that Reussir makes the loop; the results must not change.
+`tests/runtime/trmc-helper-check.sh` builds `tests/runtime/TrmcHelper.lean`
+(not a runtime test) to MLIR's LLVM dialect (`scripts/l2r.py --emit
+mlir-llvm`: the functions as Reussir's passes leave them; LLVM's inliner
+hides them in the LLVM IR) and checks the helper function that Reussir
+makes for such a loop (`<function>.trmc`): the box-only maps over a `Nat`,
+a `Float` and a structure (`boxNat`, `boxFloat`, `boxStruct`) must have
+one, so the check fails if lean2rr's rule or Reussir's pass stops working
+(the functions then recurse: right results, a stack frame per element,
+which no runtime test shows); the functions with a traced call after the
+self call (`callApp`, `callFn`) must have none (a helper there is the
+wrong order). With the translator before the rule the first three fail.
 
 ### Representation changes: allocations, determinism, pay nothing
 
@@ -725,7 +767,7 @@ New cases:
 | RtDepFloatArrayAlloc | `get!`, `getD`, `modify`, `set!` on an `Array Float` and on arrays of one-field structures over `Float` and `UInt64`, constants pushed, reads out of bounds, `unsafeCast ()` read back (adversarial finding 2: a constant default is boxed once, `Array.modify`'s placeholder is `box(0)`) | passes (before the fix on this branch: a cell per `get!`, two per update) |
 | RtDepBoxedClosedOnce | a closed term that traces, evaluated where it is used by a constant and boxed there, runs once (`boxed-consts` leaves such closed terms out) | — |
 | RtDeadBoxedConst | a boxed closed term in a branch that never runs is not computed (a judged Lean compiler bug: natively its `_boxed_const` is computed at startup and the program hangs; expectation files, `.pipe` with a 3-second limit) | — |
-| RtDepDropOrderBoxed | the order in which handles in boxes (a `List IO.FS.Handle`, a structure over a type parameter) close when user code drops the value by itself (adversarial finding 3; expectation files, plan §10) | — |
+| RtDepDropOrderBoxed | the order in which handles in boxes (a `List IO.FS.Handle`, a structure over a type parameter) close when user code drops the value by itself (adversarial finding 3; identical to native since the port to Reussir `36a55a0f`, plan §10; it had expectation files on `l2r-base12`) | — |
 
 `RtDepX*` hold the cases of the shared dependent-type corpus (programs
 another translator's team wrote and checked against native Lean), about
@@ -925,9 +967,10 @@ it draws on, with their copyright notices (Apache 2.0):
 | RB-03 (review of the destructor port, memory and cost): inside a free that the runtime starts, Reussir's glue releases a whole list or tree within one pop of leanrt's pending stack, and each array it reached waited there as a 24-byte step entry: a balanced tree of 10^6 nodes, each holding a one-element `Array Nat`, freed by a reference's `set`, peaked at 111 MB, native 69 MB (a list of such arrays at 105 MB, also before the port). Inside a free an array of immediates is now freed at once, and another array waits as one pointer of a run (Performance) | RtArrayPileFree (`RtArrayPileFree.alloc`: peak within native's plus 4000 KB, allocations and bytes as native's), leanrt's `drop::tests::arrays_inside_a_free_share_one_entry` |
 | Phase 2 memory question (before its merge): upstream Reussir's destructor executor (l2r-base7, no local drop patches) keeps one frame per level while it frees a deep structure whose type it frees as a worklist (a variant with a managed field after its recursive one, or two recursive fields). For lean2rr's closure enums the frame grows with the number of closure kinds: a chain of 10^6 closures of a 64-kind type peaked at 652 MB, native 102 MB (the old drop patches: 68 MB); a chain of compositions 156 MB, native 86 MB. Reussir's stack of pending drops (entry 23, Reussir base l2r-base9 with the stack that leanrt shares) frees such chains at a bounded depth with one entry per pending child: at 10^6 levels 68 MB in every closure mode, native 102 MB; compositions 66 MB, native 86 MB; `list` 109 MB, native 164 MB (both integer representations) | RtClosureChainFree (`RtClosureChainFree.alloc`: peak within native's plus 4000 KB, allocations and bytes as native's; modes `big`, `bigu`, `bigt` (the same kinds with the closure stored last: freed by Reussir's loop), `comp`, `small`, `smallu`, `list`) |
 | Phase 2 memory question, trees: the same executor frame per level for any type with two recursive fields, not only closures: one-sided binary trees of 10^6 nodes (left-deep and right-deep, freed by a reference's `set` and by user code) peaked at 111 MB, native 39 MB, the old drop patches 37 MB (about 74 bytes per level). With Reussir's stack of pending drops (entry 23): 37.3 MB in every mode, native 38.8 MB (both integer representations) | RtDeepTreeFree (`RtDeepTreeFree.alloc`: peak within native's plus 4000 KB, allocations and bytes as native's; modes `tl`, `tr`, `tlu`, `tru`) |
-| Review P1 of Reussir's shared drop stack (patch 23-l): a pending child that does not join a run took a 24-byte entry; a deep chain of two mutually recursive types leaves one pending child per level, alternating the release functions: 88.6 MB at 10^6 levels on l2r-base9-shared, native 55.1 MB. Reussir now links a deferred record whose release function differs from the one before it through its header (23-n to 23-p; one with the same function is an 8-byte cell of a run): here every one, 45.7 MB, allocations and bytes as native's | RtAltTreeFree (`RtAltTreeFree.alloc`: allocations and bytes as native's, peak within native's plus 4000 KB) |
+| Review P1 of Reussir's shared drop stack (patch 23-l): a pending child that does not join a run took a 24-byte entry; a deep chain of two mutually recursive types leaves one pending child per level, alternating the release functions: 88.6 MB at 10^6 levels on l2r-base9-shared, native 55.1 MB. Reussir now links a deferred record whose release function differs from the one before it through its header (23-n to 23-p; one with the same function is an 8-byte cell of a run): here every one, 45.7 MB, allocations and bytes as native's | RtAltTreeFree (`RtAltTreeFree.alloc`: allocations and bytes as native's, peak within native's plus 4000 KB). Since Reussir `36a55a0f` the stack of pending drops in this row and the two rows above is upstream Reussir's (scoped worklists, with the header links and the runs of cells); the numbers in these rows are from the bases with the local patches. On the new base the three tests pass `alloc-check.sh` with the same bounds (the port's gate 53, 2026-11-18; their allocation counts are within 3 of the last gate's on l2r-base12) |
 | Testing the Phase 2 port on Reussir base l2r-base9, whose drop glue kept a stack of pending drops per thread beside leanrt's: a promise dropped inside Reussir's drain (in a tree's child that user code frees) was resolved at once, and its `sync` dependent ran inside the drain; the dependent's own frees of such trees (or those of a task it waited for, which runs on its stack) joined the suspended drain and waited for it. Fixed by one stack for both, whose end work (the deferred resolutions) runs after the outermost drain | RtPromiseDepFreeInDrain (the promise `q` that the dependent's drop releases is resolved by it: `true`; on l2r-base9 alone `false`), RtPromiseDepWaitInDrain (the dependent waits for a task that waits for such a promise; `NAME.pipe` stops it after 20 s and prints the exit code, so a hang fails instead of stalling the suite; on l2r-base9 alone it hung) |
 | Review of the shared drop stack (its leanrt side): more shapes of Lean code at the end of a drain (a task finished before, one not finished, a dedicated one, two promises in one tree, a dependent that frees an array of trees) and of release order where leanrt containers and Reussir records nest (structures with a tree, an array, a closure and a handle; lists of arrays of trees; a thunk; a finished task; a reference set; a shared subtree; a closure capturing a tree). With a drop stack of Reussir's own beside leanrt's, the first hung and the second's closes came out per subtree | RtPromiseDepDrainShapes (`NAME.pipe`: stops it after 20 s and prints the exit code; stderr not compared), RtDropOrderMix |
+| The first full run of the runtime tests on upstream Reussir `36a55a0f` (the port's gate 53, 2026-11-18), two changes of the release order. (1) A drop run that starts inside a running free is complete before it returns there (on `l2r-base12` it joined the free): the release of a box's payload, a drop of the record in place, freed a tree in an early field before the record's later fields (`{t : Tr, h : Handle}` in an array closed `T` then `H`, natively `H` then `T`). The release of such a payload now goes through the record's FFI release, which joins the free (`payloadJoins`). (2) A record released through its FFI release is one free from the root, last field first, where `l2r-base12` went through the root's fields in field order: native's order for `lean_dec`, but not where native Lean knows the constructor (`lean_dec_ref_known`: the fields in field order, each completely). lean2rr now releases such a value field by field (`l2r_release_known_<type>`), after a call that borrows it and at the start of a branch | RtDropNestedRunOrder (a structure with a tree and a handle in an array, as a thunk's value, in a reference, inside another structure; a list type of the program with a tree per cell), RtDropKnownCtorOrder (a tree, a list and a structure built where they are released; a shared value, which is only decremented; a value from another function, one free; a matched value and a value bound by a constructor at the start of a branch; a reused cell, which natively is no constructor), RtDropOrderRec, RtDropOrderMix, RtPromiseDepDrainShapes and RtDepDropOrderBoxed (failing in that run, identical to native now) |
 | HST-01 (hunt of the per-thread standard streams; switch step 15): a stdout that one UV callback's `sync` dependent set was gone for a later callback when the next loop context started on another id; natively the loop is one thread (the limit RS4-06 recorded) | RtLoopStreamsKept |
 | HST-02 (hunt of the per-thread standard streams; switch step 15): at `main`'s end the drop of its stderr stream released a promise whose `sync` dependent printed to stdout, whose cell the leave had already dropped; the leave's assertion aborted the program with no output | RtStdLeaveReentry |
 | switch step 14, lean-runtime's HF-01 (semantics-5): `Float.sin` and `Float.cos` of one operand inlined into one block became one `sincos` call, whose sine is one ulp off at ±0x1.ad1fb54442d18p+0 | RtFloatSinCosPair |
@@ -1087,7 +1130,7 @@ and the checks under each representation, an item `int:leanrt` or
 `int:` item fails the test) and a test's `NAME.int-backend` fixed its
 representation. The expected typed array and typed cell kinds
 (`RtTArr*`, `RtTRef*`) hold Reussir's owned handles at type arguments
-(local patch R2). Tests for the switch (each passed under both
+(then local patch R2; upstream Reussir's code since #824 and #843). Tests for the switch (each passed under both
 representations):
 
 | test | what |

@@ -130,23 +130,31 @@ inline, the rest textures calling `sem::uint`, `sem::sint`, `sem::float`).
      prog --extern core=<leanrt dir>/core.rri` (Reussir's core package,
      which declares the built-in `Nat` and `Int`) and the flags of
      `L2R_RRC_FLAGS`,
-   - and the environment variable `REUSSIR_FFI_CACHE_DIR`
-     (`runtime/leanrt/target/polyffi-cache`, unless the caller sets it;
-     empty turns it off): rrc compiles each texture of the program text
-     with its own rustc run (about 470 per program when the text had the
-     whole prelude, most of rrc's time; with `prelude-liveness` about 75
-     for a one-line program, 330 for a regex engine), and
-     with rrc's texture cache (a local patch on the old stack; upstream
-     Reussir #690 reads the same variable) it keeps their bitcode there
-     and reuses it (an rrc without a cache ignores the variable). Its key covers the texture, the `rustc-native-<hash>` script (its
-     path and text; the text also names lean-runtime's build), rustc's options and every
-     library in the `--polyffi-libdir` directories, so a change to leanrt or
-     lean-runtime only makes new entries. rrc prunes the directory
-     (`llvm::pruneCache`): it removes the entries (`llvmcache-*`) not read
-     for a week and keeps their total at most 1 GiB. Other files stay, such
-     as the `<hex>.bc` entries of the old local patch (deleted once, at the
-     move to Reussir `7954a367`). rrc checks entries for damage, not for
-     tampering: the directory must be one only you can write.
+   - `--drop-order backward`: the order in which a freed value's members
+     are released, native Lean's (the last dead member first). It is rrc's
+     default; the driver names it so that a change of the default cannot
+     change programs silently,
+   - and the environment variable `XDG_CACHE_HOME`, set for rrc's process
+     to `L2R_POLYFFI_CACHE` (default `runtime/leanrt/target/rrc-cache`;
+     empty: a directory in the build's temporary directory, so no entry
+     outlives the build): rrc compiles each texture of the program text
+     with its own rustc run (about 75 for a one-line program, 330 for a
+     regex engine, most of rrc's time) and keeps the bitcode in its
+     texture cache (upstream Reussir #852), one SQLite store `rrc/cache.db`
+     under the user's cache directory. rrc has no option for the place, so
+     the driver moves the cache directory: nothing of a lean2rr build is
+     written to `~/.cache`. The key of an entry is the request: the path of
+     rustc (the `rustc-native-<hash>` script), the texture and rustc's
+     options with the paths of the `--polyffi-libdir` directories. The
+     bytes of the libraries are not in the key, and leanrt and Reussir's
+     runtime are rebuilt in place. The script's text therefore names the
+     build of leanrt (a digest of its sources, of rustc's path and version
+     report, of the host CPU's features, of the flags, of lean-runtime's
+     build and of Reussir's runtime rlibs), and the script's name is a hash of its text: a rebuilt runtime
+     gives a new script path and so new keys, and an unchanged one keeps
+     its entries (`tests/runtime/texture-cache-check.sh`). rrc prunes the
+     store: entries not read for a week, once it is above 4 GiB. The
+     directory must be one only you can write.
 
 ### The shared crate lean-runtime
 
@@ -209,7 +217,10 @@ rest.
   never sees them: lean-runtime would be built with another profile than
   leanrt), `CARGO_UNSTABLE_*`, `CARGO_INCREMENTAL`, the rustc wrappers
   (`RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTC_WRAPPER`,
-  `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTC`) and what
+  `CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER`, `CARGO_BUILD_RUSTC`; with
+  `L2R_KEEP_RUSTC_WRAPPER=1` the four wrapper variables stay, for a
+  compiler cache such as sccache, and that build has a directory of its
+  own) and what
   would move the build (`CARGO_TARGET_DIR`, `CARGO_BUILD_TARGET`,
   `CARGO_BUILD_BUILD_DIR`). Cargo's fingerprints are the cache; they
   follow file modification times, so a lean-runtime tree copied over the
@@ -447,8 +458,8 @@ B1), so the field order of the record's free is not seen. The last
 reference to a box is released out of line by `any::release_last`, inside
 a free the runtime starts, as one pending cell, and so is a record that a
 reference or cell set releases (`drop::free_unique`; both through
-`drop::free_deferred`: leanrt's `pending::defer_cell`, then
-`pending::drain`, which outside a free pops the cell at once), so its
+`drop::free_deferred`: leanrt's `pending::defer_cell`, which outside a
+free opens a scope and releases the cell at once), so its
 fields go in Lean's order, the last one first, as `lean_dec` frees them in
 `lean_array_uset` (review RS10-01). Inlined, a read's release meets the
 caller's increment, and LLVM folds the pair (the free check included,
@@ -642,8 +653,8 @@ new value first and then releases the old one as `lean_dec` does
 is decremented; the last reference to a record is freed inside a free the
 runtime starts (as one pending cell: `drop::free_unique` for a record,
 `any::release_last` for a box's payload, both through
-`drop::free_deferred`: leanrt's `pending::defer_cell`, then
-`pending::drain`, which outside a free pops the cell at once), so its fields go last first and the `sync`
+`drop::free_deferred`: leanrt's `pending::defer_cell`, which outside a
+free opens a scope and releases the cell at once), so its fields go last first and the `sync`
 dependents of the promises it drops run when that free ends. A reference
 set then releases the reference itself (natively the caller's release
 after the borrowed set): a set that is the reference's last use frees the
@@ -663,17 +674,22 @@ records `r` as taken by the running thread (Lean 4.35's rule).
 children whose count drops to zero go on a stack of objects to free, popped
 last first. Reussir frees records itself, at a bounded stack depth: a list
 in a loop, any other record whose drop could recurse through a stack of
-pending drops per thread (reussir-rt's `drop_stack`: the members in field
-order, a dead child record pushed and popped last first, Reussir issue
-23). It releases a container
+pending drops per thread (reussir-rt's `drop_stack`, upstream Reussir's
+scoped worklists, with `--drop-order backward`: a dead child record is
+pushed and popped last first; Reussir issue 23 has the history). It
+releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore
 `leanrt::drop`'s types, and leanrt shares Reussir's stack of pending
 drops, with its "releasing" flag (`leanrt::pending`: `releasing`,
-`depth`, `defer_step`, `run_step`, `defer_cell`, `drain`,
+`depth`, `defer_step`, `run_step`, `defer_cell`,
 `want_end_work`, over `reussir_rt::drop_stack`; `drop::active`, `defer`,
 `run` and `release` wrap it): one drain pops the glue's records and
-leanrt's work in one order.
+leanrt's work in one order. ("Drain" here is the work of the scope that
+the outermost free opens. The scope ends by itself when its work and
+everything that the work pushed is done; leanrt has no `drain`
+function. A step answers `StepStatus::Pending` or `Complete`, and the
+argument of a step or a cell is never null.)
 A release that starts at a runtime object (a container, a box's
 payload, a record a set gives up) and can reach more work goes through it.
 Some releases outside a free are done at once without it: a stream
@@ -684,7 +700,9 @@ there may still use the stack) and a leaf payload. The first release
 on a thread that finds the flag clear and uses the stack is the
 outermost free: it sets the flag, runs the release, pops the
 stack until it is empty, clears the flag, and then runs the end work that
-a release asked for (`task::drained`). Every release that leanrt reaches
+a release asked for (`task::drained`; a scope-exit callback of the
+worklist, `drop_stack::defer_until_scope_exit`, asked for once for each
+outermost scope). Every release that leanrt reaches
 below it, also through Reussir's glue, is pushed. So a value deep through
 records, containers and boxes is freed at a bounded depth. An array is
 freed in native Lean's two
@@ -696,10 +714,15 @@ first field first and every runtime object it reaches is pushed (`fs` and
 `task` push a stream's close and a promise's drop too while a free runs),
 so the pops give the order of observable releases that Lean has (file
 handles closed, and so flushed, promises resolved), except for a value
-that two fields of one freed cell hold. A free that starts when user code
-drops a record by itself has no drain around it: each runtime object
-that the glue reaches is a free of its own, so the order is field order at
-every record level from the root (translation plan §10). An
+that two fields of one freed cell hold. A free that starts in the
+program's code is native's too where lean2rr releases the value itself:
+one free from the root through the record's FFI release (native
+`lean_dec`), or field by field where Lean knows the constructor (native
+`lean_dec_ref_known`). Where Reussir's own code drops a record without
+a cycle (a matched value that dies in its `match`, a value that Lean's
+reset/reuse resets), each runtime object that the glue reaches is a
+free of its own, so the order is the record's field order (translation
+plan §10). An
 array of Reussir records (`Bridge` elements, lean2rr's typed arrays) is
 freed by its step inside a free, and at once outside one (`free_now`, up
 to 16 nested levels, then the step): every element released in index
@@ -722,10 +745,14 @@ only immediates is freed at once, as a typed array of `Nat`, `Int` or
 `String` is inside a free or outside one (`ReleaseElems::free_leaves`),
 and another array goes on the stack as a cell that pushes its step when
 it is popped: a later field of the record being freed may hold one of
-its elements.) `scripts/l2r.py` requires the local Reussir patches of
-the current base (`REQUIRED_REUSSIR_PATCHES`), so it refuses the checkout
-of an older base: the old stack of local patch 02-b, or a drop stack of
-Reussir's own beside leanrt's: two stacks do not compose.
+its elements.) `scripts/l2r.py` requires upstream Reussir's scoped drop
+worklists and the local Reussir patches of the current base
+(`REQUIRED_REUSSIR_PATCHES`: `join_or_run_step` and
+`defer_until_scope_exit` of `drop_stack.rs`; patches 10-a, 07-a, 20-c,
+20-d, 26-a and 28-a), so it refuses the checkout of an older base: the old stack
+of local patch 02-b, a drop stack of Reussir's own beside leanrt's (two
+stacks do not compose), or the stack of the local patches 23-a to 23-p
+(another interface).
 
 **Constants.** A constant's accessor tests its slot's word in a static
 table at a fixed address (`once::ready`: one load, inline; 0 while the
@@ -890,9 +917,9 @@ that order, on this context, with `run_deferred`, before `after_drain`), since i
 are Lean code that may block. A promise dropped outside a drain
 (by itself, or reached by Reussir's glue as it frees a record that user
 code drops outside a drain) is resolved at once. The outermost drain runs
-that end work after it is over (`task::drained`, the end function leanrt
-gives the stack with `pending::want_end_work`: Reussir's local patch
-23-k). Output
+that end work after it is over (`task::drained`, which leanrt asks for
+with `pending::want_end_work`: a scope-exit callback of Reussir's
+worklist, `defer_until_scope_exit`; once Reussir's local patch 23-k). Output
 (`io::stream_put`, `fs::put_str`, `fs::flush`, a panic's lines), spawning a
 process and `IO.Process.exit` are lean-runtime's effect points
 (`sched::effect`); the program's clock reads are polling points

@@ -173,45 +173,58 @@ files, `runtime/` and `scripts/` from the repository root.
   the check, and the read could be one texture again (measure the reads
   first).
 
-### Reussir's drop order is first field first (issue 2, missing feature)
+### Reussir's drop order is not native Lean's in every case (issue 2, missing feature)
 
-- **What:** leanrt keeps its pending releases on Reussir's drop stack
-  (issue 23, patches 23-k to 23-m), through `pending`, with one flag
-  that tells whether a drain runs. Inside a drain (a free that starts at
-  a runtime object: an array, a reference set, a box, a task or thunk
-  cell; or the drain of a record that Reussir frees as a worklist),
-  every runtime object that Reussir's glue reaches is pushed (an array
-  as a cell that pushes its step when it is popped; an array of
-  immediates only, which releases nothing, and a typed array of `Nat`,
-  `Int` or `String` are freed at once), and the pops give native Lean's
-  order. A free that starts when user code drops a record runs no drain
-  at its top (for a Worklist record, each dead Worklist child is a drain
-  of its own), so the order there is Reussir's own: field order at every
-  record level from the root (plan
+- **What:** Two things. (1) `scripts/l2r.py` passes
+  `--drop-order backward` to rrc: inside a free, the dead members of a
+  cell are pushed and come out last first. (2) leanrt keeps its pending
+  releases on Reussir's drop scopes
+  (`reussir_rt::drop_stack`, upstream since 2026-11-01), through
+  `pending`, with one flag that tells whether a free runs. Inside a free
+  that starts at a runtime object (an array, a reference set, a box, a
+  task or thunk cell), every runtime object that Reussir's glue reaches
+  is pushed (an array as a cell that pushes its step when it is popped;
+  an array of immediates only, which releases nothing, and a typed array
+  of `Nat`, `Int` or `String` are freed at once), and the pops give
+  native Lean's order. A free that starts when user code drops a record
+  is in Reussir's hands (plan
   [§10](../../translation-plan.md#10-known-divergences-and-unsupported-features),
   "Order of releases in one free").
-- **Why:** A missing feature, not a bug: upstream Reussir `7954a367`
-  frees records at a bounded stack depth, first field first, each
-  member's subtree whole, with its state per drop; issue 23's worklist
-  (in lean2rr's series) frees Worklist records in place with a stack per
-  thread, which 23-k to 23-m open to a host. Lean frees iteratively, last
-  field first. The bases before Phase 2 (up to `l2r-base8`) had five
-  local patches, 02-a to 02-e, that replaced upstream's drop lowering
-  with a stack shared with leanrt, and a drain-end hook, 09-a (issue 9,
-  retired); they went when leanrt got its own stack, since a Reussir
-  change is the last resort (owner)
-  ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md)).
+- **Status on Reussir `36a55a0f`** (the port's first gate, 2026-11-18,
+  and the emitter work after it): a whole value released through its
+  FFI release is one free, last field first, as native `lean_dec`, so
+  three older documented differences are gone. Two rules of upstream's
+  design gave new differences, and lean2rr's emitter answers both: a
+  value whose constructor Lean knows is released field by field
+  ([../ownership.md](../ownership.md#a-value-whose-constructor-lean-knows-is-released-field-by-field)),
+  and a box's payload release joins the running free
+  ([../representations/box-and-uniform.md](../representations/box-and-uniform.md#the-program-releases-its-own-payloads-one-function-per-type)).
+  Left: a matched value that Reussir consumes in its `match`, a value
+  that Lean's reset/reuse resets, and a value shared by two fields of
+  one freed cell
+  ([02-native-drop-order.md](../../../reussir-bugs/02-native-drop-order.md#on-upstream-36a55a0f)).
+- **Why:** A missing feature, not a bug: Reussir does not promise
+  native Lean's order. Lean frees iteratively: it decrements all fields
+  of a cell, pushes the dead ones, and pops the last first. Upstream
+  Reussir frees recursive records through scoped worklists and has one
+  switch, `--drop-order forward|backward` (default `backward`); `forward`
+  is source order and must not be used. The flag is passed explicitly so
+  that a change of upstream's default cannot move lean2rr's order.
+  History: upstream `7954a367` to `95d9a1c8` freed first field first,
+  with its state per drop; the bases `l2r-base9` to `l2r-base12` had
+  local patches for worklist drops (issue 23, which upstream took), and
+  the bases before Phase 2 (up to `l2r-base8`) had five local patches,
+  02-a to 02-e, with a stack shared with leanrt, and a drain-end hook,
+  09-a (issue 9, retired); they went when leanrt got its own stack,
+  since a Reussir change is the last resort (owner).
 - **Where:** [../ownership.md](../ownership.md#runtime-objects-free-through-leanrts-pending-stack-in-leans-order);
-  `runtime/leanrt/src/pending.rs`; `scripts/l2r.py`:
-  `check_reussir_patches` (it requires 23-f, 23-k, 23-m, 23-n and 23-o,
-  so it refuses the checkout of a base before Phase 2, whose glue still
-  pushes onto the old shared stack, `l2r-base9`, which lacks the shared
-  stack, and `l2r-base9-shared`, whose pending records take a stack entry
-  each instead of a link through their headers).
-- **Remove only if:** the stack itself: never (a bounded stack through
-  runtime objects). The field order at the top of a free that user code
-  starts goes only if such a drop runs inside a drain of the shared
-  stack.
+  `runtime/leanrt/src/pending.rs`; `scripts/l2r.py`: `rrc_command` (the
+  flag) and `check_reussir_patches` (it requires upstream's
+  `join_or_run_step` and `defer_until_scope_exit`, so it refuses the
+  checkout of a base before upstream's scoped worklists).
+- **Remove only if:** the pending work itself: never (a bounded stack
+  through runtime objects). The flag: never, unless Reussir gets native
+  Lean's exact rule as a drop order; then pass that one.
 
 ### Each texture is its own crate
 
@@ -251,9 +264,13 @@ files, `runtime/` and `scripts/` from the repository root.
   [README.md](README.md)); closure devirtualization stays
   on (old issue 10's `--no-closure-wpd` is removed,
   [build-time.md](build-time.md#old-issue-10-cost-closure-devirtualization-printed-types-exponentially));
-  `L2R_RRC_FLAGS` appends flags for experiments. rrc runs
-  with `REUSSIR_FFI_CACHE_DIR` set, for rrc's texture cache (old issue
-  35, a cost,
+  `--drop-order backward` (issue 2, above);
+  `L2R_RRC_FLAGS` appends flags for experiments (for example
+  `--disable-borrow-analysis`: rrc's borrow analysis is on by default,
+  and the driver passes nothing for it). rrc runs
+  with `XDG_CACHE_HOME` set to lean2rr's cache directory
+  (`L2R_POLYFFI_CACHE`), for rrc's texture cache (old issue 35 and
+  issue 25,
   [build-time.md](build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)).
   `leanrt` is built per Reussir checkout (`L2R_REUSSIR`), rustc
   (`L2R_RUSTC`), `L2R_LEANRT_RUSTFLAGS`, lean-runtime checkout and extra

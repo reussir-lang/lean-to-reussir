@@ -7,11 +7,26 @@ the top 16 bits of a pointer handle may carry foreign data.
 ## Summary
 
 **Kind:** missing feature (lean2rr's one-word box needs it). **Status:**
-patched (07-a), not yet applied in `./reussir`; lean2rr's generated code
-does not use the feature yet (the probe of the one-word `Box`, track E of
-the dependent-type work, does).
+patched (07-a), the second patch of the series on upstream `36a55a0f`
+(Reussir branch `l2r-base13-final`, commit `854f2b27`; 4 files, +74/-6,
+without `tests/` +34/-2). lean2rr's box
+`LAny` uses the feature, and `scripts/l2r.py` requires the patch.
 
-**Upstream (2026-10-24):** Not upstream at 0378b744. 07-a stays in the series on 0378b744 (it applies unchanged), on ea240b19 and 00906e38 (2026-10-25: upstream's two new commits change rrc's relocation default, #758, and the commit of mlir-rcgmp that the build fetches, #804, not this code), and on `l2r-base12` (Phase 2: after 10-a, without the drop patches; on upstream `95d9a1c8`; commit `3dea33ba`; only line offsets change). The base before 7954a367 (`l2r-base2`) had it as old 38-a.
+**Upstream (2026-11-17):** Not upstream at `36a55a0f`. Reussir's
+maintainer tried the tagged handles upstream himself (Reussir #923) and
+closed that pull request unmerged on 2026-11-05; his port of lean2rr
+keeps 07-a in this series. On `36a55a0f` the patch is the code of
+`l2r-base12`'s 07-a with one change: the width of the address has a
+name, `FFIObjectType::TAGGED_ADDRESS_BITS` (48), which the mask uses
+(the same value, 2^48 - 1). Its comment states the assumption: every
+box lies below 2^48 and carries no address tag of its own (TBI, MTE). Upstream's changes to the reading of
+nullary tags on aarch64 (#980 to #982) are about Reussir's own records,
+not about `ffi_object` handles: no hunk of 07-a touches that code. One
+risk for later: upstream issue #408 (a tag in the top byte of every box
+of a taggable type) was tried inside #980 and taken out again; if it
+comes back, it meets `LAny`'s use of the top 16 bits.
+
+**Upstream, earlier bases (history, 2026-10-24):** Not upstream at 0378b744. 07-a stays in the series on 0378b744 (it applies unchanged), on ea240b19 and 00906e38 (2026-10-25: upstream's two new commits change rrc's relocation default, #758, and the commit of mlir-rcgmp that the build fetches, #804, not this code), and on `l2r-base12` (Phase 2: after 10-a, without the drop patches; on upstream `95d9a1c8`; commit `3dea33ba`; only line offsets change). The base before 7954a367 (`l2r-base2`) had it as old 38-a.
 
 lean2rr's one-word `Box` (`leanrt::any::LAny`, runtime/prelude.rr section
 "The one-word box") is a `tagged` opaque type. An odd word is an
@@ -74,8 +89,10 @@ every allocation exactly once.
 
 Patch file
 [`patches/07-a-tagged-top-bits.patch`](patches/07-a-tagged-top-bits.patch)
-(commit `3350bc38` on branch `l2r-anybox` of a scratch Reussir worktree,
-made on `l2r-local` d79f8b70). Issue number 37 is left to another
+(on `36a55a0f`: commit `854f2b27`, subject `[ffi] mask tag bits before
+accessing foreign reference counts`; first made as commit `3350bc38` on
+branch `l2r-anybox` of a scratch Reussir worktree, on `l2r-local`
+d79f8b70). Issue number 37 is left to another
 track's patch (value records across the FFI boundary), which reserved it
 (with the old patch number 0067; its file will be `37-a-*.patch`).
 
@@ -94,7 +111,10 @@ without top bits it is the identity. Nothing else reads through a tagged
 handle (patch 10-a's review traced every reader of a count: the
 decrement calls the hook; the nonlinear-FFI instrumentation and the
 unique-carrying analysis skip tagged objects; an `ffi_object` gets no
-reuse token and no deferred release). User-space addresses fit in 48 bits
+reuse token). On `36a55a0f` upstream's worklist drops and
+`core::object::is_unique` are new readers of a count; 10-a keeps tagged
+handles away from them
+([issue 10](10-tagged-ffi-objects.md#the-readers-of-a-count-on-36a55a0f)). User-space addresses fit in 48 bits
 on the targets lean2rr builds for: aarch64 Linux with 48-bit virtual
 addresses (with 52-bit ones, the kernel gives an address above 2^48 only
 to a mapping asked for above it), x86-64 with 47-bit user space (5-level
@@ -114,7 +134,24 @@ and 32 TiB. leanrt checks the 48-bit assumption when it boxes a pointer
   `frontend/ffi_tagged.rr` and `conversion/instrument_nonlinear_ffi_tagged.mlir`
   pass.
 - `run.sh`: `issue 7   FIXED       a tagged handle with top bits copied in
-  line: prints 143   [-O aggressive]`.
+  line: prints 143   [-O aggressive]` (on the earlier bases; `run.sh`
+  was not run on `36a55a0f` yet).
+- On `36a55a0f` (2026-11-18, aarch64): `conversion/tagged_ffi_object.mlir`
+  passes, and lean2rr's `tests/runtime/any-probe.sh` passes its 19
+  scenarios under both encodings of nullary variants. This is the first
+  run of 07-a's mask together with upstream's top-byte tags on aarch64.
+  The repro on the port's first gate (`run.sh`): pristine `36a55a0f`
+  rejects the `tagged` attribute (no 10-a); the patched base prints 143,
+  FIXED.
+
+**Measured claim.** No wall time was measured. The mask is one AND on
+the retain of a boxed tagged handle; an immediate never reaches it, and
+an untagged object lowers as before (LLVM IR of 7 programs without
+tagged types, pristine `36a55a0f` against the patched compiler, 16
+compilations: 0 differing lines; the measurement is of 10-a and 07-a
+together). The review of the two patches on `36a55a0f` (local notes
+`port13/reviews/RV1`) checked the mask against upstream's top-byte
+reading of nullary tags and found no conflict.
 - The probe of the one-word box (see lean2rr): every scenario frees every
   block it allocates exactly once; the copy of a box is an inline `and`,
   load, add and store (no call).

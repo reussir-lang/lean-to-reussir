@@ -182,6 +182,15 @@ parameters the join point takes: rule 4 removes the erased ones). -/
   rebinding is. Empty in an outlined join point's body and in a local
   function, where that name is not captured. -/
   indexOrig : Std.HashMap FVarId String := {}
+  /-- The code being lowered is in the declaration's own Reussir function
+  (not a state machine, an outlined join point's function or a local
+  function): a call of `decl` there is a direct self call (Lower/PreBox). -/
+  ownFn : Bool := false
+  /-- For the `let` being lowered, a constructor application that takes the
+  result of the self call before it: its arguments whose boxes are bound
+  before that call, with the boxes' names (Lower/PreBox; `lowerArg` gives
+  the name at a `Box` position). -/
+  preBoxed : Std.HashMap FVarId String := {}
   /-- The state optional passes keep in the context, by the pass's name
   (`CodeCtx.getExt?`, `CodeCtx.setExt`). -/
   ext : NameMap Dynamic := {}

@@ -24,9 +24,9 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
   toolchain the pin names, whatever elan's default is
   (`scripts/toolchain.sh`).
 - Reussir built from source (LLVM/MLIR 23, Clang 23), checked out into
-  `reussir/`: upstream `95d9a1c8` plus the patches of
-  `reussir-bugs/patches/series` (head `c1170ff9`: branch
-  `l2r-base12`; see
+  `reussir/`: upstream `36a55a0f` (2026-11-17; the commit in
+  `reussir-bugs/patches/base`) plus the 12 patches (Lean integration, and fixes of three upstream bugs) in
+  `reussir-bugs/patches/series` (see
   [`reussir-bugs/README.md`](reussir-bugs/README.md#applying-the-patches)).
   Its build needs GMP 6.2 or later (`gmp.h`, `libgmp`), a CMake that
   knows `cxx_std_26` for Clang (CMake 4.4.4 works; Ubuntu 24.04's 3.28

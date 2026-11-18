@@ -63,17 +63,21 @@ the image changes from run to run.
 
 ### The last full run
 
-The gate of switch step 10 (branch `lean-runtime-step10` at 0410be6), against
-native Lean 4.34.0, 2026-10-06:
+The gate of 2026-11-18 (lean2rr at 8d032fdb), against native Lean
+4.34.0:
 
-- runtime suite: 336 of 337 identical to native, some of them through
-  expectation files; the other one is the expected failure
-  `RtLeanUnsupported`;
-- loader checks: 17 of 17;
-- classic corpus: 54 of 54, with all optional passes on and with all off;
-- Reussir benchmark suite: 18 of 18;
-- `leanrt` unit tests 46 of 46; lean-runtime's rows all agree; the
-  inline, constant-read, conversion-count and big-number checks pass.
+- runtime suite: 748 of 750 identical to native, some of them through
+  expectation files; the other two are the expected failures
+  `RtLeanUnsupported` and `RtCastMixedRebox`;
+- the 23 check scripts of the runtime tests: all pass. Among them are
+  the `leanrt` unit tests, lean-runtime's rows (all agree), and the
+  inline, constant-read, conversion-count, allocation and loop checks;
+- classic corpus: all 18 programs at the small and medium sizes, with
+  all optional passes on and with 26 passes off;
+- the raytracer: 3 of 3 settings.
+
+The loader checks and the Reussir benchmark suite were not part of
+this run (their last runs: 17 of 17 and 18 of 18, 2026-10-06).
 
 No correctness failure. Each switch step passed such a gate before its
 merge.
