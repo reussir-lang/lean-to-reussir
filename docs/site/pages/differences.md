@@ -290,7 +290,7 @@ all the fields of the value.
 | Reads take their container owned | an increment and a release per read, unless LLVM cancels them |
 | One-block arrays | a 16 MiB payload (a hash table's 2^21 buckets) becomes a huge mimalloc segment, freed late |
 | Constants read in a loop | one load and a test per read (native: one load for a named constant; two loads and a test for a closed term); a constant whose bits are all 0 needs a second load |
-| Borrowed parameters | a traversal that keeps the nodes it visits wrote counts that native Lean only reads (about 1.5×). Reussir's borrow analysis is new; this cost is not measured again yet |
+| Borrowed parameters | a traversal that keeps the nodes it visits wrote counts that native Lean only reads (about 1.5×, before Reussir had a borrow analysis; that traversal is not measured again). Reussir's borrow analysis removes such counts where the caller keeps the argument: on 53 benchmark programs the time without it is 1.02× the time with it as a whole and 1.24× on nqueens, and no program is slower with it |
 | Dropping a deep value that is not a list (a snoc list, a tree deep along its left child) | Reussir's work list keeps one slot per level while it frees the value (heap memory, freed at the end); native Lean links its to-do list through the freed objects |
 
 ## Lean bugs we do not reproduce

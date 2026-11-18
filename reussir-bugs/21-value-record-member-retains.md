@@ -15,7 +15,8 @@ patch was reworked for this base
 ([below](#21-a-on-36a55a0f-reworked)): its rule is smaller than the one
 of `l2r-base12` (commit `5a15f745`; made as `8e9a6293`, `l2r-stepd`
 plus 21-a). Measured on this base: fewer instructions, statically and
-executed; wall time is pending the timing run.
+executed, and wall time: 1.058 over the 12 timed cases, with L17
+strings 1.298, Z01c 1.205 and L12 sieve 1.154 (timing run 20).
 No workaround in lean2rr.**Upstream (2026-11-18):** Not upstream at `36a55a0f` (source read):
 `EquivalenceAnalysis::decideLoadedEquivalent` still needs a load on both
 sides, and the counted-word scan stops at `ref.spilled`. The
@@ -93,8 +94,25 @@ sizes, identical output):
 | Z01c | not run | | | -6.0% |
 
 So the gain is smaller than on `l2r-base12` for L12 and still there.
-**Wall time: pending the timing run.** Until then, "21-a makes these
-programs faster" is a hypothesis that instruction counts support.
+**Wall time** (timing run 20, 2026-11-18: lean2rr's port on the final
+series against the same with 21-a taken out; direct pairs, median of 9
+and min, the two sides in turn; 12 cases of the shared benchmark set
+whose code the patch changes; a ratio above 1 means that 21-a gains):
+
+| Case | with 21-a | without | without / with (median) | (min) |
+|---|---:|---:|---:|---:|
+| L17 strings | 590.8 ms | 767.1 ms | 1.298 | 1.300 |
+| Z01c lean-zip compress | 6752.7 ms | 8140.0 ms | 1.205 | 1.205 |
+| L12 sieve | 694.1 ms | 800.9 ms | 1.154 | 1.143 |
+| E05 word_freq | 27.9 ms | 28.5 ms | 1.037 | 1.027 |
+| Z01d lean-zip decompress | 1528.6 ms | 1578.0 ms | 1.032 | 1.032 |
+
+Geometric mean over the 12 cases: 1.058. No case loses. No measurable
+effect on the seven others (L10, L11, L15, L18, E09, Z03l, Z06t). L18
+hashmap is the case whose object changes most without the patch
+(+12.7%); its time does not move (0.998). Peak memory does not change.
+So "21-a makes these programs faster" is measured for five cases, and
+it is large on three.
 
 On other code: the patch changes nothing in upstream's benchmark suite,
 core and std (33 units, lowered MLIR; no by-value record of integers is

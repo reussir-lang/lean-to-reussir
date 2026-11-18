@@ -361,7 +361,7 @@ all the fields of the value.</p>
 </tr>
 <tr>
 <td>Borrowed parameters</td>
-<td>a traversal that keeps the nodes it visits wrote counts that native Lean only reads (about 1.5×). Reussir's borrow analysis is new; this cost is not measured again yet</td>
+<td>a traversal that keeps the nodes it visits wrote counts that native Lean only reads (about 1.5×, before Reussir had a borrow analysis; that traversal is not measured again). Reussir's borrow analysis removes such counts where the caller keeps the argument: on 53 benchmark programs the time without it is 1.02× the time with it as a whole and 1.24× on nqueens, and no program is slower with it</td>
 </tr>
 <tr>
 <td>Dropping a deep value that is not a list (a snoc list, a tree deep along its left child)</td>

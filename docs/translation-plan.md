@@ -1344,7 +1344,9 @@ application appears.
   goes into a constructor that the function returns, the boxes of the
   constructor's other arguments are bound before the self call (a boxing
   has no effect), so that Reussir can turn the recursion into a loop
-  (tail recursion modulo cons;
+  (tail recursion modulo cons; timing run 20: 22% on a merge sort over
+  lists and 6% on one more of 21 cases, no measurable effect on the
+  other 19, and less peak memory on two;
   [implementation notes](implementation/control-flow/calls-and-lets.md#the-boxes-of-a-constructor-that-takes-a-self-calls-result-are-bound-before-the-call)).
 - Literals:
   - A `Nat` literal of any size becomes Reussir's literal
@@ -3824,8 +3826,11 @@ Each item says what differs and when.
   every node it keeps, and every `ptrEq` operand: 1.5x native on such a
   traversal (adv4 RP4-09). (Measured before Reussir had a borrow
   analysis. On the base since 2026-11-17 Reussir removes such count
-  updates itself where the caller keeps the argument; the cost there is
-  pending the timing run.)
+  updates itself where the caller keeps the argument. That traversal
+  was not timed again. On the shared benchmark set, timing run 20, the
+  analysis gains 2.2% (geometric mean over 53 cases, the port with the
+  analysis off against the port), with no case slower and nine cases
+  with a ratio of 1.03 to 1.24, the two nqueens cases most.)
 - *Casts between layouts that differ* (§5.1): a value cast to another
   inductive whose layout differs (a field holding an `Int` where the
   source's holds a `Nat`) is rebuilt, O(size), at each such cast, where

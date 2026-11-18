@@ -155,6 +155,14 @@ Paths are relative to `lean2rr/LeanToReussir/` unless they start with
   `tests/runtime/trmc-helper-check.sh` (the `.trmc` helpers of
   `TrmcHelper.lean`: present for the box-only shapes, absent after a
   traced call).
+- **Measured:** timing run 20 (2026-11-18; the port against the port
+  without the rule; direct pairs, median of 9 and min; the 21 cases of
+  the shared benchmark set whose code the rule changes): geometric mean
+  1.018. Two cases gain: E02 merge_sort_list 1.223 and X12 k_nucleotide
+  1.064. The other 19 show no measurable effect, and no case is slower
+  with the rule (the fastest ratio without it is 0.995). Peak memory
+  without the rule: 1.67 times on E02 and 1.23 times on L13 mergesort
+  (whose time does not change: 1.004).
 - **Remove only if:** Reussir's tail recursion modulo cons learns that a
   callee is pure and total (an attribute on functions and FFI imports), or
   boxes are no longer calls. Without the rule the programs are still

@@ -87,8 +87,7 @@ and several optional passes help token reuse (see
   So for a program that creates resources, lean2rr runs Lean's own borrow
   inference and keeps such arguments alive until the call returns.
   Reussir has a borrow analysis of its own, which removes count updates
-  of an argument that the caller keeps. lean2rr's rule is not changed
-  for it yet.
+  of an argument that the caller keeps. lean2rr's rule stays as it is.
 - **Values that die at the start of a branch.** When two or more values
   die at the start of a branch, Lean releases them there, the newest
   first. A matched value goes first in an arm that reads none of its

@@ -134,7 +134,7 @@ other results are the last recorded runs.
 | Loader checks | {{v:env_cases}} cases†, all as expected |
 | Lean's own compile tests | 72 programs of Lean's `tests/compile` and `tests/compile_bench`: all match native (checked with Lean 4.33) |
 | Externs of `Init` and `Std` | all 717 of Lean 4.34 available; 706 checked by programs that call each one |
-| Speed | against native Lean 4.34.0 (2026-10-04, largest size): faster on 15 of the 18 classic programs, about equal on the other 3; geometric mean 0.71× time and 0.69× memory; less memory on all 18 |
+| Speed | against native Lean 4.34.0 (2026-11-18, 53 programs: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; median of 9 runs): geometric mean 0.58× of native's time; 48 programs are faster than native, 5 are slower (n_body 1.22×, rose_tree 1.19×, deriv 1.15× and 1.08×, gcd_batch 1.03×) |
 
 [Testing](testing.html) explains each test set and the review process.
 

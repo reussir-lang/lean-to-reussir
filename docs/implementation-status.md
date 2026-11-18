@@ -52,9 +52,11 @@ lean-runtime 50840bb, aarch64). What it ran:
   every verdict as its entry expects.
 
 Not part of that gate: `tests/env`, `tests/reussir-benchmark`, and any
-timing. The speed rows of the table are from the timing runs on the
-Reussir base before (`l2r-base12`); on the current base every speed
-number is pending the timing run.
+timing. Speed on this base was measured after it, in timing run 20
+(2026-11-18, the same lean2rr commit and Reussir series; the row
+"Speed, shared benchmark set" of the table, and
+[Reussir](#reussir)). The row of the classic corpus alone and the
+tables further down are from older runs on earlier bases.
 
 The gate before it on this base (the first series of 5 patches, the
 translator of dev) had 6 release-order failures in 747 tests and one
@@ -73,6 +75,9 @@ Known open items on this base:
   before; the cause is not attributed.
 - `RtListDropWhole`, an array of 10^6 lists: peak memory 68.1 MB,
   53.7 MB on the base before; inside the test's allowance.
+- Speed: n_body is 1.56 times its time on the base before, and eleven
+  more of the 53 timed cases are 3 to 16% slower; causes unknown
+  ([Reussir](#reussir)).
 - Loops for recursions into a constructor: 54 of the 57 functions that
   had a loop on the base before have it again; the shape of
   `AssocList.foldrM` (a value built after the self call) has none.
@@ -88,6 +93,7 @@ Known open items on this base:
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed (merged 36a5f92)); every other finding fixed or documented |
+| Speed, shared benchmark set (53 cases: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; timing run 20, 2026-11-18, median of 9, aarch64) | geometric mean 0.584× of native Lean 4.34.0's time (run 19 on the Reussir base before: 0.593); five cases above native: n_body 1.22, rose_tree 1.19, deriv 1.15 and 1.08, gcd_batch 1.03. Against lean2rr on the Reussir base before, in direct pairs: 0.984 (by set 0.976, 0.978, 1.012, 0.967); 20 cases more than 3% faster, 12 more than 3% slower; peak memory 1.000 |
 | Speed (classic corpus against native Lean 4.34.0, 2026-10-04) | faster than native Lean on 15 of the 18 classic programs and about equal on the other three (bignum 1.00×, binarytrees 1.02×, nqueens 1.04×); geometric mean 0.71× time, 0.69× memory; less memory on all 18. Reussir's suite last measured against 4.33 (faster on 17 of 18); tables below |
 
 ## How a program is compiled
@@ -671,8 +677,23 @@ What the move to this base changed
   texture cache. The largest measured cause is patched (29-a: a warm
   build of a program with 124 textures 5.05 s to 3.16 s). What is left
   is in "Where it stands".
-- Speed against the base before and against native: pending the timing
-  run.
+- Speed (timing run 20, 2026-11-18, 53 cases): 0.584 of native's time
+  (0.593 on the base before), and 0.984 of lean2rr on the base before
+  in direct pairs. What the pairs with one change taken out show: the
+  upstream borrow analysis gains 2.2% over the set and loses nowhere
+  (time without it against time with it: nqueens 1.21 and 1.24, a
+  closure pipeline 1.21, the regex engine 1.07 and 1.08); the translator's rule for boxes before a self call gains 22% on
+  a merge sort over lists and 6% on one more case; patch 21-a gains 30%
+  on Strings, 20% on lean-zip's compress and 15% on Sieve; patch 20-g
+  gains 12% on lean-zip's decompress and 11% on higher-order.
+- Open, with no cause known: n_body is 1.56 times its time on the base
+  before (22.9 ms to 34.3 ms; the generated `.rr` is the same; not the
+  borrow analysis; under investigation). Eleven more cases are 3 to
+  16% slower, most of them programs that free large structures (the
+  checked red-black tree, deriv, cfold, expr_eval); the cause is not
+  attributed (a hypothesis only: upstream's worklist drops against the
+  old local drop patches). Some wins are not attributed either (the
+  red-black tree cases, peano, binarytrees).
 
 The base before this one was upstream Reussir `95d9a1c8` (2026-10-26)
 plus 24 patches: the Reussir branch `l2r-base12` (head

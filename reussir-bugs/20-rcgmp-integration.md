@@ -37,8 +37,10 @@ its remaining tests are parked
 | [20-e](patches/20-e-hex-bigint-literals.patch) | `[bigint] pass integer constants and match keys to MLIR in hexadecimal` | `5baeed3b` | optimization (build time) | rrc on one `Nat` literal of 20,000 digits: 8.17 s to 0.07 s; of 40,000 digits: 74.57 s to 0.18 s; the objects are byte-identical |
 | [20-b](patches/parked/20-b-mpz-handle-more-tests.patch) | (tests) | - | tests | parked: tests only, so no claim is possible; it found nothing on the new base |
 
-Wall time of lean2rr's programs with these patches: pending the timing
-run. The instruction counts of 20-c's old section and 20-f's effect on
+Wall time of lean2rr's programs: timing run 20 (2026-11-18) timed
+20-g alone (below: 1.021 over 13 cases, three cases gain 3 to 12%). The
+other patches of this entry were not timed alone: 20-a, 20-c and 20-d
+are needed to build, and 20-e changes build time only. The instruction counts of 20-c's old section and 20-f's effect on
 L11 were measured on the earlier bases.
 
 **Upstream (2026-11-18):** At `36a55a0f`, 20-b's code and 20-f's pin are
@@ -255,7 +257,22 @@ only patch of the series that changes existing code: 6 functions (two
 of core's `Nat::div_exact`, and one each in bigint-binomial,
 bigint-collatz, bigint-factorial and bigint-fib): `ashr` to `lshr`,
 `sdiv`/`srem` to `udiv`/`urem`, and 5 or 6 operations fewer where the
-quotient is taken. No wall time was measured.
+quotient is taken.
+
+**Wall time** (timing run 20, 2026-11-18: lean2rr's port on the final
+series against the same with 20-g taken out; direct pairs, median of 9
+and min, the two sides in turn; 13 cases of the shared benchmark set
+whose code the patch changes; a ratio above 1 means that 20-g gains):
+
+| Case | with 20-g | without | without / with (median) | (min) |
+|---|---:|---:|---:|---:|
+| Z01d lean-zip decompress | 1528.3 ms | 1715.2 ms | 1.122 | 1.127 |
+| L14 higher-order | 1389.8 ms | 1545.7 ms | 1.112 | 1.112 |
+| Z01c lean-zip compress | 6750.6 ms | 6983.5 ms | 1.034 | 1.034 |
+
+Geometric mean over the 13 cases: 1.021. No case loses. No measurable
+effect on the ten others, the division-heavy L11 bignum (1.000), E01
+gcd_batch (0.998) and L12 sieve (1.010) among them.
 
 **Tests.** `frontend/bigint_nat_division.rr` (the `-O` LLVM IR of a
 `Nat` `/` and of a `Nat` `remsi_lean` divides the untagged immediates

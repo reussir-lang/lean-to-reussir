@@ -94,8 +94,13 @@ native with 2 expected failures, 23 of 23 check scripts, the classic
 corpus in its three modes, the raytracer
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md) has the
 results). Not verified there: every "kept: measured ..." line of this
-directory (the measurements are of the earlier bases), and wall time
-(pending the timing run).
+directory (the measurements are of the earlier bases). Wall time on
+this base: timing run 20 (2026-11-18): 0.584 of native over the 53
+cases of the shared benchmark set, and 0.984 of lean2rr on the base
+before; one case is 1.56 times slower than before (n_body, cause
+unknown) and eleven more are 3 to 16% slower (cause not attributed)
+([`reussir-bugs/README.md`](../../../reussir-bugs/README.md#history-the-move-to-36a55a0f-2026-11-17),
+step 6).
 
 The base before this one was `l2r-base12` (head `c1170ff9`): upstream
 `95d9a1c8` (2026-10-26) plus 24 patches, with 20-b's tests, 20-e, 21-a

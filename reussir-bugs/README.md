@@ -88,8 +88,13 @@ Status of the port (2026-11-18): **the final gate passed** (lean2rr
   (5 patches) with the translator of dev: 739 of 747, with 6
   release-order failures and one failing check script
   ([history](#history-the-move-to-36a55a0f-2026-11-17)).
-- Wall time of lean2rr's programs against `l2r-base12` and native:
-  pending the timing run.
+- Wall time (timing run 20, 2026-11-18, the shared benchmark set of 53
+  cases): the port against native 0.584 (geometric mean; dev on
+  `l2r-base12` in run 19: 0.593); the port against dev on `l2r-base12`
+  in direct pairs 0.984. One case is much slower than on `l2r-base12`
+  (X10 n_body, 1.562; cause unknown, under investigation), and eleven
+  more are 3 to 16% slower
+  ([history](#history-the-move-to-36a55a0f-2026-11-17), step 6).
 
 ### Earlier bases (history)
 
@@ -300,7 +305,7 @@ and brought the three bugs of entries 26 to 28
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | reproduces on `36a55a0f` (the port's first gate, 2026-11-18) |
 | [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | reproduces on `36a55a0f` (2 stack slots; the port's first gate, 2026-11-18); not reported |
 | [18](18-tail-padding-return.md) | missed optimization | a `[value]` struct's tail padding is an explicit byte array in the LLVM struct (`{ i64, i1, [7 x i8] }`); each byte counts as a returned value, so on aarch64 a result with more than 8 values comes back in memory (`sret`) | yes, speed (Unionfind +16% instructions on dev b874c365) | the tuple of a `flatten-structs` result keeps narrow values in `u64` members and no unit member (`tupleMemberTy`) | none | reproduces on `36a55a0f` (2 stores through `x8`; the port's first gate, 2026-11-18); not reported |
-| [21](21-value-record-member-retains.md) | missed optimization | inc/dec cancellation keeps the retain of an rcgmp integer member extracted from a `[value]` record or tuple, and the member's release in the record's drop, a pair it cancels for an rc member | yes: speed. On `36a55a0f` with the patch: executed instructions L12 -5.5%, L17 -6.6% (cachegrind, reduced sizes); optimized IR L12 -3.3%, L17 -1.8%, Z01c -9.5%. Wall time: pending the timing run | none | [21-a](patches/21-a-value-record-member-retains.patch) (reworked for this base: a smaller rule) | not upstream at `36a55a0f` (source read) |
+| [21](21-value-record-member-retains.md) | missed optimization | inc/dec cancellation keeps the retain of an rcgmp integer member extracted from a `[value]` record or tuple, and the member's release in the record's drop, a pair it cancels for an rc member | yes: speed. On `36a55a0f` with the patch: executed instructions L12 -5.5%, L17 -6.6% (cachegrind, reduced sizes); optimized IR L12 -3.3%, L17 -1.8%, Z01c -9.5%. Wall time (run 20, direct pairs): L17 1.298, Z01c 1.205, L12 1.154 without the patch against with it; 1.058 over 12 cases | none | [21-a](patches/21-a-value-record-member-retains.patch) (reworked for this base: a smaller rule) | not upstream at `36a55a0f` (source read) |
 | [8](08-alias-release-donor.md) | missed optimization | token reuse takes the release of a value an opaque call returned (an alias, never freed) as the donor | no longer | a field put back into a rebuilt node is boxed again | none | reproduces on `36a55a0f` (32,020 and 129,488 cells; the port's first gate, 2026-11-18) |
 | [2](02-native-drop-order.md) | missing feature (partly fixed upstream) | drop glue does not free in native Lean's order in every case. Upstream's `backward` policy (the default, which lean2rr passes) frees a whole value last field first, as native `lean_dec`; a drop run that starts inside a free finishes before it returns | yes: the release order of resources. On `36a55a0f` three older documented differences are gone, and two new ones that the first gate showed are answered in lean2rr's emitter. Left: a matched value that Reussir consumes in its `match`, a value that Lean's reset/reuse resets, a value shared by two fields of one freed cell | leanrt keeps its pending releases on Reussir's drop scopes; a value whose constructor Lean knows is released field by field (`l2r_release_known_<type>`); a box's payload release joins the running free (`payloadJoins`) | none (02-a to 02-e left the series in Phase 2) | the stack depth is bounded (worklist drops); the order is a switch, `--drop-order forward\|backward`, default `backward`. Native Lean's exact rule is not a mode |
 | [7](07-tagged-top-bits.md) | missing feature | the inline count increment of a `tagged` handle uses all 64 bits as the address | yes: the one-word `Box` needs it | none | [07-a](patches/07-a-tagged-top-bits.patch) | not upstream at `36a55a0f` (the maintainer's pull request #923 with it was closed unmerged on 2026-11-05); the repro prints FIXED on the patched base (the port's first gate, 2026-11-18) |
@@ -394,10 +399,25 @@ Order and dependencies:
 ### What each patch buys, and how it was measured
 
 Every compiler change of the port has a measured claim (owner,
-2026-11-17). The measurements are counts of instructions, calls and
-bytes, and compile times of rrc; **none is a wall time of a lean2rr
-program: those are pending the timing run.** All on aarch64. Each
-entry has the details and what was not measured.
+2026-11-17). The table's claims are counts of instructions, calls and
+bytes, and compile times of rrc. All on aarch64. Each entry has the
+details and what was not measured.
+
+**Wall time.** Timing run 20 (2026-11-18) timed two patches of the
+series alone, each as a direct pair (the port against the port without
+the patch; median of 9 and min, the two sides in turn; a ratio above 1
+means that the patch gains):
+
+| Patch | Cases timed | Geometric mean, without / with | Cases outside ±3% | The others |
+|---|---:|---:|---|---|
+| 21-a | 12 | 1.058 | L17 strings 1.298, Z01c lean-zip compress 1.205, L12 sieve 1.154, E05 word_freq 1.037, Z01d lean-zip decompress 1.032 | no measurable effect on seven (L10, L11, L15, L18, E09, Z03l, Z06t); no case loses |
+| 20-g | 13 | 1.021 | Z01d lean-zip decompress 1.122, L14 higher-order 1.112, Z01c 1.034 | no measurable effect on ten (L11 bignum 1.000, E01 gcd_batch 0.998 and L12 sieve 1.010 among them); no case loses |
+
+The other patches were not timed alone: 10-a, 07-a, 20-a, 20-c and 20-d
+are features that the programs need (there is no build without them),
+20-e and 29-a change build time only, and 26-a, 27-a and 28-a change no
+code of the timed programs. The series as one unit, with upstream's
+changes and lean2rr's own, is the 0.984 of the history's step 6.
 
 | Patch | What it buys | Measured claim | Where measured |
 |---|---|---|---|
@@ -1135,9 +1155,64 @@ Open after the port (each is recorded where it belongs):
   `AssocList.foldrM`); 54 of 57 functions have their loop again.
 - Release order: a matched value that Reussir consumes alone in its
   `match` ([entry 2](02-native-drop-order.md#on-upstream-36a55a0f)).
-- Wall time against `l2r-base12` and against native: pending the timing
-  run.
 - The deletion of entries 19, 23 and 24 (fixed upstream, to delete).
+
+**6. Wall time: timing run 20 (2026-11-18).** One session on a quiet
+set of cores; every output checked; a drift step at the end agrees with
+the main step within 0.5%. Sides: A = lean2rr dev `5d907046` on
+`l2r-base12`; B = lean2rr `8d032fdb` on the final series (`d62797ac`).
+The shared benchmark set, 53 cases (L: the classic corpus; E and X:
+small programs; Z: lean-zip, the raytracer, a regex engine, Cedar).
+
+- **Against native:** B 0.584 (geometric mean over 53 cases; run 19, A:
+  0.593; A derived from this session's pairs: 0.594).
+- **B against A, direct pairs:** 0.984, so the port is 1.6% faster as a
+  whole. By set: L 0.976, E 0.978, X 1.012, Z 0.967. Peak memory: 1.000
+  (only E07 0.894 and X02 1.031 are outside 3%).
+- **32 of 53 cases are outside ±3%** (median and min agree): 20 faster,
+  12 slower.
+  - Faster, among them: L04 nqueens 0.774, X04 nqueens 0.811, X14 peano
+    0.848, L01 rbtree 0.854, X05 rbtree 0.857, E10 closure_pipeline
+    0.859, L06 binarytrees 0.886, L09 rbmap 0.890, Z03l 0.903, L10
+    liasolver 0.906, Z03d 0.910, E02 merge_sort_list 0.919, X01 0.938,
+    L16 0.945, X12 0.946, Z06d Cedar 0.951.
+  - Slower, all twelve: X10 n_body 1.562, X02 deriv 1.164, X06
+    rbtree_ck 1.151, L02 rbtree-ck 1.138, E06 expr_eval 1.078, L18
+    hashmap 1.076, X07 qsort 1.073, L08 unionfind 1.061, L15
+    monadic-interp 1.051, X03 cfold 1.048, L03 deriv 1.047, L05 cfold
+    1.035.
+- **Five cases are above native:** X10 n_body 1.22 (0.77 in run 19),
+  E07 rose_tree 1.19, L03 deriv 1.15, X02 deriv 1.08 (0.94 in run 19),
+  E01 gcd_batch 1.03. The two nqueens cases left that list (L04 1.12 to
+  0.86, X04 1.05 to 0.85).
+- **Per change** (B against B without the change; above 1 = the change
+  gains):
+  - upstream's borrow analysis (`--disable-borrow-analysis`, 53 cases):
+    1.022, and no case loses (the slowest ratio is 0.991). Nine cases
+    gain more than 3%: L04 nqueens 1.235, X04 nqueens 1.212, E10 1.210,
+    L03 deriv 1.084, Z03l 1.082, Z03d 1.069, E02 1.059, Z06d 1.052, X05
+    1.032;
+  - lean2rr's rule that binds boxes before a self call (21 cases):
+    1.018. E02 merge_sort_list 1.223 and X12 k_nucleotide 1.064; no
+    measurable effect on the other 19. Peak memory without the rule:
+    1.67 times on E02 and 1.23 times on L13;
+  - 21-a (12 cases): 1.058; 20-g (13 cases): 1.021 (the table in
+    [what each patch buys](#what-each-patch-buys-and-how-it-was-measured)).
+
+Open performance items. Each is open; no cause is known:
+
+- **X10 n_body is 1.562 of `l2r-base12`** (22.9 ms to 34.3 ms; the
+  median and the min agree, and the time repeats in three steps). The
+  `.rr` is identical on both sides, and it is not the borrow analysis
+  (0.997 with it off). Cause unknown, under investigation.
+- **The twelve slower cases** are concentrated on programs that free
+  large structures (rbtree-ck, deriv, cfold, expr_eval). The four
+  changes that have a switch do not explain them. The cause is not
+  attributed. One hypothesis, not tested: upstream's worklist drops
+  against the old local drop patches of entry 23.
+- **Wins that the four switches do not explain** (the red-black tree
+  cases L01, L09 and X05, X14 peano, L06 binarytrees and X01) are not
+  attributed either.
 
 ## History: the move to 95d9a1c8 (2026-10-26)
 
@@ -1598,7 +1673,14 @@ Not bugs, but each one costs lean2rr measurably:
   caller keeps the argument gets a copy that does not retain or release
   it. The analysis works on Reussir functions with a body, so a read
   through a texture is not covered by it (by reading). Its effect on
-  lean2rr's programs: pending the timing run.
+  lean2rr's programs (timing run 20, the port with the analysis off
+  against the port, 53 cases): 2.2% over the set (geometric mean
+  1.022), no case slower with it, and nine cases more than 3% faster
+  (L04 nqueens 1.235, X04 nqueens 1.212, E10 closure_pipeline 1.210,
+  L03 deriv 1.084, Z03l and Z03d regex 1.082 and 1.069, E02 1.059, Z06d
+  Cedar 1.052, X05 rbtree 1.032). The loss on lookups in large trees
+  that upstream warns of does not show (L01 0.997, L09 0.995). The
+  `Expr.replace` traversal itself was not timed again.
 - **A one-word `Nat`** (done: lean2rr's `Nat` and `Int` are Reussir's
   built-in integers since D8, 2026-10-26; before, local patch 10-a,
   [issue 10](10-tagged-ffi-objects.md), made them one tagged word, as

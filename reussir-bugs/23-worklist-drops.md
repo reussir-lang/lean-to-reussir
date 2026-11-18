@@ -106,8 +106,16 @@ Still hypotheses, not measured:
   member. So for a record with a `Nat` or `Int` member, the tail call on
   the last child and the finish in line are off: each dead child is a
   deferral and a pop. 23-i and 23-j gave up the tail call only when a
-  member after the children could push. The cost per freed cell on
-  lean2rr's programs: pending the timing run.
+  member after the children could push. The cost per freed cell was
+  not measured alone. What timing run 20 shows (2026-11-18, the port
+  against dev on `l2r-base12`, direct pairs): twelve of 53 cases are
+  slower, and they are concentrated on programs that free large
+  structures (L02 rbtree-ck 1.138, X06 rbtree_ck 1.151, X02 deriv
+  1.164, L03 deriv 1.047, cfold, expr_eval); two cases that allocate
+  and free are faster (L06 binarytrees 0.886, X01 0.938). Neither is
+  attributed to a cause. That upstream's worklist drops cost more than
+  these patches did on such programs is a hypothesis only: no build
+  with one and without the other was timed.
 - **The order of releases** is upstream's `backward` policy. Two of its
   rules differ from these patches'; lean2rr's emitter answers both
   ([entry 2](02-native-drop-order.md#on-upstream-36a55a0f)).
