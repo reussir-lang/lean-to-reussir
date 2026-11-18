@@ -12,8 +12,8 @@ optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (32-a), patch 11 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
-`6d56ffeb`; 246 added and 53 removed lines; `WorklistDrop.cpp` +103/-53,
+upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
+`43e51856`; 246 added and 53 removed lines; `WorklistDrop.cpp` +103/-53,
 the rest tests). `scripts/l2r.py` does not check for the patch: without
 it the programs are the same and frees of such records are slower.
 
@@ -195,12 +195,15 @@ seven are 32-a's:
 
 Over the 53 cases the two patches together: geometric mean 0.975 (by
 set 0.980, 0.989, 0.941, 0.996). No case is slower (the slowest ratio
-is 1.023, inside the band). Peak memory: no case outside 3%. The two
-patches were timed together; 32-a's prototype alone, in a step of its
-own, gave L02 0.846, L03 0.839, X02 0.846, X06 0.875, E06 0.933, X03
-0.958 with six control cases between 0.988 and 1.003, and it generates
-the same LLVM IR as the final form for those six programs (compared
-function by function).
+is 1.023, inside the band). Peak memory: no case outside 3%.
+
+**32-a alone** (timing run 22, 2026-11-18: the series of 12 patches
+with 32-a against the same without it; direct pairs, median of 9 and
+min; 20 cases: the seven above, X10 and 12 controls with the largest
+change of their objects): X02 0.831, L03 0.837, L02 0.850, X06 0.857,
+E06 0.875, X03 0.946, L05 0.963; the 13 others 0.993 to 1.007; no case
+slower; X10 does not move with it (1.000). So the two patches' effects
+are separate. The other 33 cases were not timed with 32-a alone.
 
 **Counts** (the prototype, the same code): scopes entered on deriv
 565,495 to 1; children deferred on deriv 2,426,392 to 652,241, on
@@ -225,10 +228,10 @@ not run.
 **Through lean2rr:** 16 release-order and memory tests pass on the
 series with 31-a and 32-a, and `alloc-check.sh` on the four deep-free
 tests passes with peak memory at or below native's; the gate on the
-series with all 15 patches passes (748 of 750, 2 expected failures).
+series with all 15 patches passes (748 of 750, 2 expected failures),
+and so does the gate on the series of 16.
 
-**Not measured:** 32-a alone on its final form in a timing step; the
-follow-up G3; forward order through lean2rr (lean2rr does not use it).
+**Not measured:** the follow-up G3; forward order through lean2rr (lean2rr does not use it).
 
 ## What is left against l2r-base12
 
@@ -239,7 +242,7 @@ qsort 1.075, L08 unionfind 1.062, L15 monadic-interp 1.054. They did
 not move with 31-a and 32-a (1.002, 1.002, 1.000, 1.003). Their cause
 is unknown.
 
-**Repro.** [`repros/bug32-integer-member-release.mlir`](repros/bug32-integer-member-release.mlir) shows the static difference through `reussir-opt`: the release of a variant with integer members has no tail release (REPRODUCES) or has one (FIXED). Run on pristine `36a55a0f`: REPRODUCES; on the series of 15 patches: FIXED (2026-11-18, a run of the repro's author; the gate's own `run.sh` was from before the repro).
+**Repro.** [`repros/bug32-integer-member-release.mlir`](repros/bug32-integer-member-release.mlir) shows the static difference through `reussir-opt`: the release of a variant with integer members has no tail release (REPRODUCES) or has one (FIXED). In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 
 ## Upstream note
 

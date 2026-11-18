@@ -1,7 +1,7 @@
-From 67dab72760020cd47033891caf6188f235cc7f8b Mon Sep 17 00:00:00 2001
+From 4561d76426c95cc5380e8b0286dc5349c3b4ac8e Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 17 Nov 2026 23:31:18 -0500
-Subject: [PATCH 12/15] [trmc] keep a self call in place across a release with
+Subject: [PATCH 12/16] [trmc] keep a self call in place across a release with
  an observable cleanup
 
 TRMC re-creates a linearized self call at its leaf and so moves it past

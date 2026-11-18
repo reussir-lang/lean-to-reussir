@@ -1,7 +1,7 @@
-From 00e367fb378e2a6f75d8d7e4616e56b6c345e6b3 Mon Sep 17 00:00:00 2001
+From 68bf7d89af0e53c481fd55fdec045e4a35959139 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 00:13:21 -0400
-Subject: [PATCH 05/15] [bigint] emit inlineable acquire and release glue for
+Subject: [PATCH 05/16] [bigint] emit inlineable acquire and release glue for
  foreign handles
 
 `reussir_rt::rcgmp::Mpz`, the owned `Nat`/`Int` handle of the polymorphic

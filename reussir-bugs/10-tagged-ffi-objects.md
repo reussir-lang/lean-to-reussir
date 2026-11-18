@@ -9,7 +9,7 @@ them (and its one-word `Nat` and `Int` did, until clean-integration D8 on
 
 **Kind:** missing feature (lean2rr's prelude needs it). **Status:**
 patched (10-a), the first patch of the series on upstream `36a55a0f`
-(Reussir branch `l2r-base13-final`, commit `169d8db5`; 43 files,
+(Reussir branch `l2r-base13-r4`, commit `07a97202`; 43 files,
 +742/-50, without `tests/` +283/-50).
 lean2rr's prelude declares the box `LAny` `tagged` (until D8 also `Nat`
 and `Int`); rrc rejects the attribute without the patch.

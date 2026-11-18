@@ -36,16 +36,18 @@ same standard output, standard error and exit code.
 ## Where it stands
 
 The last full gate that passed (2026-11-18): the translator of
-lean2rr `29a130c9` on the Reussir build of the series of 15 patches
-(`l2r-base13-r3-vec` `2e0bb232` = upstream `36a55a0f` + 15 patches),
+lean2rr `51292d7a` on the Reussir build of the series of 16 patches
+(`l2r-base13-r4` `703a73f2` = upstream `36a55a0f` + 16 patches),
 lean-runtime 50840bb, aarch64. What it ran:
 
 - the runtime suite, 750 programs: 748 identical to native Lean 4.34.0,
   2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), no
-  failure; 652 s;
+  failure; 597 s. Every executable has the section sizes of the gate
+  before (the sixteenth patch changes no generated code);
 - the 23 check scripts of `tests/runtime`: all exit 0. The allocation
-  check (81 tests, 191 rows) passes with no row worse than in the gate
-  before; the scripts that pin shapes and hashes of the generated code
+  check (81 tests, 191 rows) passes; each row is equal to the gate
+  before or within 4 allocations of it, and the executables are the
+  same, so allocation counts move that much between runs; the scripts that pin shapes and hashes of the generated code
   have the output of the gate before;
 - the classic corpus: 18 programs with the passes on and with 26 passes
   off (small and medium sizes, 36 rows each), and with `unread-fields`
@@ -96,10 +98,11 @@ Known open items on this base:
   values on the base before already. One row is better since patches
   31-a and 32-a: `RtClosureChainFree`'s chain of compositions peaks at
   45.7 MB, 66.1 MB before.
-- Build time of a small program: the series of 15 patches takes about
-  9% more in rrc and the link than the series of 12 (a warm sample of
-  20 tests: 1.84 s against 1.69 s); the patch that causes it is not
-  known.
+- Build time of a small program: with patch 30-a it takes about 9%
+  more in rrc and the link than without (timing run 22, 20 tests,
+  warm: 1.83 s against 1.68 s, slower in 20 of 20). The cost is that
+  patch's alone; the time is in LLVM's work on a larger module. Two
+  large programs (lean-zip, Cedar) are not slower to build with it.
 - Loops for recursions into a constructor: 54 of the 57 functions that
   had a loop on the base before have it again; the shape of
   `AssocList.foldrM` (a value built after the self call) has none.
@@ -109,13 +112,13 @@ Known open items on this base:
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (750 programs, `tests/runtime`) | at its last full run (the gate of 2026-11-18 on the series of 15 patches: lean2rr 29a130c9, Reussir `36a55a0f` + 15 patches, lean-runtime 50840bb), 748 of 750 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`); the classic corpus 36 of 36 with the passes on and with 26 passes off, 18 of 18 with `unread-fields`; the 23 check scripts; the raytracer 3 of 3 |
+| Runtime test suite (750 programs, `tests/runtime`) | at its last full run (the gate of 2026-11-18 on the series of 16 patches: lean2rr 51292d7a, Reussir `36a55a0f` + 16 patches, lean-runtime 50840bb), 748 of 750 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`); the classic corpus 36 of 36 with the passes on and with 26 passes off, 18 of 18 with `unread-fields`; the 23 check scripts; the raytracer 3 of 3 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | Applications (`tests/apps`: lean4-raytracer, two modules, built with Lake) | the image file, stdout, stderr and exit code identical to native at all three settings (60×40 pixels on the main thread and in one task; 200×133 pixels, 4 samples per pixel, depth 30, on the main thread), dev e1e5dde, 2026-10-07 |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed (merged 36a5f92)); every other finding fixed or documented |
-| Speed, shared benchmark set (53 cases: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; timing run 21, 2026-11-18, median of 9, aarch64) | geometric mean 0.568× of native Lean 4.34.0's time (run 20, before patches 31-a and 32-a: 0.584; run 19 on the Reussir base before: 0.593); two cases above native: rose_tree 1.19, gcd_batch 1.03. Against the series of run 20, in direct pairs: 0.975, eight cases more than 3% faster and none slower. Against lean2rr on the Reussir base before, derived from runs 20 and 21 (not a direct pair): 0.959. The headline was timed without patch 30-a, which came last; with it, in direct pairs: 1.000 (run time does not change), code size +2.0%. Peak memory: no case outside 3% in either pair |
+| Speed, shared benchmark set (53 cases: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; timing runs 21 and 22, 2026-11-18, median of 9, aarch64) | geometric mean 0.569× of native Lean 4.34.0's time for the full series, timed directly in run 22 (run 21, without patch 30-a: 0.568; run 20, before patches 31-a and 32-a: 0.584; run 19 on the Reussir base before: 0.593); two cases above native: rose_tree 1.18, gcd_batch 1.03. Against the series of run 20, in direct pairs: 0.975, eight cases more than 3% faster and none slower. Against lean2rr on the Reussir base before, derived from runs 20 and 21 (not a direct pair): 0.959. Patch 30-a against the series without it, in direct pairs: 1.000 (run time does not change), code size +2.0%. Peak memory: no case outside 3% in either pair |
 | Speed (classic corpus against native Lean 4.34.0, 2026-10-04) | faster than native Lean on 15 of the 18 classic programs and about equal on the other three (bignum 1.00×, binarytrees 1.02×, nqueens 1.04×); geometric mean 0.71× time, 0.69× memory; less memory on all 18. Reussir's suite last measured against 4.33 (faster on 17 of 18); tables below |
 
 ## How a program is compiled
@@ -653,16 +656,18 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 15
-patches of the series (the Reussir branch `l2r-base13-r3-vec`, head
-`2e0bb232`, tree `72d3b85b`): 10-a, 07-a, five patches of step D
+Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 16
+patches of the series (the Reussir branch `l2r-base13-r4`, head
+`703a73f2`, tree `2778b509`): 10-a, 07-a, five patches of step D
 (issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), three
 patches for costs of upstream's own that lean2rr's programs showed
 (29-a: the store of rrc's texture cache is opened once for a module;
 31-a: a record of scalars that foreign code releases is freed
 directly; 32-a: records with integer members keep the fast paths of
 the drop glue), the fixes of three upstream bugs that the port found
-(26-a, 27-a, 28-a), and 30-a (the vector lowering without block
+(26-a, 27-a, 28-a), the fix of a fourth upstream bug that lean2rr
+does not reach (33-a: a pass of `reussir-opt` crashed on a release
+without a token), and 30-a (the vector lowering without block
 merging, a build-time patch that comes last because it follows
 28-a).
 The file
@@ -724,17 +729,22 @@ What the move to this base changed
   off for records with an integer member (issue 32). Run 21, with both
   patches against the series of run 20: 0.975 over the set, n_body
   0.642, the seven cases 0.829 to 0.961, no case slower; 0.568 of
-  native's time.
+  native's time. Run 22 timed each patch alone: n_body is 31-a's case
+  (0.642), the seven cases are 32-a's (0.831 to 0.963), and neither
+  patch moves another case.
 - One runtime test took about 18 minutes to compile: an MLIR pass for
   vectors merged the blocks of a large function without vectors (issue
   30). Patch 30-a removes the merging: the test builds in seconds, run
   time does not change (1.000 over the 53 cases), and the code is 2.0%
-  larger (Cedar 9.3%).
+  larger (Cedar 9.3%). A small program takes about 9% more time to
+  build with it (run 22); lean-zip and Cedar do not. The full series
+  with it: 0.569 of native's time, timed directly (run 22).
 - Open: four cases are still 5 to 8% slower than on the base before
   (hashmap, the small qsort, unionfind, monadic-interp); they did not
   move with the two patches, and their cause is unknown. Some wins of
   run 20 are not attributed either (the red-black tree cases, peano,
-  binarytrees).
+  binarytrees). `RtDepPolyRec` takes 136 s in rrc and the link; not
+  investigated.
 
 The base before this one was upstream Reussir `95d9a1c8` (2026-10-26)
 plus 24 patches: the Reussir branch `l2r-base12` (head
@@ -797,7 +807,7 @@ lean2rr, since the old drop patches went; their numbers are retired, as
 is 22 (a local patch for retcon destructors, never published, superseded
 by issue 23). The series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-15 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
+16 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct

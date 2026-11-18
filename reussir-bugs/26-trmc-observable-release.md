@@ -10,7 +10,7 @@ after. Patch 26-a keeps the self call in place there.
 ## Summary
 
 **Kind:** bug. **Status:** patched (26-a), in the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit `67dab727`).
+`36a55a0f` (Reussir branch `l2r-base13-r4`, commit `4561d764`).
 lean2rr's programs are not known to reach the bug: one constructed Lean
 program gave native's output, and the patch changes no TRMC helper of
 the 19 lean2rr programs that the review compiled. `scripts/l2r.py`

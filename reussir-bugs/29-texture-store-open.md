@@ -9,8 +9,8 @@ opens the store once for a module's textures. It is an optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (29-a), patch 9 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
-`0f679c4e`; 4 files, +50/-8).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
+`5a5eda93`; 4 files, +50/-8).
 `scripts/l2r.py` does not check for the patch: without it builds are
 slower, with the same results.
 
@@ -121,7 +121,7 @@ The second case depends on the text of compcache's debug log.
 
 **The patch file and the gated compilers.** The file in `patches/` has
 this test in its last form, and so has the Reussir branch of the
-current series (`l2r-base13-r3-vec`). The compiler of the port's final
+current series (`l2r-base13-r4`). The compiler of the port's final
 gate (branch `l2r-base13-final`, head `d62797ac`) had the form before
 it, in which the test made a lock file read-only; only that test file
 differed, no compiler source.
@@ -204,6 +204,22 @@ process at a time):
 The reviewer did not measure the small-store rows, the cold rows of an
 empty store, the larger program or the system-call counts.
 
+**The series' form on the larger program** (timing run 22, 2026-11-18:
+RtTArrKinds, 308 textures; the series of 12 patches without 29-a
+against the same with it; stores on disk; rrc and the link, min /
+median of 3; another agent's builds ran on the machine):
+
+| Store | without 29-a | with 29-a | difference of the medians |
+|---|---:|---:|---:|
+| warm, small store (2.4 MB) | 41.64 / 41.77 | 37.83 / 38.01 | -3.8 s (-9%) |
+| warm, 139 MB store | 54.66 / 55.23 | 37.80 / 39.74 | -15.5 s (-28%) |
+| cold, empty store | 50.17 / 50.50 | 47.33 / 49.41 | -1.1 s (-2%) |
+
+The 139 MB store of this table is synthetic (the warm small store plus
+15,500 entries of random bytes), because the first gate's store no
+longer exists. For the cold case the claim is only "not slower" (three
+runs each under some load; the first form's table above showed more).
+
 **What the claim is.** A warm rrc build of a program with 124 textures
 goes from about 5 s to about 3.2 s with a small store and from about
 10 s to about 3.1 s with a 140 MB store; two such builds at once on one
@@ -226,7 +242,9 @@ The gate on the series of 15 patches (the store on a memory file
 system again) took 652 s for the suite, with 30-a removing the outlier
 program ([entry 30](30-vector-to-llvm-block-merging.md)).
 
-**Not measured:** the patch alone in a full suite run; the share of
+**Not measured:** the series' form on the larger program with a real
+store of that size (the one above is synthetic); the patch alone in a
+full suite run; the share of
 each of the four things above; a store on disk in the final gate;
 other platforms.
 
@@ -239,13 +257,12 @@ code generation 6.8 s to 11.2 s for lean-zip; one run each, before
 this patch). The cause is not attributed to an upstream change. Small
 programs do not show it. One program's build of 16 to 18 minutes on
 this base had its own cause, which is patched
-([entry 30](30-vector-to-llvm-block-merging.md)). Open, from the gate
-on the series of 15 patches: with every texture in the cache and alone
-on the machine, a small program takes about 0.15 s more in rrc and the
-link on that series than on the series of 12 (1.84 s against 1.69 s
-for each of 20 tests, about 9%; between 5% and 12%; slower in 17 of
-20 tests in both passes). The three patches that the two series differ
-by are 31-a, 32-a and 30-a; which one costs it is not measured.
+([entry 30](30-vector-to-llvm-block-merging.md)). One more build-time cost
+on this base has its cause too: a small program takes about 9% more
+in rrc and the link with patch 30-a than without it (+0.15 s for each
+test, slower in 20 of 20; the patches 31-a and 32-a cost nothing
+measurable). It is the price of 30-a
+([entry 30](30-vector-to-llvm-block-merging.md#the-trade-off)).
 Measured not to be causes of the difference to `l2r-base12`: the frontend and
 the loading of core's interface, the borrow analysis, the link, and
 rustc's time for a cold texture.

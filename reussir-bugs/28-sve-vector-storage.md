@@ -9,7 +9,7 @@ Patch 28-a applies the same patterns without the cleanup that fails.
 ## Summary
 
 **Kind:** bug. **Status:** patched (28-a), in the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit `46c816b3`).
+`36a55a0f` (Reussir branch `l2r-base13-r4`, commit `6817ba69`).
 lean2rr reaches the bug on the build machine (aarch64 with SVE): the
 largest function of the row oracle of `tests/runtime/rows-check.sh`
 does not compile without the patch. `scripts/l2r.py` requires the

@@ -1,7 +1,7 @@
-From af8015853a843b2a880cebec907684821e9a2431 Mon Sep 17 00:00:00 2001
+From 703a73f232a072964bd43dfe019dda39aab9f4b9 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 07:24:50 -0500
-Subject: [PATCH] [conversion] lower the vector dialect without region
+Subject: [PATCH 16/16] [conversion] lower the vector dialect without region
  simplification
 
 The pipeline ran MLIR's `convert-vector-to-llvm` on every module. That
@@ -56,10 +56,10 @@ index 04cf84c8..371f6aa6 100644
      "MLIRReussirInstrumentNonlinearFFI",
      "MLIRReussirAttachNativeTarget",
 diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
-index 68585ffe..a651f76b 100644
+index c66b5ff5..3415968e 100644
 --- a/include/Reussir/Conversion/Passes.td
 +++ b/include/Reussir/Conversion/Passes.td
-@@ -370,6 +370,27 @@ def ReussirConvertToLLVMPass
+@@ -374,6 +374,27 @@ def ReussirConvertToLLVMPass
    let dependentDialects = ["::mlir::LLVM::LLVMDialect"];
  }
  

@@ -1,7 +1,7 @@
-From 46c816b39e9b4460014caff9fe141292f5ae6264 Mon Sep 17 00:00:00 2001
+From 6817ba69cf6a3ebeb322b49931cefe873f880e58 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 01:51:48 -0500
-Subject: [PATCH 14/15] [conversion] legalize the storage of scalable vectors
+Subject: [PATCH 14/16] [conversion] legalize the storage of scalable vectors
  with the patterns alone
 
 On a target with SVE the pipeline ran MLIR's `arm-sve-legalize-vector-

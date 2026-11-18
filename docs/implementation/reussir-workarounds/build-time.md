@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `36a55a0f` with the series
-(the Reussir branch `l2r-base13-r3-vec`, `2e0bb232`); the workarounds
+(the Reussir branch `l2r-base13-r4`, `703a73f2`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)). The measurements in this file were
 made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
@@ -33,7 +33,9 @@ the series). Build-time items on this base:
 - The gate's runtime suite on the series of 15 patches took 652 s
   (750 tests, 8 shards, a cold texture store on a memory file system,
   a quiet machine); on the base before 671 s (747 tests, a warm store
-  on disk). One run each, not a benchmark.
+  on disk). One run each, not a benchmark. The gate on the series of
+  16 patches took 597 s with executables that are identical in their
+  section sizes: the difference to 652 s is variation between runs.
 - Per test, the first 20 tests of one shard, rrc and the link: 16.7 s
   in the first gate (cold store on disk, a loaded machine), 3.2 s in
   the final gate on 12 patches, 4.2 s in the gate on 15 patches (both
@@ -41,14 +43,22 @@ the series). Build-time items on this base:
   was mostly noise of the cold start with 8 shards: the sum over the
   whole suite is 5% lower than the final gate's without
   `RtOutlineStates` (3085 s against 3244 s).
-- Open: a warm repeat of those 20 tests (the same driver and
-  translator, two passes for each compiler in turn, alone on the
-  machine, every texture a cache hit) shows a small real cost of the
-  series of 15 patches against the series of 12: 1.84 s against 1.69 s
-  of rrc and the link for each test, about 0.15 s or 9% (between 5%
-  and 12% by the spread of the passes; slower in 17 of 20 tests in
-  both passes). Which of the three new patches (31-a, 32-a, 30-a)
-  costs it is not measured.
+- A small program takes about 9% more time in rrc and the link with
+  patch 30-a than without it. First seen in a warm repeat of those 20
+  tests in the gate on 15 patches (1.84 s against 1.69 s for each
+  test). Timing run 22 found the patch (20 tests, every texture in a
+  warm store, five compilers in turn): the series of 12 patches
+  1.684 s for each test; with 31-a, with 32-a and with both, 0.008 s
+  to 0.014 s less; with 30-a on top +0.148 s (+9%), slower in 20 of 20
+  tests; a second build of that compiler gave +0.172 s. The time is
+  not in MLIR. The module that goes to LLVM is 18 to 48% larger on the
+  three tests that were measured by stage, and LLVM's optimization and
+  code generation take the extra time: LLVM now does the work on the
+  blocks that MLIR's pass merged before. This mechanism is supported
+  by the stage times and sizes; it is not isolated further. Large
+  programs are not slower to build with the patch (rrc and the link,
+  two runs each): lean-zip 37.6 s without, 35.0 s and 36.9 s with;
+  Cedar 78.2 s and 83.3 s without, 76.4 s and 77.6 s with.
 - Open: `RtDepPolyRec` (a 6 MB `.rr`) takes 136 s in rrc and the link
   (146 s in the final gate). It is the one large single-program time
   now. Its time is in the drop expansion and other passes, not in the

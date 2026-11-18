@@ -1,7 +1,7 @@
-From 6d56ffeb6e1e7782ba72b8e60d5acbacfecbee0e Mon Sep 17 00:00:00 2001
+From 43e5185634f4abbd84b477e463df9e9e205cbbfd Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 08:08:39 -0500
-Subject: [PATCH 11/15] [drop] release integer members in place and
+Subject: [PATCH 11/16] [drop] release integer members in place and
  tail-release the last child
 
 A record that holds an arbitrary-precision integer reports an observable

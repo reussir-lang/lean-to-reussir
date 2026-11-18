@@ -1,0 +1,374 @@
+From 00e32e22d72aa4726eee675d7091928494a9601e Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Wed, 18 Nov 2026 07:24:50 -0500
+Subject: [PATCH] [conversion] lower the vector dialect without region
+ simplification
+
+The pipeline ran MLIR's `convert-vector-to-llvm` on every module. That
+pass applies its first pattern sets with the greedy driver's default
+configuration, whose region simplification merges the similar blocks
+of every function, also of one without any vector, and gives a merged
+block one argument per operand that differs. In a large function with
+many similar arms these arguments multiply from one merge to the next:
+the pass took minutes and left blocks with hundreds of thousands of
+arguments for LLVM. This is a cost of the MLIR pass, which has no
+option for the driver's configuration; no LLVM report has been filed.
+
+`reussir-convert-vector-to-llvm` applies the same pattern sets in the
+same order, with that pass's default options and the same conversion
+to the LLVM dialect, and with region simplification off. Folding stays
+on, since the lowering patterns build on it. The pipeline and the JIT
+bridge use it.
+
+On the program that showed the cost, the lowering pipeline takes 2.7 s
+where it took 536 s, and the build to the executable 8 s where it took
+978 s. The merging also made code smaller. Without it the code of 53
+programs of a compiler that targets Reussir is 2.0% larger in the
+geometric mean (the largest 9.3%), with no measurable effect on run
+time (geometric mean 1.000, 52 of 53 within 3%); the benchmark suite,
+core and std do not change.
+---
+ crates/reussir-backend-sys/build.rs           |   1 +
+ include/Reussir/Conversion/Passes.td          |  21 ++++
+ lib/Bridge/Bridge.cppm                        |   4 +-
+ lib/CAPI/CMakeLists.txt                       |   1 +
+ lib/CAPI/Passes.cpp                           |   5 +-
+ lib/Conversion/CMakeLists.txt                 |   2 +
+ .../ConvertVectorToLLVM/CMakeLists.txt        |  16 +++
+ .../ConvertVectorToLLVM.cpp                   | 108 ++++++++++++++++++
+ .../conversion/convert_vector_to_llvm.mlir    |  54 +++++++++
+ tool/reussir-opt/main.cpp                     |   3 +
+ 10 files changed, 210 insertions(+), 5 deletions(-)
+ create mode 100644 lib/Conversion/ConvertVectorToLLVM/CMakeLists.txt
+ create mode 100644 lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
+ create mode 100644 tests/integration/conversion/convert_vector_to_llvm.mlir
+
+diff --git a/crates/reussir-backend-sys/build.rs b/crates/reussir-backend-sys/build.rs
+index b8f4c924..954439a3 100644
+--- a/crates/reussir-backend-sys/build.rs
++++ b/crates/reussir-backend-sys/build.rs
+@@ -34,6 +34,7 @@ const REUSSIR_ARCHIVES: &[&str] = &[
+     "MLIRReussirRcDecrementExpansion",
+     "MLIRReussirTokenInstantiation",
+     "MLIRReussirClosureOutlining",
++    "MLIRReussirConvertVectorToLLVM",
+     "MLIRReussirCompilePolymorphicFFI",
+     "MLIRReussirInstrumentNonlinearFFI",
+     "MLIRReussirAttachNativeTarget",
+diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
+index 66170846..95c68b18 100644
+--- a/include/Reussir/Conversion/Passes.td
++++ b/include/Reussir/Conversion/Passes.td
+@@ -370,6 +370,27 @@ def ReussirConvertToLLVMPass
+   let dependentDialects = ["::mlir::LLVM::LLVMDialect"];
+ }
+ 
++//===----------------------------------------------------------------------===//
++// ConvertVectorToLLVM
++//===----------------------------------------------------------------------===//
++def ReussirConvertVectorToLLVMPass
++    : Pass<"reussir-convert-vector-to-llvm", "::mlir::ModuleOp"> {
++  let summary = "lower the vector dialect to the LLVM dialect";
++  let description = [{
++    `reussir-convert-vector-to-llvm` applies the pattern sets of MLIR's
++    `convert-vector-to-llvm`, with that pass's default options, and the same
++    conversion to the LLVM dialect. MLIR's pass applies the first sets with
++    the greedy driver's default configuration, whose region simplification
++    merges the similar blocks of every function, also of one without any
++    vector, and gives a merged block one argument per operand that differs.
++    In a large function with many similar arms these arguments multiply from
++    one merge to the next. Here the driver does not simplify
++    regions.
++  }];
++  let options = [Option<"armSVE", "enable-arm-sve", "bool", /*default=*/"false",
++                        "Use the ArmSVE dialect in the lowering">];
++}
++
+ //===----------------------------------------------------------------------===//
+ // FixVectorScale
+ //===----------------------------------------------------------------------===//
+diff --git a/lib/Bridge/Bridge.cppm b/lib/Bridge/Bridge.cppm
+index 3585434a..b4b107bb 100644
+--- a/lib/Bridge/Bridge.cppm
++++ b/lib/Bridge/Bridge.cppm
+@@ -256,9 +256,9 @@ void createLoweringPipeline(mlir::PassManager &pm,
+   if (armSVE)
+     pm.addNestedPass<mlir::func::FuncOp>(
+         mlir::arm_sve::createLegalizeVectorStoragePass());
+-  mlir::ConvertVectorToLLVMPassOptions vectorOptions;
++  reussir::ReussirConvertVectorToLLVMPassOptions vectorOptions;
+   vectorOptions.armSVE = armSVE;
+-  pm.addPass(mlir::createConvertVectorToLLVMPass(vectorOptions));
++  pm.addPass(reussir::createReussirConvertVectorToLLVMPass(vectorOptions));
+   pm.addPass(createReussirConvertToLLVMPass());
+   pm.addPass(createReconcileUnrealizedCastsPass());
+   pm.addPass(createCSEPass());
+diff --git a/lib/CAPI/CMakeLists.txt b/lib/CAPI/CMakeLists.txt
+index baa35ab4..0c52f76e 100644
+--- a/lib/CAPI/CMakeLists.txt
++++ b/lib/CAPI/CMakeLists.txt
+@@ -44,6 +44,7 @@ set(REUSSIR_BACKEND_ARCHIVES
+   MLIRReussirRcDecrementExpansion
+   MLIRReussirTokenInstantiation
+   MLIRReussirClosureOutlining
++  MLIRReussirConvertVectorToLLVM
+   MLIRReussirCompilePolymorphicFFI
+   MLIRReussirInstrumentNonlinearFFI
+   MLIRReussirAttachNativeTarget
+diff --git a/lib/CAPI/Passes.cpp b/lib/CAPI/Passes.cpp
+index faa00ee2..e1518835 100644
+--- a/lib/CAPI/Passes.cpp
++++ b/lib/CAPI/Passes.cpp
+@@ -42,7 +42,6 @@
+ #include <mlir/Conversion/ConvertToLLVM/ToLLVMPass.h>
+ #include <mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h>
+ #include <mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h>
+-#include <mlir/Conversion/VectorToLLVM/ConvertVectorToLLVMPass.h>
+ #include <mlir/Dialect/ArmSVE/Transforms/Passes.h>
+ #include <mlir/Dialect/DLTI/DLTI.h>
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+@@ -258,9 +257,9 @@ MlirPass reussirCreateLowerAffinePass(void) {
+   return wrapOwned(mlir::createLowerAffinePass());
+ }
+ MlirPass reussirCreateConvertVectorToLLVMPass(bool armSVE) {
+-  mlir::ConvertVectorToLLVMPassOptions options;
++  reussir::ReussirConvertVectorToLLVMPassOptions options;
+   options.armSVE = armSVE;
+-  return wrapOwned(mlir::createConvertVectorToLLVMPass(options));
++  return wrapOwned(reussir::createReussirConvertVectorToLLVMPass(options));
+ }
+ MlirPass reussirCreateFixVectorScalePass(unsigned scale) {
+   reussir::ReussirFixVectorScalePassOptions options;
+diff --git a/lib/Conversion/CMakeLists.txt b/lib/Conversion/CMakeLists.txt
+index 393c61b3..334c33dd 100644
+--- a/lib/Conversion/CMakeLists.txt
++++ b/lib/Conversion/CMakeLists.txt
+@@ -6,6 +6,7 @@ add_subdirectory(AcquireDropExpansion)
+ add_subdirectory(RcDecrementExpansion)
+ add_subdirectory(TokenInstantiation)
+ add_subdirectory(ClosureOutlining)
++add_subdirectory(ConvertVectorToLLVM)
+ add_subdirectory(CompilePolymorphicFFI)
+ add_subdirectory(InstrumentNonlinearFFI)
+ add_subdirectory(AttachNativeTarget)
+@@ -21,6 +22,7 @@ set(REUSSIR_CONVERSION_AGGREGATE_LIBS
+   MLIRReussirRcDecrementExpansion
+   MLIRReussirTokenInstantiation
+   MLIRReussirClosureOutlining
++  MLIRReussirConvertVectorToLLVM
+   MLIRReussirCompilePolymorphicFFI
+   MLIRReussirInstrumentNonlinearFFI
+   MLIRReussirAttachNativeTarget
+diff --git a/lib/Conversion/ConvertVectorToLLVM/CMakeLists.txt b/lib/Conversion/ConvertVectorToLLVM/CMakeLists.txt
+new file mode 100644
+index 00000000..0b2c633e
+--- /dev/null
++++ b/lib/Conversion/ConvertVectorToLLVM/CMakeLists.txt
+@@ -0,0 +1,16 @@
++add_mlir_conversion_library(MLIRReussirConvertVectorToLLVM
++  ConvertVectorToLLVM.cpp
++
++  DEPENDS
++  MLIRReussirConversionPassIncGen
++
++  LINK_COMPONENTS
++  Core
++  Support
++
++  LINK_LIBS PUBLIC
++  MLIRArmSVETransforms
++  MLIRLLVMCommonConversion
++  MLIRVectorToLLVM
++  MLIRVectorTransforms
++)
+diff --git a/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
+new file mode 100644
+index 00000000..bb537a0d
+--- /dev/null
++++ b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
+@@ -0,0 +1,108 @@
++//===----------------------------------------------------------------------===//
++//
++// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
++// the MIT License.
++// See https://github.com/reussir-lang/reussir/blob/main/LICENSE for license
++// information.
++// SPDX-License-Identifier: Apache-2.0 OR MIT
++//
++//===----------------------------------------------------------------------===//
++///
++/// \file
++/// This file implements the pass that lowers the vector dialect to the LLVM
++/// dialect.
++///
++//===----------------------------------------------------------------------===//
++
++#include "Reussir/Conversion/Passes.h"
++
++#include <mlir/Conversion/LLVMCommon/ConversionTarget.h>
++#include <mlir/Conversion/LLVMCommon/TypeConverter.h>
++#include <mlir/Conversion/VectorToLLVM/ConvertVectorToLLVM.h>
++#include <mlir/Dialect/Arith/IR/Arith.h>
++#include <mlir/Dialect/ArmSVE/IR/ArmSVEDialect.h>
++#include <mlir/Dialect/ArmSVE/Transforms/Transforms.h>
++#include <mlir/Dialect/LLVMIR/LLVMDialect.h>
++#include <mlir/Dialect/MemRef/IR/MemRef.h>
++#include <mlir/Dialect/Tensor/IR/Tensor.h>
++#include <mlir/Dialect/Vector/Transforms/LoweringPatterns.h>
++#include <mlir/Dialect/Vector/Transforms/VectorRewritePatterns.h>
++#include <mlir/IR/BuiltinOps.h>
++#include <mlir/Pass/Pass.h>
++#include <mlir/Transforms/GreedyPatternRewriteDriver.h>
++
++namespace reussir {
++#define GEN_PASS_DEF_REUSSIRCONVERTVECTORTOLLVMPASS
++#include "Reussir/Conversion/Passes.h.inc"
++
++namespace {
++using namespace mlir;
++
++// The pattern sets, their order and their options are those of MLIR's
++// `convert-vector-to-llvm` with its default options.
++struct ReussirConvertVectorToLLVMPass
++    : public impl::ReussirConvertVectorToLLVMPassBase<
++          ReussirConvertVectorToLLVMPass> {
++  using impl::ReussirConvertVectorToLLVMPassBase<
++      ReussirConvertVectorToLLVMPass>::ReussirConvertVectorToLLVMPassBase;
++
++  void getDependentDialects(DialectRegistry &registry) const override {
++    registry.insert<LLVM::LLVMDialect, arith::ArithDialect,
++                    memref::MemRefDialect, tensor::TensorDialect>();
++    if (armSVE)
++      registry.insert<arm_sve::ArmSVEDialect>();
++  }
++
++  void runOnOperation() override {
++    const bool force32BitVectorIndices = true;
++    {
++      RewritePatternSet patterns(&getContext());
++      vector::populateVectorToVectorCanonicalizationPatterns(patterns);
++      vector::populateVectorBitCastLoweringPatterns(patterns);
++      vector::populateVectorBroadcastLoweringPatterns(patterns);
++      vector::populateVectorContractLoweringPatterns(
++          patterns, vector::VectorContractLowering::Dot);
++      vector::populateVectorMaskOpLoweringPatterns(patterns);
++      vector::populateVectorShapeCastLoweringPatterns(patterns);
++      vector::populateVectorInterleaveLoweringPatterns(patterns);
++      vector::populateVectorTransposeLoweringPatterns(
++          patterns, vector::VectorTransposeLowering::EltWise);
++      vector::populateVectorTransferLoweringPatterns(patterns,
++                                                     /*maxTransferRank=*/1);
++      vector::populateVectorMaskMaterializationPatterns(
++          patterns, force32BitVectorIndices);
++      vector::populateVectorInsertExtractStridedSliceTransforms(patterns);
++      vector::populateVectorRankReducingFMAPattern(patterns);
++      vector::populateVectorGatherLoweringPatterns(patterns);
++      vector::populateVectorFromElementsUnrollPatterns(patterns);
++      vector::populateVectorToElementsUnrollPatterns(patterns);
++      // Folding stays, since the lowering patterns build on it. Region
++      // simplification is not part of the lowering: it merges the similar
++      // blocks of code without any vector.
++      GreedyRewriteConfig config;
++      config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
++      (void)applyPatternsGreedily(getOperation(), std::move(patterns), config);
++    }
++
++    LowerToLLVMOptions options(&getContext());
++    LLVMTypeConverter converter(&getContext(), options);
++    RewritePatternSet patterns(&getContext());
++    vector::populateVectorTransferLoweringPatterns(patterns);
++    populateVectorToLLVMConversionPatterns(
++        converter, patterns, /*reassociateFPReductions=*/false,
++        force32BitVectorIndices);
++    LLVMConversionTarget target(getContext());
++    target.addLegalDialect<arith::ArithDialect>();
++    target.addLegalDialect<memref::MemRefDialect>();
++    target.addLegalOp<UnrealizedConversionCastOp>();
++    if (armSVE) {
++      configureArmSVELegalizeForExportTarget(target);
++      populateArmSVELegalizeForLLVMExportPatterns(converter, patterns);
++    }
++    if (failed(applyPartialConversion(getOperation(), target,
++                                      std::move(patterns))))
++      signalPassFailure();
++  }
++};
++} // namespace
++} // namespace reussir
+diff --git a/tests/integration/conversion/convert_vector_to_llvm.mlir b/tests/integration/conversion/convert_vector_to_llvm.mlir
+new file mode 100644
+index 00000000..3c8d153e
+--- /dev/null
++++ b/tests/integration/conversion/convert_vector_to_llvm.mlir
+@@ -0,0 +1,54 @@
++// RUN: %reussir-opt %s --reussir-convert-vector-to-llvm | %FileCheck %s
++// RUN: %reussir-opt %s --reussir-convert-vector-to-llvm | %FileCheck %s --check-prefix=ARGS
++// RUN: %reussir-opt %S/vector_lowering.mlir --pass-pipeline='builtin.module(reussir-attach-native-target,reussir-convert-vector-to-llvm,reussir-convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %FileCheck %S/vector_lowering.mlir
++
++// Two pairs of arms without any vector that release different values in the
++// same way. The region simplification of MLIR's `convert-vector-to-llvm`
++// merges each pair into one block that takes the values as arguments; in a
++// large function with many such arms the arguments multiply from one merge
++// to the next. The lowering leaves the blocks as they are, and no block
++// gets an argument.
++
++// ARGS-NOT: ^bb{{[0-9]+}}(
++
++func.func private @release(i64, i64)
++
++// CHECK-LABEL: func.func @arms(
++// CHECK: cf.cond_br %{{.+}}, ^[[LEFT:bb[0-9]+]], ^[[RIGHT:bb[0-9]+]]
++// CHECK-NEXT: ^[[LEFT]]:
++// CHECK-NEXT: call @release(%[[A:[^,]+]], %[[A]])
++// CHECK: ^[[RIGHT]]:
++// CHECK-NEXT: call @release(%[[B:[^,]+]], %[[C:[^)]+]])
++// CHECK: cf.cond_br %{{.+}}, ^[[LEFT2:bb[0-9]+]], ^[[RIGHT2:bb[0-9]+]]
++// CHECK-NEXT: ^[[LEFT2]]:
++// CHECK-NEXT: call @release(%[[C]], %[[C]])
++// CHECK: ^[[RIGHT2]]:
++// CHECK-NEXT: call @release(%[[A]], %[[B]])
++func.func @arms(%p: i1, %a: i64, %b: i64, %c: i64) {
++  cf.cond_br %p, ^left, ^right
++^left:
++  call @release(%a, %a) : (i64, i64) -> ()
++  cf.br ^next
++^right:
++  call @release(%b, %c) : (i64, i64) -> ()
++  cf.br ^next
++^next:
++  cf.cond_br %p, ^left2, ^right2
++^left2:
++  call @release(%c, %c) : (i64, i64) -> ()
++  cf.br ^exit
++^right2:
++  call @release(%a, %b) : (i64, i64) -> ()
++  cf.br ^exit
++^exit:
++  return
++}
++
++// The vector operations are still lowered.
++// CHECK-LABEL: func.func @splat(
++// CHECK-NOT: vector.broadcast
++// CHECK: llvm.shufflevector
++func.func @splat(%x: f32) -> vector<4xf32> {
++  %v = vector.broadcast %x : f32 to vector<4xf32>
++  return %v : vector<4xf32>
++}
+diff --git a/tool/reussir-opt/main.cpp b/tool/reussir-opt/main.cpp
+index d8f92bce..4e72086d 100644
+--- a/tool/reussir-opt/main.cpp
++++ b/tool/reussir-opt/main.cpp
+@@ -142,6 +142,9 @@ int main(int argc, char **argv) {
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirSpecialPointerTagPass();
+   });
++  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
++    return reussir::createReussirConvertVectorToLLVMPass();
++  });
+   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> {
+     return reussir::createReussirAttachNativeTargetPass();
+   });
+-- 
+2.43.0
+

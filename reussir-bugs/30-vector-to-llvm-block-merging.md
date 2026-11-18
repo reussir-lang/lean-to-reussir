@@ -12,9 +12,10 @@ lean2rr's programs is 2.0% larger.
 ## Summary
 
 **Kind:** cost. **Status:** patched (30-a), the last patch of the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
-`2e0bb232`; the patch file is its final form, `af801585`, which differs
-only in a description string and in its test; 10 files, +210/-4).
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
+`703a73f2`; 10 files, +210/-4). A form of the patch that applies to
+plain upstream is in
+[`patches/standalone/`](patches/standalone/).
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same, and one known program builds in minutes.
 
@@ -22,9 +23,9 @@ are the same, and one known program builds in minutes.
 vector work (#994). `l2r-base12` does not have the pass. The behaviour
 is MLIR's (LLVM 23.1.2), and the pass has no option for it. Not
 reported to Reussir (the maintainer takes changes from this directory)
-and not reported to LLVM. A form of the patch for plain upstream exists
-(Reussir branch `j2-vec2llvm-pristine`); the file in `patches/` is the
-form that applies after 28-a.
+and not reported to LLVM. The file in `patches/` is the form that
+applies after 28-a; the form for plain upstream is
+`patches/standalone/30-a-vector-to-llvm-patterns.patch`.
 
 ## Context
 
@@ -130,13 +131,21 @@ mechanism, not the multiplication.
 ## The trade-off
 
 The merging that MLIR's pass did by accident also made lean2rr's code
-smaller. Nobody had planned or measured that. 30-a takes it away:
+smaller. Nobody had planned or measured that. 30-a takes it away. The
+whole trade, as measured:
 
-- **Build time:** `RtOutlineStates` builds in seconds.
-- **Run time:** no measurable effect (below).
+- **One program builds:** `RtOutlineStates` goes from about 16 minutes
+  to 11 s.
+- **Small programs are about 9% slower to build:** +0.15 s of rrc and
+  the link for each small test (1.68 s to 1.83 s), slower in 20 of 20
+  tests. The cost is 30-a's alone (below).
+- **Large programs are not slower to build:** lean-zip 37.6 s without
+  the patch, 35.0 s and 36.9 s with it; Cedar 78.2 s and 83.3 s
+  without, 76.4 s and 77.6 s with.
 - **Code size:** the executables of the 53 benchmark programs are 2.0%
   larger in `.text` (geometric mean); Cedar is 9.3% larger. Every
   program grows.
+- **Run time:** unchanged (1.000 over 53 cases).
 
 What the growth is made of (symbol sizes of the executables of timing
 run 21, without and with 30-a):
@@ -235,11 +244,46 @@ files of upstream's vector tests and of tests without vectors: 70
 byte-identical, 2 identical after the random names of Rust modules are
 made equal.
 
-**Not measured:** the exponential growth on a small input (not
-reduced); lean-zip and Cedar build times with and without the patch; a
-run of the JIT bridge.
+**Build time of other programs** (timing run 22, 2026-11-18; rrc and
+the link from the `.rr`, every texture in a warm store on a memory
+file system, the compilers in turn on each test; another agent's
+builds ran on the machine, so CPU time was taken beside wall time):
 
-**Repro.** [`repros/bug30-vector-lowering-merge.mlir`](repros/bug30-vector-lowering-merge.mlir) shows the mechanism through `reussir-opt`: MLIR's pass merges the arms of a function without a vector into blocks with arguments, and the pipeline's own pass leaves them (`run.sh` prints REPRODUCES or FIXED). It does not show the multiplication. Run on pristine `36a55a0f`: REPRODUCES; on the series of 15 patches: FIXED (2026-11-18, a run of the repro's author; the gate's own `run.sh` was from before the repro).
+| Compiler | per small test (20 tests, mean of two passes) | against the series of 12 | slower in |
+|---|---:|---:|---:|
+| the series of 12 patches | 1.684 s | - | - |
+| with 31-a | 1.673 s | -0.011 s | 10 of 20 |
+| with 32-a | 1.676 s | -0.008 s | 12 of 20 |
+| with 31-a, 32-a and the amended 28-a and 29-a | 1.670 s | -0.014 s | 7 of 20 |
+| with 30-a on top (the series of 15) | 1.832 s | +0.148 s (+9%) | 20 of 20 |
+
+A second build of the compiler with 30-a, made the same way as the one
+without it, confirms it: +0.172 s for each test, slower in 20 of 20.
+So the cost is 30-a's alone.
+
+Where the time goes (three tests, to each stage): not in MLIR, where
+the stage is equal or faster with the patch. The module that goes to
+LLVM is 18%, 18% and 48% larger, and the extra time is in LLVM's
+optimization and code generation. The mechanism (blocks that MLIR no
+longer merges are optimized and emitted by LLVM) is supported by these
+stage times and sizes; it is not isolated further (no variant with
+partial merging was built).
+
+The two large programs (two runs each, the compilers in turn): lean-zip
+37.62 s and 37.63 s without 30-a, 35.00 s and 36.94 s with it; Cedar
+78.16 s and 83.27 s without, 76.38 s and 77.58 s with. So "not slower"
+is what the data supports for large programs: there the merging that
+the patch removes cost at least as much as LLVM's extra work.
+
+**Run time of the whole series with 30-a** (timing run 22, a direct
+step against native, 53 cases): 0.569, where the series without it had
+0.568 in run 21.
+
+**Not measured:** the exponential growth on a small input (not
+reduced); a run of the JIT bridge; the build-time mechanism beyond the
+stage times above.
+
+**Repro.** [`repros/bug30-vector-lowering-merge.mlir`](repros/bug30-vector-lowering-merge.mlir) shows the mechanism through `reussir-opt`: MLIR's pass merges the arms of a function without a vector into blocks with arguments, and the pipeline's own pass leaves them (`run.sh` prints REPRODUCES or FIXED). It does not show the multiplication. In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 
 ## Upstream note
 

@@ -545,6 +545,11 @@ REQUIRED_REUSSIR_PATCHES = [
 #   time grows steeply with the size of a function: one known program
 #   takes about 16 minutes to compile. A slow build is not an error, so it
 #   is not checked;
+# - 33-a: the decrement expansion no longer crashes on a shared box's
+#   decrement without a token result (`replaceWithProduced` in
+#   lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp). rrc's
+#   pipeline makes the tokens before the expansion and never reaches the
+#   fixed branch; it matters for reussir-opt pipelines run by hand;
 # - 27-a: `core::object::is_unique` of a nullary immediate under TBI
 #   (a wrong answer upstream; lean2rr's programs do not call it);
 # - the patches out of the series (reussir-bugs/patches/parked).

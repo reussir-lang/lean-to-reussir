@@ -10,8 +10,8 @@ It is an optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (31-a), patch 10 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r3-vec`, commit
-`4fb8e8f2`; 168 added lines, 7 of them code, the rest tests).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
+`bebee388`; 168 added lines, 7 of them code, the rest tests).
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same and one kind of release is slower.
 
@@ -157,10 +157,21 @@ other cases between 0.984 and 1.008. X10
 against `l2r-base12`: 1.56 in run 20, about 1.00 now (derived: this
 run's ratio times run 20's). Against native: 1.22 to 0.78.
 
-The two patches were timed together in run 21, not 31-a alone on its
-final form. The final form gives the two changed functions of n_body
-the same eight instructions as the prototype (checked by the author and
-by the reviewer).
+**31-a alone** (timing run 22, 2026-11-18: the series of 12 patches
+with 31-a against the same without it; direct pairs, median of 9 and
+min; the 9 cases whose object the patch changes and 2 controls):
+
+| Case | without | with 31-a | ratio |
+|---|---:|---:|---:|
+| X10 n_body | 34.3 ms | 23.1 ms | 0.642 (by the kernel's time; 0.671 median and 0.664 min by wall time) |
+| the 10 others | | | 0.970 to 1.002 |
+
+So 31-a alone gives the gain on n_body, and nothing else moves
+measurably. One case is at the edge of the band: Cedar's first
+case, 0.970 (median and min agree; a small real gain is likely).
+The final form gives the two changed functions of n_body the same
+eight instructions as the prototype (checked by the author and by the
+reviewer).
 
 **Static:** in X10 one of 7 foreign release functions keeps its body,
 and 4 functions differ (that release and the three runtime functions
@@ -173,11 +184,10 @@ byte-identical.
 suite pass on the series with 31-a; the gate on the series with all 15
 patches passes (748 of 750, 2 expected failures).
 
-**Not measured:** 31-a alone on its final form in a timing step; the
-number of records that n_body drops; a wider rule (a payload whose
+**Not measured:** the number of records that n_body drops; a wider rule (a payload whose
 members release without a scope, such as strings or big integers).
 
-**Repro.** [`repros/bug31-leaf-foreign-release.mlir`](repros/bug31-leaf-foreign-release.mlir) shows the static difference through `reussir-opt`: the foreign release of a leaf record has a `drop.join` (REPRODUCES) or frees the box directly (FIXED). Run on pristine `36a55a0f`: REPRODUCES; on the series of 15 patches: FIXED (2026-11-18, a run of the repro's author; the gate's own `run.sh` was from before the repro).
+**Repro.** [`repros/bug31-leaf-foreign-release.mlir`](repros/bug31-leaf-foreign-release.mlir) shows the static difference through `reussir-opt`: the foreign release of a leaf record has a `drop.join` (REPRODUCES) or frees the box directly (FIXED). In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 
 ## Upstream note
 

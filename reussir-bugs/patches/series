@@ -12,4 +12,5 @@
 26-a-trmc-observable-release.patch
 27-a-is-unique-tbi-immediate.patch
 28-a-sve-vector-storage-patterns.patch
+33-a-tokenless-rc-dec.patch
 30-a-vector-to-llvm-patterns.patch

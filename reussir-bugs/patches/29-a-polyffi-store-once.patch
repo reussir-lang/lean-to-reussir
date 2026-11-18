@@ -1,7 +1,7 @@
-From 0f679c4e763f4fbb2d4f0d0668f61544d35fb48b Mon Sep 17 00:00:00 2001
+From 5a5eda93d79d64c83490f8a29b0e2e959c367c3e Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 02:58:54 -0500
-Subject: [PATCH 09/15] [rrc] open the polyffi cache store once per module
+Subject: [PATCH 09/16] [rrc] open the polyffi cache store once per module
 
 compileRustSourceToBitcode opened and closed the compcache store for
 every texture. Each open takes the store-wide initialization lock, runs

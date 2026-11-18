@@ -1,7 +1,7 @@
-From c9e433ea84fc6feb17c69bab012096b5e761e2ee Mon Sep 17 00:00:00 2001
+From 67dd6c151aff7b176da621bb5056e3e3327e913c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 17 Nov 2026 23:48:48 -0500
-Subject: [PATCH 04/15] [bigint] divide Nats as nonnegative integers
+Subject: [PATCH 04/16] [bigint] divide Nats as nonnegative integers
 
 Divisions of `Nat`s now set rcgmp's `nonnegative` attribute: both operands
 are nonnegative, so immediates untag by a logical shift and divide
