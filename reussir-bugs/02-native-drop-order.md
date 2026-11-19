@@ -6,9 +6,10 @@ Reussir freed first field first until 2026-11-01, and since then has a
 switch whose default, `backward`, frees last first inside a free
 ([on upstream 36a55a0f](#on-upstream-36a55a0f)). Until 2026-10-25 the local patches 02-a
 to 02-e gave lean2rr native Lean's order; since Phase 2 lean2rr uses
-upstream's drop design without them (with entry 23's worklist for
-recursive records that are neither Direct nor TailLoop, on a stack that
-lean2rr's runtime shares), and the two remaining differences are
+upstream's drop design without them (until 2026-11-17 with the local
+worklist drops of entry 23, deleted since, for recursive records that
+are neither Direct nor TailLoop, on a stack that lean2rr's runtime
+shares; since then with upstream's scoped worklists), and the two remaining differences are
 accepted.
 
 ## On upstream 36a55a0f
@@ -25,7 +26,7 @@ patch for the order of releases. What changed for this entry:
   gives `3 2 1`. The policy is saved in a module attribute, and a
   flag that conflicts with it is an error.
 - **Backward is our order.** It is the order that `l2r-base12` gave
-  (entry 23's worklist), so `scripts/l2r.py` passes
+  (the worklist of the deleted entry 23), so `scripts/l2r.py` passes
   `--drop-order backward` explicitly: a later change of upstream's
   default cannot move lean2rr's release order. `forward` must not be
   used.
@@ -130,8 +131,9 @@ shapes that the first gate showed, and three documented differences
 stay ([above](#on-upstream-36a55a0f)). On the bases
 from 2026-10-25 (Phase 2) to `l2r-base12` (history): patches
 02-a to 02-e left the series. lean2rr used upstream's drops for Direct
-and TailLoop records and entry 23's worklist drops for the other
-recursive records ([issue 23](23-worklist-drops.md)), and lean2rr's
+and TailLoop records and local worklist drops for the other
+recursive records (entry 23, deleted on 2026-11-18, when upstream had
+taken its design: [history](README.md#history-entries-19-23-and-24-deleted-2026-11-18)), and lean2rr's
 runtime (leanrt) kept its pending releases on entry 23's stack (patches
 23-k to 23-m). Two differences from native Lean remained, which the owner
 accepted (2026-10-19): records that user code drops are freed in field
@@ -186,10 +188,10 @@ bounded stack depth:
   `20a6dd3d`): a recursive member's drop suspends and yields a child task;
   a local executor (`crates/reussir-rt/src/dtor_executor.rs`) runs the
   child and then resumes the parent. A root that does not suspend never
-  makes an executor. (lean2rr's builds replace these retcon drops with
-  entry 23's worklist, which frees with no state per level:
-  [issue 23](23-worklist-drops.md); upstream's expansion of their
-  direct arms is [issue 19](19-retcon-direct-arms.md).)
+  makes an executor. (lean2rr's builds replaced these retcon drops with
+  the worklist of entry 23, which freed with no state per level;
+  upstream's expansion of their direct arms was entry 19. Both entries
+  are deleted: upstream removed the retcon drops.)
 - Order: source order, each member's whole subtree before the next member;
   the cell is freed after its children. #682's test says it covers the
   hazard of old patch 13-d "without importing its pending stack's
@@ -213,7 +215,7 @@ work). Reussir frees records with upstream's glue (Direct and TailLoop
 records) and with entry 23's worklist (the other recursive records): at
 a cell's visit its other members are released at once, in field order,
 and its dead children of the cycle are pushed onto that stack and come
-out last first ([issue 23](23-worklist-drops.md#order-of-releases)). The
+out last first (the deleted entry 23, section "Order of releases"; git history). The
 implementation notes describe leanrt's side
 (`docs/implementation/ownership.md`, "Runtime objects free through
 leanrt's pending stack in Lean's order"; plan §10, "Order of releases in

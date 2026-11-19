@@ -1,7 +1,7 @@
-From bf8f8de0b0cddded0a1d798205162a5f0f2ba57e Mon Sep 17 00:00:00 2001
+From 74b55900d3f0ee7b43f9465651570edab0415bac Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 11:06:17 -0500
-Subject: [PATCH 15/16] [rc] expand a decrement that has no token result
+Subject: [PATCH 16/17] [rc] expand a decrement that has no token result
 
 `reussir.rc.dec` of a shared box is valid without its token result: it is
 the form the frontend emits, and `rrc --emit mlir` prints it. The decrement

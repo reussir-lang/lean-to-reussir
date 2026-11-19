@@ -212,7 +212,8 @@ files, `runtime/` and `scripts/` from the repository root.
   that a change of upstream's default cannot move lean2rr's order.
   History: upstream `7954a367` to `95d9a1c8` freed first field first,
   with its state per drop; the bases `l2r-base9` to `l2r-base12` had
-  local patches for worklist drops (issue 23, which upstream took), and
+  local patches for worklist drops (issue 23, which upstream took; the
+  issue is deleted), and
   the bases before Phase 2 (up to `l2r-base8`) had five local patches,
   02-a to 02-e, with a stack shared with leanrt, and a drain-end hook,
   09-a (issue 9, retired); they went when leanrt got its own stack,

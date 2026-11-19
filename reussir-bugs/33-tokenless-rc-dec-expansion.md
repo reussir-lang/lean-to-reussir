@@ -7,16 +7,15 @@ the expansion make that result itself.
 
 ## Summary
 
-**Kind:** bug. **Status:** patched (33-a), patch 15 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit `bf8f8de0`;
+**Kind:** bug. **Status:** patched (33-a), patch 16 of the series on
+upstream `36a55a0f` (Reussir branch `l2r-base13-r5`, tree `107c212b`;
 3 files, +77/-0; 10 of the lines are code and pass description, the
 rest is the test). It does not affect lean2rr: rrc's pipeline always
 runs the token pass before the decrement expansion. `scripts/l2r.py`
 does not check for the patch.
 
-**Upstream (2026-11-18):** Open at `36a55a0f` (confirmed on pristine
-upstream). Not reported: the maintainer takes fixes from this
-directory. Found during the work on patch 31-a
+**Upstream (2026-11-19):** Open at `36a55a0f` (confirmed on pristine
+upstream). Pull request reussir#1093 has patch 33-a; it is open. Found during the work on patch 31-a
 ([entry 31](31-leaf-foreign-release.md)). The patch applies to a clean
 `36a55a0f` alone.
 
@@ -57,8 +56,10 @@ the output has the expanded decrement.
 Runs: the patch's author and its reviewer (pristine 139, patched 0);
 the gate on the series by hand (pristine exit 139, the series exit 0,
 23 lines of MLIR); and `run.sh`'s function `bug33`, in a run of the
-function's author: REPRODUCES on pristine, FIXED on the series. The
-gate did not run `bug33` through `run.sh`.
+function's author: REPRODUCES on pristine, FIXED on the series. With
+the gate on the series of 17 patches, `bug33` ran through `run.sh`:
+REPRODUCES on pristine (the gate's run), FIXED on the series (a run
+after the gate, on a `reussir-opt` built for the series' tree).
 
 ## Cause
 
@@ -169,5 +170,5 @@ path the pattern gains one test of a result for null.
 
 ## Upstream note
 
-Not reported. A report would give the one function, the one command
-and the two lines of the fix.
+Pull request reussir#1093 (2026-11-19, open) has the fix: the one
+function, the one command and the two lines.

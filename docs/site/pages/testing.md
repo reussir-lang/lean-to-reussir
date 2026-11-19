@@ -63,7 +63,7 @@ the image changes from run to run.
 
 ### The last full run
 
-The gate of 2026-11-18 (lean2rr at 51292d7a), against native Lean
+The gate of 2026-11-18 (lean2rr at f20aed74), against native Lean
 4.34.0:
 
 - runtime suite: 748 of 750 identical to native, some of them through

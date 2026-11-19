@@ -470,7 +470,8 @@ def build_lean_runtime(out):
 # The first two are upstream code, not patches: they refuse the checkout of
 # a base before upstream's scoped drop worklists (2026-11-01), such as
 # 95d9a1c8 with the old series, whose drop stack had other entry points
-# (local patches 23-a to 23-p, which upstream's worklists replace). leanrt's
+# (the local worklist patches of that series, which upstream's worklists
+# replace; they and their entry are deleted). leanrt's
 # pending work is a layer over that drop stack (runtime/leanrt/src/pending.rs):
 # its steps join the active free or run in a scope of their own
 # (`join_or_run_step`), and the end work after the outermost free is a
@@ -533,12 +534,17 @@ REQUIRED_REUSSIR_PATCHES = [
 #   per texture (`PolyffiCache openPolyffiCache()` in
 #   include/Reussir/RustCompiler.h; without it builds are only slower);
 # - 31-a: a record without counted members that foreign code releases is
-#   freed directly, not through the drop worklist (`Releasing such a box
-#   only frees it` in lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp;
-#   fewer instructions per release);
+#   freed directly, not through the drop worklist (its test,
+#   tests/integration/conversion/worklist_drop_bridges_leaf.mlir; fewer
+#   instructions per release);
 # - 32-a: the integer members of a record are released in place and its
 #   pure children by a tail release (`enum class Visit { Leaf, Boxes,
-#   Ordered }` in the same file; fewer worklist entries);
+#   Ordered }` in lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp;
+#   fewer worklist entries);
+# - 34-a: the same direct release as 31-a for a record whose counted
+#   members are all integers (`static bool releasesInPlace(mlir::Type
+#   payload)` in the same file, where 34-a rewrites the comment that
+#   marked 31-a; fewer instructions per release);
 # - 30-a: on an aarch64 host with SVE, rrc lowers the vector dialect with
 #   its patterns alone (`createReussirConvertVectorToLLVMPass` in
 #   lib/CAPI/Passes.cpp). Without it the results are the same and rrc's

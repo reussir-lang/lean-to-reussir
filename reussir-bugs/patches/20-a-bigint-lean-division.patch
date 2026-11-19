@@ -1,7 +1,7 @@
 From ea56407374d7369d7044c78c4d079bbc3f6747f2 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sat, 24 Oct 2026 23:28:28 -0400
-Subject: [PATCH 03/16] [bigint] expose Lean division modes and power-of-two
+Subject: [PATCH 03/17] [bigint] expose Lean division modes and power-of-two
  remainder
 
 Lean's integer divisions do not trap on a zero divisor: `x / 0 = 0` and

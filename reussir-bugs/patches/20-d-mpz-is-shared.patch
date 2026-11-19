@@ -1,7 +1,7 @@
 From d8849a4f12f450fa458ba25053f0ea103ca520ce Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Sun, 25 Oct 2026 01:30:35 -0400
-Subject: [PATCH 06/16] [bigint] expose foreign handle sharing through
+Subject: [PATCH 06/17] [bigint] expose foreign handle sharing through
  generated glue
 
 Runtime code that holds a `Nat` or `Int` as `reussir_rt::rcgmp::Mpz` may

@@ -184,8 +184,8 @@ byte-identical.
 suite pass on the series with 31-a; the gate on the series with all 15
 patches passes (748 of 750, 2 expected failures).
 
-**Not measured:** the number of records that n_body drops; a wider rule (a payload whose
-members release without a scope, such as strings or big integers).
+**Not measured:** the number of records that n_body drops; a wider rule for strings (big integers have it since patch 34-a,
+[entry 34](34-leaf-integer-foreign-release.md)).
 
 **Repro.** [`repros/bug31-leaf-foreign-release.mlir`](repros/bug31-leaf-foreign-release.mlir) shows the static difference through `reussir-opt`: the foreign release of a leaf record has a `drop.join` (REPRODUCES) or frees the box directly (FIXED). In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 

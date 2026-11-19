@@ -42,8 +42,7 @@ patch, and it refuses an older base. See the table below.
 ## Summary
 
 lean2rr's builds use upstream Reussir `36a55a0f` (2026-11-17) plus the
-16 patches of the series (the Reussir branch `l2r-base13-r4`, head
-`703a73f2`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
+17 patches of the series (the Reussir branch `l2r-base13-r5`, tree `107c212b`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
 holds the upstream commit): 10-a (tagged opaque handles,
 [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a,
 20-a, 20-g, 20-c, 20-d and 20-e (the interface for `Nat` and `Int` on
@@ -53,6 +52,7 @@ step D), 21-a
 29-a ([issue 29](../../../reussir-bugs/29-texture-store-open.md)),
 31-a ([issue 31](../../../reussir-bugs/31-leaf-foreign-release.md)),
 32-a ([issue 32](../../../reussir-bugs/32-integer-members-drop-path.md)),
+34-a ([issue 34](../../../reussir-bugs/34-leaf-integer-foreign-release.md)),
 30-a ([issue 30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md)),
 and the fixes of four upstream bugs: 26-a
 ([issue 26](../../../reussir-bugs/26-trmc-observable-release.md)), 27-a
@@ -66,10 +66,12 @@ The move to this base
 changed these things for lean2rr:
 
 - **Worklist drops are upstream's.** Upstream took the design of
-  [issue 23](../../../reussir-bugs/23-worklist-drops.md) on 2026-11-01:
+  lean2rr's local worklist drops (issue 23) on 2026-11-01:
   rrc frees the records of a recursive type through scoped drop
-  worklists, and the retcon coroutines are deleted. The sixteen patches
-  23-a to 23-p are parked as history. leanrt keeps its pending releases
+  worklists, and the retcon coroutines are deleted. Issue 23 and its
+  sixteen patches 23-a to 23-p were deleted on 2026-11-18, with issues
+  19 and 24, which the same upstream change fixes
+  ([history](../../../reussir-bugs/README.md#history-entries-19-23-and-24-deleted-2026-11-18)). leanrt keeps its pending releases
   on upstream's drop scopes
   ([ownership.md](../ownership.md#runtime-objects-free-through-leanrts-pending-stack-in-leans-order)).
 - **The drop order is a flag, and two of its rules are new.**
@@ -101,16 +103,18 @@ corpus in its three modes, the raytracer
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md) has the
 results). Not verified there: every "kept: measured ..." line of this
 directory (the measurements are of the earlier bases). The series of
-16 patches has its own gate, the last one that passed: the runtime
-suite (748 of 750, 2 expected failures), 23 of 23 check scripts, the
-corpus, the raytracer and the repros.
+17 patches has its own gate, the last one that passed (gate 57): the
+runtime suite (748 of 750, 2 expected failures), 23 of 23 check
+scripts, the corpus, the raytracer and the repros.
 Wall time on this base (the shared benchmark set, 53 cases): timing
 run 22 (2026-11-18), the full series: 0.569 of native (run 21,
 without patch 30-a: 0.568); derived from runs 20 and 21, 0.959 of
-lean2rr on the base before. Four cases are still 5 to 8%
-slower than before (cause unknown)
+lean2rr on the base before; timing run 24, patch 34-a on the full
+set: 0.999 of the series without it, unionfind 0.937. Two cases are
+still slower than before (run 24: monadic-interp 1.044, partly
+located; hashmap 1.055, one allocation site found, its cause not)
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md#history-the-move-to-36a55a0f-2026-11-17),
-steps 6 to 8).
+steps 6 to 9).
 
 The base before this one was `l2r-base12` (head `c1170ff9`): upstream
 `95d9a1c8` (2026-10-26) plus 24 patches, with 20-b's tests, 20-e, 21-a
@@ -122,7 +126,8 @@ stack replaced them. Phase 2's first base, `l2r-base7` (head
 `bfe3d32d`), used upstream's retcon drops and needed 19-a (issue 19,
 reussir#759: the drop expansion's code grew exponentially with type
 nesting); with 23-f rrc made no retcon destructors, so 19-a was parked
-(upstream has deleted the retcon drops since).
+(upstream has deleted the retcon drops since, and issue 19 and 19-a are
+deleted).
 The last base before Phase 2 was upstream `00906e38` plus 14 patches:
 `./reussir`'s branch `l2r-base8` (head `8e9a6293`, `l2r-stepd` plus
 21-a), step D's 5 patches (issue 20) after the 8 of the stack
@@ -145,10 +150,9 @@ were not: `7954a367` fixed 30 of the old entries in full, so
 their files are gone and the open entries have new numbers (the mapping
 is in [`reussir-bugs/README.md`](../../../reussir-bugs/README.md)). The
 owner keeps only bug fixes and major items in the series: the
-optimizations 01-a (issue 1), 06-a and 06-b (issue 6), and the fixes
-16-a ([issue 16](../../../reussir-bugs/16-driver-stack-address-limit.md))
-and 19-a ([issue 19](../../../reussir-bugs/19-retcon-direct-arms.md);
-fixed upstream now), bugs lean2rr does not reach, are parked, outside the series
+optimizations 01-a (issue 1), 06-a and 06-b (issue 6), and the fix
+16-a ([issue 16](../../../reussir-bugs/16-driver-stack-address-limit.md)),
+of a bug lean2rr does not reach, are parked, outside the series
 ([parked patches](../../../reussir-bugs/README.md#parked-patches)).
 
 A workaround for an issue that Reussir `7954a367` fixes is marked
@@ -173,25 +177,29 @@ either way.
 | [15](../../../reussir-bugs/15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | leanrt sets mimalloc's `arena_purge_mult` to 0 on v2.1.8 to v2.2.7, so free arena memory goes back to the OS at once ([startup/entry.md](../startup/entry.md#free-arena-memory-goes-back-to-the-os-at-once-mimalloc-v218-to-v227)) | none (a newer `libmimalloc-sys`, 0.1.49 or later, parked) | n/a: with a fixed mimalloc the workaround turns itself off; delete it then |
 | [17](../../../reussir-bugs/17-padded-member-widening.md) | missed optimization | every generated tuple (a join point's, J2; a `flatten-structs` result) has its fields in decreasing alignment, as records have (`memberOrder`, `field-order`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
 | [18](../../../reussir-bugs/18-tail-padding-return.md) | missed optimization | the tuple of a `flatten-structs` result keeps a `bool`, `u8`, `u16` or `u32` in a `u64` member and has no member for a unit value, so it has no tail padding (`tupleMemberTy`; [records.md](../representations/records.md#fields-are-ordered-by-decreasing-alignment)) | none | n/a (no patch) |
-| [19](../../../reussir-bugs/19-retcon-direct-arms.md) | bug (rrc's memory, reussir#759); fixed upstream, to delete | none needed (on `l2r-base7` rrc ran out of memory on `RtSyncSelect` without 19-a) | none (19-a parked, history) | n/a |
 | [20](../../../reussir-bugs/20-rcgmp-integration.md) | missing feature (20-b's fix of a bug is upstream) | none: lean2rr's step D (on dev since `1e57ed53`, 2026-10-25; the only representation of `Nat` and `Int` since D8, 2026-10-26) uses the interface the patches add | 20-a, 20-g, 20-c, 20-d, 20-e (parked: 20-b, tests) | n/a: every build needs 20-a and upstream's `Mpz` (`check_rcgmp`), and `scripts/l2r.py` checks for 20-c and 20-d; 20-g and 20-e are optimizations that nothing requires (without 20-e a `Nat` literal of 100,000 digits takes rrc about 19 minutes) |
 | [21](../../../reussir-bugs/21-value-record-member-retains.md) | missed optimization | none: the pairs stay without the patch | 21-a (reworked for `36a55a0f`) | n/a: an optimization; nothing requires it |
-| [23](../../../reussir-bugs/23-worklist-drops.md) | cost (memory and run time of frees); fixed upstream (scoped worklists, 2026-11-01), to delete | none: leanrt's pending work is built on upstream's drop scopes. `RtDeepTreeFree`, `RtClosureChainFree`, `RtAltTreeFree` and `RtArrayPileFree` keep their alloc-check bounds on the new base (the port's first gate) | none (23-a to 23-p parked, history) | n/a: `scripts/l2r.py` requires upstream's `join_or_run_step` and `defer_until_scope_exit` |
 | [25](../../../reussir-bugs/25-texture-cache-key.md) | sharp edge (a documented rule) | `scripts/l2r.py` gives rrc a rustc script whose path names the build of leanrt, of lean-runtime and of Reussir's runtime, and sets `XDG_CACHE_HOME` for rrc to `L2R_POLYFFI_CACHE` ([build-time.md](build-time.md#old-issue-35-cost-every-texture-was-compiled-again-on-every-build)); test `tests/runtime/texture-cache-check.sh` | none | n/a (no patch) |
 | [29](../../../reussir-bugs/29-texture-store-open.md) | cost (build time: rrc opened its texture store once for each texture) | none in the driver; `L2R_POLYFFI_CACHE` can name a directory on a memory file system, which removes the sync cost (the port's final gate did so) | 29-a | n/a: an optimization; nothing requires it |
 | [30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md) | cost (build time: MLIR's vector lowering pass merges blocks of all code; one build took 16 to 18 minutes) | none: no flag reaches the pass, and cutting the function further only moves the cliff | 30-a (costs 2.0% of code size) | n/a: an optimization; nothing requires it |
 | [31](../../../reussir-bugs/31-leaf-foreign-release.md) | cost (run time: a record of scalars that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 31-a | n/a: an optimization; nothing requires it |
 | [32](../../../reussir-bugs/32-integer-members-drop-path.md) | cost (run time: records with a `Nat` or `Int` member lost the fast paths of the drop glue) | none: the glue is made by rrc | 32-a | n/a: an optimization; nothing requires it |
 | [33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only: a crash on an `rc.dec` without a token) | none needed: rrc does not reach it | 33-a | n/a: lean2rr's builds do not reach the bug |
+| [34](../../../reussir-bugs/34-leaf-integer-foreign-release.md) | cost (run time: a record of scalars and integers that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 34-a | n/a: an optimization; nothing requires it |
 | [26](../../../reussir-bugs/26-trmc-observable-release.md) | bug (TRMC moves a self call before a release with a foreign cleanup) | none: lean2rr's own releases are calls, which keep the self call in place; no lean2rr program is known to reach the bug | 26-a | no workaround to keep; `scripts/l2r.py` requires the patch |
 | [27](../../../reussir-bugs/27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI: `is_unique` true for an immediate) | none: lean2rr does not call the intrinsic | 27-a | no workaround to keep |
 | [28](../../../reussir-bugs/28-sve-vector-storage.md) | bug (aarch64 with SVE: rrc fails on a large function without vectors) | none in lean2rr | 28-a | n/a: `scripts/l2r.py` requires the patch; without it the row oracle of `rows-check.sh` does not build on a host with SVE |
 
-Issues 12 to 14, 16 and 24 (three bugs of Reussir's runtime and
+Issues 12 to 14 and 16 (three bugs of Reussir's runtime and
 hand-written MLIR; rrc's driver stack under an address-space limit,
-which lean2rr's builds do not set; a leak with TPDE's drop options,
-which rrc's command line cannot select, fixed upstream at `36a55a0f`
-and to delete) need nothing from lean2rr. Issues 9 and 11 (the drain-end hook and the cost of a one-cell
+which lean2rr's builds do not set) need nothing from lean2rr. Issues
+19, 23 and 24 (the code size of retcon destructors, the memory of deep
+frees, a leak with TPDE's drop options) are fixed upstream at
+`36a55a0f`; they were deleted on 2026-11-18 and their numbers are
+retired ([history](../../../reussir-bugs/README.md#history-entries-19-23-and-24-deleted-2026-11-18)). lean2rr's deep-free tests
+(`RtDeepTreeFree`, `RtClosureChainFree`, `RtAltTreeFree`,
+`RtArrayPileFree`) keep their alloc-check bounds on upstream's
+worklists. Issues 9 and 11 (the drain-end hook and the cost of a one-cell
 free on the old shared stack) were retired with Phase 2: lean2rr no
 longer uses that stack, and leanrt's outermost free runs the end work
 itself.

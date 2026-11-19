@@ -36,25 +36,29 @@ same standard output, standard error and exit code.
 ## Where it stands
 
 The last full gate that passed (2026-11-18): the translator of
-lean2rr `51292d7a` on the Reussir build of the series of 16 patches
-(`l2r-base13-r4` `703a73f2` = upstream `36a55a0f` + 16 patches),
+lean2rr `f20aed74` on the Reussir build of the series of 17 patches
+(`l2r-base13-r5`, tree `107c212b` = upstream `36a55a0f` + 17 patches),
 lean-runtime 50840bb, aarch64. What it ran:
 
 - the runtime suite, 750 programs: 748 identical to native Lean 4.34.0,
   2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), no
-  failure; 597 s. Every executable has the section sizes of the gate
-  before (the sixteenth patch changes no generated code);
+  failure; 603 s. Against the gate before, 345 of the 742 executables
+  lose at least one worker function of a release from foreign code
+  (patch 34-a; mostly for records of the library), and the 397 others
+  have the same section sizes;
 - the 23 check scripts of `tests/runtime`: all exit 0. The allocation
   check (81 tests, 191 rows) passes; each row is equal to the gate
-  before or within 4 allocations of it, and the executables are the
-  same, so allocation counts move that much between runs; the scripts that pin shapes and hashes of the generated code
+  before or within 4 allocations of it, which is the variation
+  between runs of one executable; the scripts that pin shapes and hashes of the generated code
   have the output of the gate before;
 - the classic corpus: 18 programs with the passes on and with 26 passes
   off (small and medium sizes, 36 rows each), and with `unread-fields`
   (small, 18 rows);
 - the raytracer at its three settings: images identical to native;
 - the repros of `reussir-bugs/` on the series and on plain upstream:
-  every verdict as its entry expects.
+  every verdict as its entry expects. The repros that need Reussir's
+  pass tool ran on the series after the gate, on a build of that tool
+  for the same tree.
 
 Not part of that gate: `tests/env`, `tests/reussir-benchmark`, and any
 timing.
@@ -77,16 +81,36 @@ them ([Reussir](#reussir)).
 
 Known open items on this base:
 
-- Speed: four of the 53 timed cases are still 5 to 8% slower than on
-  the base before (hashmap 1.077, the small qsort 1.075, unionfind
-  1.062, monadic-interp 1.054; derived from two timing sessions); the
-  cause is unknown. Closed: n_body (1.56 times its old time in run 20)
-  and seven cases that free large structures have their causes found
-  and patched (Reussir issues 31 and 32).
-- Build time: `RtDepPolyRec` (a 6 MB `.rr`) takes 136 s in rrc and the
-  link, the one large single-program time; not investigated. On large
-  programs rrc itself uses more time than on the base before; the
-  cause is not attributed. Closed: `RtOutlineStates` took about 18
+- Speed: two timed cases are slower than on the base before (timing
+  run 24, direct pairs on the series of 17 patches). Monadic-interp,
+  1.044: about half is located. Its array elements are pairs of
+  boxes, and each last release of one from the runtime enters a
+  destruction scope (476,166 entries at a small size, none on the
+  base before). The scope is needed there. One entry costs 149
+  instructions, 102 of them the scope's overhead; a fast path in
+  Reussir's runtime could save at most about 1.3% of the case
+  (arithmetic; not built). The other half is not located. Hashmap,
+  1.055: all 75,000 extra allocations come from one site in `main`,
+  where a uniqueness test at run time finds a cell shared, allocates
+  a 16-byte cell and frees it at once. Five variants leave it in
+  place (the other tag encoding, one upstream change reverted, forward
+  drop order, the borrow analysis off, the hoist rule off). Who holds
+  the second reference is not found. Closed: n_body (1.56 times its old time in run
+  20) and seven cases that free large structures have their causes
+  found and patched (Reussir issues 31 and 32); unionfind (1.077) has
+  its cause found and patched (issue 34, patch 34-a: 0.937 on it in a
+  direct pair, and 1.010 of the base before); the small qsort was code
+  placement, not a code change, and is at 1.001 of the base before.
+- Build time: `RtDepPolyRec` (a 6 MB `.rr`) is the one large
+  single-program time. It is not a regression: the same `.rr` takes
+  119.8 s on the base before and 113.2 s on this one (one run each).
+  One upstream cost was found in it and is not patched: Reussir's
+  drop glue computes a glue function's name at every request; a
+  prototype takes the build from 113.2 s to 81.8 s with a
+  byte-identical executable
+  ([build-time.md](implementation/reussir-workarounds/build-time.md)).
+  On large programs rrc's MLIR pipeline uses more time than on the
+  base before; for the other programs the cause is not attributed. Closed: `RtOutlineStates` took about 18
   minutes; with patch 30-a it takes 10.7 s, and the suite 652 s (671 s
   on the base before).
 - Code size: patch 30-a makes the executables 2.0% larger (geometric
@@ -118,7 +142,7 @@ Known open items on this base:
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
 | Lean library C functions (externs) of `Init` and `Std` | all 717 of Lean 4.34 (767 declarations) available: 706 checked by programs that call each one, the other 11 (internal or private helpers) by direct tests |
 | Adversarial testing | 9 review rounds (the first 4 wrote about 1,300 test programs to break it; the later ones work by inspection with targeted programs), Lean's own compile tests (72 programs of `tests/compile` and `compile_bench`, Lean 4.33: all identical), and cross-tests on 550 external fixture programs (542 identical; the 6 causes of the 8 differences are XT-1 to XT-6, XT-6 fixed, XT-1 to XT-5 fixed (merged 36a5f92)); every other finding fixed or documented |
-| Speed, shared benchmark set (53 cases: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; timing runs 21 and 22, 2026-11-18, median of 9, aarch64) | geometric mean 0.569× of native Lean 4.34.0's time for the full series, timed directly in run 22 (run 21, without patch 30-a: 0.568; run 20, before patches 31-a and 32-a: 0.584; run 19 on the Reussir base before: 0.593); two cases above native: rose_tree 1.18, gcd_batch 1.03. Against the series of run 20, in direct pairs: 0.975, eight cases more than 3% faster and none slower. Against lean2rr on the Reussir base before, derived from runs 20 and 21 (not a direct pair): 0.959. Patch 30-a against the series without it, in direct pairs: 1.000 (run time does not change), code size +2.0%. Peak memory: no case outside 3% in either pair |
+| Speed, shared benchmark set (53 cases: the classic corpus, two sets of small programs, lean-zip, the raytracer, a regex engine, Cedar; timing runs 21 to 24, 2026-11-18 and 19, median of 9, aarch64) | geometric mean 0.569× of native Lean 4.34.0's time, timed directly in run 22 on the series of 15 patches; this is the last direct headline. Patch 33-a changes no generated code. Patch 34-a came later and was timed on the full set against that series of 15 patches (run 24, direct pairs, 53 cases): geometric mean 0.999, so the headline is unchanged within noise. It removes a release worker in 20 of the 53 programs, but only unionfind moves measurably (0.937); no case is slower; peak memory and code size 1.000. The headline against native was not timed again with it. (Run 21, without patch 30-a: 0.568; run 20, before patches 31-a and 32-a: 0.584; run 19 on the Reussir base before: 0.593); two cases above native: rose_tree 1.18, gcd_batch 1.03. Against the series of run 20, in direct pairs: 0.975, eight cases more than 3% faster and none slower. Against lean2rr on the Reussir base before, derived from runs 20 and 21 (not a direct pair): 0.959; on 14 cases in direct pairs (run 23, without 34-a): 0.951. Patch 30-a against the series without it, in direct pairs: 1.000 (run time does not change), code size +2.0%. Peak memory: no case outside 3% in either pair |
 | Speed (classic corpus against native Lean 4.34.0, 2026-10-04) | faster than native Lean on 15 of the 18 classic programs and about equal on the other three (bignum 1.00×, binarytrees 1.02×, nqueens 1.04×); geometric mean 0.71× time, 0.69× memory; less memory on all 18. Reussir's suite last measured against 4.33 (faster on 17 of 18); tables below |
 
 ## How a program is compiled
@@ -656,15 +680,16 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 16
-patches of the series (the Reussir branch `l2r-base13-r4`, head
-`703a73f2`, tree `2778b509`): 10-a, 07-a, five patches of step D
-(issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), three
+Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 17
+patches of the series (the Reussir branch `l2r-base13-r5`, tree
+`107c212b`, on which the last gate ran): 10-a, 07-a, five patches of step D
+(issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), four
 patches for costs of upstream's own that lean2rr's programs showed
 (29-a: the store of rrc's texture cache is opened once for a module;
 31-a: a record of scalars that foreign code releases is freed
 directly; 32-a: records with integer members keep the fast paths of
-the drop glue), the fixes of three upstream bugs that the port found
+the drop glue; 34-a: 31-a's rule also for records of scalars and
+integers), the fixes of three upstream bugs that the port found
 (26-a, 27-a, 28-a), the fix of a fourth upstream bug that lean2rr
 does not reach (33-a: a pass of `reussir-opt` crashed on a release
 without a token), and 30-a (the vector lowering without block
@@ -680,7 +705,7 @@ What the move to this base changed
 ([history](../reussir-bugs/README.md#history-the-move-to-36a55a0f-2026-11-17)):
 
 - Upstream Reussir took worklist drops (2026-11-01), so the 16 patches
-  of issue 23 are not carried any more. lean2rr's runtime keeps its
+  of issue 23 are not carried any more (the issue is deleted). lean2rr's runtime keeps its
   pending releases on upstream's drop scopes. The driver passes
   `--drop-order backward`, upstream's default. With it a whole value is
   one free, last field first, as native `lean_dec`: three documented
@@ -739,12 +764,27 @@ What the move to this base changed
   larger (Cedar 9.3%). A small program takes about 9% more time to
   build with it (run 22); lean-zip and Cedar do not. The full series
   with it: 0.569 of native's time, timed directly (run 22).
-- Open: four cases are still 5 to 8% slower than on the base before
-  (hashmap, the small qsort, unionfind, monadic-interp); they did not
-  move with the two patches, and their cause is unknown. Some wins of
-  run 20 are not attributed either (the red-black tree cases, peano,
-  binarytrees). `RtDepPolyRec` takes 136 s in rrc and the link; not
-  investigated.
+- Four cases were still 5 to 8% slower than on the base before
+  (hashmap, the small qsort, unionfind, monadic-interp). Run 23 timed
+  them in direct pairs against the base before. The small qsort:
+  1.001; the earlier difference was the placement of one hot function
+  in memory, whose machine code is the same on both bases. Unionfind,
+  1.077: records of two `Nat`s in an array entered a destruction
+  scope at each last release (issue 34); patch 34-a removes that, and
+  run 24 timed it on the full set: unionfind 0.937, 1.010 of the base
+  before; the 53 cases 0.999, no other case outside 3%. Open, with
+  the facts under "Known open items": monadic-interp, 1.044 (about
+  half located: scope entries of releases where the scope is needed),
+  and hashmap, 1.055 (one allocation site found; its cause not). One
+  upstream change that makes code smaller (#968) is not a time cause
+  for either: with it reverted, 9 cases are at 0.999.
+- The wins of run 20 that had no cause: binarytrees comes from
+  upstream's new decoding of top-byte tags (shown by a pair: 1.197
+  with the other encoding). For the red-black tree cases and peano
+  the same cause is a well-supported hypothesis, not a direct pair.
+- `RtDepPolyRec`'s build time (136 s in the last gate) is not a
+  regression: 119.8 s on the base before, 113.2 s on this one, the
+  same `.rr`.
 
 The base before this one was upstream Reussir `95d9a1c8` (2026-10-26)
 plus 24 patches: the Reussir branch `l2r-base12` (head
@@ -807,7 +847,7 @@ lean2rr, since the old drop patches went; their numbers are retired, as
 is 22 (a local patch for retcon destructors, never published, superseded
 by issue 23). The series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-16 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
+17 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct
@@ -816,7 +856,9 @@ output, and their patches are optimizations or features, not fixes.
 The list below describes the patches as they were on the base before
 (`l2r-base12`). On `36a55a0f` the series has 10-a, 07-a, 20-a, 20-g,
 20-c, 20-d, 20-e, 21-a, 29-a, 31-a, 32-a, 26-a, 27-a, 28-a and 30-a; 20-b is parked, issue
-23's patches and issue 24's fix are upstream's own code now, and the
+23's patches and issue 24's fix are upstream's own code now (issues 19,
+23 and 24 were deleted on 2026-11-18, fixed upstream:
+[history](../reussir-bugs/README.md#history-entries-19-23-and-24-deleted-2026-11-18)), and the
 numbers of 20-e and 21-a on this base are in their issues' files.
 
 - **The interface for `Nat` and `Int` on rcgmp (issue 20, 5 patches),
@@ -877,9 +919,10 @@ numbers of 20-e and 21-a on this base are in their issues' files.
   inline attribute on texture trampolines (6, patches parked) and a
   reuse token taken from a release that never frees (8); five bugs that
   do not reach lean2rr (12 to 14; 16: rrc's 1 GiB driver stack under an
-  address-space limit, its fix parked; 19: the drop expansion's code
-  exponential in type nesting with upstream's coroutine drops, which
-  issue 23's patches replace, its fix parked); and a mimalloc bug that
+  address-space limit, its fix parked; 19, deleted since: the drop
+  expansion's code exponential in type nesting with upstream's coroutine
+  drops, which issue 23's patches replaced, its fix parked); and a
+  mimalloc bug that
   leanrt works around (15).
 
 Every Reussir problem met so far is documented with a reproducer, in

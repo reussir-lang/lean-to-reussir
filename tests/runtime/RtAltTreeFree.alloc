@@ -1,6 +1,6 @@
 # A chain whose free leaves one pending child per level, alternating two release functions (review P1 of Reussir's
 # shared drop stack). Reussir links a deferred record whose release function differs from the one before it through
-# its header (entry 23, patches 23-n to 23-p, base l2r-base10): here every one, the functions alternating, so the
+# its header (upstream's `defer_wide` at Reussir 36a55a0f; once local patches 23-n to 23-p, base l2r-base10): here every one, the functions alternating, so the
 # pending children take no stack memory, as natively: at 500000 pairs (10^6 levels)
 # peak 45.7 MB against native's 55.2 MB, allocations and bytes as native's, under both integer representations
 # (with a 24-byte entry per pending child, l2r-base9-shared: 88.6 MB, bytes 2.26 times native's growth).

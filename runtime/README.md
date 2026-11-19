@@ -676,7 +676,8 @@ last first. Reussir frees records itself, at a bounded stack depth: a list
 in a loop, any other record whose drop could recurse through a stack of
 pending drops per thread (reussir-rt's `drop_stack`, upstream Reussir's
 scoped worklists, with `--drop-order backward`: a dead child record is
-pushed and popped last first; Reussir issue 23 has the history). It
+pushed and popped last first; the history is in
+`reussir-bugs/README.md`, "entries 19, 23 and 24 deleted"). It
 releases a container
 field through the container's Rust `Drop` (the opaque type's drop hook),
 which releases the elements. The prelude's containers are therefore

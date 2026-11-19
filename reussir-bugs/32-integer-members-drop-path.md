@@ -18,9 +18,10 @@ the rest tests). `scripts/l2r.py` does not check for the patch: without
 it the programs are the same and frees of such records are slower.
 
 **Upstream (2026-11-18):** Open at `36a55a0f`: new with upstream's drop
-series of 2026-11-01. The local patches of `l2r-base12`
-([entry 23](23-worklist-drops.md): 23-h, 23-i, 23-j) had these fast
-paths for such records. Not reported: the maintainer takes changes from
+series of 2026-11-01. The local patches of `l2r-base12` (23-h, 23-i
+and 23-j of the deleted entry 23,
+[history](README.md#history-entries-19-23-and-24-deleted-2026-11-18))
+had these fast paths for such records. Not reported: the maintainer takes changes from
 this directory. The patch applies to a clean `36a55a0f` alone, and in
 either order with 31-a.
 
@@ -239,8 +240,14 @@ Derived for each case as this run's ratio times run 20's ratio (two
 sessions, not a direct pair): the 53 cases are at 0.959 of dev on
 `l2r-base12`. Four cases are still above 1.03: L18 hashmap 1.077, X07
 qsort 1.075, L08 unionfind 1.062, L15 monadic-interp 1.054. They did
-not move with 31-a and 32-a (1.002, 1.002, 1.000, 1.003). Their cause
-is unknown.
+not move with 31-a and 32-a (1.002, 1.002, 1.000, 1.003). Timing run
+23 looked at them in direct pairs: X07 was code placement and is at
+1.001 with the series of 16; L08's cause is found and patched
+([entry 34](34-leaf-integer-foreign-release.md): 1.010 with 34-a);
+L15 (1.044 on the series of 17) is partly located and L18 (1.055) is
+not found
+([history](README.md#history-the-move-to-36a55a0f-2026-11-17), step
+9).
 
 **Repro.** [`repros/bug32-integer-member-release.mlir`](repros/bug32-integer-member-release.mlir) shows the static difference through `reussir-opt`: the release of a variant with integer members has no tail release (REPRODUCES) or has one (FIXED). In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 

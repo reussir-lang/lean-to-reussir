@@ -12,8 +12,8 @@ lean2rr's programs is 2.0% larger.
 ## Summary
 
 **Kind:** cost. **Status:** patched (30-a), the last patch of the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
-`703a73f2`; 10 files, +210/-4). A form of the patch that applies to
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r5`, tree
+`107c212b`; 10 files, +210/-4). A form of the patch that applies to
 plain upstream is in
 [`patches/standalone/`](patches/standalone/).
 `scripts/l2r.py` does not check for the patch: without it the programs
@@ -226,8 +226,10 @@ change outside the noise of single runs.
 **Run time** (timing run 21, 2026-11-18: the series without 30-a
 against the series with it; direct pairs, median of 9 and min, the two
 sides in turn; 53 cases): geometric mean 1.000 (0.9998). 52 of 53 cases
-are inside ±3%. The one outside is X07 qsort, 0.933, faster with the
-patch (a 20 ms case; not explained, so not a claim for the patch). The
+are inside ±3%. The one outside is X07 qsort, 0.933. It is not a gain of the
+patch: the hot function is the same machine code on both sides, and
+the patch moved its start address by 16 bytes (timing run 23; the
+times of four builds follow that address). The
 slowest is 1.027. Cedar, where the code grows most: 1.021, 1.014,
 1.000. Peak memory: no case outside 3%.
 

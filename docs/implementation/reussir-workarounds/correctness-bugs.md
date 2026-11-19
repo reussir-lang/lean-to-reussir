@@ -5,7 +5,7 @@ whether the workaround can be dropped. Every issue here was a bug
 (erroneous behaviour), and upstream Reussir `7954a367` fixes each one, so
 its file in `reussir-bugs/` is gone (the headings give the old entry
 numbers). lean2rr's builds use a later base, upstream `36a55a0f` with
-the series (the Reussir branch `l2r-base13-r4`, `703a73f2`); the
+the series (17 patches, the Reussir branch `l2r-base13-r5`, tree `107c212b`); the
 workarounds stay until each is removed.
 Issues 1 (a missed optimization) and 2 (a missing feature), which
 are not bugs, are in [limitations.md](limitations.md). The open issue
@@ -35,8 +35,9 @@ Paths: `lean2rr/LeanToReussir/` for lean2rr's files.
   makes the payload an array of alignment-sized integers when a move of
   the representative would lose another arm's bytes. Reussir has it
   since `7954a367` (so lean2rr's base `36a55a0f` has it), and
-  `scripts/l2r.py` stops on a Reussir checkout without lean2rr's series
-  (patch 23-f, which plain upstream and the bases before Phase 2 lack).
+  `scripts/l2r.py` stops on a Reussir checkout that is older than
+  upstream's scoped drop worklists (2026-11-01) or lacks lean2rr's
+  series (`REQUIRED_REUSSIR_PATCHES`).
   Checked on `l2r-base3` (2026-10-19) with a minimal program: a
   `[value]` enum of six arms of different sizes (`f64`, `bool`, `u8`,
   `u16`, padding, a counted pointer, a nested

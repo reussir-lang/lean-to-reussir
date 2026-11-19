@@ -602,8 +602,8 @@ runtime.
     ([tasks/dependents.md](tasks/dependents.md#no-context-is-ever-suspended-inside-a-free)).
   - Reussir frees records itself, at a bounded stack depth, through that
     stack (upstream's worklist drops at Reussir `36a55a0f`; on
-    l2r-base12, local patches 23-a to 23-p,
-    [Reussir issue 23](../../reussir-bugs/23-worklist-drops.md)). A record
+    l2r-base12, local patches 23-a to 23-p of Reussir issue 23, deleted
+    since: [history](../../reussir-bugs/README.md#history-entries-19-23-and-24-deleted-2026-11-18)). A record
     whose last managed member is its one recursive member (a list) is
     freed in a loop from its head. A record without a cycle is taken
     apart in place, in the order of the record's fields. A record type

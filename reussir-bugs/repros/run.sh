@@ -9,14 +9,15 @@
 # RRC_CHECKOUT is a Reussir checkout with a build: its build/bin/rrc compiles
 # the repros, and plain .rr repros link against its build/target-rt/release.
 # NN is an entry number (1, 02, ...); the default is every entry that has a
-# line here: 1 to 4, 6 to 8, 12, 17 to 19, 23 and 24 (numbers 5, 9, 11 and
-# 22 are retired). Entry 2's repros check the part of it that upstream
-# fixed (a bounded stack depth). Entries 10 and 20 (missing features) have
+# line here: 1 to 4, 6 to 8, 12, 17, 18, 26 to 28 and 30 to 34 (numbers 5,
+# 9, 11, 19 and 22 to 24 are retired). Entry 2's repros check the part of
+# it that upstream fixed (a bounded stack depth). Entries 10 and 20 (missing features) have
 # no repro: their patches carry their own tests; 13 needs a 32-bit target,
 # 14 MLIR written by hand, 15 is shown by lean2rr's runtime test
-# RtArenaPurge, and 21's patch has a lit test that shows it. Entry 24
-# needs RRC_CHECKOUT/build/bin/reussir-opt (a build with the tests on, or
-# its target reussir-opt); without it, SKIPPED. Each repro prints one line:
+# RtArenaPurge, and 21's patch has a lit test that shows it; 25 and 29 are
+# shown by lean2rr's driver and its tests. Entries 28 and 30 to 34 need the
+# checkout's reussir-opt (a build with the tests on, or its target
+# reussir-opt); without it, SKIPPED. Each repro prints one line:
 #
 #   issue NN  REPRODUCES  the documented behaviour (the bug, the cost, ...)
 #                         was seen
@@ -35,17 +36,16 @@
 # L2R_LEAN_TOOLCHAIN; put first on PATH by scripts/toolchain.sh) and a
 # lean2rr build (`lake build` in lean2rr/, or L2R_LEAN2RR). l2r.py builds
 # the runtime crate leanrt for the checkout once, under runtime/leanrt/target/.
-# Entries 3, 4 and 19 compare the sizes of two outputs (--emit mlir-llvm,
-# --emit mlir, --emit mlir-llvm); entries 6 and 17 read their LLVM IR (the
+# Entries 3 and 4 compare the sizes of two outputs (--emit mlir-llvm,
+# --emit mlir); entries 6 and 17 read their LLVM IR (the
 # calls left, the stack slots left), entry 18 its aarch64 assembly (stores
-# through x8), entry 24 the MLIR after two passes (the token frees), entry
+# through x8), entry
 # 28 the exit status of two passes on a generated MLIR function, entries
-# 30, 31 and 32 the shape of the MLIR after one pass, entry 33 whether a
-# pass crashes (entries 24, 28 and 30 to 33 need the checkout's
+# 30, 31, 32 and 34 the shape of the MLIR after one pass, entry 33 whether
+# a pass crashes (entries 28 and 30 to 34 need the checkout's
 # reussir-opt, in build/bin or build-tests/bin);
 # entries 26 and 27 link a C driver that prints what the program saw
-# (entry 27 on aarch64 only, a few seconds); entry
-# 23 links a C driver (cc) that measures peak RSS around each free; entry 8
+# (entry 27 on aarch64 only, a few seconds); entry 8
 # counts the cells its program allocates (Reussir's allocation entry points
 # wrapped at link time); entry 12 is a Rust test of the checkout's runtime
 # sources, compiled with RUSTC. Everything takes seconds, except entry 2's
@@ -381,51 +381,6 @@ bug18() {
     else say_line FIXED 18 "both functions return in registers" "-O aggressive --no-pack-record-members"; fi
 }
 
-bug19() {
-    # The size of the LLVM-dialect module at N = 3 and N = 4 nested types:
-    # about 4x when exponential (upstream), about 1.4x with patch 19-a. With
-    # 23-f rrc makes no retcon destructors, so the size grows little too.
-    local n sz=()
-    for n in 3 4; do
-        python3 "$HERE/bug19-retcon-direct-arms.py" $n "$WORK/out/19-$n.rr"
-        { (cd "$WORK/run" && "$RRC" "$WORK/out/19-$n.rr" --emit mlir-llvm -O none -o "$WORK/out/19-$n.mlir") > "$WORK/out/19-$n.log" 2>&1; } 2> /dev/null
-        RC=$?
-        if [ $RC != 0 ]; then say_line OTHER 19 "N = $n: $(build_fail 19-$n)" "-O none"; return; fi
-        sz+=("$(stat -c %s "$WORK/out/19-$n.mlir")")
-    done
-    local r msg
-    r=$(ratio "${sz[1]}" "${sz[0]}")
-    msg="--emit mlir-llvm: N = 3: $((sz[0] / 1024)) KB, N = 4: $((sz[1] / 1024)) KB (${r}x for one more level)"
-    if ge "$r" 3; then say_line REPRODUCES 19 "$msg" "-O none"
-    elif le "$r" 2; then say_line FIXED 19 "$msg" "-O none"
-    else say_line OTHER 19 "$msg" "-O none"; fi
-}
-bug23() {
-    # Peak RSS growth (KiB) during the free of four values of 10^6 levels,
-    # measured by the C driver: about 85 bytes per level (left-deep tree:
-    # 84 MiB) with upstream's retcon drops, below 16 MiB each when fixed.
-    local d=$WORK/out/23 l r c f
-    mkdir -p "$d"
-    command -v cc > /dev/null || { say_line SKIPPED 23 "no cc"; return; }
-    { (cd "$WORK/run" && "$RRC" "$HERE/bug23-deep-free.rr" -o "$d/deep.o" --emit obj --relocation-mode pic -O aggressive) > "$d/log" 2>&1; } 2> /dev/null
-    RC=$?
-    if [ $RC != 0 ]; then say_line OTHER 23 "rrc $(signame "$RC"): $(grep -m1 -o "error[:=].\{0,160\}" "$d/log")" "-O aggressive"; return; fi
-    if ! cc "$d/deep.o" "$HERE/bug23-deep-free.c" -o "$d/deep" -L"$RT/deps" -lreussir_rt -Wl,-rpath,"$RT/deps" -Wl,-rpath-link,"$TL" > "$d/cc.log" 2>&1; then
-        say_line OTHER 23 "cc failed (see $d/cc.log)" "-O aggressive"; return
-    fi
-    local k g=()
-    for k in 0 1 2 3; do
-        { (cd "$WORK/run" && timeout 120 "$d/deep" 1000000 $k) > "$d/stdout$k" 2> "$d/stderr$k"; } 2> /dev/null
-        EXIT=$?
-        g+=("$(sed -n 's/^grew \([0-9]*\)$/\1/p' "$d/stdout$k")")
-        [ -n "${g[$k]}" ] || { say_line OTHER 23 "shape $k prints '$(head -c 200 "$d/stdout$k")' ($(signame $EXIT))" "-O aggressive"; return; }
-    done
-    read -r l r c f <<< "${g[*]}"
-    local msg="peak RSS growth during the free of 10^6 levels: left-deep tree $l KiB, right-deep $r, 64-arm chain $c, compositions $f"
-    if [ "$l" -ge 32768 ]; then say_line REPRODUCES 23 "$msg" "-O aggressive"
-    elif [ "$l" -lt 16384 ] && [ "$r" -lt 16384 ] && [ "$c" -lt 16384 ] && [ "$f" -lt 16384 ]; then say_line FIXED 23 "$msg" "-O aggressive"
-    else say_line OTHER 23 "$msg" "-O aggressive"; fi
-}
 # reussir_opt: the checkout's reussir-opt (its build directory, or the
 # build of the test tools next to it, build-tests); empty when there is none.
 reussir_opt() {
@@ -433,23 +388,6 @@ reussir_opt() {
     for o in "$CK/build/bin/reussir-opt" "$CK/build-tests/bin/reussir-opt"; do
         [ -x "$o" ] && { echo "$o"; return; }
     done
-}
-bug24() {
-    # The token frees after the acquire/drop expansion with its default
-    # options (TPDE mode's) and token reuse: none when the payload's token
-    # leaks (upstream), one with 23-e.
-    local opt d=$WORK/out/24 n
-    opt=$(reussir_opt)
-    [ -n "$opt" ] || { say_line SKIPPED 24 "no reussir-opt in $CK/build/bin or $CK/build-tests/bin (build its target reussir-opt)"; return; }
-    mkdir -p "$d"
-    { "$opt" "$HERE/bug24-locked-drop-token.mlir" --reussir-acquire-drop-expansion='outline-record=true expand-decrement=true' \
-        --reussir-token-reuse > "$d/out.mlir" 2> "$d/log"; } 2> /dev/null
-    RC=$?
-    if [ $RC != 0 ]; then say_line OTHER 24 "reussir-opt $(signame "$RC"): $(grep -m1 -o "error.\{0,160\}" "$d/log")"; return; fi
-    n=$(grep -c 'reussir.token.free' "$d/out.mlir")
-    if [ "$n" = 0 ]; then say_line REPRODUCES 24 "a mutex cell's drop, TPDE options: the payload's token is never freed (no token.free)"
-    elif grep -q '@__reussir_locked_drop' "$d/out.mlir"; then say_line FIXED 24 "a mutex cell's drop, TPDE options: the payload's token is freed ($n token.free, in the locked-drop function)"
-    else say_line OTHER 24 "$n token.free, no locked-drop function"; fi
 }
 # obj_driver NN SRC.rr DRIVER.c FLAGS...: compile a repro to an object,
 # link it with a C driver and Reussir's runtime, run it (exe); returns 1
@@ -580,6 +518,17 @@ bug32() {
     elif [ "$t" = 0 ]; then say_line REPRODUCES 32 "a variant with integer members: every dead child is deferred, no tail release"
     else say_line FIXED 32 "a variant with integer members: integers released in place, the last dead child by a tail release ($t musttail)"; fi
 }
+bug34() {
+    # A cost, as entry 31's, for a box that also holds integers: its FFI
+    # release enters the drop worklist where it can release the integers
+    # in place and free the box.
+    local n
+    expanded 34 bug34-integer-leaf-foreign-release.mlir || return
+    n=$(grep -c 'reussir.drop.join' "$WORK/out/34.mlir")
+    if ! grep -q 'reussir.token.free' "$WORK/out/34.mlir"; then say_line OTHER 34 "the release does not free the box (see $WORK/out/34.mlir)"
+    elif [ "$n" = 0 ]; then say_line FIXED 34 "the foreign release of a box of two integers releases them in place (no drop.join)"
+    else say_line REPRODUCES 34 "the foreign release of a box of two integers enters the drop worklist ($n drop.join)"; fi
+}
 bug33() {
     # A crash of reussir-opt, not of rrc: `reussir.rc.dec` of a shared box
     # is valid without its token result (the form the frontend emits), and
@@ -597,7 +546,7 @@ bug33() {
     else say_line OTHER 33 "reussir-opt $(signame $RC), $n expanded decrements: $(grep -m1 -o "error.\{0,160\}" "$WORK/out/33.log")"; fi
 }
 
-ALL="01 02 03 04 06 07 08 12 17 18 19 23 24 26 27 28 30 31 32 33"
+ALL="01 02 03 04 06 07 08 12 17 18 26 27 28 30 31 32 33 34"
 SLOW=" "
 [ $# -gt 0 ] && ALL=$*
 for b in $ALL; do

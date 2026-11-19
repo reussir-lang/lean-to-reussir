@@ -1,7 +1,7 @@
-From 703a73f232a072964bd43dfe019dda39aab9f4b9 Mon Sep 17 00:00:00 2001
+From a4531501b11bc7f6ba392b5accedacdc6955f3df Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 07:24:50 -0500
-Subject: [PATCH 16/16] [conversion] lower the vector dialect without region
+Subject: [PATCH 17/17] [conversion] lower the vector dialect without region
  simplification
 
 The pipeline ran MLIR's `convert-vector-to-llvm` on every module. That

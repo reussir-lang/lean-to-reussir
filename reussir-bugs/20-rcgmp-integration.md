@@ -80,14 +80,15 @@ changed lines each), they are prepared as pull request candidates.
 | [20-b](patches/parked/20-b-mpz-handle-more-tests.patch) | R2 (rest) | `b2e70249` | tests | the reviewed R2's tests that #824, #843 and #845 left out (R2 itself, a bug fix and feature: `Nat` and `Int` at polyffi type arguments become an owned handle, `reussir_rt::rcgmp::Mpz`, is upstream) |
 | [20-c](patches/20-c-mpz-inline-glue.patch) | R2b | `6471a6de` | optimization | `Mpz` clones and drops through compiler-emitted rcgmp glue that inlines into textures |
 | [20-d](patches/20-d-mpz-is-shared.patch) | R2c | `90c53269` | feature | `Mpz::is_shared`, through compiler-emitted glue from `rcgmp.mpz.is_unique` |
-| [20-e](patches/parked/20-e-hex-bigint-literals.patch) | R3 | `2b2ef6be` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
+| [20-e](patches/20-e-hex-bigint-literals.patch) | R3 | `2b2ef6be` | optimization (build time) | big integer constants and match keys reach MLIR in hexadecimal |
 
 Step D's notes and the patches' subject lines use the names R1 to R3.
 The patches apply in this order, after 10-a and 07-a (until Phase 2,
 after the 8 of the drop series, 10-a and 07-a), with no change of code;
 20-c and 20-d change the `Mpz` that 20-b added, now upstream's (#824;
 upstream's comments are reworded, the code is the same, so 20-c applies
-with one comment merged). 21-a and entry 23's patches come after them.
+with one comment merged). 21-a comes after them (on `l2r-base12`, the
+patches of the deleted entry 23 too).
 
 ## Context
 

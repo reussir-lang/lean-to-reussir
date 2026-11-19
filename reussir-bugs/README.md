@@ -22,16 +22,16 @@ builds apply to Reussir.
   which builds and runs them ([running the repros](#running-the-repros)).
 
 **Base.** lean2rr's Reussir is upstream Reussir `36a55a0f` (`main` on
-2026-11-17) plus the 16 patches of the series: 10-a, 07-a, entry 20's
-five (20-a, 20-g, 20-c, 20-d, 20-e), 21-a, 29-a, 31-a, 32-a, the fixes
-of four upstream bugs (26-a, 27-a, 28-a, which the port found, and
-33-a, which the work on 31-a found), and 30-a. The file
+2026-11-17) plus the 17 patches of the series: 10-a, 07-a, entry 20's
+five (20-a, 20-g, 20-c, 20-d, 20-e), 21-a, 29-a, 31-a, 32-a, 34-a, the
+fixes of four upstream bugs (26-a, 27-a, 28-a, which the port found,
+and 33-a, which the work on 31-a found), and 30-a. The file
 [`patches/base`](patches/base) holds the full id of the upstream commit.
 The Reussir checkout is not part of this repository. Its branch
-`l2r-base13-r4` (head `703a73f2`, tree `2778b509`) is the compiler
-that lean2rr's last gate ran on. The series of this folder gives
-exactly this tree (checked with `git am --keep-non-patch` on a clean
-`36a55a0f`). `scripts/l2r.py` stops
+`l2r-base13-r5` (tree `107c212b`) is the compiler that lean2rr's last
+gate ran on. The series of this folder gives exactly this tree
+(applied on a clean `36a55a0f`).
+`scripts/l2r.py` stops
 with an error on a Reussir that lacks the upstream drop interface or a
 patch that lean2rr requires
 ([applying the patches](#applying-the-patches)). The build needs GMP and
@@ -45,14 +45,14 @@ patches) to this one
 
 - **Upstream took worklist drops.** Its series of 2026-11-01 (#872 to
   #914) deleted the retcon drop lowering and added scoped drop worklists
-  in `crates/reussir-rt/src/drop_stack.rs`. This is the design of entry
-  23, so the sixteen patches 23-a to 23-p left the series
-  ([issue 23](23-worklist-drops.md) has the mapping). rrc's option
+  in `crates/reussir-rt/src/drop_stack.rs`. This is the design of the
+  deleted entry 23, so the sixteen patches 23-a to 23-p left the series
+  (the [history](#history-entries-19-23-and-24-deleted-2026-11-18) has the mapping). rrc's option
   `--drop-order forward|backward` selects the order of releases; the
   default, `backward`, is the order that `l2r-base12` gave, and
   `scripts/l2r.py` passes it explicitly.
 - **Upstream closed the four issues we filed.** #759 and #760 (retcon
-  drops: entries 19 and 23) closed on 2026-11-01 with the removal of
+  drops: the deleted entries 19 and 23) closed on 2026-11-01 with the removal of
   retcon drops; #761 (the drop executor's slot table) closed on
   2026-10-21; #762 (borrowed parameters) closed on 2026-11-01 with the
   borrow analysis (#854 to #866, #919), which is on by default at the
@@ -65,7 +65,7 @@ patches) to this one
 - **Our move to `36a55a0f` (2026-11-17).** The 8 patches were moved to
   `36a55a0f`, two more sites of 10-a's rule were fixed, and 24-a, 24-b
   and 24-c were folded into the patches that they change. No patch has
-  the number 24 now (entry 24 is another topic).
+  the number 24 now (the deleted entry 24 was another topic).
 - **The refinement and the final series (2026-11-18).** The five
   patches were reviewed and refined (20-g split from 20-a), 20-e and
   21-a came back with measurements on this base, and three upstream
@@ -96,7 +96,17 @@ Status (2026-11-18):
   raytracer, `repros/run.sh` on the series and on pristine `36a55a0f`).
   All 742 `.rr` files are byte-identical to the gate before, and all
   742 executables have the same section sizes as there: 33-a changes
-  no generated code. This is the last gate that passed.
+  no generated code.
+- **The gate on the series of 17 patches** (gate 57; lean2rr dev
+  `f20aed74` on Reussir tree `107c212b`; 2026-11-18): the runtime
+  suite passed, 748 of 750 with the same 2 expected failures, and so
+  did the second phase (23 of 23 check scripts, the classic corpus in
+  its three modes, the raytracer, the repros). All 742 `.rr` files
+  are byte-identical to the gate before. 345 of the 742 executables
+  lose at least one worker of a foreign release, which is 34-a's
+  effect, mostly for records of the library
+  ([entry 34](34-leaf-integer-foreign-release.md#measured-claim)).
+  This is the last gate that passed.
 - **Wall time** (the shared benchmark set, 53 cases; geometric means):
   - timing run 20, the series of 12 patches: 0.584 of native (dev on
     `l2r-base12` in run 19: 0.593), and 0.984 of dev on `l2r-base12` in
@@ -107,11 +117,20 @@ Status (2026-11-18):
     two runs, not a direct pair: 0.959 of dev on `l2r-base12`;
   - timing run 22, the series with 30-a, a direct step: 0.569 of
     native. It also timed 31-a and 32-a each alone and the build-time
-    cost of 30-a.
-- **Open:** four cases are still 5 to 8% slower than on `l2r-base12`
-  (L18, X07, L08, L15; cause unknown); 30-a costs 2.0% of code size
+    cost of 30-a;
+  - timing run 23, 14 cases, the series of 16 against dev on
+    `l2r-base12` in direct pairs: 0.951. It looked at the four cases
+    that were still slower than on `l2r-base12`;
+  - timing run 24, the series of 17 (with 34-a) against the series of
+    15, 53 cases in direct pairs: 0.999; one case outside ±3%,
+    unionfind 0.937; no case slower. The last direct headline against
+    native stays the 0.569 of run 22, on the series of 15.
+- **Open:** two cases are slower than on `l2r-base12`: L15
+  monadic-interp 1.044 (about half of it located: scope entries that
+  are needed) and L18 hashmap 1.055 (one allocation site found, its
+  cause not). 30-a costs 2.0% of code size
   and about 9% of a small program's build time
-  ([history](#history-the-move-to-36a55a0f-2026-11-17), steps 6 and 7).
+  ([history](#history-the-move-to-36a55a0f-2026-11-17), steps 6 to 9).
 
 ### Earlier bases (history)
 
@@ -190,7 +209,11 @@ only in part).
 
 ## Names
 
-- **Entry numbers** run from 1 to 33. Numbers 5, 9, 11 and 22 are
+- **Entry numbers** run from 1 to 33. Numbers 19, 23 and 24 are retired
+  (2026-11-18): upstream `36a55a0f` fixes the three entries in full
+  (retcon destructors' direct arms; the memory of deep frees; a locked
+  cell's leaked payload), and they were deleted with their patches and
+  repros ([history](#history-entries-19-23-and-24-deleted-2026-11-18)). Numbers 5, 9, 11 and 22 are
   retired (2026-10-25): upstream `ea240b19` fixed entry 5 in full; Phase
   2 made entries 9 and 11 obsolete (they were about the drop series'
   shared stack, which is gone); and number 22 named a local patch that
@@ -199,19 +222,19 @@ only in part).
   entry 23 superseded: with 23-f no pipeline made retcon destructors
   (upstream has deleted them since). No
   other entry gets these numbers; the other entries keep theirs. Number
-  19, reserved until Phase 2 for the patch for upstream issue #759, is
+  19, reserved until Phase 2 for the patch for upstream issue #759, was
   that entry. Entry 25 (the texture cache's key) is new with the move to
   `36a55a0f`. The patch names 24-a, 24-b and 24-c of the maintainer's
-  port (lean2rr's pull request #4) were not patches of entry 24: they
+  port (lean2rr's pull request #4) were not patches of the deleted entry 24: they
   are folded into 10-a, 07-a, 20-c and 20-d, and no patch has that
   number. Entries 26, 27 and 28 are the upstream bugs that the port
-  found (2026-11-18). Entries 19, 23 and 24 are fixed upstream and
-  marked "to delete"; when they are deleted, their numbers are retired
-  too. Entry 29 (rrc opens the texture cache's store once for each
+  found (2026-11-18). Entry 29 (rrc opens the texture cache's store once for each
   texture) is from 2026-11-18, and so are entries 30 to 32 (three
   upstream costs that the port's timing and gates showed, each with a
   patch) and entry 33 (an upstream bug found with 31-a, with a patch).
-  The next free number is 34. Patch letters are not used again either: 20-f was the
+  Entry 34 (a fourth upstream cost, found by timing run 23, with a
+  patch) is from 2026-11-18 too.
+  The next free number is 35. Patch letters are not used again either: 20-f was the
   pin patch, so the patch that was split from 20-a is 20-g. (Old number 37 was
   reserved for another track's patch, value records across the FFI
   boundary; that track takes the next free number.)
@@ -228,11 +251,9 @@ only in part).
   description` (`[ffi]`, `[bigint]`, `[rc]`, `[rrc]`, `[drop]`, `[trmc]`,
   `[codegen]`, `[conversion]`); it has no entry number. The body of each message
   says what the patch does, why, which tests it has and what was
-  measured. No message names lean2rr. The parked files are older:
-  20-b and 23-a to 23-p are their files from `l2r-base12`'s
-  series (`[PATCH NN/24]`, against `95d9a1c8`), whose subjects name step
-  D's patches R1 to R3 and the entries; the parked 19-a is its file from
-  `l2r-base7`'s series (`[PATCH 3/8]`). 20-f's file (its subject "rcgmp
+  measured. No message names lean2rr. The parked 20-b is older: it is
+  its file from `l2r-base12`'s series (`[PATCH 04/24]`, against
+  `95d9a1c8`), whose subject names step D's patch R2. 20-f's file (its subject "rcgmp
   pin") is in git history (commit `af521c12`). The
   [history](#history-the-renumbering-of-2026-10-19) maps old numbers to
   new ones.
@@ -252,6 +273,14 @@ only in part).
   `reussir-bugs/11-drop-run.md`, `reussir-bugs/patches/02-a-*.patch` to
   `02-e-*.patch`, `09-a-drain-end-hook.patch`,
   `parked/11-a-drop-run.patch` and `repros/bug02-unlink-provenance.rs`.
+  Text that names entries 19, 23 or 24, patches 19-a or 23-a to 23-p, or
+  the repros `bug19`, `bug23` and `bug24` records the time before
+  2026-11-18. Their last files are in commit `f20aed74` (dev):
+  `reussir-bugs/19-retcon-direct-arms.md`, `23-worklist-drops.md`,
+  `24-locked-drop-token-leak.md`, `patches/parked/19-a-*.patch` and
+  `23-a-*.patch` to `23-p-*.patch`, `repros/bug19-retcon-direct-arms.py`,
+  `bug23-deep-free.rr` and `.c`, `bug24-locked-drop-token.mlir` (for
+  example `git show f20aed74:reussir-bugs/23-worklist-drops.md`).
   Text that names patches 23-a to 23-p or 20-b as parts of
   the series, the branch `l2r-base12` or `./reussir` as the built
   checkout records the time before the move to `36a55a0f` (2026-11-17).
@@ -315,16 +344,14 @@ and brought the three bugs of entries 26 to 28
 | [26](26-trmc-observable-release.md) | bug | TRMC moves a self call before a release that runs a foreign cleanup hook or drops a closure: the cleanup runs before the recursion, where the source runs it after | not known to: one constructed Lean program gave native's output, and the patch changes no TRMC helper of 19 lean2rr programs | - | [26-a](patches/26-a-trmc-observable-release.patch) | open at `36a55a0f` (also on `l2r-base12`); not reported |
 | [27](27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI; low severity) | `core::object::is_unique` answers true for a nullary immediate after 2^32 - 1 retains of it | no: lean2rr does not call the intrinsic | - | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | open at `36a55a0f`, new with #983; not reported |
 | [28](28-sve-vector-storage.md) | bug (aarch64 with SVE: valid code rejected) | rrc runs MLIR's SVE storage pass on every function; the pass fails on some large functions without any vector, and rrc stops with `RunPass` and no diagnostic | yes on a host with SVE: the row oracle of `rows-check.sh` did not compile | none | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | open at `36a55a0f`, new with #994; the direct cause is in MLIR; not reported |
-| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) | open at `36a55a0f`; not reported |
-| [19](19-retcon-direct-arms.md) | bug (rrc out of memory); fixed upstream, to delete | the drop expansion writes a retcon variant's direct arms out in place at every drop site, nested types included: code exponential in type nesting (#759) | no: `36a55a0f` has no retcon destructors (on `l2r-base9` to `l2r-base12`, 23-f turned them off; on Phase 2's first base, `l2r-base7`, rrc ran out of memory on `RtSyncSelect` without the patch) | - | none (parked, history: [19-a](patches/parked/19-a-retcon-direct-arms.patch); its target code is gone) | fixed: upstream deleted the retcon drop lowering (#872) and closed #759 on 2026-11-01. The repro prints FIXED on pristine `36a55a0f` and on the patched base (the port's first gate, 2026-11-18) |
-| [24](24-locked-drop-token-leak.md) | bug (a leak, with TPDE's drop options); fixed upstream, to delete | with tail-recursive and retcon drops off, a lock-guarded cell's payload is released inside the critical section, and its box is never freed | no: rrc has no TPDE level | - | none (it was fixed inside 23-e, which left the series) | fixed at `36a55a0f`: upstream's drop expansion calls a locked-drop function on every path; the repro prints FIXED on pristine `36a55a0f` (the port's first gate, 2026-11-18; skipped on the patched build, which has no `reussir-opt`). Never reported |
+| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) | open at `36a55a0f`; pull request reussir#1093 is open (2026-11-19) |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | reproduces on `36a55a0f` (3.93x; the port's first gate, 2026-11-18) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | reproduces on `36a55a0f` (3.99x; the port's first gate, 2026-11-18) |
-| [23](23-worklist-drops.md) | cost (memory and run time); fixed upstream, to delete | retcon destructors kept one coroutine frame per level of a value being freed: memory grew with the depth (85 to 622 bytes per level) | no longer: upstream's scoped worklists are entry 23's design. On `l2r-base7` it did (`RtClosureChainFree` 652 MB, native 102 MB). On `36a55a0f` lean2rr's deep-free tests keep their allocation bounds (the port's first gate, 2026-11-18) | none | none (parked, history: [23-a](patches/parked/23-a-drop-stack-runtime.patch) to [23-p](patches/parked/23-p-same-release-cells.patch), sixteen) | fixed: the series of 2026-11-01 (#872 to #914) took the design; #760 closed on 2026-11-01. The repro prints FIXED on pristine `36a55a0f` and on the patched base (0 KiB in all four shapes) |
 | [29](29-texture-store-open.md) | cost (build time) | rrc opens and closes the store of its texture cache for every texture; each open syncs the store and reads the whole database (about 19 ms for each texture with a small store, about 53 ms with a 140 MB store) | yes: build time of every program | none in the driver (a store on a memory file system removes the sync cost) | [29-a](patches/29-a-polyffi-store-once.patch) | open at `36a55a0f`, new with #852; not reported |
 | [30](30-vector-to-llvm-block-merging.md) | cost (build time) | rrc runs MLIR's vector lowering pass on every module; the pass merges similar blocks of all code, and in a large function with many similar arms the merged blocks' arguments multiply (up to 234,385): one build took 16 to 18 minutes | yes: build time of one known program (`RtOutlineStates`) | none | [30-a](patches/30-a-vector-to-llvm-patterns.patch) (with costs: code 2.0% larger, a small program about 9% slower to build) | open at `36a55a0f`, new with #994; the behaviour is MLIR's; not reported |
 | [31](31-leaf-foreign-release.md) | cost (run time) | the last release of a record without counted members from foreign code enters a destruction scope of the runtime, where a direct free is enough | yes: speed of programs that keep such records in runtime containers (n_body 1.56 times its time on `l2r-base12`) | none | [31-a](patches/31-a-leaf-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [32](32-integer-members-drop-path.md) | cost (run time) | a record with a `Nat` or `Int` member counts as having an observable cleanup, so the drop glue's leaf dispatch, pure release and tail call are off for it: a scope for each dead leaf, a deferral for each freed node | yes: speed of programs that free trees with integer members (deriv, rbtree-ck, cfold, expr_eval: 3 to 16% slower than on `l2r-base12`) | none | [32-a](patches/32-a-integer-members-pure-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
+| [34](34-leaf-integer-foreign-release.md) | cost (run time) | the last release of a record of scalars and big integers from foreign code enters a destruction scope of the runtime, though its body only releases the integers in place and frees the box (31-a's rule covers scalars only) | yes: speed of programs that keep such records in runtime containers (unionfind 1.077 times its time on `l2r-base12`) | none | [34-a](patches/34-a-leaf-integer-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | reproduces on `36a55a0f` (4.79x pristine, 4.71x patched; the port's first gate, 2026-11-18) |
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | reproduces on `36a55a0f` (the port's first gate, 2026-11-18) |
 | [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | reproduces on `36a55a0f` (2 stack slots; the port's first gate, 2026-11-18); not reported |
@@ -338,15 +365,14 @@ and brought the three bugs of entries 26 to 28
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44 at `36a55a0f`; `Cargo.toml` read, 2026-11-17) |
 | [25](25-texture-cache-key.md) | sharp edge (documented rule) | rrc's texture cache is keyed on the paths of rustc and of the library directories, not on their contents: after a library is rebuilt in place, rrc reuses texture bitcode made against the old library, with no message | not with lean2rr's driver; a build without the driver's rule gets a wrong program | `scripts/l2r.py` puts the runtime build's digest into the path of the rustc that it gives rrc, and keeps the cache in lean2rr's own directory (`L2R_POLYFFI_CACHE`); test `tests/runtime/texture-cache-check.sh` | none | by design (#852): library directories are fixed inputs, a changed library needs a new path; upstream's own tests hit it and changed the caller (#967). |
 
-**Counts.** 29 entries (numbers 1 to 33; numbers 5, 9, 11 and 22 are
-retired): 10 bugs (2 of them fixed upstream and to delete: 19, 24), 7
-costs (1 fixed upstream and to delete: 23), 6 missed optimizations, 4
-missing features, 1 dependency issue, 1 sharp edge. 12 entries have
-patches in the series, 16 patch files in all (one each for 7, 10, 21
-and 26 to 33, five for entry 20): 4 bug fixes (26-a, 27-a, 28-a, 33-a), 4
-features (07-a, 10-a, 20-a, 20-d) and 8 optimizations (20-g, 20-c,
-20-e, 21-a, 29-a, 30-a, 31-a, 32-a). 22 parked patch files lie outside
-the series (01-a, 06-a, 06-b, 16-a, 19-a, 20-b and 23-a to 23-p), and
+**Counts.** 27 entries (numbers 1 to 34; numbers 5, 9, 11, 19 and 22 to
+24 are retired): 8 bugs, 7 costs, 6 missed optimizations, 4
+missing features, 1 dependency issue, 1 sharp edge. 13 entries have
+patches in the series, 17 patch files in all (one each for 7, 10, 21
+and 26 to 34, five for entry 20): 4 bug fixes (26-a, 27-a, 28-a, 33-a), 4
+features (07-a, 10-a, 20-a, 20-d) and 9 optimizations (20-g, 20-c,
+20-e, 21-a, 29-a, 30-a, 31-a, 32-a, 34-a). 5 parked patch files lie outside
+the series (01-a, 06-a, 06-b, 16-a and 20-b), and
 one file in `patches/standalone/` is a second form of 30-a.
 
 Status words used in the entries' summaries:
@@ -375,15 +401,17 @@ cmake --build reussir/build --target rrc reussir-rt
 
 `--keep-non-patch` is necessary: the subjects start with `[ffi]` or
 `[bigint]`, and plain `git am` removes a leading `[...]`. The result has
-the series of 16 patches, and its tree is that of the Reussir branch
-`l2r-base13-r4` (head `703a73f2`, tree `2778b509`), on which the last
-gate ran. `scripts/l2r.py` uses the checkout
+the series of 17 patches, tree `107c212b`: the tree of the Reussir
+branch `l2r-base13-r5`, on which the last gate ran. `scripts/l2r.py` uses the checkout
 at `./reussir` unless `L2R_REUSSIR` names another one, and expects the
 build in `<checkout>/build`.
 
-The series on `36a55a0f` (16 patches; the whole series is 112 files,
-without `tests/` 59 files; the commit ids are those of
-`l2r-base13-r4`):
+The series on `36a55a0f` (17 patches; the whole series is 114 files,
+without `tests/` 60 files; the Reussir branch is `l2r-base13-r5`, tree
+`107c212b`. The commit ids of rows 1 to 11 are those of that branch
+and of `l2r-base13-r4`. Rows 12 to 17 have no commit id here: their
+commits are made again when a message changes, and the patch file
+and the tree name them):
 
 | # | Patch | Commit | Subject | Kind | Lines (all; without `tests/`) |
 |---|---|---|---|---|---|
@@ -398,11 +426,12 @@ without `tests/` 59 files; the commit ids are those of
 | 9 | [29-a](patches/29-a-polyffi-store-once.patch) | `5a5eda93` | `[rrc] open the polyffi cache store once per module` | optimization (build time) | +50/-8 |
 | 10 | [31-a](patches/31-a-leaf-foreign-release.patch) | `bebee388` | `[drop] release a foreign box of trivially copyable members in place` | optimization | +168/-0; code 7 lines |
 | 11 | [32-a](patches/32-a-integer-members-pure-release.patch) | `43e51856` | `[drop] release integer members in place and tail-release the last child` | optimization | +246/-53; code +103/-53 |
-| 12 | [26-a](patches/26-a-trmc-observable-release.patch) | `4561d764` | `[trmc] keep a self call in place across a release with an observable cleanup` | bug fix | +283/-13; +83/-13 |
-| 13 | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | `1e0950a9` | `[codegen] answer false to a uniqueness test of an immediate under TBI` | bug fix | +44/-2; +29/-2 |
-| 14 | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | `6817ba69` | `[conversion] legalize the storage of scalable vectors with the patterns alone` | bug fix | +156/-4 |
-| 15 | [33-a](patches/33-a-tokenless-rc-dec.patch) | `bf8f8de0` | `[rc] expand a decrement that has no token result` | bug fix | +77/-0; code 10 lines |
-| 16 | [30-a](patches/30-a-vector-to-llvm-patterns.patch) | `703a73f2` | `[conversion] lower the vector dialect without region simplification` | optimization (build time of large functions; costs code size and build time of small programs) | +210/-4 |
+| 12 | [34-a](patches/34-a-leaf-integer-foreign-release.patch) | - | `[drop] release a foreign box of scalars and integers in place` | optimization | +109/-2; code +19/-2 |
+| 13 | [26-a](patches/26-a-trmc-observable-release.patch) | - | `[trmc] keep a self call in place across a release with an observable cleanup` | bug fix | +283/-13; +83/-13 |
+| 14 | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | - | `[codegen] answer false to a uniqueness test of an immediate under TBI` | bug fix | +44/-2; +29/-2 |
+| 15 | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | - | `[conversion] legalize the storage of scalable vectors with the patterns alone` | bug fix | +156/-4 |
+| 16 | [33-a](patches/33-a-tokenless-rc-dec.patch) | - | `[rc] expand a decrement that has no token result` | bug fix | +77/-0; code 10 lines |
+| 17 | [30-a](patches/30-a-vector-to-llvm-patterns.patch) | - | `[conversion] lower the vector dialect without region simplification` | optimization (build time of large functions; costs code size and build time of small programs) | +210/-4 |
 
 Order and dependencies:
 
@@ -416,10 +445,14 @@ Order and dependencies:
   patch touches, and it applies to a clean `36a55a0f` alone.
 - 31-a and 32-a change one file, `WorklistDrop.cpp`, far apart; they
   apply in either order, and each applies to a clean `36a55a0f` alone.
+- 34-a needs both: it widens 31-a's rule with the class that 32-a
+  adds. It comes directly after 32-a and does not apply to a clean
+  `36a55a0f` alone. The five later patches apply after it with no
+  conflict.
 - **The order has a reason: what lean2rr needs or gains first, then
-  the four fixes of upstream bugs, then 30-a.** Patches 1 to 11 are
-  features that lean2rr needs and optimizations (20-g to 32-a; the
-  last three of them, 29-a, 31-a and 32-a, are answers to costs that
+  the four fixes of upstream bugs, then 30-a.** Patches 1 to 12 are
+  features that lean2rr needs and optimizations (20-g to 34-a; the
+  last four of them, 29-a, 31-a, 32-a and 34-a, are answers to costs that
   are upstream's own and that lean2rr's programs show). 26-a, 27-a and
   28-a are fixes of bugs that are upstream's own. They are independent
   of the rest and of each other: they apply to a clean `36a55a0f`, each
@@ -440,7 +473,7 @@ Every compiler change of the port has a measured claim (owner,
 bytes, and compile times of rrc. All on aarch64. Each entry has the
 details and what was not measured.
 
-**Wall time.** Timing runs 20, 21 and 22 (2026-11-18) timed patches of
+**Wall time.** Timing runs 20 to 23 (2026-11-18) timed patches of
 the series as direct pairs. Run 20 timed two patches alone, each as a
 direct pair (the port against the port without
 the patch; median of 9 and min, the two sides in turn; a ratio above 1
@@ -458,7 +491,7 @@ method, a ratio below 1 means that the newer side is faster:
 | Patches | Geometric mean | Cases outside ±3% | The others |
 |---|---:|---|---|
 | 31-a and 32-a, against the series of 12 | 0.975 (by set 0.980, 0.989, 0.941, 0.996) | eight, all faster: X10 n_body 0.642 (31-a's case); X02 deriv 0.829, L03 deriv 0.841, L02 rbtree-ck 0.849, X06 rbtree_ck 0.855, E06 expr_eval 0.875, X03 cfold 0.946, L05 cfold 0.961 (32-a's cases) | no case is slower (the slowest 1.023); `.text` 1.001; peak memory inside 3% |
-| 30-a, against the series with 31-a and 32-a | 1.000 | one, faster: X07 qsort 0.933 (not explained; not a claim for the patch) | 52 of 53 inside ±3% (the slowest 1.027); `.text` 1.020, Cedar 1.093; peak memory inside 3% |
+| 30-a, against the series with 31-a and 32-a | 1.000 | one, faster: X07 qsort 0.933 (not a gain of the patch: code placement, run 23) | 52 of 53 inside ±3% (the slowest 1.027); `.text` 1.020, Cedar 1.093; peak memory inside 3% |
 
 Run 22 timed 31-a alone and 32-a alone (the series of 12 with the one
 patch against the series of 12; the same method):
@@ -471,6 +504,24 @@ patch against the series of 12; the same method):
 Run 22 also timed the whole series with 30-a against native, as a
 direct step: 0.569 over 53 cases (without 30-a: 0.568 in run 21). Two
 cases are above native: E07 rose_tree 1.18 and E01 gcd_batch 1.03.
+
+Run 23 timed the prototype of 34-a (the series of 16 with the
+prototype against the series of 16; 14 cases; the same method). 34-a
+compiles the changed case to the same instructions as the prototype.
+Run 24 then timed 34-a itself on the full set (the series of 17
+against the series of 15, which differ in 34-a and in 33-a, which
+changes no generated code):
+
+| Patch | Cases timed | Cases outside ±3% | The others |
+|---|---:|---|---|
+| 34-a (its prototype) | 14 (the four cases above `l2r-base12`, 5 winners of run 20, 5 neutral) | one, faster: L08 unionfind 0.938 (315.3 ms to 295.6 ms; min 0.934) | the 13 others 0.997 to 1.004 |
+| 34-a (run 24) | 53 | one, faster: L08 unionfind 0.937 (315.6 ms to 295.6 ms; min 0.938) | geometric mean 0.999; no case slower (the slowest 1.022, inside the band); the patch removes a release worker in 20 of the 53 programs, and 18 of them are between 0.994 and 1.006; peak memory 1.000; `.text` 1.000 (-0.3% to +0.6%) |
+
+Run 23 also timed the series of 16 against dev on `l2r-base12` on
+these 14 cases, as direct pairs: geometric mean 0.951; L08 1.077, L18
+hashmap 1.054, L15 monadic-interp 1.040, X07 qsort 1.001. Run 24, the
+series of 17 against dev on `l2r-base12` on 9 cases: L08 1.010, L18
+1.055, L15 1.044.
 
 **Build time** (run 22; rrc and the link of 20 small tests, every
 texture in a warm store, the compilers in turn): the series of 12
@@ -505,6 +556,7 @@ from the two runs).
 | 29-a | the texture store is opened once for a module, not once for each texture | a warm rrc build of a program with 124 textures: 5.05 s to 3.16 s with a 1 MB store, 10.21 s to 3.09 s with a 140 MB store (wall, median of 3); two builds at once on the 140 MB store: 15.48 s to 3.49 s each; fsync 744 to 129. The reviewer measured the 140 MB rows again (10.13 s to 3.25 s). The series' form on a test with 308 textures (run 22, median of 3): warm small store 41.8 s to 38.0 s; warm 139 MB store (synthetic) 55.2 s to 39.7 s; cold 50.5 s to 49.4 s (the claim: not slower). Generated code: byte-identical objects | the series without and with the patch, one rrc process on a shared machine (load 2 to 13); build time only |
 | 31-a | a record of scalars that foreign code releases is freed directly | X10 n_body 34.3 ms to 23.1 ms (0.642; timing run 22, 31-a alone; 10 other cases 0.970 to 1.002). One upstream unit of 33 changes | the series of 12 against the same with 31-a, direct pairs |
 | 32-a | trees and expressions with integer members are freed with fewer runtime entries | seven cases 0.831 to 0.963 (timing run 22, 32-a alone, the table above; 13 other cases 0.993 to 1.007); scopes entered on deriv 565,495 to 1, deferrals on rbtree-ck 1,053,560 to 204,963. The order of cleanup hooks is unchanged in 3,080 generated scenarios. Cost: code size (IR of deriv +3.8%; a synthetic type +39% of its object) | the series of 12 against the same with 32-a, direct pairs; counts with the prototype, which generates the same IR |
+| 34-a | a record of scalars and big integers that foreign code releases keeps its direct release | L08 unionfind 315.6 ms to 295.6 ms (0.937; timing run 24, 53 cases: geometric mean 0.999, no other case outside ±3%, none slower; peak memory and `.text` 1.000); destruction scopes entered at size 300000: 665,000 to 0. Its reach is wide (a release worker goes in 345 of 742 test programs and in 20 of the 53 benchmark programs), but only unionfind moves measurably. Its rule for variants of leaf arms is checked for correctness, not timed on its own. Leak harness: 0 integers left alive, 0 bad frees | the series of 15 against the series of 17, direct pairs; counts at run time; the gate's executables |
 | 30-a | large functions with many similar arms compile in seconds | `RtOutlineStates`: the lowering pipeline 536 s to 2.7 s, the build 978 s to 8 s. Run time 1.000 over 53 cases. Costs: `.text` +2.0% in the geometric mean, Cedar +9.3%; a small program's build +0.15 s (+9%); lean-zip's and Cedar's builds are not slower | the series before 30-a against the same with it; timing runs 21 and 22 |
 | 26-a | a foreign cleanup runs after the recursion, as in the source | the repro: 0 open handles at the leaf to 3. Cost: no TRMC helper lost (18 of 18 helpers, 114 of 114 helper calls on upstream's benchmark, core and std; 7 of 7 and 40 of 40 on 19 lean2rr programs; lowered MLIR byte-identical) | pristine `36a55a0f` against the fix |
 | 27-a | a right answer of `is_unique` for an immediate | the repro: 1 to 0 after 2^32 - 1 retains. Cost: none for a program without such a call (33 upstream units and 19 lean2rr programs byte-identical) | pristine `36a55a0f` against the fix |
@@ -555,9 +607,9 @@ Reussir checkout lacks one of these texts (`REQUIRED_REUSSIR_PATCHES`,
   with `lowering pipeline failed: RunPass`. The check is made on every
   host.
 
-The driver checks none of 20-g, 20-e, 21-a, 29-a, 31-a, 32-a, 30-a,
-27-a and 33-a: without one of them, lean2rr's programs build and give
-the same results (20-g, 21-a, 31-a and 32-a are optimizations of run
+The driver checks none of 20-g, 20-e, 21-a, 29-a, 31-a, 32-a, 34-a,
+30-a, 27-a and 33-a: without one of them, lean2rr's programs build and
+give the same results (20-g, 21-a, 31-a, 32-a and 34-a are optimizations of run
 time, 20-e, 29-a and 30-a of build time, lean2rr's programs do not call
 the intrinsic of entry 27, and rrc does not reach the crash of entry
 33).
@@ -666,7 +718,7 @@ the targets `rrc` and `reussir-rt`. Three things to know on this base:
 - The archive of the rcgmp runtime is `build/lib/libRCGMPRuntime.a`; the
   `reussir-rt` target copies it to `build/target-rt/release/deps`, where
   `scripts/l2r.py` finds it.
-- `reussir-opt` (for the repro of entry 24) and Reussir's lit tests need
+- `reussir-opt` (for the repros of entries 28 and 30 to 33) and Reussir's lit tests need
   a build with the tests on (`REUSSIR_ENABLE_TESTS=ON`), which needs GTest
   and lit.
 - rrc keeps compiled textures in a cache for each user
@@ -681,10 +733,13 @@ it. Its file is in [`patches/parked/`](patches/parked/), outside
 [`patches/series`](patches/series) and the counts above; its entry says
 why it is parked and describes the patch. Two groups:
 
-- Parked by the owner's decision (the first four rows).
-- Out of the series since the move to `36a55a0f` (the last two rows).
-  These files are the `l2r-base12` versions, against `95d9a1c8`: they
-  are kept as they were reviewed.
+- Parked by the owner's decision (the first three rows).
+- Out of the series since the move to `36a55a0f` (the last row, 20-b).
+  Its file is the `l2r-base12` version, against `95d9a1c8`: it is kept
+  as it was reviewed.
+
+The parked 19-a and 23-a to 23-p were deleted with their entries on
+2026-11-18 ([history](#history-entries-19-23-and-24-deleted-2026-11-18)).
 
 20-e and 21-a were parked from 2026-11-17 to 2026-11-18, while they
 were measured on the new base; they are in the series again (21-a
@@ -695,18 +750,15 @@ reworked), and their old-base files left `parked/`.
 | [01-a](patches/parked/01-a-sink-bound-retains.patch) | [1](01-phantom-reuse-donor.md) | optimization | 2026-10-07 | a missed optimization; lean2rr's `lazy-fields` covers it | not checked (it did not apply to `95d9a1c8`) |
 | [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch) (review fixes) | [6](06-trampoline-inline.md) | optimization | 2026-10-07 | the gain is too small for a local Reussir patch | not checked (they did not apply to `95d9a1c8`) |
 | [16-a](patches/parked/16-a-driver-stack-rlimit.patch) | [16](16-driver-stack-address-limit.md) | bug fix | 2026-10-19 | lean2rr does not reach the bug | not checked (it applied to `95d9a1c8` and `l2r-base12`) |
-| [19-a](patches/parked/19-a-retcon-direct-arms.patch) | [19](19-retcon-direct-arms.md) | bug fix | 2026-10-25 | lean2rr did not reach the bug since 23-f | history, to delete with entry 19: upstream deleted the code that it changes (#872) |
 | [20-b](patches/parked/20-b-mpz-handle-more-tests.patch) | [20](20-rcgmp-integration.md) | tests | 2026-11-17 (out of the maintainer's series since 2026-11-05); decided on 2026-11-18: it stays parked | tests only, so no measured claim is possible; it found nothing on the new base; it edits three upstream test files | applies with no conflict, and its tests pass there (7 of 7 `frontend/bigint_ffi*` lit tests and the unit test) |
-| [23-a](patches/parked/23-a-drop-stack-runtime.patch) to [23-p](patches/parked/23-p-same-release-cells.patch) | [23](23-worklist-drops.md) | optimizations, features, tests | 2026-11-17 | upstream has the design (2026-11-01) | history, to delete with entry 23: not to be applied |
 
 The parked files 01-a, 06-a and 06-b are against the stacks they were
 made on (`ef922049` plus earlier patches of the old series); 16-a is
-against `7954a367`, 19-a against `l2r-base7` (`00906e38` plus 10-a and
-07-a); 20-b and 23-a to 23-p against `95d9a1c8` with the
-patches before them in `l2r-base12`'s series. The moved version of 20-b
+against `7954a367`; 20-b is against `95d9a1c8` with the
+patches before it in `l2r-base12`'s series. The moved version of 20-b
 is on a Reussir branch of the port (`m1-20b`); it replaces the parked
 file if the patch comes back.
-For 01-a, 06-a, 06-b, 16-a and 19-a the last check was on 2026-10-26
+For 01-a, 06-a, 06-b and 16-a the last check was on 2026-10-26
 (`git apply --check` on `95d9a1c8` and `l2r-base12`; the same results on
 `00906e38`, `0378b744`, `ea240b19` and the bases between). The parked
 11-a was deleted with entry 11 in Phase 2 (it needed 02-c and 09-a). To
@@ -721,8 +773,9 @@ Reussir alone: a plain Reussir program (`bugNN-name.rr`), a Lean program
 built through lean2rr (`bugNN-name.lean`), a small generator
 (`bugNN-name.py`) where the program must be large, a Rust test of
 Reussir's runtime sources (`bug12-nullable-as-ref.rs`), a Reussir
-program with a C driver (`bug23-deep-free.rr` and `.c`, linked with
-`cc`), or MLIR for `reussir-opt` (`bug24-locked-drop-token.mlir`; a
+program with a C driver (`bug26-trmc-observable-release.rr` and `.c`,
+linked with `cc`), or MLIR for `reussir-opt`
+(`bug31-leaf-foreign-release.mlir`; a
 build without the tests has no `reussir-opt`, and `run.sh` then prints
 `SKIPPED`). `bug01b-call-before-branch.rr` is a variant used in issue
 1's entry. Entry 2's repros show the part of it that upstream fixed (a
@@ -772,36 +825,49 @@ them). "lean2rr's flags" are
 
 ### Latest recorded run
 
-**On `36a55a0f`** (the gate on the series of 16 patches, 2026-11-18):
-`run.sh` of lean2rr `51292d7a` ran without an error on pristine
-upstream `36a55a0f` and on the series (Reussir `703a73f2`).
+**On `36a55a0f`** (the gate on the series of 17 patches, gate 57,
+2026-11-18): `run.sh` of lean2rr `f20aed74` ran without an error on
+pristine upstream `36a55a0f` and on the series (Reussir tree
+`107c212b`). The series' build of the gate had no `reussir-opt`, so
+the gate's run printed SKIPPED on the series for the entries that
+need it (24, 28, 30 to 33). After the gate, `run.sh` of this branch
+ran for entries 28 and 30 to 34 on a `reussir-opt` built for the
+series' tree and on pristine; the table marks those rows.
 
-| Entry | Pristine `36a55a0f` | Series of 16 patches | Verdict |
+| Entry | Pristine `36a55a0f` | Series of 17 patches | Verdict |
 |---|---|---|---|
-| 1 | REPRODUCES (4.93x) | REPRODUCES (5.02x) | still there, no patch |
+| 1 | REPRODUCES (5.04x) | REPRODUCES (5.09x) | still there, no patch |
 | 2, plain repros (list, snoc list, left spine, `Nullable` chain) | FIXED (4 lines) | FIXED (4 lines) | the bounded depth is upstream's |
 | 2, the nested drop run | SHOWN (`1 2`, then `2 1`) | SHOWN (the same) | a documented rule of upstream's drop scopes, the same on both |
 | 2, Lean repro (40,000,000 cells) | OTHER: the driver refuses pristine upstream | FIXED (2 lines) | works on the series |
 | 3, 4, 6, 8, 12, 17, 18 | REPRODUCES | REPRODUCES (the same figures) | still there, no patch |
 | 7 | OTHER: rrc rejects the `tagged` attribute | FIXED (prints 143) | fixed by 10-a and 07-a |
-| 19 | FIXED (30 KB, 39 KB; 1.28x) | FIXED (37 KB, 48 KB; 1.29x) | fixed upstream; the series' module at `-O none` is about 23% larger at both sizes, with the same growth rate |
-| 23 | FIXED (192 KiB in 4 shapes) | FIXED (192 KiB in 4 shapes) | fixed upstream |
-| 24 | FIXED (1 `token.free`) | FIXED (1 `token.free`) | fixed upstream |
+| 19 | FIXED (30 KB, 39 KB) | FIXED (37 KB, 48 KB; 1.29x) | fixed upstream |
+| 23 | FIXED (192 KiB in 4 shapes) | FIXED (0 KiB in 4 shapes) | fixed upstream |
+| 24 | FIXED | SKIPPED in the gate | fixed upstream; not checked on the series (the entry and its repro are deleted) |
 | 26 | REPRODUCES (0 handles open at the leaf, the source keeps 3) | FIXED (3, control 3) | fixed by 26-a |
 | 27 | REPRODUCES (true after 2^32 - 1 retains) | FIXED (false) | fixed by 27-a |
-| 28 | REPRODUCES (MLIR's pass fails 13 blocks) | FIXED (the pipeline's pass succeeds) | fixed by the amended 28-a; `rows-check.sh` passes too |
-| 30 | REPRODUCES (2 blocks with arguments) | FIXED (the arms are left) | fixed by 30-a; the first gate run of this repro |
-| 31 | REPRODUCES (1 `drop.join`) | FIXED (a direct free) | fixed by 31-a; the first gate run |
-| 32 | REPRODUCES (no tail release) | FIXED (2 `musttail` releases) | fixed by 32-a; the first gate run |
-| 33, by hand (`reussir-opt` with the decrement expansion on a leaf record) | exit 139 (crash) | exit 0 | fixed by 33-a. This row is the gate's run by hand. `run.sh`'s `bug33`, in a run of the function's author: REPRODUCES on pristine, FIXED on the series |
+| 28 | REPRODUCES | FIXED (the run after the gate) | fixed by 28-a; `rows-check.sh` passes in the gate too |
+| 30 | REPRODUCES | FIXED (the run after the gate) | fixed by 30-a |
+| 31 | REPRODUCES (1 `drop.join`) | FIXED (the run after the gate) | fixed by 31-a |
+| 32 | REPRODUCES (no tail release) | FIXED (the run after the gate) | fixed by 32-a |
+| 33 | REPRODUCES (`reussir-opt` crashes; its first run through `run.sh`) | FIXED (the run after the gate) | fixed by 33-a |
+| 34 | REPRODUCES (the run after the gate) | FIXED (the run after the gate) | fixed by 34-a. `bug34` is newer than the gate's `run.sh`. The gate ran the patch's lit input by hand: 6 bridge functions on pristine, 3 on a build of pristine with 31-a, 32-a and 34-a |
+
+Entries 19, 23 and 24 were deleted after the gated commit, with their repros
+([history](#history-entries-19-23-and-24-deleted-2026-11-18)); their rows stay here as the record of the
+run.
 
 The repros of entries 30 to 32 are checks of structure through
 `reussir-opt` (blocks with arguments after the vector lowering; a
 `drop.join` in the foreign release of a leaf record; tail releases in
-the release of a variant with integer members), not timings. Entry
-33's repro is in `run.sh` too (`bug33`); the gate ran it by hand. The
-gate on the series of 15 patches gave the same verdicts for entries 1
-to 28 (entry 1: 4.74x and 4.76x). So did the final gate on the series
+the release of a variant with integer members), not timings. The
+gate on the series of 16 patches gave the same verdicts for entries 1
+to 32, with entries 30 to 32 on its own series build (entry 1: 4.93x
+and 5.02x; entry 23: 192 KiB on both sides), and ran entry 33 by hand
+(exit 139 on pristine, exit 0 on the series). The gate on the series
+of 15 patches gave the same verdicts for entries 1 to 28 (entry 1:
+4.74x and 4.76x). So did the final gate on the series
 of 12 patches (entry 1: 4.98x and 5.08x;
 entry 19: 30 and 39 KB on both sides; entry 23: 0 KiB on pristine and
 172 to 192 KiB on the series).
@@ -820,7 +886,7 @@ with `L2R_POLYFFI_CACHE` empty) and names the drop order as the driver
 does. rrc at `36a55a0f` does not read the old `REUSSIR_FFI_CACHE_DIR`,
 and its cache cannot be turned off
 ([entry 25](25-texture-cache-key.md)). So the rrc times that the
-script measures (entries 3, 4, 19) are with an empty cache, as before.
+script measures (entries 3 and 4) are with an empty cache, as before.
 
 The runs on the earlier bases (history):
 
@@ -861,7 +927,7 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   until upstream fixes it. When upstream fixes an entry fully, the entry,
   its patches and its repros are deleted (they stay in git history), and
   its number is retired: the other entries keep their numbers (since
-  2026-10-25, entry 5; on 2026-10-19 the remaining entries were
+  2026-10-25, entry 5; on 2026-11-18, entries 19, 23 and 24; on 2026-10-19 the remaining entries were
   renumbered). An entry that a change on lean2rr's side makes obsolete
   (no Reussir problem left for lean2rr: entries 9 and 11 in Phase 2) is
   deleted and its number retired the same way. An entry upstream fixes
@@ -875,8 +941,8 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   lowering has what 23-e fixed), the features lean2rr needs (07-a,
   10-a, 20-a, 20-d) and optimizations with a measured gain (20-g, 20-c,
   20-e, 21-a). A fix of a bug that lean2rr does not reach is
-  parked (16-a). On `l2r-base12` the series also had entry
-  23's worklist drops (652 MB to 68 MB on `RtClosureChainFree`), which
+  parked (16-a). On `l2r-base12` the series also had the worklist drops
+  of the deleted entry 23 (652 MB to 68 MB on `RtClosureChainFree`), which
   upstream has now.
 - Every bug found in upstream Reussir during the port gets a patch that
   is kept in this series, also when lean2rr does not reach the bug
@@ -891,7 +957,7 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
 - A Reussir change is the last resort (owner): where lean2rr's runtime
   can do the work itself, it does, and the local patch goes (Phase 2:
   leanrt's own stack of pending releases replaced 02-a to 02-e and
-  09-a). Entry 23 changed Reussir because the cost was in Reussir's own
+  09-a). The deleted entry 23 changed Reussir because the cost was in Reussir's own
   drop glue, which lean2rr's runtime does not run; upstream took that
   design on 2026-11-01, and leanrt keeps its pending work on upstream's
   drop scopes, with no second stack beside them.
@@ -899,6 +965,11 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   parked, not kept (01-a, 06-a with 06-b; 11-a until Phase 2). Costs
   whose removal would be a redesign (3, 4) and missed optimizations stay
   unpatched, with the reason in their file.
+- Pull requests since 2026-11-19 (owner): the patches go upstream in
+  two sets, the general ones and the rcgmp ones, as pull requests of
+  at most 500 changed lines each, one at a time. Open: reussir#1093
+  (33-a, [entry 33](33-tokenless-rc-dec-expansion.md)). The rest of
+  this item is the history before that date.
 - Pull requests: after #758 (05-a, merged as `ea240b19`) none for the
   patches of this directory (owner, 2026-10-19). Since 2026-10-25 the
   owner's rule is: rcgmp-related Reussir fixes and optimizations may go
@@ -940,7 +1011,8 @@ outside this repository (column *Notes*: their names). The rows below
 record the reviews on the earlier bases (history), but for the row of
 the series on `36a55a0f`. The patches were
 reviewed under their old names, on the old base (entry 20's patches
-under their step D names, on `00906e38`; entry 23's on `l2r-base7`). The
+under their step D names, on `00906e38`). The rows of 19-a and of 23-a
+to 23-p went with their entries on 2026-11-18. The
 rows of the patches that left with Phase 2 (02-a to 02-e, 09-a) are in
 git history (commit `419a74d4`):
 
@@ -954,10 +1026,6 @@ git history (commit `419a74d4`):
 | 20-d (R2c) | step D review | `stepd-r12/review/r2c` | no bug in the final version |
 | 20-e (R3) | step D review | `stepd-r12/review/r3` | no bug in the final version |
 | 21-a | independent review | `rccancel-review/` | sound; its three findings (test inputs, the crossed operations in the message with a negative test, the stop at `rcgmp.bridge.mpz.is_unique`) are in the patch |
-| 23-a to 23-j | two adversarial rounds (runtime, IR and pipeline; glue, member kinds, release order and tests), then an independent re-review | `lifodrop-review/rt/NOTES.md`, `lifodrop-review/gen/NOTES.txt`, `lifodrop-review/gen/v2/` | round one: two order bugs (the tail call taken although a later member pushed; an anonymous recursive arm taken for a leaf), the TPDE token leak (entry 24), a flex box accepted by `rc.defer`, a defer outside a drain that waited for a later drain, a buffer leaked after the thread-exit guard, and documentation and test gaps: all fixed in the patches; re-review: the type predicates exponential on generated inputs (fixed: one reachability walk per query), nothing else; the fixes were checked with targeted lit tests and ASan |
-| 23-k to 23-m | made and tested by the runtime side, then an adversarial review (2026-10-25) | `phase2/shared/` | its fixes are in the patches: a step is `extern "C"`, so a panicking step aborts instead of unwinding with the thread marked as draining; the nesting of end work requested inside the end function (one level per generation, as natively) and the entry costs of runs are documented; on the first version (`fbc2bba2`), leanrt's unit tests 101 of 101 (leanrt build) and 104 of 104 (rcgmp build) and the trace digests of 400 random order scenarios equal to those of leanrt's own stack |
-| 23-n, 23-o | an adversarial review (2026-10-26) | `lifodrop-review/rt/link/` | no bug: every box 23-o routes to `defer_wide` has the claimed header on every target (i686 narrow, wasm32 right, big-endian safe); headers back before each release; the order with host cells, steps, runs, nested runs and end work in a model check with real boxes (3000 seeds x 3 natively, 40 x 3 under Miri, both borrow models); the 40-bit offset right at +-2^42. Its cleanups (the table zero-initialized, the linked flag in the count's top bit, two comments) are in 23-n |
-| 23-p | short re-review pending; the review's model check, with a joined box allowed (count untouched, upper bits 0), passes (3000 x 3 natively, 40 x 3 under Miri) | `lifodrop/link/` | instructions per freed cell back near `l2r-base9-shared`'s (balanced tree 59.08 against 57.08, rose tree 54.55 against 52.77); `RtAltTreeFree` 45.7 MB kept |
 | 10-a, 07-a on `36a55a0f` | independent review (2026-11-17), then a review of the refinement (2026-11-18) | `port13/reviews/RV1`, `RV6` | no hole in the rule; its findings are in the patch: one predicate and a verifier rule, the contract of the foreign type (a first form of the check, a niche test, was found wrong by the second review and replaced), an end-to-end array test. Code without tagged types: identical IR |
 | 20-a, 20-g, 20-c, 20-d on `36a55a0f` | independent review (2026-11-17), then a review of the refinement (2026-11-18) | `port13/reviews/RV2`, `RV6` | no bug in the three patches (20-a's semantics: 23,860 checks, 0 failures). Findings in the patches: the three unused intrinsics removed, 20-g split off, the glue defined in every unit, hidden visibility by a module attribute. The second review found one regression of the refinement (a program with `Nat` only as a type argument inside a foreign body did not link); fixed by restoring the glue entry, with a test |
 | 20-e, 21-a on `36a55a0f` | independent review (2026-11-18) | `port13/reviews/RV5` | 20-e approved as moved. 21-a approved with changes, which are in the patch: the scan rule is one operation (`ref.spilled`) instead of an effect rule, the `is_unique` stop is gone; the pair counts of the commit message are the review's |
@@ -967,8 +1035,8 @@ git history (commit `419a74d4`):
 | 31-a | independent review (2026-11-18) | `port13/reviews/RV1` (the section on 31-a) | accepted; could not break it (twelve kinds of payload, two levels, both drop orders: outputs, allocations, frees and live boxes equal). Side findings: an upstream crash of `reussir-opt` on a token-less `rc.dec` ([entry 33](33-tokenless-rc-dec-expansion.md)); one doubt of the author was checked and is not a bug |
 | 32-a | independent review (2026-11-18) | `port13/reviews/RV2` (the section on 32-a) | accepted; could not break it (3,080 scenarios, 151,906 hook events: the same order; spines of 10^6 nodes on a 256 kB stack; no integer leaked or freed twice). The exclusion of forward order is needed (the prototype without it changes the order in 9 of 1,400 scenarios). Open follow-ups: a lit case that pins that exclusion; a boxed structure of integers as a child is still deferred |
 | 33-a | independent review (2026-11-18) | `port13/reviews/RV1` (the section on 33-a) | accepted. The key argument: no return lies between the new test and the old read, so every decrement that takes the new branch crashed before, and no program that compiled before can take it. Outputs byte-equal to pristine with the token pass first; foreign and rigid boxes untouched; a decrement in worklist glue gets no token. Low findings: the test's second RUN line lacks positive checks for two functions; no negative case for worklist glue. An unverified note, not a bug report: upstream's own `replaceWithProduced` may trip an MLIR assertion in a build with assertions on (from the reviewer's memory; not run) |
+| 34-a | independent review (2026-11-18) | `port13/reviews/RV2` (the section on 34-a) | accepted; could not break it. Integers held by Rust containers: 54 scenarios, 16 runs (two levels, both drop orders, before and after on two bases), 0 integers left alive and 0 bad frees; results, allocation counts and hook order equal. A probe of the boundary of the leaf class (a nested handle, a token, a nullable box, an in-line array stay bridged). lean-zip, which holds a variant of leaf arms, prints native's results. The timed pair (0.938) is the prototype's and covers records; the part for variants is checked for correctness, not timed. Finding H1 (low): the lit test has no case for a handle inside a nested value record |
 | the final series (12 patches) | checks on the stack (2026-11-18), then lean2rr's final gate | `port13/research/I7`, `port13/gate54` | lit: 174 of 189 selected tests pass, 15 unsupported (13 sanitizer tests, 2 that need a build without rcgmp), 0 fail; `reussir-ut` 97 of 97; cargo tests of reussir-core (677), reussir-codegen (87), reussir-backend (29): 0 failed. Not run: the full lit suite, clang-tidy, the sanitizer tests; clang-format is not installed on the build machine |
-| 19-a (parked) | issue #759's measurements (prototype "a+m2", on 7954a367); `l2r-base7` checks | `r759/RESULTS.md`, `reussir-move/base7/` | not reviewed adversarially; the prototype passed Reussir's 66 lit tests that touch drops; on `l2r-base7` lit 767 passed, 2 failed for want of the `not` tool, 125 unsupported; `reussir-ut` 82 of 82 |
 
 The rebase onto `7954a367` (2026-10-19) is not reviewed yet: 10-a had two
 conflicts (upstream added the `placement` and `launch` fields to
@@ -1024,8 +1092,91 @@ compiles `RtSyncSelect` in 1.94 GB and `RtDepPolyRec` in 3.47 GB
 without 19-a (entry 19). `l2r-base9-shared` adds 23-k to 23-m, which
 the runtime side made for leanrt and which change only reussir-rt's
 `drop_stack.rs` and its tests (reviewed, 2026-10-25). `l2r-base10` adds
-23-n to 23-p (2026-10-26): the same 21 commits, then three; checks in
-[issue 23](23-worklist-drops.md#tests).
+23-n to 23-p (2026-10-26): the same 21 commits, then three; the checks
+were in the deleted entry 23 (section "Tests"; git history).
+
+## History: entries 19, 23 and 24 deleted (2026-11-18)
+
+Upstream `36a55a0f` fixes three entries in full. By the
+[policy](#policy) they were deleted with their patches and repros, and
+their numbers are retired. The port's gates ran the three repros on
+pristine `36a55a0f` and on the series: FIXED each time
+([latest recorded run](#latest-recorded-run)).
+
+- **Entry 19** (a bug: rrc's drop expansion wrote the direct arms of a
+  retcon destructor out in place at every drop site, code exponential
+  in type nesting; upstream issue #759). Fixed by upstream #872, which
+  deleted the retcon drop lowering, its LLVM passes and the executor;
+  upstream closed #759 on 2026-11-01. Deleted: the entry, the parked
+  19-a, `repros/bug19-retcon-direct-arms.py`, `bug19` in `run.sh`. On
+  `36a55a0f` the repro's module grows 1.28 times from 3 to 4 nested
+  types (about 4 times with the bug), and `RtSyncSelect` and
+  `RtDepPolyRec`, the programs that showed the bug, build.
+- **Entry 23** (a cost: a retcon destructor kept one coroutine frame
+  per level of the value it freed, 85 to 622 bytes per level; upstream
+  issue #760). Fixed by upstream's drop series #872 to #914
+  (2026-11-01), which took the entry's design, scoped worklists;
+  upstream closed #760 with it. Deleted: the entry, the sixteen parked
+  patches 23-a to 23-p, `repros/bug23-deep-free.rr` and `.c`, `bug23` in
+  `run.sh`.
+- **Entry 24** (a bug: with TPDE's drop options, a lock-guarded cell's
+  payload was released inside the critical section and its box never
+  freed). Fixed by the same series: upstream's drop expansion calls a
+  locked-drop function on every path (`AcquireDropExpansion.cpp`; no
+  upstream change names the bug). On `l2r-base9` to `l2r-base12` the
+  fix was a part of 23-e. Deleted: the entry,
+  `repros/bug24-locked-drop-token.mlir`, `bug24` in `run.sh`.
+
+The files are in git history, last in commit `f20aed74`
+([names](#names)).
+
+**What upstream has in the place of 23-a to 23-p** (read at `36a55a0f`
+on 2026-11-17). The runtime stack of 23-a is
+`crates/reussir-rt/src/drop_stack.rs`, where a nested `run` is a scope
+that finishes before it returns (ours joined the running drain). The
+ops of 23-b are there with three more (`drop.defer`, `drop.join`,
+`drop.defer_indexed`). The option of 23-d and the pipelines of 23-f are
+gone: worklist drops are always on, with the pass option `drop-order`.
+The glue of 23-c, 23-e and 23-h is `TailDrop.cpp`, `deadTest`, the
+locked-drop function and `dispatchLeaf`. The tail call and the last
+two children of 23-i and 23-j are `releasePure`, which upstream limits
+to records without an observable cleanup
+([entry 32](32-integer-members-drop-path.md) is about that limit). The
+end work of 23-k is `defer_until_scope_exit`, a queue of callbacks
+with no deduplication. The runs of 23-l are the active run and its
+cells. The steps and the depth of 23-m are steps that answer a
+`StepStatus` and `depth()`; there is no `drain()`, as a step or a
+deferral outside a scope completes at once, and a null step argument
+is undefined behaviour. The linked records of 23-n to 23-p are
+`drop_stack/wide.rs`, `hasWideHeader` and `mark_cell` with a 16-slot
+cache. leanrt uses these functions
+(`runtime/leanrt/src/pending.rs`).
+
+**What is lost.** 23-g's test of the peak memory of a deep free of
+alternating types (`worklist_drop_depth.rr`) has no upstream equal;
+lean2rr's `RtAltTreeFree` checks the same bound through lean2rr.
+
+**Facts of entry 23 that still matter, and where they are now.**
+
+- The deep-free tests of lean2rr's runtime suite (`RtClosureChainFree`,
+  `RtDeepTreeFree`, `RtArrayPileFree`, `RtAltTreeFree`) keep their
+  allocation bounds on `36a55a0f`, in every gate of the port.
+- `RtListDropWhole`, an array of 10^6 lists: peak 68.1 MB, 53.7 MB on
+  `l2r-base12` (the same allocation count), inside the test's
+  allowance. The row did not move with lean2rr's changes or with 31-a
+  and 32-a, so it came with the base. The cause is not found; the
+  gate's report observes that the test's `ref` row had these values on
+  `l2r-base12` already.
+- With 31-a and 32-a, `RtClosureChainFree`'s chain of compositions
+  peaks at 45.7 MB, 66.1 MB before; which patch does it is not
+  separated.
+- The programs that free large structures and were slower than on
+  `l2r-base12` in timing run 20: the causes that were found are
+  entries [31](31-leaf-foreign-release.md) and
+  [32](32-integer-members-drop-path.md), and the four cases that are
+  left, with no cause known, are in entry 32.
+- The order of releases on upstream's drop scopes:
+  [entry 2](02-native-drop-order.md#on-upstream-36a55a0f).
 
 ## History: the move to 36a55a0f (2026-11-17)
 
@@ -1241,14 +1392,15 @@ Open after the port (each is recorded where it belongs):
   ([entry 29](29-texture-store-open.md#what-stays-slower-than-on-l2r-base12));
   the cause is not attributed.
 - `RtListDropWhole`, an array of 10^6 lists: peak 68.1 MB, 53.7 MB on
-  `l2r-base12`; inside the test's allowance
-  ([entry 23](23-worklist-drops.md#on-upstream-36a55a0f)).
+  `l2r-base12`; inside the test's allowance (the later gates:
+  [history](#history-entries-19-23-and-24-deleted-2026-11-18)).
 - TRMC: one shape of lean2rr's code has no loop any more (a value
   built after the self call and boxed into the constructor, as in
   `AssocList.foldrM`); 54 of 57 functions have their loop again.
 - Release order: a matched value that Reussir consumes alone in its
   `match` ([entry 2](02-native-drop-order.md#on-upstream-36a55a0f)).
-- The deletion of entries 19, 23 and 24 (fixed upstream, to delete).
+- The deletion of entries 19, 23 and 24 (fixed upstream; done on
+  2026-11-18, [history](#history-entries-19-23-and-24-deleted-2026-11-18)).
 
 **6. Wall time: timing run 20 (2026-11-18).** One session on a quiet
 set of cores; every output checked; a drift step at the end agrees with
@@ -1399,10 +1551,11 @@ Open after this round (step 8 closes the build-time item):
   that causes it was not known in this step (step 8: 30-a).
 - **`RtDepPolyRec` takes 136 s in rrc and the link** (a 6 MB `.rr`); it
   is the one large single-program build time now. Its time is in other
-  passes than 30-a's; not investigated.
+  passes than 30-a's; not investigated. (Step 9: it is not a
+  regression.)
 - **Follow-ups of 32-a's review:** a lit case that pins the exclusion
   of forward order; a boxed structure of integers as a child.
-- The deletion of entries 19, 23 and 24.
+- The deletion of entries 19, 23 and 24 (done on 2026-11-18).
 
 **8. The fix of entry 33, and the claims measured patch by patch
 (2026-11-18).** The series has 16 patches: 33-a before 30-a. Reussir
@@ -1454,18 +1607,134 @@ form for plain upstream.
 Open after step 8:
 
 - **Four cases above 1.03 of `l2r-base12`** (L18, X07, L08, L15): cause
-  unknown.
-- **The unexplained wins** of step 6: not attributed.
+  unknown (step 9 looked at them).
+- **The unexplained wins** of step 6: not attributed (step 9).
 - **30-a's costs:** code +2.0% in the geometric mean (+9.3% on Cedar)
   and about 9% of a small program's build time, against one program
   that builds in 11 s where it took 16 minutes. Whether lean2rr should
   share the equal arms of the dispatchers that it emits is open.
 - **`RtDepPolyRec` takes 136 s in rrc and the link**; not
-  investigated.
+  investigated. (Step 9: it is not a regression.)
 - **Which of 31-a and 32-a** moved `RtClosureChainFree`'s peak (66.1 MB
   to 45.7 MB) is not separated.
-- The follow-ups of 32-a's and 33-a's reviews (test cases), and the
-  deletion of entries 19, 23 and 24.
+- The follow-ups of 32-a's and 33-a's reviews (test cases). (The
+  deletion of entries 19, 23 and 24, open here, is done:
+  [history](#history-entries-19-23-and-24-deleted-2026-11-18).)
+
+**9. The four slower cases, a fourth cost with a patch, and
+`RtDepPolyRec`'s build (2026-11-18).** The series has 17 patches: 34-a
+after 32-a. Reussir branch `l2r-base13-r5`, tree `107c212b`. Gate 57
+passed on it.
+
+Timing run 23 (the same method; 14 cases: the four, 5 winners of run
+20, 5 neutral; A = dev on `l2r-base12`, R4 = the series of 16, P = R4
+with the prototype of 34-a, E = R4 with the tag encoding that does
+not use the top byte):
+
+| Case | R4 / A | P / R4 | E / R4 |
+|---|---:|---:|---:|
+| L08 unionfind | 1.077 (293.1 ms to 315.7 ms) | 0.938 (315.3 ms to 295.6 ms) | 0.997 |
+| L18 hashmap | 1.054 | 1.001 | 0.993 |
+| L15 monadic-interp | 1.040 | 1.004 | 1.005 |
+| X07 qsort | 1.001 | 1.000 | 1.002 |
+| L06 binarytrees | 0.888 | 0.998 | 1.197 |
+| geometric mean of the 14 | 0.951 | 0.996 | 1.011 |
+
+- *X07 qsort: closed.* It was code placement, not a code change. The
+  hot function (92% of the samples) is the same machine code on both
+  bases. Its start address is 16 mod 64 in the fast builds (the old
+  base, the series with 30-a) and 0 mod 64 in the slow ones (the
+  series of 12 and the same with 31-a and 32-a). With the series of
+  16 the case is at 1.001 of the old base. So the "X07 0.933 with
+  30-a" of step 7 was the same effect, not a gain of 30-a. Why this
+  placement costs 7% on this CPU was not measured.
+- *L08 unionfind: cause confirmed, patch 34-a*
+  ([entry 34](34-leaf-integer-foreign-release.md)). Records of two
+  `Nat`s in an array: each last release from Rust entered a
+  destruction scope (665,000 entries at size 300000; 0 on the old
+  base). The prototype removes them: 0.938, and the case is within
+  about 1% of the old base (derived). 34-a is the prototype's rule in
+  reviewed form, with variants of leaf arms added.
+- *34-a on the full set (timing run 24).* The series of 17 against
+  the series of 15, 53 cases, direct pairs: geometric mean 0.999; L08
+  unionfind 0.937 (315.6 ms to 295.6 ms) is the only case outside
+  ±3%; no case slower; peak memory 1.000; `.text` 1.000 (-0.3% to
+  +0.6%). The patch removes a release worker in 20 of the 53 programs.
+  Against the old base, direct: L08 1.010.
+- *Gate 57* (lean2rr dev `f20aed74`): 748 of 750 with 2 expected
+  failures; 23 of 23 check scripts, the corpus, the raytracer; all
+  `.rr` files byte-identical to the gate on 16. 345 of the 742
+  executables lose at least one release worker, mostly for records of
+  the library (`StdGen` in 123 programs, `Std.Format.SpaceResult` in
+  98, `Std.Legacy.Range` in 90, `IO.FS.SystemTime` in 73); in 15
+  programs leanrt's generic record paths grew. `alloc-check`: no row
+  beyond the noise of 4 allocations; the pinned shapes are unchanged.
+  The repros: [latest recorded run](#latest-recorded-run).
+- *L15 monadic-interp: partly located, not confirmed, no patch.*
+  476,166 scope entries (size 3000) where the old base had 0, from
+  last releases in Rust of pairs of boxes in an array. There the scope
+  is needed (a member's release can run cleanup), so 34-a's rule does
+  not apply. By L08's cost for each entry they are about half of the
+  4% (arithmetic, not a measurement). No variant removed the
+  difference. Not the cause, by pairs: the hoist rule, the borrow
+  analysis, the tag encoding. A cheaper scope entry in Reussir's
+  runtime is a candidate; it is not prototyped. Run 24 measured the
+  entry: on the series of 17 the case is at 1.044; one scope entry
+  costs 149 instructions, 102 of them the scope's overhead (the old
+  base ran the other 47). The scope is needed: the members are
+  one-word boxes whose release can free values and defer work. A fast
+  path in the runtime could save at most about 1.3% of the case
+  (arithmetic; not built: under the bar for a Reussir change). The
+  other half of the difference is not located.
+- *L18 hashmap: not found.* Two measured differences (size 300000):
+  554,565 scope entries against 75,076, and 10% more allocations
+  (825,204 against 750,215), though the compiler's token-reuse
+  decisions are the same 317 on both bases. A hypothesis only: a
+  uniqueness test at run time fails once for each new key because a
+  release is now deferred. The site was not found in run 23. Run 24
+  found it (the case is at 1.055 on the series of 17): all 75,000
+  extra allocations come from one site in `main`, the branch of a
+  uniqueness test at run time, after a string comparison, that
+  allocates a new cell. The cell is shared there on the new base; a
+  16-byte cell is allocated and freed again at once. Five variants
+  leave the allocations in place: the other tag encoding, upstream's
+  #968 reverted, forward drop order, the borrow analysis off, the
+  hoist rule off. Who holds the second reference was not found.
+- *Upstream's #968 is not a time cause for either case.* A pair with
+  #968 reverted on the series of 17, 9 cases: geometric mean 0.999,
+  no case outside ±3% (L18 0.993, L15 1.006). Without it the code is
+  larger (Cedar +9.4%).
+- *Run 20's wins.* L06 binarytrees: shown by a pair to come from
+  upstream's new decoding of top-byte tags (#980 to #982): with the
+  other encoding the series of 16 is 19.7% slower on it (1.197). The
+  red-black tree cases, peano and X01 (L01, L09, X05, X14, X01): a
+  well-supported hypothesis of the same cause. On the old base the
+  other encoding was faster on exactly these cases by the size of the
+  port's win, and on the new base the two encodings are equal on the
+  three that were timed. It is not one direct pair, so it stays a
+  hypothesis.
+- *`RtDepPolyRec`'s build is not a regression.* The same `.rr` to the
+  executable: 119.8 s on `l2r-base12`, 113.2 s on the series of 16
+  (one run each; the gates on the old base had 122 s to 145 s for
+  it). The 671 s that step 6 compared with was the wall time of the
+  old suite in 8 parallel shards, not this program's time. One
+  upstream cost was found on the way and is not patched
+  ([other observations](#other-observations)): the worklist glue
+  prints and hashes a signature at every request for a glue function.
+
+Open after step 9:
+
+- **L15 monadic-interp** (1.044 of `l2r-base12`): about half is the
+  cost of scope entries that are needed; the other half is not
+  located.
+- **L18 hashmap** (1.055): the site of the extra allocations is
+  known; who holds the second reference is not.
+- **30-a's costs** (code +2.0%, a small program's build about 9%
+  slower), as after step 8.
+- **Which of 31-a and 32-a** moved `RtClosureChainFree`'s peak: not
+  separated.
+- **34-a:** its rule for variants has no timing of its own.
+- The follow-ups of the reviews of 32-a, 33-a and 34-a (test cases).
 
 ## History: the move to 95d9a1c8 (2026-10-26)
 
@@ -1617,7 +1886,7 @@ without 23-k to 23-m.
   after the outermost drain (23-k), runs of cells (23-l) and steps,
   depth and drain for a host (23-m), and built leanrt's pending stack
   on Reussir's; the three tests then give native's results
-  ([issue 23](23-worklist-drops.md#the-shared-stack-23-k-23-l-23-m)).
+  (the deleted entry 23, section "The shared stack"; git history).
 - **`scripts/l2r.py`** requires 23-f, 23-k, 23-m and 07-a; it required
   02-a, 09-a, 07-a and 02-e, and checked that upstream's tail-recursive
   and retcon drops were off.
@@ -1911,6 +2180,25 @@ is in git history).
   Not rechecked on `7954a367`; token reuse has no change up to
   `0378b744`, and not rechecked on `36a55a0f`. [Issue 8](08-alias-release-donor.md) is a
   case where the bonus would decide for the matched cell.
+
+- **The worklist glue computes a glue function's name at every
+  request (a cost of build time; no entry, no patch).** In
+  `lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`,
+  `WorklistGlue::function` prints the glue's whole signature and
+  hashes the text for the symbol name at every call, also when the
+  glue function exists already. The code is upstream's at `36a55a0f`
+  (the drop series of 2026-11-01); no local patch changes it. On
+  `RtDepPolyRec` (a 6 MB `.rr` with long, nested signatures) the
+  second run of the acquire/drop expansion takes 34.5 s, where the
+  old base's took 4.7 s. A prototype of 15 added lines that keeps the
+  name for each signature, role and direction takes the pass from
+  35.6 s to 4.7 s and the build from 113.2 s to 81.8 s, with a
+  byte-identical object file and executable (single runs under
+  varying load; read each number as ±5 s). It is a measured proposal,
+  not in the series: Reussir changes are kept few. A patch would keep
+  the names in a map that the pass owns (the prototype's map is
+  thread-local and static, which is enough to measure and wrong for a
+  patch). Not measured: other programs; the number of requests.
 
 ## Missing features that cost lean2rr performance
 

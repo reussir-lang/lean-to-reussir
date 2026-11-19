@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `36a55a0f` with the series
-(the Reussir branch `l2r-base13-r4`, `703a73f2`); the workarounds
+(17 patches, the Reussir branch `l2r-base13-r5`, tree `107c212b`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)). The measurements in this file were
 made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
@@ -36,6 +36,7 @@ the series). Build-time items on this base:
   on disk). One run each, not a benchmark. The gate on the series of
   16 patches took 597 s with executables that are identical in their
   section sizes: the difference to 652 s is variation between runs.
+  The gate on 17 patches took 603 s.
 - Per test, the first 20 tests of one shard, rrc and the link: 16.7 s
   in the first gate (cold store on disk, a loaded machine), 3.2 s in
   the final gate on 12 patches, 4.2 s in the gate on 15 patches (both
@@ -59,10 +60,37 @@ the series). Build-time items on this base:
   programs are not slower to build with the patch (rrc and the link,
   two runs each): lean-zip 37.6 s without, 35.0 s and 36.9 s with;
   Cedar 78.2 s and 83.3 s without, 76.4 s and 77.6 s with.
-- Open: `RtDepPolyRec` (a 6 MB `.rr`) takes 136 s in rrc and the link
-  (146 s in the final gate). It is the one large single-program time
-  now. Its time is in the drop expansion and other passes, not in the
-  vector pass; not investigated.
+- `RtDepPolyRec` (a 6 MB `.rr`, 3794 functions) takes 136 s in rrc
+  and the link in the last gate (146 s in the final gate on 12
+  patches). It is the one large single-program time now. It is not a
+  regression: the same `.rr` to the executable takes 119.8 s on the
+  base before and 113.2 s on the series of 16 patches (one run each,
+  under varying load; read each number as ±5 s), and the gates on the
+  base before had 122 s to 145 s for it. An earlier note compared it
+  with 671 s; that was the wall time of the old suite in 8 parallel
+  shards. By phase, base before against this base: the MLIR pipeline
+  64.9 s against 83.0 s, LLVM optimization 26.3 s against 15.2 s,
+  code generation 23.2 s against 11.3 s (the module is about half
+  the size).
+- A proposal, measured, not in the series: in that build one pass is
+  much slower on this base, the second run of the acquire/drop
+  expansion (4.7 s on the base before, 34.5 s here). The cause is
+  upstream's code and is confirmed by a prototype:
+  `WorklistGlue::function`
+  (`lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`) prints the
+  glue's whole signature and hashes the text for the symbol name at
+  every request, also when the glue function exists already. A
+  prototype of 15 added lines keeps the name for each signature, role
+  and direction: the pass goes from 35.6 s to 4.7 s and the build
+  from 113.2 s to 81.8 s, and the object file and the executable are
+  byte-identical. These are single runs under varying load. It is
+  not a patch of the series, because Reussir changes are kept few; a
+  patch would hold the names in a map that the pass owns (about 30 to
+  40 changed lines, no rule changed), and its claim must be measured
+  on the suite. Not measured: other programs; whether the cost grows
+  faster than the module. Also seen in that build and not looked at
+  further: upstream's pipeline has one more SCCP pair after token
+  reuse (about 8 s here).
 - Open: on large programs rrc uses more time than on the base before
   (the MLIR pipeline +18% for `RtTArrKinds` and +27% for lean-zip's
   compress, one run each, measured before patches 29-a to 32-a); the

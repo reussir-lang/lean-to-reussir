@@ -17,9 +17,9 @@
 //           `__reussir_drop_run`, a nested scope that finishes before it
 //           returns; the tag 2 was not yet reached.
 //   2 1     glue_free: last member first (native Lean's order).
-// l2r-base12 (entry 23's stack): a nested run joined the running scope,
-// and both orders were `2 1` (lean2rr's test RtDropNestedRunOrder shows the
-// same through a box's payload).
+// l2r-base12 (the drop stack of that base's local patches): a nested run
+// joined the running scope, and both orders were `2 1` (lean2rr's test
+// RtDropNestedRunOrder shows the same through a box's payload).
 extern "rust" [{
     use reussir_rt::rc::Rc;
     use reussir_rt::drop_stack;
