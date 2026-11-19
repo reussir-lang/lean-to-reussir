@@ -353,14 +353,14 @@ and brought the three bugs of entries 26 to 28
 | [13](13-small-allocation-limit.md) | bug (32-bit targets) | constant-size boxes of 513 to 1024 bytes go to `mi_malloc_small`, whose limit is 512 bytes there | no: 64-bit targets only | - | none | unchanged at `36a55a0f` (`alloc.rs` read, 2026-11-17) |
 | [14](14-polyffi-rc-substitution.md) | bug (hand-written MLIR only) | a polymorphic-FFI substitution given as an MLIR rc type becomes Rust's `Rc` without the record's glue | no | - | none | unchanged at `36a55a0f` (source read on 2026-11-18; there is no repro) |
 | [16](16-driver-stack-address-limit.md) | bug (under `ulimit -v`) | rrc's 1 GiB driver stack (#686) counts against an address-space limit: under `ulimit -v` 1250000 or 1600000 rrc aborts where it compiled before | no: lean2rr sets no such limit | - | none (parked: [16-a](patches/parked/16-a-driver-stack-rlimit.patch)) | open: the 1 GiB stack is unchanged at `36a55a0f` (`main.rs` read, 2026-11-17); #686 is the old 31-a; no pull request planned |
-| [26](26-trmc-observable-release.md) | bug | TRMC moves a self call before a release that runs a foreign cleanup hook or drops a closure: the cleanup runs before the recursion, where the source runs it after | not known to: one constructed Lean program gave native's output, and the patch changes no TRMC helper of 19 lean2rr programs | - | [26-a](patches/26-a-trmc-observable-release.patch) | open at `36a55a0f` (also on `l2r-base12`); not reported |
-| [27](27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI; low severity) | `core::object::is_unique` answers true for a nullary immediate after 2^32 - 1 retains of it | no: lean2rr does not call the intrinsic | - | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | open at `36a55a0f`, new with #983; not reported |
-| [28](28-sve-vector-storage.md) | bug (aarch64 with SVE: valid code rejected) | rrc runs MLIR's SVE storage pass on every function; the pass fails on some large functions without any vector, and rrc stops with `RunPass` and no diagnostic | yes on a host with SVE: the row oracle of `rows-check.sh` did not compile | none | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | open at `36a55a0f`, new with #994; the direct cause is in MLIR; not reported |
-| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) (the pass leaves such a decrement unexpanded) | open at `36a55a0f`; pull request reussir#1095 is open (2026-11-19); reussir#1093, the first form, was closed |
+| [26](26-trmc-observable-release.md) | bug | TRMC moves a self call before a release that runs a foreign cleanup hook or drops a closure: the cleanup runs before the recursion, where the source runs it after | not known to: one constructed Lean program gave native's output, and the patch changes no TRMC helper of 19 lean2rr programs | - | [26-a](patches/26-a-trmc-observable-release.patch) | fixed upstream after `36a55a0f`: reussir#1097, commit `d0c7ccf5`; open at `36a55a0f`. The patch stays until the base moves past that commit |
+| [27](27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI; low severity) | `core::object::is_unique` answers true for a nullary immediate after 2^32 - 1 retains of it | no: lean2rr does not call the intrinsic | - | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | fixed upstream after `36a55a0f`: reussir#1096, commit `2b3a1485`; open at `36a55a0f`. The patch stays until the base moves past that commit |
+| [28](28-sve-vector-storage.md) | bug (aarch64 with SVE: valid code rejected) | rrc runs MLIR's SVE storage pass on every function; the pass fails on some large functions without any vector, and rrc stops with `RunPass` and no diagnostic | yes on a host with SVE: the row oracle of `rows-check.sh` did not compile | none | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | fixed upstream after `36a55a0f`: reussir#1099, commit `c2861a55`; open at `36a55a0f` (the direct cause is in MLIR). The patch stays until the base moves past that commit |
+| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) (the pass leaves such a decrement unexpanded) | fixed upstream after `36a55a0f`: reussir#1095, commit `686c2f87` (2026-11-19); reussir#1093, the first form, was closed. The patch stays until the base moves past that commit |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | reproduces on `36a55a0f` (3.93x; the port's first gate, 2026-11-18) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | reproduces on `36a55a0f` (3.99x; the port's first gate, 2026-11-18) |
 | [29](29-texture-store-open.md) | cost (build time) | rrc opens and closes the store of its texture cache for every texture; each open syncs the store and reads the whole database (about 19 ms for each texture with a small store, about 53 ms with a 140 MB store) | yes: build time of every program | none in the driver (a store on a memory file system removes the sync cost) | [29-a](patches/29-a-polyffi-store-once.patch) | open at `36a55a0f`, new with #852; not reported |
-| [30](30-vector-to-llvm-block-merging.md) | cost (build time) | rrc runs MLIR's vector lowering pass on every module; the pass merges similar blocks of all code, and in a large function with many similar arms the merged blocks' arguments multiply (up to 234,385): one build took 16 to 18 minutes | yes: build time of one known program (`RtOutlineStates`) | none | [30-a](patches/30-a-vector-to-llvm-patterns.patch) (with costs: code 2.0% larger, a small program about 9% slower to build) | open at `36a55a0f`, new with #994; the behaviour is MLIR's; not reported |
+| [30](30-vector-to-llvm-block-merging.md) | cost (build time) | rrc runs MLIR's vector lowering pass on every module; the pass merges similar blocks of all code, and in a large function with many similar arms the merged blocks' arguments multiply (up to 234,385): one build took 16 to 18 minutes | yes: build time of one known program (`RtOutlineStates`) | none | [30-a](patches/30-a-vector-to-llvm-patterns.patch) (with costs: code 2.0% larger, a small program about 9% slower to build) | open at `36a55a0f` and on upstream's main; pull request reussir#1100 is open, in a form that turns off the block merging only; the series is to be switched to the form that upstream accepts |
 | [31](31-leaf-foreign-release.md) | cost (run time) | the last release of a record without counted members from foreign code enters a destruction scope of the runtime, where a direct free is enough | yes: speed of programs that keep such records in runtime containers (n_body 1.56 times its time on `l2r-base12`) | none | [31-a](patches/31-a-leaf-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [32](32-integer-members-drop-path.md) | cost (run time) | a record with a `Nat` or `Int` member counts as having an observable cleanup, so the drop glue's leaf dispatch, pure release and tail call are off for it: a scope for each dead leaf, a deferral for each freed node | yes: speed of programs that free trees with integer members (deriv, rbtree-ck, cfold, expr_eval: 3 to 16% slower than on `l2r-base12`) | none | [32-a](patches/32-a-integer-members-pure-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [34](34-leaf-integer-foreign-release.md) | cost (run time) | the last release of a record of scalars and big integers from foreign code enters a destruction scope of the runtime, though its body only releases the integers in place and frees the box (31-a's rule covers scalars only) | yes: speed of programs that keep such records in runtime containers (unionfind 1.077 times its time on `l2r-base12`) | none | [34-a](patches/34-a-leaf-integer-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
@@ -574,7 +574,7 @@ from the two runs).
 | 31-a | a record of scalars that foreign code releases is freed directly | X10 n_body 34.3 ms to 23.1 ms (0.642; timing run 22, 31-a alone; 10 other cases 0.970 to 1.002). One upstream unit of 33 changes | the series of 12 against the same with 31-a, direct pairs |
 | 32-a | trees and expressions with integer members are freed with fewer runtime entries | seven cases 0.831 to 0.963 (timing run 22, 32-a alone, the table above; 13 other cases 0.993 to 1.007); scopes entered on deriv 565,495 to 1, deferrals on rbtree-ck 1,053,560 to 204,963. The order of cleanup hooks is unchanged in 3,080 generated scenarios. Cost: code size (IR of deriv +3.8%; a synthetic type +39% of its object) | the series of 12 against the same with 32-a, direct pairs; counts with the prototype, which generates the same IR |
 | 34-a | a record of scalars and big integers that foreign code releases keeps its direct release | L08 unionfind 315.6 ms to 295.6 ms (0.937; timing run 24, 53 cases: geometric mean 0.999, no other case outside ±3%, none slower; peak memory and `.text` 1.000); destruction scopes entered at size 300000: 665,000 to 0. Its reach is wide (a release worker goes in 345 of 742 test programs and in 20 of the 53 benchmark programs), but only unionfind moves measurably. Its rule for variants of leaf arms is checked for correctness, not timed on its own. Leak harness: 0 integers left alive, 0 bad frees | the series of 15 against the series of 17, direct pairs; counts at run time; the gate's executables |
-| 30-a | large functions with many similar arms compile in seconds | `RtOutlineStates`: the lowering pipeline 536 s to 2.7 s, the build 978 s to 8 s. Run time 1.000 over 53 cases. Costs: `.text` +2.0% in the geometric mean, Cedar +9.3%; a small program's build +0.15 s (+9%); lean-zip's and Cedar's builds are not slower | the series before 30-a against the same with it; timing runs 21 and 22 |
+| 30-a | large functions with many similar arms compile in seconds | `RtOutlineStates`: the lowering pipeline 536 s to 2.7 s, the build 978 s to 8 s. Run time 1.000 over 53 cases. Costs: `.text` +2.0% in the geometric mean, Cedar +9.3%; a small program's build +0.15 s (+9%); lean-zip's and Cedar's builds are not slower | the series before 30-a against the same with it; timing runs 21 and 22. On upstream's own 33 units (main with 28-a): 30 change in lowered MLIR, `.text` +0.7% in the geometric mean; their run time is not measured |
 | 26-a | a foreign cleanup runs after the recursion, as in the source | the repro: 0 open handles at the leaf to 3. Cost: no TRMC helper lost (18 of 18 helpers, 114 of 114 helper calls on upstream's benchmark, core and std; 7 of 7 and 40 of 40 on 19 lean2rr programs; lowered MLIR byte-identical) | pristine `36a55a0f` against the fix |
 | 27-a | a right answer of `is_unique` for an immediate | the repro: 1 to 0 after 2^32 - 1 retains. Cost: none for a program without such a call (33 upstream units and 19 lean2rr programs byte-identical) | pristine `36a55a0f` against the fix |
 | 28-a | large functions compile on a host with SVE | `rows-check.sh`: a build failure to `every row agrees`. Generated code: 33 upstream units byte-identical; 72 files of vector tests identical (2 of them after the random names of Rust modules are made equal) | pristine `36a55a0f` against the fix; the row oracle on the final series |
@@ -1019,9 +1019,15 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   two sets, the general ones and the rcgmp ones, as pull requests of
   at most 500 changed lines each, one at a time. reussir#1093 (the
   first form of 33-a) was closed by the maintainer on 2026-11-19: the
-  pass must not do the token pass's work, only not crash. Open:
-  reussir#1095 (33-a in the form that the maintainer asked for,
-  [entry 33](33-tokenless-rc-dec-expansion.md)). The rest of
+  pass must not do the token pass's work, only not crash. Merged:
+  reussir#1095 (`686c2f87`, 2026-11-19; 33-a in the form that the
+  maintainer asked for), reussir#1096 (`2b3a1485`; 27-a), reussir#1097
+  (`d0c7ccf5`; 26-a), reussir#1099 (`c2861a55`; 28-a). So the four
+  upstream bugs of the series' bug fixes are fixed upstream. Their
+  patches stay in the series until lean2rr's base moves past those
+  commits; then each entry is deleted with its patch and repros, as
+  the first item of this list says. Open: reussir#1100 (30-a,
+  [entry 30](30-vector-to-llvm-block-merging.md)). The rest of
   this item is the history before that date.
 - Pull requests: after #758 (05-a, merged as `ea240b19`) none for the
   patches of this directory (owner, 2026-10-19). Since 2026-10-25 the
@@ -1870,6 +1876,39 @@ Known after step 10:
 - **Which of 31-a and 32-a** moved `RtClosureChainFree`'s peak: not
   separated.
 - The follow-ups of the reviews of 32-a and 34-a (test cases).
+
+**11. The four bug fixes are upstream; a correction of entry 30
+(2026-11-19).** The series and its patch files do not change in this
+step.
+
+- *Upstream status.* The owner's pull requests, one at a time:
+  reussir#1095 merged on 2026-11-19 (`686c2f87`; 33-a in the
+  maintainer's form), reussir#1096 merged (`2b3a1485`; 27-a),
+  reussir#1097 merged (`d0c7ccf5`; 26-a), reussir#1099 merged
+  (`c2861a55`; 28-a). reussir#1093 (the first form of 33-a) was closed.
+  So all four upstream bugs that the series fixes (entries 26, 27, 28
+  and 33) are fixed upstream. lean2rr's base is still `36a55a0f`,
+  which is before these commits, so the four patches stay in the
+  series; when the base moves past them, the entries are deleted by
+  the policy. reussir#1100 (30-a) is open.
+- *A correction.* [Entry 30](30-vector-to-llvm-block-merging.md#measured-claim)
+  said that with 30-a the lowered MLIR of upstream's 33 units is
+  byte-identical. That was wrong as a claim about the series. It was
+  measured with 30-a alone on pristine `36a55a0f` on a machine with
+  SVE, where MLIR's SVE storage pass had already merged the blocks.
+  With 28-a before it (the series; upstream's main since #1099), 30
+  of the 33 units change in lowered MLIR, and their `.text` is 0.7%
+  larger in the geometric mean and 2.1% in total (from 23% smaller to
+  11% larger by unit). The run time of upstream's suite is not
+  measured. The numbers of lean2rr's 53 programs (`.text` +2.0%, run
+  time 1.000) stand. Entry 28's identity claim has the same blind
+  spot in the other direction and is true as measured.
+- *The form of 30-a.* Upstream's review asked why the whole region
+  simplification is turned off. The form now in review turns off the
+  block merging only (level `Normal`). It gives byte-identical objects
+  on 6 lean2rr programs and identical output on all vector inputs
+  that were tried. The series keeps its form until reussir#1100
+  resolves, then takes the form that upstream accepts.
 
 ## History: the move to 95d9a1c8 (2026-10-26)
 

@@ -16,15 +16,20 @@ before the decrement expansion. `scripts/l2r.py` does not check for
 the patch. The gate on the series with this form passed (gate 58,
 2026-11-19).
 
-**Upstream (2026-11-19):** Open at `36a55a0f` (confirmed on pristine
-upstream). Two pull requests:
+**Upstream (2026-11-19):** Fixed upstream: pull request reussir#1095
+is merged (commit `686c2f87`, 2026-11-19), with this entry's patch.
+The patch stays in the series until lean2rr's base moves past that
+commit; then this entry, its patch and its repro are deleted (README
+policy). At `36a55a0f` the bug is open (confirmed on pristine
+upstream). The two pull requests:
 
 - reussir#1093, the first form of 33-a (the expansion made the missing
   token itself): closed by the maintainer on 2026-11-19, rejected. The
   reason: the token pass runs before this pass by design, so the pass
   must not do that pass's work; it must only not crash, that is, test
   and leave an operation that it cannot expand.
-- reussir#1095, the form of this entry: open.
+- reussir#1095, the form of this entry: merged on 2026-11-19 as
+  `686c2f87`.
 
 Found during the work on patch 31-a
 ([entry 31](31-leaf-foreign-release.md)). The patch applies to a clean
@@ -205,5 +210,5 @@ same sizes of every section; in the 106 that were sampled `.text`,
 
 ## Upstream note
 
-Pull request reussir#1095 (2026-11-19, open). reussir#1093 (the first
-form) is closed.
+Pull request reussir#1095 is merged (2026-11-19, commit `686c2f87`).
+reussir#1093 (the first form) is closed.

@@ -709,10 +709,15 @@ signature before it computes the name), the fixes of three upstream bugs that th
 (26-a, 27-a, 28-a), the fix of a fourth upstream bug that lean2rr
 does not reach (33-a: a pass of `reussir-opt` crashed on a release
 without a token; the pass now leaves such a release as it is, the
-form that upstream's maintainer asked for; pull request reussir#1095
-is open, and reussir#1093 with the first form was closed), and 30-a (the vector lowering without block
+form that upstream's maintainer asked for), and 30-a (the vector lowering without block
 merging, a build-time patch that comes last because it follows
 28-a).
+Upstream status (2026-11-19): the four bug fixes are merged upstream
+(26-a as reussir#1097, 27-a as #1096, 28-a as #1099, 33-a as #1095),
+in commits after `36a55a0f`; the patches stay in the series until the
+base moves past them. The pull request for 30-a (#1100) is open, in a
+form that turns off the block merging only; the series takes the form
+that upstream accepts when it resolves.
 The file
 [`../reussir-bugs/patches/base`](../reussir-bugs/patches/base) names the
 upstream commit. Each patch has a measured claim

@@ -61,7 +61,9 @@ and the fixes of four upstream bugs: 26-a
 28-a ([issue 28](../../../reussir-bugs/28-sve-vector-storage.md)),
 which the port found, and 33-a
 ([issue 33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md)),
-which lean2rr does not reach.
+which lean2rr does not reach. All four fixes are merged upstream
+(2026-11-19), in commits after `36a55a0f`; the patches stay until the
+base moves past them.
 The move to this base
 ([history](../../../reussir-bugs/README.md#history-the-move-to-36a55a0f-2026-11-17))
 changed these things for lean2rr:
@@ -187,7 +189,7 @@ either way.
 | [30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md) | cost (build time: MLIR's vector lowering pass merges blocks of all code; one build took 16 to 18 minutes) | none: no flag reaches the pass, and cutting the function further only moves the cliff | 30-a (costs 2.0% of code size) | n/a: an optimization; nothing requires it |
 | [31](../../../reussir-bugs/31-leaf-foreign-release.md) | cost (run time: a record of scalars that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 31-a | n/a: an optimization; nothing requires it |
 | [32](../../../reussir-bugs/32-integer-members-drop-path.md) | cost (run time: records with a `Nat` or `Int` member lost the fast paths of the drop glue) | none: the glue is made by rrc | 32-a | n/a: an optimization; nothing requires it |
-| [33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only: a crash on an `rc.dec` without a token) | none needed: rrc does not reach it | 33-a (the pass leaves the decrement unexpanded; upstream pull request reussir#1095, open) | n/a: lean2rr's builds do not reach the bug |
+| [33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only: a crash on an `rc.dec` without a token) | none needed: rrc does not reach it | 33-a (the pass leaves the decrement unexpanded; merged upstream as reussir#1095) | n/a: lean2rr's builds do not reach the bug |
 | [34](../../../reussir-bugs/34-leaf-integer-foreign-release.md) | cost (run time: a record of scalars and integers that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 34-a | n/a: an optimization; nothing requires it |
 | [35](../../../reussir-bugs/35-worklist-glue-name.md) | cost (build time: the drop glue computed a glue function's name at every request) | none: the translator has no reasonable change to make | 35-a | n/a: an optimization of build time; nothing requires it |
 | [26](../../../reussir-bugs/26-trmc-observable-release.md) | bug (TRMC moves a self call before a release with a foreign cleanup) | none: lean2rr's own releases are calls, which keep the self call in place; no lean2rr program is known to reach the bug | 26-a | no workaround to keep; `scripts/l2r.py` requires the patch |

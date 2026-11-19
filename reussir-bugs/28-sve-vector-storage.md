@@ -17,12 +17,16 @@ patch on every host (it checks for the text
 `createReussirLegalizeVectorStoragePass` in `lib/CAPI/Passes.cpp`), so
 a missing patch gives a clear message, not `RunPass`.
 
-**Upstream (2026-11-18):** Open at `36a55a0f`. New with upstream's
+**Upstream (2026-11-19):** Fixed upstream: pull request reussir#1099
+is merged (commit `c2861a55`), with this entry's patch. The patch stays in the series until lean2rr's base moves past
+that commit; then this entry, its patch and its repro are deleted
+(README policy). The rest of this paragraph is the state at
+`36a55a0f`.
+
+Open at `36a55a0f`. New with upstream's
 vector work (#994, #1008); `l2r-base12` does not have the pass. The
 direct cause is in MLIR (LLVM 23.1.2), but Reussir schedules the pass
-on every function, so the fix is in Reussir. Not reported to Reussir
-(the maintainer takes fixes from this directory) and not reported to
-LLVM. The patch applies to a clean `36a55a0f` alone.
+on every function, so the fix is in Reussir. Not reported to LLVM. The patch applies to a clean `36a55a0f` alone.
 
 ## Context
 
@@ -183,9 +187,17 @@ was not measured again. On an SVE target the old pass gave every
 function one more round of folding and block merging; no measured unit
 shows a difference, but a program could.
 
+**A limit of the identity claim above** (found on 2026-11-19, in the
+review of upstream's pull request for patch 30-a). "33 upstream units
+byte-identical" is true as measured, on pristine `36a55a0f` with 28-a
+alone. But it has a blind spot: MLIR's vector lowering pass ran after
+the storage pass and merged the same blocks again, so the output was
+the same. The storage pass's own block merging did go away with 28-a;
+that shows only when the vector pass does not merge either
+([entry 30](30-vector-to-llvm-block-merging.md#measured-claim)).
+
 ## Upstream note
 
-Not reported. A report to Reussir would give the minimal MLIR chain and
-the two `mlir-opt` lines. The MLIR behaviour (a legalization pass that
+Fixed upstream by pull request reussir#1099 (commit `c2861a55`). The MLIR behaviour (a legalization pass that
 fails on the limit of an unrelated cleanup) is worth an LLVM report of
 its own; none is filed.

@@ -18,11 +18,17 @@ plain upstream is in
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same, and one known program builds in minutes.
 
-**Upstream (2026-11-18):** Open at `36a55a0f`: new with upstream's
-vector work (#994). `l2r-base12` does not have the pass. The behaviour
-is MLIR's (LLVM 23.1.2), and the pass has no option for it. Not
-reported to Reussir (the maintainer takes changes from this directory)
-and not reported to LLVM. The file in `patches/` is the form that
+**Upstream (2026-11-19):** Open at `36a55a0f` and on upstream's main
+(`c2861a55`): new with upstream's vector work (#994). `l2r-base12`
+does not have the pass. The behaviour is MLIR's (LLVM 23.1.2), and the
+pass has no option for it. Pull request reussir#1100 is open. Its
+first form was the series' 30-a (region simplification `Disabled`).
+The maintainer asked for a justification of turning the whole step
+off, and the form now in review sets the level `Normal`: only the
+block merging is off
+([the levels](#region-simplification-and-its-levels)). **The series
+keeps `Disabled` for now; it is to be switched to the form that
+upstream accepts when reussir#1100 resolves.** Not reported to LLVM. The file in `patches/` is the form that
 applies after 28-a; the form for plain upstream is
 `patches/standalone/30-a-vector-to-llvm-patterns.patch`.
 
@@ -94,6 +100,46 @@ six constructed shapes (five in plain MLIR, one in plain Reussir) all
 merge to a linear number of arguments. What a small input does show is
 the mechanism: MLIR's pass merges two arms without a vector into one
 block with arguments.
+
+## Region simplification and its levels
+
+Read from MLIR 23.1.2's greedy driver. After the driver applies its
+patterns, it can simplify the regions of the code. The step has three
+levels:
+
+| Level | What the driver does after the patterns |
+|---|---|
+| `Disabled` | nothing |
+| `Normal` | removes unreachable blocks; removes dead operations and dead block arguments |
+| `Aggressive` | the same, and merges identical blocks and drops redundant block arguments |
+
+Block merging makes one block of blocks that have the same successors
+and the same operations; each operand position that differs becomes a
+new block argument. There is no finer switch than the three levels.
+
+- **MLIR's vector pass has block merging only through the driver's
+  default.** The pass calls the greedy driver with no configuration,
+  and the driver's default level is `Aggressive`. MLIR's own
+  canonicalizer pass has `Normal` as its default.
+- **Reussir's own code never asks for `Aggressive`.** Where it sets a
+  level at all, it turns region simplification off (its inliner, its
+  JIT bridge, and the storage pass of patch 28-a). The canonicalizer
+  passes of rrc's pipeline, before and after the vector pass, run at
+  `Normal`: none merges blocks. So nothing depends on the merging for
+  correctness; it changes code size only.
+- **The vector patterns do not need the cleanup.** The patterns that
+  were read create no block and no branch (one creates a structured
+  `scf.if`). Measured: `Normal` and `Disabled` give byte-identical
+  output on every input that was tried (85 files of upstream; objects
+  of 6 lean2rr programs).
+
+**The two forms of the patch.** The series' 30-a sets `Disabled`. The
+form in upstream's review (reussir#1100) sets `Normal`. They differ
+only in the cleanup of unreachable blocks and dead operations, which
+finds nothing after these patterns. `RtOutlineStates` to the
+executable: 924 s with MLIR's pass (one run), 8.67 s with `Disabled`,
+8.83 s with `Normal` (medians of 3); the executable's output is the
+same in all three.
 
 ## lean2rr
 
@@ -241,11 +287,42 @@ program in three cases), L04 +2.7%, L17 +2.4%; the smallest growth is
 the growth was 1.6% to 25% of the object's `.text` (the 25% is a 70 kB
 object that gains the same 16.8 kB).
 
-**Other code:** upstream's benchmark suite, core and std (33 units,
-lowered MLIR): byte-identical with and without the patch. 72 output
-files of upstream's vector tests and of tests without vectors: 70
-byte-identical, 2 identical after the random names of Rust modules are
-made equal.
+**Other code: a correction (2026-11-19).** This entry said until
+2026-11-19: "upstream's benchmark suite, core and std (33 units,
+lowered MLIR): byte-identical with and without the patch". **That
+sentence was wrong as a claim about the patch in the series.** It was
+measured on pristine `36a55a0f` with 30-a alone, on a machine with
+SVE. There MLIR's SVE storage pass ran first on every function, with
+the same default configuration, and had already merged the blocks; the
+vector pass found nothing left to merge. So 30-a alone looked neutral.
+In lean2rr's series 28-a comes before 30-a, and upstream has 28-a
+since #1099. Then the vector pass is the only block merger, on every
+target, and the sentence does not hold.
+
+The corrected facts, measured on upstream's main (`c2861a55`, which
+has 28-a), MLIR's pass against the patch:
+
+- **30 of the 33 units change in lowered MLIR** (more blocks: std
+  21,574 to 28,789 blocks, mltt 6,333 to 18,266). The `Disabled` and
+  the `Normal` form give identical output.
+- **`.text` of the 33 units' objects:** 0.7% larger in the geometric
+  mean, 2.1% in total (700,279 to 715,123 bytes). By unit: from 23%
+  smaller to 11% larger. The largest growth is derive +11.4% and mltt
+  +10.5%; 11 units do not change; four are smaller (list-membership
+  -23%).
+- **Run time of upstream's suite: not measured.**
+- Upstream's SIMD tests (13 tests, two levels, two stages: 52 files):
+  6 files differ (two tests, with blocks not merged); their LLVM IR at
+  `-O aggressive` is identical.
+
+The numbers of lean2rr's programs above stand (53 programs: `.text`
++2.0% in the geometric mean, the largest +9.3%; run time 1.000): they
+were measured on the series, where 28-a is before 30-a.
+
+The earlier comparison of 72 output files of upstream's tests (70
+byte-identical, 2 identical after the random names of Rust modules
+are made equal) was made in the same way, on pristine with 30-a alone
+on the SVE machine, and has the same limit.
 
 **Build time of other programs** (timing run 22, 2026-11-18; rrc and
 the link from the `.rr`, every texture in a warm store on a memory
@@ -290,7 +367,8 @@ stage times above.
 
 ## Upstream note
 
-Not reported. A report to Reussir would give the phase table and the
-block-argument counts of the three variants. The MLIR behaviour (a
+Pull request reussir#1100 is open (2026-11-19), in the `Normal` form
+after the maintainer's review. The report gives the phase table and
+the block-argument counts of the three variants. The MLIR behaviour (a
 lowering pass for one dialect that simplifies the regions of all code)
 is worth an LLVM report of its own, together with entry 28's.

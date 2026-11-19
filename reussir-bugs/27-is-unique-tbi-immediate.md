@@ -15,12 +15,17 @@ is the file `patches/27-a-is-unique-tbi-immediate.patch`). It does not affect le
 code do not call `core::object::is_unique`. `scripts/l2r.py` does not
 check for the patch.
 
-**Upstream (2026-11-18):** Open at `36a55a0f`. New with #983,
+**Upstream (2026-11-19):** Fixed upstream: pull request reussir#1096
+is merged (commit `2b3a1485`), with this entry's patch. The patch stays in the series until lean2rr's base moves past
+that commit; then this entry, its patch and its repro are deleted
+(README policy). The rest of this paragraph is the state at
+`36a55a0f`.
+
+Open at `36a55a0f`. New with #983,
 which added the intrinsic; `l2r-base12` has no such
 function. aarch64 with TBI only: on x86-64, and with
 `--nullary-variant-encoding arch-independent`, the answer is always
-false. Not reported: the maintainer takes fixes from this directory.
-The patch applies to a clean `36a55a0f` alone.
+false. The patch applies to a clean `36a55a0f` alone.
 
 ## Context
 
@@ -133,7 +138,7 @@ dropped for this reason.
 
 ## Upstream note
 
-Not reported. A report would give the six output lines above. Upstream
+Fixed upstream by pull request reussir#1096 (commit `2b3a1485`). Upstream
 tried full constructor tagging inside #980 and took it out again; the
 maintainer wrote there that he may remove TBI. If TBI goes, the bug
 goes with it.

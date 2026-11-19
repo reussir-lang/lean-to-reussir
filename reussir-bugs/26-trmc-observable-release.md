@@ -19,9 +19,14 @@ requires the patch all the same (it checks for the text
 build succeeds, and a program that does reach the bug gets a wrong
 release order with no message.
 
-**Upstream (2026-11-18):** Open at `36a55a0f`. Old: the same wrong
-output on `l2r-base12` (upstream `95d9a1c8`). Not reported: the
-maintainer takes fixes from this directory. The patch applies to a clean
+**Upstream (2026-11-19):** Fixed upstream: pull request reussir#1097
+is merged (commit `d0c7ccf5`), with this entry's patch. The patch stays in the series until lean2rr's base moves past
+that commit; then this entry, its patch and its repro are deleted
+(README policy). The rest of this paragraph is the state at
+`36a55a0f`.
+
+Open at `36a55a0f`. Old: the same wrong
+output on `l2r-base12` (upstream `95d9a1c8`). The patch applies to a clean
 `36a55a0f` alone, and together with 27-a and 28-a.
 
 ## Context
@@ -196,7 +201,8 @@ device array. That function goes from a wrong order to plain recursion.
 
 ## Upstream note
 
-Not reported. A report would give the repro: three levels of
+Fixed upstream by pull request reussir#1097 (commit `d0c7ccf5`). What
+the report gave: the repro, three levels of
 `build`, the count of open handles at the leaf, 0 for 3. The fix is the
 completion of #984's rule for releases, with upstream's own predicate
 for an observable cleanup.
