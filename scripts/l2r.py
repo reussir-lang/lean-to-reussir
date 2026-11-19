@@ -545,6 +545,10 @@ REQUIRED_REUSSIR_PATCHES = [
 #   members are all integers (`static bool releasesInPlace(mlir::Type
 #   payload)` in the same file, where 34-a rewrites the comment that
 #   marked 31-a; fewer instructions per release);
+# - 35-a: the drop expansion looks a type's worklist glue up by its
+#   signature before it makes a name for it (`struct DropGlueSymbols` in
+#   include/Reussir/Conversion/AcquireDropExpansion.h). The object code
+#   is the same; rrc's time for a large program is shorter;
 # - 30-a: on an aarch64 host with SVE, rrc lowers the vector dialect with
 #   its patterns alone (`createReussirConvertVectorToLLVMPass` in
 #   lib/CAPI/Passes.cpp). Without it the results are the same and rrc's
@@ -552,10 +556,12 @@ REQUIRED_REUSSIR_PATCHES = [
 #   takes about 16 minutes to compile. A slow build is not an error, so it
 #   is not checked;
 # - 33-a: the decrement expansion no longer crashes on a shared box's
-#   decrement without a token result (`replaceWithProduced` in
-#   lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp). rrc's
-#   pipeline makes the tokens before the expansion and never reaches the
-#   fixed branch; it matters for reussir-opt pipelines run by hand;
+#   decrement without a token result: it leaves the decrement as it is
+#   (the match failure `"requires token instantiation"` in
+#   lib/Conversion/RcDecrementExpansion/RcDecrementExpansion.cpp; upstream
+#   has the same text in another file). rrc's pipeline makes the tokens
+#   before the expansion and never reaches the fixed branch; it matters
+#   for reussir-opt pipelines run by hand;
 # - 27-a: `core::object::is_unique` of a nullary immediate under TBI
 #   (a wrong answer upstream; lean2rr's programs do not call it);
 # - the patches out of the series (reussir-bugs/patches/parked).

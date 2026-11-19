@@ -1,7 +1,7 @@
-From bf96a18de270751b908a1adcdeed0c478f7f77ee Mon Sep 17 00:00:00 2001
+From ef7872f1d93952ec734e5fbb0006d4d0c7540011 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 6 Oct 2026 04:10:28 -0400
-Subject: [PATCH 02/17] [ffi] mask tag bits before accessing foreign reference
+Subject: [PATCH 02/18] [ffi] mask tag bits before accessing foreign reference
  counts
 
 A `tagged` foreign handle that is not an immediate points to a box whose
@@ -74,7 +74,7 @@ index 2df14e7b..9ef08894 100644
  
  def ReussirStrType : ReussirType<"Str", "str",
 diff --git a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
-index 7f8a8128..e757203e 100644
+index 7f8a8128..30a61880 100644
 --- a/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 +++ b/lib/Conversion/BasicOpsLowering/BasicOpsLowering.cpp
 @@ -299,6 +299,23 @@ void endRealBoxGuard(mlir::ConversionPatternRewriter &rewriter,
@@ -93,8 +93,8 @@ index 7f8a8128..e757203e 100644
 +  mlir::Value mask = mlir::LLVM::ConstantOp::create(
 +      rewriter, loc, intTy,
 +      rewriter.getIntegerAttr(
-+          intTy, llvm::APInt::getLowBitsSet(
-+                     64, FFIObjectType::TAGGED_ADDRESS_BITS)));
++          intTy,
++          llvm::APInt::getLowBitsSet(64, FFIObjectType::TAGGED_ADDRESS_BITS)));
 +  return mlir::LLVM::PtrMaskOp::create(rewriter, loc, ptr.getType(), ptr, mask);
 +}
 +

@@ -9,7 +9,7 @@ Patch 28-a applies the same patterns without the cleanup that fails.
 ## Summary
 
 **Kind:** bug. **Status:** patched (28-a), in the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-r5`, tree `107c212b`; the patch is the file `patches/28-a-sve-vector-storage-patterns.patch`).
+`36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; the patch is the file `patches/28-a-sve-vector-storage-patterns.patch`).
 lean2rr reaches the bug on the build machine (aarch64 with SVE): the
 largest function of the row oracle of `tests/runtime/rows-check.sh`
 does not compile without the patch. `scripts/l2r.py` requires the
@@ -158,8 +158,10 @@ call with the default configuration is in two more upstream passes
 (`SpecialPointerTag.cpp`, `ClosureBetaReduction.cpp`); they run early,
 on structured code, and no failing program is known. Not changed.
 
-Not run: the full lit suite, the sanitizer tests. clang-format is not
-installed on the build machine.
+Not run: the full lit suite, the sanitizer tests. The patch's changed
+lines are clean under clang-format 23.1.0 (LLVM style) since
+2026-11-19; the formatter moved line breaks in 4 lines and changed no
+token.
 
 ## Measured claim
 

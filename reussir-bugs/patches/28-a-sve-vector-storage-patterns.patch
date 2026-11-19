@@ -1,7 +1,7 @@
-From a9bee2244e55764ab7a33c1db29a6377cbc27c5d Mon Sep 17 00:00:00 2001
+From 79adb24e1da987f42cc7ee4953294ec4b2c25713 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 01:51:48 -0500
-Subject: [PATCH 15/17] [conversion] legalize the storage of scalable vectors
+Subject: [PATCH 16/18] [conversion] legalize the storage of scalable vectors
  with the patterns alone
 
 On a target with SVE the pipeline ran MLIR's `arm-sve-legalize-vector-
@@ -167,7 +167,7 @@ index 00000000..b4444a09
 +)
 diff --git a/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp b/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
 new file mode 100644
-index 00000000..fcdccc6d
+index 00000000..09cfbf68
 --- /dev/null
 +++ b/lib/Conversion/LegalizeVectorStorage/LegalizeVectorStorage.cpp
 @@ -0,0 +1,61 @@
@@ -213,8 +213,8 @@ index 00000000..fcdccc6d
 +    config.enableFolding(false).enableConstantCSE(false);
 +    config.setRegionSimplificationLevel(
 +        mlir::GreedySimplifyRegionLevel::Disabled);
-+    if (mlir::failed(mlir::applyPatternsGreedily(
-+            getOperation(), std::move(patterns), config)))
++    if (mlir::failed(mlir::applyPatternsGreedily(getOperation(),
++                                                 std::move(patterns), config)))
 +      return signalPassFailure();
 +    // The patterns give a legalized allocation its old type back through a
 +    // cast between memrefs, for the uses they then rewrite. One that is left

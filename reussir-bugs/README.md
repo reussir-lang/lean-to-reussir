@@ -22,15 +22,15 @@ builds apply to Reussir.
   which builds and runs them ([running the repros](#running-the-repros)).
 
 **Base.** lean2rr's Reussir is upstream Reussir `36a55a0f` (`main` on
-2026-11-17) plus the 17 patches of the series: 10-a, 07-a, entry 20's
-five (20-a, 20-g, 20-c, 20-d, 20-e), 21-a, 29-a, 31-a, 32-a, 34-a, the
-fixes of four upstream bugs (26-a, 27-a, 28-a, which the port found,
-and 33-a, which the work on 31-a found), and 30-a. The file
+2026-11-17) plus the 18 patches of the series: 10-a, 07-a, entry 20's
+five (20-a, 20-g, 20-c, 20-d, 20-e), 21-a, 29-a, 31-a, 32-a, 34-a,
+35-a, the fixes of four upstream bugs (26-a, 27-a, 28-a, which the
+port found, and 33-a, which the work on 31-a found), and 30-a. The file
 [`patches/base`](patches/base) holds the full id of the upstream commit.
 The Reussir checkout is not part of this repository. Its branch
-`l2r-base13-r5` (tree `107c212b`) is the compiler that lean2rr's last
-gate ran on. The series of this folder gives exactly this tree
-(applied on a clean `36a55a0f`).
+`l2r-base13-r7` (tree `6dc99546`) is the compiler that lean2rr's last
+gate ran on (gate 58). The series of this folder gives exactly this
+tree (applied on a clean `36a55a0f`).
 `scripts/l2r.py` stops
 with an error on a Reussir that lacks the upstream drop interface or a
 patch that lean2rr requires
@@ -106,7 +106,16 @@ Status (2026-11-18):
   lose at least one worker of a foreign release, which is 34-a's
   effect, mostly for records of the library
   ([entry 34](34-leaf-integer-foreign-release.md#measured-claim)).
-  This is the last gate that passed.
+- **The gate on the series of 18 patches** (gate 58; with 35-a, the
+  new form of 33-a and the formatted patches; lean2rr dev `6fb19b4e`
+  on Reussir tree `6dc99546`; 2026-11-19): the runtime suite passed,
+  748 of 750 with the same 2 expected failures, and so did the second
+  phase (23 of 23 check scripts, the classic corpus in its three
+  modes, the raytracer, the repros, every one with a verdict on the
+  series' own build). All 742 `.rr` files are byte-identical to the
+  gate before, and all 742 executables have the same sizes of every
+  section: the changes of this series change no generated code. This
+  is the last gate that passed.
 - **Wall time** (the shared benchmark set, 53 cases; geometric means):
   - timing run 20, the series of 12 patches: 0.584 of native (dev on
     `l2r-base12` in run 19: 0.593), and 0.984 of dev on `l2r-base12` in
@@ -125,12 +134,13 @@ Status (2026-11-18):
     15, 53 cases in direct pairs: 0.999; one case outside ±3%,
     unionfind 0.937; no case slower. The last direct headline against
     native stays the 0.569 of run 22, on the series of 15.
-- **Open:** two cases are slower than on `l2r-base12`: L15
-  monadic-interp 1.044 (about half of it located: scope entries that
-  are needed) and L18 hashmap 1.055 (one allocation site found, its
-  cause not). 30-a costs 2.0% of code size
+- **Known costs, investigated and not fixed:** two cases are slower
+  than on `l2r-base12`, L15 monadic-interp 1.044 and L18 hashmap
+  1.055. For each, about half is the cost of destruction-scope
+  entries and the other half is not located; each remaining part is
+  under 3%, and they are not pursued. 30-a costs 2.0% of code size
   and about 9% of a small program's build time
-  ([history](#history-the-move-to-36a55a0f-2026-11-17), steps 6 to 9).
+  ([history](#history-the-move-to-36a55a0f-2026-11-17), steps 6 to 10).
 
 ### Earlier bases (history)
 
@@ -234,7 +244,9 @@ only in part).
   patch) and entry 33 (an upstream bug found with 31-a, with a patch).
   Entry 34 (a fourth upstream cost, found by timing run 23, with a
   patch) is from 2026-11-18 too.
-  The next free number is 35. Patch letters are not used again either: 20-f was the
+  Entry 35 (a cost of build time in upstream's drop glue, with a
+  patch) is from 2026-11-19.
+  The next free number is 36. Patch letters are not used again either: 20-f was the
   pin patch, so the patch that was split from 20-a is 20-g. (Old number 37 was
   reserved for another track's patch, value records across the FFI
   boundary; that track takes the next free number.)
@@ -344,7 +356,7 @@ and brought the three bugs of entries 26 to 28
 | [26](26-trmc-observable-release.md) | bug | TRMC moves a self call before a release that runs a foreign cleanup hook or drops a closure: the cleanup runs before the recursion, where the source runs it after | not known to: one constructed Lean program gave native's output, and the patch changes no TRMC helper of 19 lean2rr programs | - | [26-a](patches/26-a-trmc-observable-release.patch) | open at `36a55a0f` (also on `l2r-base12`); not reported |
 | [27](27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI; low severity) | `core::object::is_unique` answers true for a nullary immediate after 2^32 - 1 retains of it | no: lean2rr does not call the intrinsic | - | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | open at `36a55a0f`, new with #983; not reported |
 | [28](28-sve-vector-storage.md) | bug (aarch64 with SVE: valid code rejected) | rrc runs MLIR's SVE storage pass on every function; the pass fails on some large functions without any vector, and rrc stops with `RunPass` and no diagnostic | yes on a host with SVE: the row oracle of `rows-check.sh` did not compile | none | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | open at `36a55a0f`, new with #994; the direct cause is in MLIR; not reported |
-| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) | open at `36a55a0f`; pull request reussir#1093 is open (2026-11-19) |
+| [33](33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only; low severity) | the decrement expansion crashes on a valid `rc.dec` without a token (a pass run before the token pass) | no: rrc always runs the token pass first | - | [33-a](patches/33-a-tokenless-rc-dec.patch) (the pass leaves such a decrement unexpanded) | open at `36a55a0f`; pull request reussir#1095 is open (2026-11-19); reussir#1093, the first form, was closed |
 | [3](03-value-record-dag.md) | cost (deliberate design) | the first acquire/drop expansion writes a `[value]` record's copy out in line, exponential for records shared in a DAG | no, lean2rr's `[value]` records are shallow | - | none | reproduces on `36a55a0f` (3.93x; the port's first gate, 2026-11-18) |
 | [4](04-emit-mlir-size.md) | cost (debug output) | the `--emit mlir` dump is exponential in the nesting of records that share sub-records | no, builds unaffected | dump smaller programs | none | reproduces on `36a55a0f` (3.99x; the port's first gate, 2026-11-18) |
 | [29](29-texture-store-open.md) | cost (build time) | rrc opens and closes the store of its texture cache for every texture; each open syncs the store and reads the whole database (about 19 ms for each texture with a small store, about 53 ms with a 140 MB store) | yes: build time of every program | none in the driver (a store on a memory file system removes the sync cost) | [29-a](patches/29-a-polyffi-store-once.patch) | open at `36a55a0f`, new with #852; not reported |
@@ -352,6 +364,7 @@ and brought the three bugs of entries 26 to 28
 | [31](31-leaf-foreign-release.md) | cost (run time) | the last release of a record without counted members from foreign code enters a destruction scope of the runtime, where a direct free is enough | yes: speed of programs that keep such records in runtime containers (n_body 1.56 times its time on `l2r-base12`) | none | [31-a](patches/31-a-leaf-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [32](32-integer-members-drop-path.md) | cost (run time) | a record with a `Nat` or `Int` member counts as having an observable cleanup, so the drop glue's leaf dispatch, pure release and tail call are off for it: a scope for each dead leaf, a deferral for each freed node | yes: speed of programs that free trees with integer members (deriv, rbtree-ck, cfold, expr_eval: 3 to 16% slower than on `l2r-base12`) | none | [32-a](patches/32-a-integer-members-pure-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [34](34-leaf-integer-foreign-release.md) | cost (run time) | the last release of a record of scalars and big integers from foreign code enters a destruction scope of the runtime, though its body only releases the integers in place and frees the box (31-a's rule covers scalars only) | yes: speed of programs that keep such records in runtime containers (unionfind 1.077 times its time on `l2r-base12`) | none | [34-a](patches/34-a-leaf-integer-foreign-release.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
+| [35](35-worklist-glue-name.md) | cost (build time) | the worklist glue prints and hashes a glue function's signature for its name at every request, also when the function exists: in a program with long, nested types one pass takes 35 s where 5 s is enough | yes: build time of one class of program (`RtDepPolyRec`: 117 s to the executable, 84 s with the patch) | none | [35-a](patches/35-a-worklist-glue-name-cache.patch) | open at `36a55a0f`, new with the drop series of 2026-11-01; not reported |
 | [1](01-phantom-reuse-donor.md) | missed optimization | token reuse picks decrements that never free | yes, speed | fields bound lazily (`lazy-fields`) | none (parked: [01-a](patches/parked/01-a-sink-bound-retains.patch)) | reproduces on `36a55a0f` (4.79x pristine, 4.71x patched; the port's first gate, 2026-11-18) |
 | [6](06-trampoline-inline.md) | missed optimization | a texture's import trampoline has no inline attribute: at a cold call site a texture costing more than 45 stays a call | yes, speed (three reads at cold sites) | read textures kept small | none (parked: [06-a](patches/parked/06-a-inline-small-textures.patch), [06-b](patches/parked/06-b-inline-guards.patch)) | reproduces on `36a55a0f` (the port's first gate, 2026-11-18) |
 | [17](17-padded-member-widening.md) | missed optimization | with `--no-pack-record-members`, a member padded by the next one's alignment is widened to an integer but stored at its own width (`store i1`): LLVM keeps the struct on the stack | yes, speed (generated tuples with a `bool` first) | every generated tuple (join points, `flatten-structs`) in decreasing alignment (`memberOrder`) | none | reproduces on `36a55a0f` (2 stack slots; the port's first gate, 2026-11-18); not reported |
@@ -365,13 +378,13 @@ and brought the three bugs of entries 26 to 28
 | [15](15-mimalloc-arena-purge.md) | issue (dependency: mimalloc v2.2.4) | mimalloc's delayed arena purges do not run | yes, peak memory | leanrt sets `arena_purge_mult` to 0 on v2.1.8 to v2.2.7 | none (a newer `libmimalloc-sys` parked) | unchanged (still 0.1.44 at `36a55a0f`; `Cargo.toml` read, 2026-11-17) |
 | [25](25-texture-cache-key.md) | sharp edge (documented rule) | rrc's texture cache is keyed on the paths of rustc and of the library directories, not on their contents: after a library is rebuilt in place, rrc reuses texture bitcode made against the old library, with no message | not with lean2rr's driver; a build without the driver's rule gets a wrong program | `scripts/l2r.py` puts the runtime build's digest into the path of the rustc that it gives rrc, and keeps the cache in lean2rr's own directory (`L2R_POLYFFI_CACHE`); test `tests/runtime/texture-cache-check.sh` | none | by design (#852): library directories are fixed inputs, a changed library needs a new path; upstream's own tests hit it and changed the caller (#967). |
 
-**Counts.** 27 entries (numbers 1 to 34; numbers 5, 9, 11, 19 and 22 to
-24 are retired): 8 bugs, 7 costs, 6 missed optimizations, 4
-missing features, 1 dependency issue, 1 sharp edge. 13 entries have
-patches in the series, 17 patch files in all (one each for 7, 10, 21
-and 26 to 34, five for entry 20): 4 bug fixes (26-a, 27-a, 28-a, 33-a), 4
-features (07-a, 10-a, 20-a, 20-d) and 9 optimizations (20-g, 20-c,
-20-e, 21-a, 29-a, 30-a, 31-a, 32-a, 34-a). 5 parked patch files lie outside
+**Counts.** 28 entries (numbers 1 to 35; numbers 5, 9, 11, 19 and 22 to
+24 are retired): 8 bugs, 8 costs, 6 missed optimizations, 4
+missing features, 1 dependency issue, 1 sharp edge. 14 entries have
+patches in the series, 18 patch files in all (one each for 7, 10, 21
+and 26 to 35, five for entry 20): 4 bug fixes (26-a, 27-a, 28-a, 33-a), 4
+features (07-a, 10-a, 20-a, 20-d) and 10 optimizations (20-g, 20-c,
+20-e, 21-a, 29-a, 30-a, 31-a, 32-a, 34-a, 35-a). 5 parked patch files lie outside
 the series (01-a, 06-a, 06-b, 16-a and 20-b), and
 one file in `patches/standalone/` is a second form of 30-a.
 
@@ -401,37 +414,38 @@ cmake --build reussir/build --target rrc reussir-rt
 
 `--keep-non-patch` is necessary: the subjects start with `[ffi]` or
 `[bigint]`, and plain `git am` removes a leading `[...]`. The result has
-the series of 17 patches, tree `107c212b`: the tree of the Reussir
-branch `l2r-base13-r5`, on which the last gate ran. `scripts/l2r.py` uses the checkout
+the series of 18 patches, tree `6dc99546`: the tree of the Reussir
+branch `l2r-base13-r7`. `scripts/l2r.py` uses the checkout
 at `./reussir` unless `L2R_REUSSIR` names another one, and expects the
 build in `<checkout>/build`.
 
-The series on `36a55a0f` (17 patches; the whole series is 114 files,
-without `tests/` 60 files; the Reussir branch is `l2r-base13-r5`, tree
-`107c212b`. The commit ids of rows 1 to 11 are those of that branch
-and of `l2r-base13-r4`. Rows 12 to 17 have no commit id here: their
-commits are made again when a message changes, and the patch file
-and the tree name them):
+The series on `36a55a0f` (18 patches; the Reussir branch is
+`l2r-base13-r7`, tree `6dc99546`. The table gives no commit ids: the
+commits are made again when a message or the formatting changes, and
+the patch file and the tree name them. The line counts are those of
+the patches before their lines were formatted on 2026-11-19; the
+formatter changed 5 files by +29/-31 in all):
 
 | # | Patch | Commit | Subject | Kind | Lines (all; without `tests/`) |
 |---|---|---|---|---|---|
-| 1 | [10-a](patches/10-a-tagged-ffi-objects.patch) | `07a97202` | `[ffi] support tagged foreign handles` | feature | +742/-50; +283/-50 |
-| 2 | [07-a](patches/07-a-tagged-top-bits.patch) | `bf96a18d` | `[ffi] mask tag bits before accessing foreign reference counts` | feature | +74/-6; +34/-2 |
-| 3 | [20-a](patches/20-a-bigint-lean-division.patch) | `ea564073` | `[bigint] expose Lean division modes and power-of-two remainder` | feature | +468/-4; +137/-4 |
-| 4 | [20-g](patches/20-g-bigint-nat-nonnegative.patch) | `67dd6c15` | `[bigint] divide Nats as nonnegative integers` | optimization | +110/-24; +58/-22 |
-| 5 | [20-c](patches/20-c-mpz-inline-glue.patch) | `68bf7d89` | `[bigint] emit inlineable acquire and release glue for foreign handles` | optimization | +343/-50; +135/-50 |
-| 6 | [20-d](patches/20-d-mpz-is-shared.patch) | `d8849a4f` | `[bigint] expose foreign handle sharing through generated glue` | feature | +240/-7; +114/-6 |
-| 7 | [20-e](patches/20-e-hex-bigint-literals.patch) | `698f7832` | `[bigint] pass integer constants and match keys to MLIR in hexadecimal` | optimization (build time) | +142/-17; +75/-17 |
-| 8 | [21-a](patches/21-a-value-record-member-retains.patch) | `2a886467` | `[rc] cancel rcgmp retains of by-value record members against the record's drop` | optimization | +418/-2; +16/-2 |
-| 9 | [29-a](patches/29-a-polyffi-store-once.patch) | `5a5eda93` | `[rrc] open the polyffi cache store once per module` | optimization (build time) | +50/-8 |
-| 10 | [31-a](patches/31-a-leaf-foreign-release.patch) | `bebee388` | `[drop] release a foreign box of trivially copyable members in place` | optimization | +168/-0; code 7 lines |
-| 11 | [32-a](patches/32-a-integer-members-pure-release.patch) | `43e51856` | `[drop] release integer members in place and tail-release the last child` | optimization | +246/-53; code +103/-53 |
+| 1 | [10-a](patches/10-a-tagged-ffi-objects.patch) | - | `[ffi] support tagged foreign handles` | feature | +742/-50; +283/-50 |
+| 2 | [07-a](patches/07-a-tagged-top-bits.patch) | - | `[ffi] mask tag bits before accessing foreign reference counts` | feature | +74/-6; +34/-2 |
+| 3 | [20-a](patches/20-a-bigint-lean-division.patch) | - | `[bigint] expose Lean division modes and power-of-two remainder` | feature | +468/-4; +137/-4 |
+| 4 | [20-g](patches/20-g-bigint-nat-nonnegative.patch) | - | `[bigint] divide Nats as nonnegative integers` | optimization | +110/-24; +58/-22 |
+| 5 | [20-c](patches/20-c-mpz-inline-glue.patch) | - | `[bigint] emit inlineable acquire and release glue for foreign handles` | optimization | +343/-50; +135/-50 |
+| 6 | [20-d](patches/20-d-mpz-is-shared.patch) | - | `[bigint] expose foreign handle sharing through generated glue` | feature | +240/-7; +114/-6 |
+| 7 | [20-e](patches/20-e-hex-bigint-literals.patch) | - | `[bigint] pass integer constants and match keys to MLIR in hexadecimal` | optimization (build time) | +142/-17; +75/-17 |
+| 8 | [21-a](patches/21-a-value-record-member-retains.patch) | - | `[rc] cancel rcgmp retains of by-value record members against the record's drop` | optimization | +418/-2; +16/-2 |
+| 9 | [29-a](patches/29-a-polyffi-store-once.patch) | - | `[rrc] open the polyffi cache store once per module` | optimization (build time) | +50/-8 |
+| 10 | [31-a](patches/31-a-leaf-foreign-release.patch) | - | `[drop] release a foreign box of trivially copyable members in place` | optimization | +168/-0; code 7 lines |
+| 11 | [32-a](patches/32-a-integer-members-pure-release.patch) | - | `[drop] release integer members in place and tail-release the last child` | optimization | +246/-53; code +103/-53 |
 | 12 | [34-a](patches/34-a-leaf-integer-foreign-release.patch) | - | `[drop] release a foreign box of scalars and integers in place` | optimization | +109/-2; code +19/-2 |
-| 13 | [26-a](patches/26-a-trmc-observable-release.patch) | - | `[trmc] keep a self call in place across a release with an observable cleanup` | bug fix | +283/-13; +83/-13 |
-| 14 | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | - | `[codegen] answer false to a uniqueness test of an immediate under TBI` | bug fix | +44/-2; +29/-2 |
-| 15 | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | - | `[conversion] legalize the storage of scalable vectors with the patterns alone` | bug fix | +156/-4 |
-| 16 | [33-a](patches/33-a-tokenless-rc-dec.patch) | - | `[rc] expand a decrement that has no token result` | bug fix | +77/-0; code 10 lines |
-| 17 | [30-a](patches/30-a-vector-to-llvm-patterns.patch) | - | `[conversion] lower the vector dialect without region simplification` | optimization (build time of large functions; costs code size and build time of small programs) | +210/-4 |
+| 13 | [35-a](patches/35-a-worklist-glue-name-cache.patch) | - | `[drop] look worklist glue up by signature before naming it` | optimization (build time) | +56/-45; no test |
+| 14 | [26-a](patches/26-a-trmc-observable-release.patch) | - | `[trmc] keep a self call in place across a release with an observable cleanup` | bug fix | +283/-13; +83/-13 |
+| 15 | [27-a](patches/27-a-is-unique-tbi-immediate.patch) | - | `[codegen] answer false to a uniqueness test of an immediate under TBI` | bug fix | +44/-2; +29/-2 |
+| 16 | [28-a](patches/28-a-sve-vector-storage-patterns.patch) | - | `[conversion] legalize the storage of scalable vectors with the patterns alone` | bug fix | +156/-4 |
+| 17 | [33-a](patches/33-a-tokenless-rc-dec.patch) | - | `[rc] leave a decrement without a token result unexpanded` | bug fix | +51/-0; code 5 lines |
+| 18 | [30-a](patches/30-a-vector-to-llvm-patterns.patch) | - | `[conversion] lower the vector dialect without region simplification` | optimization (build time of large functions; costs code size and build time of small programs) | +210/-4 |
 
 Order and dependencies:
 
@@ -447,12 +461,15 @@ Order and dependencies:
   apply in either order, and each applies to a clean `36a55a0f` alone.
 - 34-a needs both: it widens 31-a's rule with the class that 32-a
   adds. It comes directly after 32-a and does not apply to a clean
-  `36a55a0f` alone. The five later patches apply after it with no
+  `36a55a0f` alone. The later patches apply after it with no
   conflict.
+- 35-a changes the same file and its header. It comes after 34-a; the
+  file here is the form with the series' context lines. The same
+  change applies to a clean `36a55a0f` with other context.
 - **The order has a reason: what lean2rr needs or gains first, then
-  the four fixes of upstream bugs, then 30-a.** Patches 1 to 12 are
-  features that lean2rr needs and optimizations (20-g to 34-a; the
-  last four of them, 29-a, 31-a, 32-a and 34-a, are answers to costs that
+  the four fixes of upstream bugs, then 30-a.** Patches 1 to 13 are
+  features that lean2rr needs and optimizations (20-g to 35-a; the
+  last five of them, 29-a, 31-a, 32-a, 34-a and 35-a, are answers to costs that
   are upstream's own and that lean2rr's programs show). 26-a, 27-a and
   28-a are fixes of bugs that are upstream's own. They are independent
   of the rest and of each other: they apply to a clean `36a55a0f`, each
@@ -561,7 +578,8 @@ from the two runs).
 | 26-a | a foreign cleanup runs after the recursion, as in the source | the repro: 0 open handles at the leaf to 3. Cost: no TRMC helper lost (18 of 18 helpers, 114 of 114 helper calls on upstream's benchmark, core and std; 7 of 7 and 40 of 40 on 19 lean2rr programs; lowered MLIR byte-identical) | pristine `36a55a0f` against the fix |
 | 27-a | a right answer of `is_unique` for an immediate | the repro: 1 to 0 after 2^32 - 1 retains. Cost: none for a program without such a call (33 upstream units and 19 lean2rr programs byte-identical) | pristine `36a55a0f` against the fix |
 | 28-a | large functions compile on a host with SVE | `rows-check.sh`: a build failure to `every row agrees`. Generated code: 33 upstream units byte-identical; 72 files of vector tests identical (2 of them after the random names of Rust modules are made equal) | pristine `36a55a0f` against the fix; the row oracle on the final series |
-| 33-a | `reussir-opt` expands a decrement without a token where it crashed | the repro: exit 139 to exit 0. Generated code: none changes (33 upstream units byte-identical in lowered MLIR; 40 of 40 lean2rr objects identical; the 742 executables of the gate have the section sizes of the gate before) | pristine `36a55a0f` against the fix; the series of 15 against the series of 16 |
+| 33-a | `reussir-opt` leaves a decrement without a token unexpanded where it crashed | the repro: exit 139 to exit 0, the decrement unchanged. Generated code: none changes (lowered MLIR of 5 upstream units byte-identical; objects of 8 lean2rr programs byte-identical on the series of 18) | pristine `36a55a0f` against the fix; the series of 17 against the series of 18 |
+| 35-a | a program with long, nested types builds without naming each glue function again and again | `RtDepPolyRec`: the acquire/drop expansion 35.8 s to 5.1 s, the MLIR pipeline 83.6 s to 53.9 s, source to executable 116.7 s to 84.4 s (median of 3). Six other programs and upstream's 33 units do not change measurably: one outlier class, not a broad gain. Objects and executables byte-identical | the series of 17 against the same with 35-a, the driver's rrc command, the sides in turn; build time only |
 
 The whole series on other code: on upstream's benchmark suite with core
 and std (33 units, lowered MLIR), 25 units are byte-identical to
@@ -608,9 +626,9 @@ Reussir checkout lacks one of these texts (`REQUIRED_REUSSIR_PATCHES`,
   host.
 
 The driver checks none of 20-g, 20-e, 21-a, 29-a, 31-a, 32-a, 34-a,
-30-a, 27-a and 33-a: without one of them, lean2rr's programs build and
+35-a, 30-a, 27-a and 33-a: without one of them, lean2rr's programs build and
 give the same results (20-g, 21-a, 31-a, 32-a and 34-a are optimizations of run
-time, 20-e, 29-a and 30-a of build time, lean2rr's programs do not call
+time, 20-e, 29-a, 35-a and 30-a of build time, lean2rr's programs do not call
 the intrinsic of entry 27, and rrc does not reach the crash of entry
 33).
 
@@ -636,6 +654,37 @@ added as a new patch. Follow upstream Reussir's rules for patches (its
 `AGENTS.md`): a `[scope] description` subject, a body that says what and
 why, clang-format and rustfmt. Every patch needs a measured claim, in
 its message and in its entry. A message does not name lean2rr.
+
+**Formatting** (state of 2026-11-19). clang-format 23.1.0 is on the
+build machine (in the nix store; nothing was installed). Every patch
+of the series is clean on its own changed lines: C and C++ under
+clang-format with LLVM style, and every Rust file that a patch
+touches under the pinned rustfmt. Six patches needed a change, of
+line breaks only: 07-a (4 lines), 32-a (27), 34-a (6), 26-a (13), 28-a
+(4), 30-a (6). No token changed (the files are equal with all white
+space removed), and the objects of 8 lean2rr programs are
+byte-identical before and after. The scope is a patch's own lines
+because upstream's files are not all clean themselves (22 of its 147
+C++ files are not under this version). Not checked: `.td`, `.mlir`,
+`.rr`, Python and CMake files (upstream has no formatter for them);
+clang-tidy and clippy were not run. It is assumed, not checked, that
+23.1.0 is the minor version of upstream's development shell.
+
+**What a pull request to upstream must pass** (read from upstream's
+workflows at `36a55a0f`). No formatter is enforced or configured (no
+`.clang-format`, no `rustfmt.toml`, no step that runs one); upstream's
+`AGENTS.md` asks for formatting as a convention. The checks on a pull
+request and in the merge queue:
+
+- the Linux build on x86_64 and arm64, with the C++ compiled under
+  `-Wall -Wextra -Werror -pedantic`; the PJRT runtime tests;
+  `reussir-ut` and ctest; lit `check`; `check-sanitizer`; the cargo
+  test targets of the crates; `cargo clippy -p rene --all-targets --
+  -D warnings` and rene's tests;
+- the macOS pipeline: the build, `reussir-ut`, lit `check`;
+- the Windows cross build: lit `check`;
+- Miri on `reussir-rt`, only when that crate changes;
+- the VS Code extension's tests and clippy, for its own crate only.
 
 ### The series of the earlier bases (history)
 
@@ -825,38 +874,39 @@ them). "lean2rr's flags" are
 
 ### Latest recorded run
 
-**On `36a55a0f`** (the gate on the series of 17 patches, gate 57,
-2026-11-18): `run.sh` of lean2rr `f20aed74` ran without an error on
-pristine upstream `36a55a0f` and on the series (Reussir tree
-`107c212b`). The series' build of the gate had no `reussir-opt`, so
-the gate's run printed SKIPPED on the series for the entries that
-need it (24, 28, 30 to 33). After the gate, `run.sh` of this branch
-ran for entries 28 and 30 to 34 on a `reussir-opt` built for the
-series' tree and on pristine; the table marks those rows.
+**On `36a55a0f`** (the gate on the series of 18 patches, gate 58,
+2026-11-19): `run.sh` of this branch ran without an error on pristine
+upstream `36a55a0f` and on the series' own build (Reussir tree
+`6dc99546`). Every entry has a verdict on both; none is skipped.
 
-| Entry | Pristine `36a55a0f` | Series of 17 patches | Verdict |
+| Entry | Pristine `36a55a0f` | Series of 18 patches | Verdict |
 |---|---|---|---|
-| 1 | REPRODUCES (5.04x) | REPRODUCES (5.09x) | still there, no patch |
+| 1 | REPRODUCES (4.93x) | REPRODUCES (5.00x) | still there, no patch |
 | 2, plain repros (list, snoc list, left spine, `Nullable` chain) | FIXED (4 lines) | FIXED (4 lines) | the bounded depth is upstream's |
 | 2, the nested drop run | SHOWN (`1 2`, then `2 1`) | SHOWN (the same) | a documented rule of upstream's drop scopes, the same on both |
 | 2, Lean repro (40,000,000 cells) | OTHER: the driver refuses pristine upstream | FIXED (2 lines) | works on the series |
-| 3, 4, 6, 8, 12, 17, 18 | REPRODUCES | REPRODUCES (the same figures) | still there, no patch |
+| 3, 4 | REPRODUCES (3.93x; 3.99x) | REPRODUCES (the same figures) | still there, no patch |
+| 6, 8, 12, 17, 18 | REPRODUCES | REPRODUCES | still there, no patch |
 | 7 | OTHER: rrc rejects the `tagged` attribute | FIXED (prints 143) | fixed by 10-a and 07-a |
-| 19 | FIXED (30 KB, 39 KB) | FIXED (37 KB, 48 KB; 1.29x) | fixed upstream |
-| 23 | FIXED (192 KiB in 4 shapes) | FIXED (0 KiB in 4 shapes) | fixed upstream |
-| 24 | FIXED | SKIPPED in the gate | fixed upstream; not checked on the series (the entry and its repro are deleted) |
 | 26 | REPRODUCES (0 handles open at the leaf, the source keeps 3) | FIXED (3, control 3) | fixed by 26-a |
-| 27 | REPRODUCES (true after 2^32 - 1 retains) | FIXED (false) | fixed by 27-a |
-| 28 | REPRODUCES | FIXED (the run after the gate) | fixed by 28-a; `rows-check.sh` passes in the gate too |
-| 30 | REPRODUCES | FIXED (the run after the gate) | fixed by 30-a |
-| 31 | REPRODUCES (1 `drop.join`) | FIXED (the run after the gate) | fixed by 31-a |
-| 32 | REPRODUCES (no tail release) | FIXED (the run after the gate) | fixed by 32-a |
-| 33 | REPRODUCES (`reussir-opt` crashes; its first run through `run.sh`) | FIXED (the run after the gate) | fixed by 33-a |
-| 34 | REPRODUCES (the run after the gate) | FIXED (the run after the gate) | fixed by 34-a. `bug34` is newer than the gate's `run.sh`. The gate ran the patch's lit input by hand: 6 bridge functions on pristine, 3 on a build of pristine with 31-a, 32-a and 34-a |
+| 27 | REPRODUCES | FIXED (false) | fixed by 27-a |
+| 28 | REPRODUCES (MLIR's pass fails 13 blocks) | FIXED (the pipeline's pass succeeds) | fixed by 28-a |
+| 30 | REPRODUCES (2 blocks with arguments) | FIXED (the arms are left) | fixed by 30-a |
+| 31 | REPRODUCES (1 `drop.join`) | FIXED (no `drop.join`) | fixed by 31-a |
+| 32 | REPRODUCES (no tail release) | FIXED (2 `musttail` releases) | fixed by 32-a |
+| 33 | REPRODUCES (`reussir-opt` crashes) | FIXED (the decrement is left unexpanded, with no crash) | fixed by 33-a in its present form |
+| 34 | REPRODUCES (1 `drop.join`) | FIXED (released in place, no `drop.join`) | fixed by 34-a; its first gate run through `run.sh` |
 
-Entries 19, 23 and 24 were deleted after the gated commit, with their repros
-([history](#history-entries-19-23-and-24-deleted-2026-11-18)); their rows stay here as the record of the
-run.
+The gate before it (gate 57, the series of 17 patches, lean2rr
+`f20aed74`) still ran the repros of entries 19, 23 and 24, which are
+deleted since
+([history](#history-entries-19-23-and-24-deleted-2026-11-18)): 19
+FIXED on both sides (30 and 39 KB on pristine; 37 and 48 KB on the
+series), 23 FIXED (192 KiB in 4 shapes on pristine, 0 KiB on the
+series), 24 FIXED on pristine and skipped on the series. Its series
+build had no `reussir-opt`, so entries 28 and 30 to 34 got their
+verdicts on that series in a run after the gate (all FIXED; entry 1:
+5.04x and 5.09x).
 
 The repros of entries 30 to 32 are checks of structure through
 `reussir-opt` (blocks with arguments after the vector lowering; a
@@ -967,8 +1017,11 @@ FIXED with 19-a (322 KB and 457 KB, 1.41x).
   unpatched, with the reason in their file.
 - Pull requests since 2026-11-19 (owner): the patches go upstream in
   two sets, the general ones and the rcgmp ones, as pull requests of
-  at most 500 changed lines each, one at a time. Open: reussir#1093
-  (33-a, [entry 33](33-tokenless-rc-dec-expansion.md)). The rest of
+  at most 500 changed lines each, one at a time. reussir#1093 (the
+  first form of 33-a) was closed by the maintainer on 2026-11-19: the
+  pass must not do the token pass's work, only not crash. Open:
+  reussir#1095 (33-a in the form that the maintainer asked for,
+  [entry 33](33-tokenless-rc-dec-expansion.md)). The rest of
   this item is the history before that date.
 - Pull requests: after #758 (05-a, merged as `ea240b19`) none for the
   patches of this directory (owner, 2026-10-19). Since 2026-10-25 the
@@ -1036,6 +1089,8 @@ git history (commit `419a74d4`):
 | 32-a | independent review (2026-11-18) | `port13/reviews/RV2` (the section on 32-a) | accepted; could not break it (3,080 scenarios, 151,906 hook events: the same order; spines of 10^6 nodes on a 256 kB stack; no integer leaked or freed twice). The exclusion of forward order is needed (the prototype without it changes the order in 9 of 1,400 scenarios). Open follow-ups: a lit case that pins that exclusion; a boxed structure of integers as a child is still deferred |
 | 33-a | independent review (2026-11-18) | `port13/reviews/RV1` (the section on 33-a) | accepted. The key argument: no return lies between the new test and the old read, so every decrement that takes the new branch crashed before, and no program that compiled before can take it. Outputs byte-equal to pristine with the token pass first; foreign and rigid boxes untouched; a decrement in worklist glue gets no token. Low findings: the test's second RUN line lacks positive checks for two functions; no negative case for worklist glue. An unverified note, not a bug report: upstream's own `replaceWithProduced` may trip an MLIR assertion in a build with assertions on (from the reviewer's memory; not run) |
 | 34-a | independent review (2026-11-18) | `port13/reviews/RV2` (the section on 34-a) | accepted; could not break it. Integers held by Rust containers: 54 scenarios, 16 runs (two levels, both drop orders, before and after on two bases), 0 integers left alive and 0 bad frees; results, allocation counts and hook order equal. A probe of the boundary of the leaf class (a nested handle, a token, a nullable box, an in-line array stay bridged). lean-zip, which holds a variant of leaf arms, prints native's results. The timed pair (0.938) is the prototype's and covers records; the part for variants is checked for correctness, not timed. Finding H1 (low): the lit test has no case for a handle inside a nested value record |
+| 33-a, the form of 2026-11-19 (leave the decrement unexpanded) | independent review (2026-11-19) | `port13/reviews/RV1` (the section on the reworked 33-a) | accepted: it does what the maintainer asked on reussir#1093 and nothing else. The guard is before the first operation that the pattern creates. 65 runs over 5 inputs without tokens and every option set of upstream's tests: pristine crashes in 37, the patched tool exits 0 in all. With the token pass first, 264 of 264 outputs equal to pristine. The row above is the review of the first form, which is not in the series any more; its unverified note on `replaceWithProduced` does not concern this form |
+| 35-a | independent review (2026-11-19) | `port13/reviews/RV1` (the section on 35-a) | accepted: no way found to make the cache return a function that the name lookup would not return. No stale entry is possible (the pass erases no function); the key has exactly the inputs of the name; 72 of 72 outputs of `reussir-opt` equal to pristine (18 inputs, two orders, one and two runs of the pass); 5 upstream units and 4 lean2rr objects byte-identical; the reviewer's own single run: the pass 35.3 s to 4.9 s. Findings, low: C1 (inheritance as the carrier: changed to composition in the patch; that form was reviewed again and accepted, "only the carrier changed", 76 of 76 outputs of `reussir-opt` equal to pristine), C2 (one public signature changes), C3 |
 | the final series (12 patches) | checks on the stack (2026-11-18), then lean2rr's final gate | `port13/research/I7`, `port13/gate54` | lit: 174 of 189 selected tests pass, 15 unsupported (13 sanitizer tests, 2 that need a build without rcgmp), 0 fail; `reussir-ut` 97 of 97; cargo tests of reussir-core (677), reussir-codegen (87), reussir-backend (29): 0 failed. Not run: the full lit suite, clang-tidy, the sanitizer tests; clang-format is not installed on the build machine |
 
 The rebase onto `7954a367` (2026-10-19) is not reviewed yet: 10-a had two
@@ -1278,8 +1333,9 @@ Checks done on 2026-11-17 (all on aarch64):
 
 - The unfolded tree builds (`rrc`, `reussir-rt`, `reussir-opt`,
   `reussir-translate`). `rustfmt --check` is clean on the 24 Rust files
-  that the stack touches. clang-format was not run (the build machine
-  has none); the C++ was formatted by hand.
+  that the stack touches. clang-format was not run at that time; the
+  C++ was formatted by hand (since 2026-11-19 every patch is checked
+  with clang-format: [formatting](#applying-the-patches), step 10).
 - Reussir's lit tests that the stack adds or changes, 13 of 13. The
   three sanitizer tests were not run.
 - Through lean2rr, on that build: three runtime tests (`RtNat`,
@@ -1719,7 +1775,7 @@ not use the top byte):
   it). The 671 s that step 6 compared with was the wall time of the
   old suite in 8 parallel shards, not this program's time. One
   upstream cost was found on the way and is not patched
-  ([other observations](#other-observations)): the worklist glue
+  (step 10: [entry 35](35-worklist-glue-name.md)): the worklist glue
   prints and hashes a signature at every request for a glue function.
 
 Open after step 9:
@@ -1735,6 +1791,85 @@ Open after step 9:
   separated.
 - **34-a:** its rule for variants has no timing of its own.
 - The follow-ups of the reviews of 32-a, 33-a and 34-a (test cases).
+
+**10. A fifth cost with a patch, 33-a in the maintainer's form, the
+formatter, and the two slower cases closed as investigated
+(2026-11-19).** The series has 18 patches: 35-a after 34-a. Reussir
+branch `l2r-base13-r7`, tree `6dc99546`. Gate 58 passed on it.
+
+- *35-a ([entry 35](35-worklist-glue-name.md)).* The cost that step 9
+  recorded as an observation has a reviewed patch: the worklist glue
+  looks a glue function up by its signature and role before it
+  computes the name. `RtDepPolyRec`: the pass 35.8 s to 5.1 s, source
+  to executable 116.7 s to 84.4 s (median of 3). Nothing else moves:
+  one outlier class, not a broad gain.
+- *33-a.* Pull request reussir#1093 (the expansion made the missing
+  token) was closed by the maintainer: the token pass runs first by
+  design, and the expansion must only not crash. 33-a is now that
+  form (a match failure; the decrement stays), open as reussir#1095
+  ([entry 33](33-tokenless-rc-dec-expansion.md)). A `reussir-opt`
+  pipeline run by hand without the token pass no longer expands the
+  leaf release that 31-a keeps in its function.
+- *Formatting.* clang-format 23.1.0 is available on the build
+  machine. Every patch is clean on its own changed lines; six patches
+  had 4 to 27 lines changed, no token; the objects of 8 programs are
+  byte-identical ([applying the patches](#applying-the-patches)).
+- *L18 hashmap, 1.055 of `l2r-base12`: investigated, not fixed.*
+  - The 75,000 extra allocations are not a failed uniqueness test, as
+    step 9 read them. They are an `Option` cell that is built and
+    matched at once. LLVM deleted it on the old base. It cannot on
+    the new one, because upstream's tag test under top-byte tagging
+    reads the pointer's top byte (#980), and nothing tells LLVM that
+    a new cell's top byte is 0. A prototype of 34 lines (a match on a
+    box that was just created takes its arm statically) restores the
+    old count exactly (750,215), but the time does not move (0.999).
+    So the allocations are not the cause.
+  - All 554,565 destruction-scope entries are final releases of the
+    cells of bucket lists, when leanrt frees a bucket array. A
+    prototype in leanrt with one scope around that loop removes them
+    (48 left) and gives 0.973 on L18: about half of the difference.
+    It makes L15 slower (1.023) and changes two expectations of
+    leanrt's unit tests (the documented order outside a free). It is
+    not taken.
+  - One scope entry costs about 4.2 ns. A cheaper path for a single
+    entry in Reussir's runtime would gain at most about 2.7% on L18
+    and 2.5% on L15: a hypothesis, not built, and under the 3% bar
+    for a Reussir change.
+  - The other half of the difference is not located.
+- *L15 monadic-interp, 1.044: investigated, not fixed.* It has no
+  extra allocations. Its scope entries are needed (step 9); in its
+  arrays of 6 elements one element dies for each array, so one scope
+  for each array saves nothing. The other half is not located.
+- Both are closed as investigated: the remaining parts are each under
+  3% and are not pursued. Two measured proposals stay recorded, with
+  no entry and no patch ([other observations](#other-observations)).
+
+- *Gate 58* (lean2rr dev `6fb19b4e`): 748 of 750 with 2 expected
+  failures; 23 of 23 check scripts, the corpus, the raytracer; the
+  repros, every one on the series' own build
+  ([latest recorded run](#latest-recorded-run)). All 742 `.rr` files
+  and the sizes of every section of all 742 executables are those of
+  gate 57; the 106 executables that were sampled are byte-identical
+  in `.text`, `.data`, `.data.rel.ro` and `.eh_frame` (`.rodata`
+  differs only in the gate's directory name and in the random digits
+  of the names of texture files). `alloc-check`: no row beyond the
+  noise of 4 allocations; the pinned shapes are equal. The suite took
+  601 s (603 s before). `RtDepPolyRec` took 105.4 s in rrc and the
+  link (137.2 s before); the sum of the other tests is 2722 s against
+  2715 s, so 35-a's gain at the level of the suite is that one
+  program.
+- *The two reworked patches were reviewed again* and accepted: 33-a's
+  new form and 35-a's composition form ([review](#review)).
+
+Known after step 10:
+
+- **L15 (1.044) and L18 (1.055)**: known costs with the evidence
+  above; not pursued.
+- **30-a's costs** (code +2.0%, a small program's build about 9%
+  slower), as after step 8.
+- **Which of 31-a and 32-a** moved `RtClosureChainFree`'s peak: not
+  separated.
+- The follow-ups of the reviews of 32-a and 34-a (test cases).
 
 ## History: the move to 95d9a1c8 (2026-10-26)
 
@@ -2181,24 +2316,37 @@ is in git history).
   `0378b744`, and not rechecked on `36a55a0f`. [Issue 8](08-alias-release-donor.md) is a
   case where the bonus would decide for the matched cell.
 
-- **The worklist glue computes a glue function's name at every
-  request (a cost of build time; no entry, no patch).** In
-  `lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`,
-  `WorklistGlue::function` prints the glue's whole signature and
-  hashes the text for the symbol name at every call, also when the
-  glue function exists already. The code is upstream's at `36a55a0f`
-  (the drop series of 2026-11-01); no local patch changes it. On
-  `RtDepPolyRec` (a 6 MB `.rr` with long, nested signatures) the
-  second run of the acquire/drop expansion takes 34.5 s, where the
-  old base's took 4.7 s. A prototype of 15 added lines that keeps the
-  name for each signature, role and direction takes the pass from
-  35.6 s to 4.7 s and the build from 113.2 s to 81.8 s, with a
-  byte-identical object file and executable (single runs under
-  varying load; read each number as ±5 s). It is a measured proposal,
-  not in the series: Reussir changes are kept few. A patch would keep
-  the names in a map that the pass owns (the prototype's map is
-  thread-local and static, which is enough to measure and wrong for a
-  patch). Not measured: other programs; the number of requests.
+- **A match on a box that was just created (a measured proposal; no
+  entry, no patch).** Under top-byte tagging a match decides "is it
+  the immediate?" from the pointer's top byte (upstream #980). Reussir
+  has no rule that a box which the function just created is not an
+  immediate and has a known constructor, and LLVM cannot fold the test
+  on a new cell or remove the cell. A prototype of 34 added lines in
+  `lib/Conversion/ConvertToSTD/ConvertToSTD.cpp` takes the arm
+  directly when the scrutinee is a borrow of a value that
+  `rc.create_variant` (or `rc.create` of a variant) defines. Measured
+  on 9 benchmark cases, direct pairs: L18 hashmap's allocation count
+  goes back to the old base's exactly (825,204 to 750,215) with no
+  change of its time (0.999); one case, L04, is faster in two pairs
+  (0.956 and 0.960; not explained); the others are between 0.992 and
+  1.010. It grows one library function by about 6 kB in every program
+  (`IO.Error.toString`, 27,448 to 33,808 bytes). The prototype is not
+  reviewed: a review must show that no pass changes a created box's
+  constructor before the match. Not counted: how many matches it
+  folds.
+- **A cheaper destruction scope for one release (a proposal with a
+  computed bound; not built).** The last release of a record from
+  Rust code enters a destruction scope of Reussir's runtime when the
+  record's members can run cleanup. One entry costs 149 instructions,
+  102 of them the scope's overhead, and about 4.2 ns (measured on L18
+  by removing 7.4 million entries). A path in the runtime that
+  returns at once when nothing was deferred would gain at most about
+  2.7% on L18 hashmap and 2.5% on L15 monadic-interp. This bound is
+  arithmetic and the gain is a hypothesis until it is built and
+  timed. It is under the 3% bar for a Reussir change, so it is not
+  built. The form in leanrt (one scope around the release of a whole
+  array) was measured and is not taken: L18 0.973, L15 1.023, and two
+  unit expectations of the documented order change.
 
 ## Missing features that cost lean2rr performance
 

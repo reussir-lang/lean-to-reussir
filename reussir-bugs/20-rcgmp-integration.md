@@ -23,7 +23,7 @@ of them is a wall-time claim.
 **Kind:** missing feature (the interface for lean2rr's `Nat` and `Int` on
 rcgmp: lean2rr's clean-integration step D). **Status:** patched (20-a,
 20-g, 20-c, 20-d, 20-e), patches 3 to 7 of the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-r4`). 20-b's code is upstream;
+`36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`). 20-b's code is upstream;
 its remaining tests are parked
 ([`patches/parked/`](patches/parked/)). 20-f left the series on
 2026-10-26: upstream #844 made the same move.
@@ -702,7 +702,9 @@ the series adds or changes pass, and 4 are unsupported on the build
 machine (the sanitizer twins); `reussir-ut` 97 of 97; cargo tests of
 reussir-core (677), reussir-codegen (87) and reussir-backend (29) with
 0 failures. Not run: the full lit suite, clang-tidy, the sanitizer
-tests; clang-format is not installed there. The text below records the
+tests. The changed lines of entry 20's five patches are clean under
+clang-format 23.1.0 and the pinned rustfmt (checked 2026-11-19;
+nothing to change). The text below records the
 reviews on the earlier bases.
 
 Each patch was reviewed adversarially (code review and targeted repros,

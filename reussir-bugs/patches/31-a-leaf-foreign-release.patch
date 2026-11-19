@@ -1,7 +1,7 @@
-From bebee3881f7dd6fff83c6912b254994d2703a866 Mon Sep 17 00:00:00 2001
+From 1bf3c70634adac7d639eda513d9d25d0e2a52198 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 07:36:31 -0500
-Subject: [PATCH 10/17] [drop] release a foreign box of trivially copyable
+Subject: [PATCH 10/18] [drop] release a foreign box of trivially copyable
  members in place
 
 `prepareWorklistDropBridges` wraps every foreign drop function: the body

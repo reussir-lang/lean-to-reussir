@@ -10,7 +10,7 @@ no box at all. Patch 27-a makes the test answer false for an immediate.
 ## Summary
 
 **Kind:** bug, low severity. **Status:** patched (27-a), in the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-r5`, tree `107c212b`; the patch
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; the patch
 is the file `patches/27-a-is-unique-tbi-immediate.patch`). It does not affect lean2rr: lean2rr's prelude and generated
 code do not call `core::object::is_unique`. `scripts/l2r.py` does not
 check for the patch.

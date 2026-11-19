@@ -25,7 +25,7 @@ Design site: [`docs/site/index.html`](docs/site/index.html) is an illustrated ov
   (`scripts/toolchain.sh`).
 - Reussir built from source (LLVM/MLIR 23, Clang 23), checked out into
   `reussir/`: upstream `36a55a0f` (2026-11-17; the commit in
-  `reussir-bugs/patches/base`) plus the 17 patches (Lean integration, optimizations, and fixes of four upstream bugs) in
+  `reussir-bugs/patches/base`) plus the 18 patches (Lean integration, optimizations, and fixes of four upstream bugs) in
   `reussir-bugs/patches/series` (see
   [`reussir-bugs/README.md`](reussir-bugs/README.md#applying-the-patches)).
   Its build needs GMP 6.2 or later (`gmp.h`, `libgmp`), a CMake that

@@ -1,0 +1,372 @@
+From 00cde7088d3744c6e820219250f26930de6860b7 Mon Sep 17 00:00:00 2001
+From: yekai pan <pyk@seas.upenn.edu>
+Date: Thu, 19 Nov 2026 10:11:00 -0500
+Subject: [PATCH 13/18] [drop] look worklist glue up by signature before naming
+ it
+
+WorklistGlue::function names a glue function with a hash of its printed
+signature. It printed and hashed the signature at every request, also
+when the function existed already, and a module asks for the same glue
+at every drop site. The printed text grows with the nesting of the type
+(records of records, closures), so the cost is the number of requests
+times the length of the signature.
+
+The expansion run now keeps the glue it has resolved: DropGlueSymbols
+holds the run's SymbolTableCollection and a map from (module, function
+type, role attribute) to the glue function. The keys are uniqued IR
+handles, so a hit prints nothing. A miss names the function and looks
+it up in the symbol table as before, so the names and the emitted IR do
+not change. The map has the lifetime and the rules of the tables next to it:
+the pass creates it for one run over one module, the run is single
+threaded (a module pass with the greedy driver), and the pass neither
+erases nor renames functions. Without a caller's collection the glue is
+resolved by name at every request, as before.
+
+Measured on aarch64 Linux (20 cores, shared machine, load 3 to 13), rrc
+-O aggressive, one process at a time, warm polyffi cache, median of 3
+runs (minimum in parentheses), before -> after:
+
+A 6.0 MB program of a compiler that targets Reussir (3794 functions,
+nested polymorphic records and closures):
+  ReussirAcquireDropExpansionPass, both runs   35.8 s -> 5.1 s (35.1 -> 5.0)
+  MLIR lowering pipeline                       83.6 s -> 53.9 s (83.1 -> 53.7)
+  source to executable                         116.7 s -> 84.4 s (112.5 -> 83.6)
+The object file and the executable are byte-identical.
+
+Six more programs of that compiler, 0.1 MB to 2.7 MB of source, spend
+0.02 s to 0.8 s in the pass before and after (differences inside the run
+to run variation), and 1.2 s to 35 s from source to executable, unchanged;
+their object files and executables are byte-identical.
+
+core, std and the 31 programs of reussir-lang/benchmark (-Oaggressive
+--reuse-across-call --relocation-mode pic): the lowered MLIR of all 33
+units is byte-identical. The pass takes 0.27 s -> 0.23 s on std and
+0.13 s -> 0.15 s on mltt, the two largest units: no measurable change.
+
+No test is added: the change has no observable but compile time. The
+lit tests selected by 'worklist|drop|ffi|tagged|bigint|rcgmp|leaf|integer'
+give the same results as before the change, and reussir-ut passes.
+Formatted with clang-format 23.1.0 on the changed lines.
+---
+ .../Reussir/Conversion/AcquireDropExpansion.h | 11 +++++-
+ .../AcquireDropExpansion.cpp                  | 31 +++++++--------
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 39 +++++++++++--------
+ .../AcquireDropExpansion/WorklistDrop.h       | 20 +++++-----
+ 4 files changed, 56 insertions(+), 45 deletions(-)
+
+diff --git a/include/Reussir/Conversion/AcquireDropExpansion.h b/include/Reussir/Conversion/AcquireDropExpansion.h
+index 94a8e303..e3ab2d71 100644
+--- a/include/Reussir/Conversion/AcquireDropExpansion.h
++++ b/include/Reussir/Conversion/AcquireDropExpansion.h
+@@ -30,12 +30,19 @@
+ 
+ namespace reussir {
+ 
++// The symbol tables of one expansion run, with the worklist glue already
++// resolved in them by module, signature and role.
++struct DropGlueSymbols {
++  using GlueKey = std::tuple<mlir::ModuleOp, mlir::Type, mlir::Attribute>;
++  mlir::SymbolTableCollection tables;
++  llvm::DenseMap<GlueKey, mlir::func::FuncOp> worklistGlue;
++};
++
+ // `symbols`, if given, holds the symbol tables the outlined glue is looked
+ // up in (see `createDtorIfNotExists`); it must outlive the patterns.
+ void populateAcquireDropExpansionConversionPatterns(
+     mlir::RewritePatternSet &patterns, bool outlineRecord,
+-    mlir::SymbolTableCollection *symbols = nullptr,
+-    bool tailRecursiveDrops = true);
++    DropGlueSymbols *symbols = nullptr, bool tailRecursiveDrops = true);
+ 
+ } // namespace reussir
+ 
+diff --git a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+index 45bd182d..922e1b13 100644
+--- a/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
++++ b/lib/Conversion/AcquireDropExpansion/AcquireDropExpansion.cpp
+@@ -98,8 +98,8 @@ private:
+     function->setAttr("llvm.linkage",
+                       rewriter.getAttr<mlir::LLVM::LinkageAttr>(
+                           mlir::LLVM::linkage::Linkage::Internal));
+-    if (symbols)
+-      symbols->getSymbolTable(module).insert(function);
++    if (tables)
++      tables->getSymbolTable(module).insert(function);
+     else
+       mlir::SymbolTable(module).insert(function);
+     inheritSanitizerPassthrough(module, function);
+@@ -224,7 +224,7 @@ private:
+           ReussirRefLoadOp::create(rewriter, op.getLoc(), rcType, op.getRef());
+       if (emitTailDropRelease(loaded, op.getLoc(),
+                               op->getParentOfType<mlir::ModuleOp>(), rewriter,
+-                              symbols)) {
++                              tables)) {
+         rewriter.eraseOp(op);
+         return mlir::success();
+       }
+@@ -376,7 +376,7 @@ private:
+       if (outlineRecord && tailRecursiveDrops &&
+           emitTailDropRelease(nonNullBlock->getArgument(0), op.getLoc(),
+                               op->getParentOfType<mlir::ModuleOp>(), rewriter,
+-                              symbols)) {
++                              tables)) {
+         ReussirScfYieldOp::create(rewriter, op.getLoc(), nullptr);
+         rewriter.eraseOp(op);
+         return mlir::success();
+@@ -411,7 +411,8 @@ private:
+ 
+   bool outlineRecord;
+   bool tailRecursiveDrops;
+-  mlir::SymbolTableCollection *symbols;
++  DropGlueSymbols *symbols;
++  mlir::SymbolTableCollection *tables;
+ 
+   bool shouldOutline(ReussirRefDropOp op, RecordType type) const {
+     if (!outlineRecord || isInsideWorklistGlue(op))
+@@ -445,11 +446,10 @@ private:
+ 
+ public:
+   DropExpansionPattern(mlir::MLIRContext *context, bool outlineRecord,
+-                       mlir::SymbolTableCollection *symbols,
+-                       bool tailRecursiveDrops)
++                       DropGlueSymbols *symbols, bool tailRecursiveDrops)
+       : mlir::OpRewritePattern<ReussirRefDropOp>(context),
+         outlineRecord(outlineRecord), tailRecursiveDrops(tailRecursiveDrops),
+-        symbols(symbols) {}
++        symbols(symbols), tables(symbols ? &symbols->tables : nullptr) {}
+ 
+   mlir::LogicalResult
+   matchAndRewrite(ReussirRefDropOp op,
+@@ -497,7 +497,7 @@ public:
+             mlir::ModuleOp moduleOp = op->getParentOfType<mlir::ModuleOp>();
+             mlir::func::FuncOp dtor =
+                 createDtorIfNotExists(moduleOp, recordType, rewriter,
+-                                      refType.getAtomicKind(), symbols);
++                                      refType.getAtomicKind(), tables);
+             mlir::func::CallOp::create(rewriter, op.getLoc(), dtor,
+                                        op.getRef());
+             rewriter.eraseOp(op);
+@@ -522,12 +522,11 @@ public:
+ };
+ 
+ class WorklistDecrementPattern : public mlir::OpRewritePattern<ReussirRcDecOp> {
+-  mlir::SymbolTableCollection *symbols;
++  DropGlueSymbols *symbols;
+   bool tailRecursiveDrops;
+ 
+ public:
+-  WorklistDecrementPattern(mlir::MLIRContext *context,
+-                           mlir::SymbolTableCollection *symbols,
++  WorklistDecrementPattern(mlir::MLIRContext *context, DropGlueSymbols *symbols,
+                            bool tailRecursiveDrops)
+       : mlir::OpRewritePattern<ReussirRcDecOp>(context, 2), symbols(symbols),
+         tailRecursiveDrops(tailRecursiveDrops) {}
+@@ -713,7 +712,7 @@ static bool mayReuseToken(mlir::Operation *site, TokenType tokenType,
+ // decrement keeps its condition and shared path but releases the box on its
+ // unique path with a single call that drops the payload and frees the box.
+ static void outlineUnreusedDecrements(mlir::func::FuncOp func,
+-                                      mlir::SymbolTableCollection &symbols,
++                                      DropGlueSymbols &symbols,
+                                       bool tailRecursiveDrops) {
+   llvm::SmallVector<mlir::scf::IfOp> candidates;
+   func.walk([&](mlir::scf::IfOp branch) {
+@@ -813,7 +812,7 @@ struct AcquireDropExpansionPass
+     mlir::ConversionTarget target(getContext());
+     // Share tables for this run only; the glue helpers register each new
+     // symbol, and this pass does not erase or rename functions.
+-    mlir::SymbolTableCollection symbols;
++    DropGlueSymbols symbols;
+     if (outlineRecord) {
+       mlir::PatternRewriter rewriter(&getContext());
+       if (mlir::failed(prepareWorklistDropBridges(module, rewriter, symbols)))
+@@ -845,14 +844,14 @@ struct AcquireDropExpansionPass
+ 
+ void populateAcquireDropExpansionConversionPatterns(
+     mlir::RewritePatternSet &patterns, bool outlineRecord,
+-    mlir::SymbolTableCollection *symbols, bool tailRecursiveDrops) {
++    DropGlueSymbols *symbols, bool tailRecursiveDrops) {
+   patterns.add<DropExpansionPattern>(patterns.getContext(), outlineRecord,
+                                      symbols, tailRecursiveDrops);
+   if (outlineRecord)
+     patterns.add<WorklistDecrementPattern>(patterns.getContext(), symbols,
+                                            tailRecursiveDrops);
+   patterns.add<AcquireExpansionPattern>(patterns.getContext(), outlineRecord,
+-                                        symbols);
++                                        symbols ? &symbols->tables : nullptr);
+ }
+ 
+ } // namespace reussir
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+index 8cff6b48..90cc553a 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
+@@ -32,13 +32,13 @@ namespace {
+ class WorklistGlue {
+   mlir::ModuleOp module;
+   mlir::PatternRewriter &builder;
+-  mlir::SymbolTableCollection *symbols;
++  DropGlueSymbols *symbols;
+   mlir::Location loc;
+   bool tailRecursiveDrops;
+ 
+ public:
+   WorklistGlue(mlir::ModuleOp module, mlir::PatternRewriter &builder,
+-               mlir::SymbolTableCollection *symbols, mlir::Location loc,
++               DropGlueSymbols *symbols, mlir::Location loc,
+                bool tailRecursiveDrops = true)
+       : module(module), builder(builder), symbols(symbols), loc(loc),
+         tailRecursiveDrops(tailRecursiveDrops) {
+@@ -58,6 +58,12 @@ public:
+     if (indexed)
+       args.push_back(builder.getIndexType());
+     auto functionType = builder.getFunctionType(args, {});
++    // The name hashes the printed signature, which is long for nested types.
++    DropGlueSymbols ownSymbols;
++    auto &known = symbols ? *symbols : ownSymbols;
++    DropGlueSymbols::GlueKey glue{module, functionType, key};
++    if (auto resolved = known.worklistGlue.lookup(glue))
++      return resolved;
+     std::string signature;
+     llvm::raw_string_ostream stream(signature);
+     printTypeWithRecordBodiesOnce(functionType, stream);
+@@ -65,10 +71,9 @@ public:
+         "REUSSIR_DROP_{}_{}", std::string_view(stringifyWorklistRole(role)),
+         std::string_view(stringifyWorklistDirection(direction)));
+     auto name = mangledBlake3Symbol(nameSpace, signature);
+-    mlir::SymbolTableCollection ownSymbols;
+-    auto &table = (symbols ? *symbols : ownSymbols).getSymbolTable(module);
++    auto &table = known.tables.getSymbolTable(module);
+     if (auto existing = table.lookup<mlir::func::FuncOp>(name))
+-      return existing;
++      return known.worklistGlue[glue] = existing;
+     mlir::OpBuilder::InsertionGuard guard(builder);
+     builder.setInsertionPointToStart(module.getBody());
+     auto function =
+@@ -80,6 +85,7 @@ public:
+                       builder.getAttr<mlir::LLVM::LinkageAttr>(
+                           mlir::LLVM::linkage::Linkage::LinkonceODR));
+     table.insert(function);
++    known.worklistGlue[glue] = function;
+     inheritSanitizerPassthrough(module, function);
+     function.setArgAttr(0, "llvm.noalias", builder.getUnitAttr());
+     function.setArgAttr(0, "llvm.nonnull", builder.getUnitAttr());
+@@ -676,8 +682,8 @@ public:
+ } // namespace
+ 
+ void emitWorklistDrop(mlir::Value ref, mlir::Location loc,
+-                      mlir::PatternRewriter &rewriter,
+-                      mlir::SymbolTableCollection *symbols, bool run) {
++                      mlir::PatternRewriter &rewriter, DropGlueSymbols *symbols,
++                      bool run) {
+   WorklistGlue(rewriter.getInsertionBlock()
+                    ->getParentOp()
+                    ->getParentOfType<mlir::ModuleOp>(),
+@@ -686,7 +692,7 @@ void emitWorklistDrop(mlir::Value ref, mlir::Location loc,
+ }
+ void emitWorklistRelease(mlir::Value rc, mlir::Location loc,
+                          mlir::PatternRewriter &rewriter,
+-                         mlir::SymbolTableCollection *symbols, bool run,
++                         DropGlueSymbols *symbols, bool run,
+                          bool tailRecursiveDrops) {
+   WorklistGlue(rewriter.getInsertionBlock()
+                    ->getParentOp()
+@@ -697,10 +703,9 @@ void emitWorklistRelease(mlir::Value rc, mlir::Location loc,
+ 
+ // Keep cleanup entry points callable from outside a drain while allowing their
+ // worker bodies to enqueue work in an existing scope.
+-mlir::LogicalResult
+-prepareWorklistDropBridges(mlir::ModuleOp module,
+-                           mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection &symbols) {
++mlir::LogicalResult prepareWorklistDropBridges(mlir::ModuleOp module,
++                                               mlir::PatternRewriter &rewriter,
++                                               DropGlueSymbols &symbols) {
+   llvm::SmallVector<mlir::func::FuncOp> functions;
+   for (auto function : module.getOps<mlir::func::FuncOp>())
+     if (!function.isExternal() && (function->hasAttr(REUSSIR_CLOSURE_DROP) ||
+@@ -740,7 +745,7 @@ prepareWorklistDropBridges(mlir::ModuleOp module,
+     worker->removeAttr(REUSSIR_FOREIGN_DROP);
+     worker->setAttr(kWorklistGlueAttr, rewriter.getUnitAttr());
+     worker.getBody().takeBody(function.getBody());
+-    symbols.getSymbolTable(module).insert(worker);
++    symbols.tables.getSymbolTable(module).insert(worker);
+     function->removeAttr(REUSSIR_CLOSURE_DROP);
+     function->removeAttr(REUSSIR_FOREIGN_DROP);
+     rewriter.setInsertionPointToStart(function.addEntryBlock());
+@@ -808,8 +813,7 @@ prepareWorklistDropBridges(mlir::ModuleOp module,
+ 
+ void emitWorklistArrayDrop(mlir::Value ref, mlir::Location loc,
+                            mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection *symbols,
+-                           bool tailRecursiveDrops) {
++                           DropGlueSymbols *symbols, bool tailRecursiveDrops) {
+   WorklistGlue(rewriter.getInsertionBlock()
+                    ->getParentOp()
+                    ->getParentOfType<mlir::ModuleOp>(),
+@@ -819,7 +823,7 @@ void emitWorklistArrayDrop(mlir::Value ref, mlir::Location loc,
+ 
+ void emitWorklistDecrement(mlir::Value rc, mlir::Location loc,
+                            mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection *symbols, bool run,
++                           DropGlueSymbols *symbols, bool run,
+                            bool tailRecursiveDrops) {
+   auto type = llvm::cast<RcType>(rc.getType());
+   if (type.isTaggedFFIObject()) {
+@@ -837,7 +841,8 @@ void emitWorklistDecrement(mlir::Value rc, mlir::Location loc,
+   if (auto record = llvm::dyn_cast<RecordType>(type.getElementType());
+       record && tailRecursiveDrops && !record.hasObservableCleanup() &&
+       (!target || !llvm::Triple(target.getValue()).isWasm()) &&
+-      emitTailDropRelease(rc, loc, module, rewriter, symbols))
++      emitTailDropRelease(rc, loc, module, rewriter,
++                          symbols ? &symbols->tables : nullptr))
+     return;
+   mlir::OpBuilder::InsertionGuard guard(rewriter);
+   if (module->hasAttr(kSpecialPtrTagAttr) && type.mayCarrySpecialPointerTag()) {
+diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.h b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+index f769e1e2..d8ac69f4 100644
+--- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
++++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.h
+@@ -6,6 +6,7 @@
+ //===----------------------------------------------------------------------===//
+ #pragma once
+ 
++#include "Reussir/Conversion/AcquireDropExpansion.h"
+ #include "Reussir/IR/ReussirOps.h"
+ #include <mlir/Dialect/Func/IR/FuncOps.h>
+ 
+@@ -14,23 +15,22 @@ inline constexpr llvm::StringLiteral kWorklistGlueAttr =
+     "reussir.worklist_drop";
+ bool isForwardDrop(mlir::ModuleOp module);
+ bool isInsideWorklistGlue(mlir::Operation *site);
+-mlir::LogicalResult
+-prepareWorklistDropBridges(mlir::ModuleOp module,
+-                           mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection &symbols);
++mlir::LogicalResult prepareWorklistDropBridges(mlir::ModuleOp module,
++                                               mlir::PatternRewriter &rewriter,
++                                               DropGlueSymbols &symbols);
+ void emitWorklistDrop(mlir::Value ref, mlir::Location loc,
+-                      mlir::PatternRewriter &rewriter,
+-                      mlir::SymbolTableCollection *symbols, bool run = false);
++                      mlir::PatternRewriter &rewriter, DropGlueSymbols *symbols,
++                      bool run = false);
+ void emitWorklistRelease(mlir::Value rc, mlir::Location loc,
+                          mlir::PatternRewriter &rewriter,
+-                         mlir::SymbolTableCollection *symbols, bool run = false,
++                         DropGlueSymbols *symbols, bool run = false,
+                          bool tailRecursiveDrops = true);
+ void emitWorklistArrayDrop(mlir::Value ref, mlir::Location loc,
+                            mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection *symbols,
++                           DropGlueSymbols *symbols,
+                            bool tailRecursiveDrops = true);
+ void emitWorklistDecrement(mlir::Value rc, mlir::Location loc,
+                            mlir::PatternRewriter &rewriter,
+-                           mlir::SymbolTableCollection *symbols,
+-                           bool run = false, bool tailRecursiveDrops = true);
++                           DropGlueSymbols *symbols, bool run = false,
++                           bool tailRecursiveDrops = true);
+ } // namespace reussir
+-- 
+2.43.0
+

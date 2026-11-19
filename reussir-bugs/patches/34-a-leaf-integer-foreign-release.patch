@@ -1,7 +1,7 @@
-From c2c822d6f093e3299c08d6f3ba318a665ac46f0d Mon Sep 17 00:00:00 2001
+From a1d3e5fb1b65f4dc9d1c4b6c5bf523e3e459de5c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 14:44:56 -0500
-Subject: [PATCH 12/17] [drop] release a foreign box of scalars and integers in
+Subject: [PATCH 12/18] [drop] release a foreign box of scalars and integers in
  place
 
 A `reussir.foreign_drop` function keeps its direct body when the payload
@@ -42,7 +42,7 @@ alive, no bad free.
  create mode 100644 tests/integration/conversion/worklist_drop_bridges_integers.mlir
 
 diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
-index 2cb5449f..4ee0c341 100644
+index 83129e95..8cff6b48 100644
 --- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
 @@ -459,6 +459,22 @@ public:
@@ -59,16 +59,16 @@ index 2cb5449f..4ee0c341 100644
 +        llvm::zip(record.getMembers(), record.getMemberIsField()),
 +        [](auto arm) {
 +          auto [member, field] = arm;
-+          return !field && classify(getProjectedType(
-+                               member, false, Capability::shared)) ==
-+                               Visit::Leaf;
++          return !field &&
++                 classify(getProjectedType(member, false,
++                                           Capability::shared)) == Visit::Leaf;
 +        });
 +  }
 +
    // Release the integers stored in line in `slot` and hand its boxes to
    // `onBox`. Only for a slot that `classify` does not call `Ordered`.
    void visitInline(mlir::Value slot,
-@@ -704,8 +720,9 @@ prepareWorklistDropBridges(mlir::ModuleOp module,
+@@ -703,8 +719,9 @@ prepareWorklistDropBridges(mlir::ModuleOp module,
      } else if (auto rc =
                     llvm::dyn_cast<RcType>(function.getArgument(0).getType());
                 rc && !rc.isRegional() &&

@@ -12,8 +12,7 @@ optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (32-a), patch 11 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
-`43e51856`; 246 added and 53 removed lines; `WorklistDrop.cpp` +103/-53,
+upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 246 added and 53 removed lines; `WorklistDrop.cpp` +103/-53,
 the rest tests). `scripts/l2r.py` does not check for the patch: without
 it the programs are the same and frees of such records are slower.
 
@@ -244,10 +243,16 @@ not move with 31-a and 32-a (1.002, 1.002, 1.000, 1.003). Timing run
 23 looked at them in direct pairs: X07 was code placement and is at
 1.001 with the series of 16; L08's cause is found and patched
 ([entry 34](34-leaf-integer-foreign-release.md): 1.010 with 34-a);
-L15 (1.044 on the series of 17) is partly located and L18 (1.055) is
-not found
-([history](README.md#history-the-move-to-36a55a0f-2026-11-17), step
-9).
+L15 (1.044 on the series of 17) and L18 (1.055) are investigated and
+not fixed. For each, about half of the difference is the cost of
+destruction-scope entries (about 4.2 ns for each entry), and the other
+half is not located. Each remaining part is under 3%, so they are not
+pursued
+([history](README.md#history-the-move-to-36a55a0f-2026-11-17), steps
+9 and 10).
+
+The formatter (clang-format 23.1.0, LLVM style, 2026-11-19) moved line
+breaks in 27 of 32-a's changed lines and changed no token.
 
 **Repro.** [`repros/bug32-integer-member-release.mlir`](repros/bug32-integer-member-release.mlir) shows the static difference through `reussir-opt`: the release of a variant with integer members has no tail release (REPRODUCES) or has one (FIXED). In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
 

@@ -10,7 +10,7 @@ after. Patch 26-a keeps the self call in place there.
 ## Summary
 
 **Kind:** bug. **Status:** patched (26-a), in the series on upstream
-`36a55a0f` (Reussir branch `l2r-base13-r5`, tree `107c212b`; the patch is the file `patches/26-a-trmc-observable-release.patch`).
+`36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; the patch is the file `patches/26-a-trmc-observable-release.patch`).
 lean2rr's programs are not known to reach the bug: one constructed Lean
 program gave native's output, and the patch changes no TRMC helper of
 the 19 lean2rr programs that the review compiled. `scripts/l2r.py`
@@ -173,8 +173,9 @@ Two rounds by an independent reviewer (local notes `port13/reviews/RV4`).
   the call in place; a release hidden behind an operand of a plain type
   would not be seen (no such operation exists today).
 - Not run: the full lit suite, clang-tidy, the sanitizer tests.
-  clang-format is not installed on the build machine; the C++ is
-  formatted by hand.
+  The patch's changed lines are clean under clang-format 23.1.0 (LLVM
+  style) since 2026-11-19; the formatter moved line breaks in 13
+  lines and changed no token.
 
 ## Measured claim
 

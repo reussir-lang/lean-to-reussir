@@ -10,8 +10,7 @@ It is an optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (31-a), patch 10 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
-`bebee388`; 168 added lines, 7 of them code, the rest tests).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 168 added lines, 7 of them code, the rest tests).
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same and one kind of release is slower.
 
@@ -124,12 +123,17 @@ levels and under both drop orders.
 
 Findings, all low:
 
-- With 31-a, `reussir-opt` run by hand crashes on one input that
-  pristine accepts: a `foreign_drop` function with an `rc.dec` that has
-  no token, given to the decrement expansion before the token pass. The
-  cause is an upstream bug, [entry 33](33-tokenless-rc-dec-expansion.md);
-  before 31-a the bridge hid it. rrc is not affected (it runs the token
-  pass first).
+- With 31-a alone, `reussir-opt` run by hand crashed on one input
+  that pristine accepts: a `foreign_drop` function with an `rc.dec`
+  that has no token, given to the decrement expansion before the token
+  pass. The cause is an upstream bug,
+  [entry 33](33-tokenless-rc-dec-expansion.md); before 31-a the bridge
+  hid it. With patch 33-a in its present form that run exits 0 and
+  leaves the decrement unexpanded: a `reussir-opt` pipeline run by
+  hand without the token pass no longer expands that input, where
+  pristine upstream expands it in the bridge's worker. With the token
+  pass first it expands as before. rrc is not affected (it runs the
+  token pass first).
 - The rule tests the argument's type, where the property belongs to the
   body. The frontend's only producer of such a function emits exactly
   "decrement, return", and upstream's closure rule is by type in the

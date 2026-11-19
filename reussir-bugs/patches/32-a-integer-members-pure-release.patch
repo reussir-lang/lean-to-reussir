@@ -1,7 +1,7 @@
-From 43e5185634f4abbd84b477e463df9e9e205cbbfd Mon Sep 17 00:00:00 2001
+From 5ada555c76ab11c17d83ab5384761277b1d16341 Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 08:08:39 -0500
-Subject: [PATCH 11/17] [drop] release integer members in place and
+Subject: [PATCH 11/18] [drop] release integer members in place and
  tail-release the last child
 
 A record that holds an arbitrary-precision integer reports an observable
@@ -52,17 +52,17 @@ both drop orders), conversion/worklist_pure_order.mlir (hooks behind
 the boxes of a pure record run in the order of the walk under both drop
 orders, with a shared box; a chain of 100,000 needs no stack).
 ---
- .../AcquireDropExpansion/WorklistDrop.cpp     | 156 ++++++++++++------
+ .../AcquireDropExpansion/WorklistDrop.cpp     | 155 ++++++++++++------
  .../conversion/worklist_integer_members.mlir  |  54 ++++++
  .../conversion/worklist_pure_order.c          |  59 +++++++
  .../conversion/worklist_pure_order.mlir       |  30 ++++
- 4 files changed, 246 insertions(+), 53 deletions(-)
+ 4 files changed, 245 insertions(+), 53 deletions(-)
  create mode 100644 tests/integration/conversion/worklist_integer_members.mlir
  create mode 100644 tests/integration/conversion/worklist_pure_order.c
  create mode 100644 tests/integration/conversion/worklist_pure_order.mlir
 
 diff --git a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
-index 4ab77e12..2cb5449f 100644
+index 4ab77e12..83129e95 100644
 --- a/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
 +++ b/lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp
 @@ -104,19 +104,47 @@ public:
@@ -90,8 +90,8 @@ index 4ab77e12..2cb5449f 100644
 +    for (auto [member, field] :
 +         llvm::zip(record.getMembers(), record.getMemberIsField()))
 +      if (!field)
-+        visit = std::max(visit, classify(getProjectedType(
-+                                    member, false, Capability::shared)));
++        visit = std::max(visit, classify(getProjectedType(member, false,
++                                                          Capability::shared)));
 +    return visit;
 +  }
 +
@@ -110,8 +110,8 @@ index 4ab77e12..2cb5449f 100644
           llvm::enumerate(record.getMembers(), record.getMemberIsField())) {
 -      leaf.push_back(field || isTriviallyCopyable(getProjectedType(
 -                                  member, false, Capability::shared)));
-+      leaf.push_back(field || classify(getProjectedType(
-+                                  member, false, Capability::shared)) ==
++      leaf.push_back(field || classify(getProjectedType(member, false,
++                                                        Capability::shared)) ==
 +                                  Visit::Leaf);
        tags.push_back(builder.getDenseI64ArrayAttr({int64_t(i)}));
      }
@@ -203,13 +203,13 @@ index 4ab77e12..2cb5449f 100644
 +          continue;
 +        auto projected = getProjectedType(
 +            member, false, Capability::unspecified, slotType.getAtomicKind());
-+        visitInline(ReussirRefProjectOp::create(
-+                        builder, loc,
-+                        RefType::get(builder.getContext(), projected,
-+                                     Capability::unspecified,
-+                                     slotType.getAtomicKind()),
-+                        slot, builder.getIndexAttr(i)),
-+                    onBox);
++        visitInline(
++            ReussirRefProjectOp::create(
++                builder, loc,
++                RefType::get(builder.getContext(), projected,
++                             Capability::unspecified, slotType.getAtomicKind()),
++                slot, builder.getIndexAttr(i)),
++            onBox);
 +      }
 +      return;
 +    }
@@ -223,14 +223,13 @@ index 4ab77e12..2cb5449f 100644
    void releasePure(mlir::Value ref, mlir::Value box) {
      auto refType = llvm::cast<RefType>(ref.getType());
      auto type = refType.getElementType();
-@@ -452,41 +518,25 @@ public:
+@@ -452,41 +518,24 @@ public:
              {loc});
          if (field)
            emitBoxFree(box, loc, module, builder);
 -        else
-+        else if (classify(getProjectedType(member, false,
-+                                           Capability::shared)) !=
-+                 Visit::Ordered)
++        else if (classify(getProjectedType(
++                     member, false, Capability::shared)) != Visit::Ordered)
            releasePure(arm->getArgument(0), box);
 +        else {
 +          assert(!isForwardDrop(module));
@@ -276,7 +275,7 @@ index 4ab77e12..2cb5449f 100644
      emitBoxFree(box, loc, module, builder);
      if (children.empty())
        return;
-@@ -556,7 +606,7 @@ public:
+@@ -556,7 +605,7 @@ public:
        auto record = llvm::dyn_cast<RecordType>(type.getElementType());
        auto target = module->getAttrOfType<mlir::StringAttr>(
            mlir::LLVM::LLVMDialect::getTargetTripleAttrName());

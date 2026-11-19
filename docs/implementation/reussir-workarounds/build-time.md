@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `36a55a0f` with the series
-(17 patches, the Reussir branch `l2r-base13-r5`, tree `107c212b`); the workarounds
+(18 patches, the Reussir branch `l2r-base13-r7`, tree `6dc99546`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)). The measurements in this file were
 made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
@@ -72,25 +72,28 @@ the series). Build-time items on this base:
   64.9 s against 83.0 s, LLVM optimization 26.3 s against 15.2 s,
   code generation 23.2 s against 11.3 s (the module is about half
   the size).
-- A proposal, measured, not in the series: in that build one pass is
-  much slower on this base, the second run of the acquire/drop
-  expansion (4.7 s on the base before, 34.5 s here). The cause is
-  upstream's code and is confirmed by a prototype:
-  `WorklistGlue::function`
+- In that build one pass is much slower on this base, the second run
+  of the acquire/drop expansion (4.7 s on the base before, 34.5 s
+  here). The cause is upstream's code: `WorklistGlue::function`
   (`lib/Conversion/AcquireDropExpansion/WorklistDrop.cpp`) prints the
   glue's whole signature and hashes the text for the symbol name at
-  every request, also when the glue function exists already. A
-  prototype of 15 added lines keeps the name for each signature, role
-  and direction: the pass goes from 35.6 s to 4.7 s and the build
-  from 113.2 s to 81.8 s, and the object file and the executable are
-  byte-identical. These are single runs under varying load. It is
-  not a patch of the series, because Reussir changes are kept few; a
-  patch would hold the names in a map that the pass owns (about 30 to
-  40 changed lines, no rule changed), and its claim must be measured
-  on the suite. Not measured: other programs; whether the cost grows
-  faster than the module. Also seen in that build and not looked at
-  further: upstream's pipeline has one more SCCP pair after token
-  reuse (about 8 s here).
+  every request, also when the glue function exists already. This is
+  [issue 35](../../../reussir-bugs/35-worklist-glue-name.md), and
+  patch 35-a of the series removes it: a map that the pass run owns,
+  with the module, the function type and the role as the key, gives
+  the function without the name. `RtDepPolyRec` (median of 3, the
+  series of 17 patches against the same with 35-a): the pass 35.8 s
+  to 5.1 s, the MLIR pipeline 83.6 s to 53.9 s, source to executable
+  116.7 s to 84.4 s; the object file and the executable are
+  byte-identical. Six other programs (0.1 MB to 2.7 MB of `.rr`) and
+  upstream's 33 units do not change measurably: the patch removes
+  the cost of one outlier class and is not a broad gain. In the gate
+  on the series with it (gate 58) the test takes 105.4 s in rrc and
+  the link, 137.2 s in the gate before (one run each, 8 shards at
+  once); the other 741 tests together take 2722 s against 2715 s, and
+  the suite 601 s against 603 s. Also seen in that build
+  and not looked at further: upstream's pipeline has one more SCCP
+  pair after token reuse (about 8 s here).
 - Open: on large programs rrc uses more time than on the base before
   (the MLIR pipeline +18% for `RtTArrKinds` and +27% for lean-zip's
   compress, one run each, measured before patches 29-a to 32-a); the

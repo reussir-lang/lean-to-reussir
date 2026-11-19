@@ -11,8 +11,7 @@ the rule of patch 31-a ([entry 31](31-leaf-foreign-release.md)).
 ## Summary
 
 **Kind:** cost. **Status:** patched (34-a), patch 12 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r5`, tree
-`107c212b`; 2 files, +109/-2: code +19/-2 and one test of 90 lines).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 2 files, +109/-2: code +19/-2 and one test of 90 lines).
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same and one kind of release is slower. The gate on the series
 with it passed (gate 57, 2026-11-18).
@@ -193,6 +192,10 @@ Findings, all low or information:
   immediate is never decremented, dropped or freed.
 - **H3.** The timing pair is the prototype's and covers records. The
   variant part is checked for correctness, not timed.
+
+Formatting: the patch's changed lines are clean under clang-format
+23.1.0 (LLVM style) since 2026-11-19 (the formatter moved line breaks
+in 6 lines and changed no token).
 
 Not verified: a byte comparison of upstream's units against the
 series without 34-a (no such build exists any more; the reviewer's

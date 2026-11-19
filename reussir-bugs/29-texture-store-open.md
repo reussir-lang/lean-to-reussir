@@ -9,8 +9,7 @@ opens the store once for a module's textures. It is an optimization.
 ## Summary
 
 **Kind:** cost. **Status:** patched (29-a), patch 9 of the series on
-upstream `36a55a0f` (Reussir branch `l2r-base13-r4`, commit
-`5a5eda93`; 4 files, +50/-8).
+upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 4 files, +50/-8).
 `scripts/l2r.py` does not check for the patch: without it builds are
 slower, with the same results.
 
@@ -121,7 +120,7 @@ The second case depends on the text of compcache's debug log.
 
 **The patch file and the gated compilers.** The file in `patches/` has
 this test in its last form, and so has the Reussir branch of the
-current series (`l2r-base13-r4`). The compiler of the port's final
+current series (`l2r-base13-r7`). The compiler of the port's final
 gate (branch `l2r-base13-final`, head `d62797ac`) had the form before
 it, in which the test made a lock file read-only; only that test file
 differed, no compiler source.
@@ -146,7 +145,8 @@ Two rounds by an independent reviewer (local notes
   recommended change to the new lit case (a better thing to observe),
   which is the last form of the test, above.
 - Not run: the whole lit suite, Windows and macOS, sanitizer builds.
-  clang-format is not installed on the build machine.
+  The patch's changed lines are clean under clang-format 23.1.0 and
+  the pinned rustfmt (checked 2026-11-19; nothing to change).
 
 ## Measured claim
 

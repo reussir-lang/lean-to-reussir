@@ -42,7 +42,7 @@ patch, and it refuses an older base. See the table below.
 ## Summary
 
 lean2rr's builds use upstream Reussir `36a55a0f` (2026-11-17) plus the
-17 patches of the series (the Reussir branch `l2r-base13-r5`, tree `107c212b`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
+18 patches of the series (the Reussir branch `l2r-base13-r7`, tree `6dc99546`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
 holds the upstream commit): 10-a (tagged opaque handles,
 [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a,
 20-a, 20-g, 20-c, 20-d and 20-e (the interface for `Nat` and `Int` on
@@ -53,6 +53,7 @@ step D), 21-a
 31-a ([issue 31](../../../reussir-bugs/31-leaf-foreign-release.md)),
 32-a ([issue 32](../../../reussir-bugs/32-integer-members-drop-path.md)),
 34-a ([issue 34](../../../reussir-bugs/34-leaf-integer-foreign-release.md)),
+35-a ([issue 35](../../../reussir-bugs/35-worklist-glue-name.md)),
 30-a ([issue 30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md)),
 and the fixes of four upstream bugs: 26-a
 ([issue 26](../../../reussir-bugs/26-trmc-observable-release.md)), 27-a
@@ -103,7 +104,7 @@ corpus in its three modes, the raytracer
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md) has the
 results). Not verified there: every "kept: measured ..." line of this
 directory (the measurements are of the earlier bases). The series of
-17 patches has its own gate, the last one that passed (gate 57): the
+18 patches has its own gate, the last one that passed (gate 58): the
 runtime suite (748 of 750, 2 expected failures), 23 of 23 check
 scripts, the corpus, the raytracer and the repros.
 Wall time on this base (the shared benchmark set, 53 cases): timing
@@ -111,10 +112,12 @@ run 22 (2026-11-18), the full series: 0.569 of native (run 21,
 without patch 30-a: 0.568); derived from runs 20 and 21, 0.959 of
 lean2rr on the base before; timing run 24, patch 34-a on the full
 set: 0.999 of the series without it, unionfind 0.937. Two cases are
-still slower than before (run 24: monadic-interp 1.044, partly
-located; hashmap 1.055, one allocation site found, its cause not)
+still slower than before (run 24: monadic-interp 1.044, hashmap
+1.055). They are investigated and not fixed: about half of each is
+the cost of destruction-scope entries, the other half is not located,
+and each remaining part is under 3%
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md#history-the-move-to-36a55a0f-2026-11-17),
-steps 6 to 9).
+steps 6 to 10).
 
 The base before this one was `l2r-base12` (head `c1170ff9`): upstream
 `95d9a1c8` (2026-10-26) plus 24 patches, with 20-b's tests, 20-e, 21-a
@@ -184,8 +187,9 @@ either way.
 | [30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md) | cost (build time: MLIR's vector lowering pass merges blocks of all code; one build took 16 to 18 minutes) | none: no flag reaches the pass, and cutting the function further only moves the cliff | 30-a (costs 2.0% of code size) | n/a: an optimization; nothing requires it |
 | [31](../../../reussir-bugs/31-leaf-foreign-release.md) | cost (run time: a record of scalars that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 31-a | n/a: an optimization; nothing requires it |
 | [32](../../../reussir-bugs/32-integer-members-drop-path.md) | cost (run time: records with a `Nat` or `Int` member lost the fast paths of the drop glue) | none: the glue is made by rrc | 32-a | n/a: an optimization; nothing requires it |
-| [33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only: a crash on an `rc.dec` without a token) | none needed: rrc does not reach it | 33-a | n/a: lean2rr's builds do not reach the bug |
+| [33](../../../reussir-bugs/33-tokenless-rc-dec-expansion.md) | bug (`reussir-opt` only: a crash on an `rc.dec` without a token) | none needed: rrc does not reach it | 33-a (the pass leaves the decrement unexpanded; upstream pull request reussir#1095, open) | n/a: lean2rr's builds do not reach the bug |
 | [34](../../../reussir-bugs/34-leaf-integer-foreign-release.md) | cost (run time: a record of scalars and integers that the runtime releases entered a destruction scope) | none: the release function is made by rrc | 34-a | n/a: an optimization; nothing requires it |
+| [35](../../../reussir-bugs/35-worklist-glue-name.md) | cost (build time: the drop glue computed a glue function's name at every request) | none: the translator has no reasonable change to make | 35-a | n/a: an optimization of build time; nothing requires it |
 | [26](../../../reussir-bugs/26-trmc-observable-release.md) | bug (TRMC moves a self call before a release with a foreign cleanup) | none: lean2rr's own releases are calls, which keep the self call in place; no lean2rr program is known to reach the bug | 26-a | no workaround to keep; `scripts/l2r.py` requires the patch |
 | [27](../../../reussir-bugs/27-is-unique-tbi-immediate.md) | bug (aarch64 with TBI: `is_unique` true for an immediate) | none: lean2rr does not call the intrinsic | 27-a | no workaround to keep |
 | [28](../../../reussir-bugs/28-sve-vector-storage.md) | bug (aarch64 with SVE: rrc fails on a large function without vectors) | none in lean2rr | 28-a | n/a: `scripts/l2r.py` requires the patch; without it the row oracle of `rows-check.sh` does not build on a host with SVE |

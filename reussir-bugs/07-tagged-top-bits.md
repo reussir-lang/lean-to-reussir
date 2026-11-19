@@ -8,7 +8,7 @@ the top 16 bits of a pointer handle may carry foreign data.
 
 **Kind:** missing feature (lean2rr's one-word box needs it). **Status:**
 patched (07-a), the second patch of the series on upstream `36a55a0f`
-(Reussir branch `l2r-base13-r4`, commit `bf96a18d`; 4 files, +74/-6,
+(Reussir branch `l2r-base13-r7`, tree `6dc99546`; 4 files, +74/-6,
 without `tests/` +34/-2). lean2rr's box
 `LAny` uses the feature, and `scripts/l2r.py` requires the patch.
 

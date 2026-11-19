@@ -1,7 +1,7 @@
-From a4531501b11bc7f6ba392b5accedacdc6955f3df Mon Sep 17 00:00:00 2001
+From 87288896d2925a0ca51d7e6243838c78d97ec6ac Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Wed, 18 Nov 2026 07:24:50 -0500
-Subject: [PATCH 17/17] [conversion] lower the vector dialect without region
+Subject: [PATCH 18/18] [conversion] lower the vector dialect without region
  simplification
 
 The pipeline ran MLIR's `convert-vector-to-llvm` on every module. That
@@ -56,7 +56,7 @@ index 04cf84c8..371f6aa6 100644
      "MLIRReussirInstrumentNonlinearFFI",
      "MLIRReussirAttachNativeTarget",
 diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
-index c66b5ff5..3415968e 100644
+index 47b23711..2769364c 100644
 --- a/include/Reussir/Conversion/Passes.td
 +++ b/include/Reussir/Conversion/Passes.td
 @@ -374,6 +374,27 @@ def ReussirConvertToLLVMPass
@@ -175,7 +175,7 @@ index 00000000..0b2c633e
 +)
 diff --git a/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
 new file mode 100644
-index 00000000..bb537a0d
+index 00000000..dc54ce14
 --- /dev/null
 +++ b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
 @@ -0,0 +1,108 @@
@@ -269,9 +269,9 @@ index 00000000..bb537a0d
 +    LLVMTypeConverter converter(&getContext(), options);
 +    RewritePatternSet patterns(&getContext());
 +    vector::populateVectorTransferLoweringPatterns(patterns);
-+    populateVectorToLLVMConversionPatterns(
-+        converter, patterns, /*reassociateFPReductions=*/false,
-+        force32BitVectorIndices);
++    populateVectorToLLVMConversionPatterns(converter, patterns,
++                                           /*reassociateFPReductions=*/false,
++                                           force32BitVectorIndices);
 +    LLVMConversionTarget target(getContext());
 +    target.addLegalDialect<arith::ArithDialect>();
 +    target.addLegalDialect<memref::MemRefDialect>();

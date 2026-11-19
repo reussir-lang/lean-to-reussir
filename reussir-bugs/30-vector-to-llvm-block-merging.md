@@ -12,8 +12,7 @@ lean2rr's programs is 2.0% larger.
 ## Summary
 
 **Kind:** cost. **Status:** patched (30-a), the last patch of the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-r5`, tree
-`107c212b`; 10 files, +210/-4). A form of the patch that applies to
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 10 files, +210/-4). A form of the patch that applies to
 plain upstream is in
 [`patches/standalone/`](patches/standalone/).
 `scripts/l2r.py` does not check for the patch: without it the programs
@@ -197,7 +196,9 @@ similar arms" in the place of "many equal release sequences").
   on the SVE machine.
 - *The JIT bridge.* Its two changed lines are compiled and linked, not
   executed: nothing in the tree calls the bridge.
-- Not installed on the build machine: clang-format, clang-tidy.
+- The patch's changed lines are clean under clang-format 23.1.0 (LLVM
+  style) since 2026-11-19; the formatter moved line breaks in 6 lines
+  and changed no token. clang-tidy was not run.
 
 ## Measured claim
 

@@ -9,8 +9,7 @@ drop, but keeps both for an rcgmp integer member (`Nat`, `Int`). Patch
 ## Summary
 
 **Kind:** missed optimization. **Status:** patched (21-a), patch 8 of
-the series on upstream `36a55a0f` (Reussir branch `l2r-base13-r4`,
-commit `2a886467`; 6 files, +418/-2, without `tests/` +16/-2). The
+the series on upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 6 files, +418/-2, without `tests/` +16/-2). The
 patch was reworked for this base
 ([below](#21-a-on-36a55a0f-reworked)): its rule is smaller than the one
 of `l2r-base12` (commit `5a15f745`; made as `8e9a6293`, `l2r-stepd`

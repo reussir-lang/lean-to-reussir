@@ -1,7 +1,7 @@
-From 19e690ad36e84cc9a1b615ce7f2aaf614be7e7fa Mon Sep 17 00:00:00 2001
+From 3f7a443ffb8e5f9cda3604a474fe2e0b157b372c Mon Sep 17 00:00:00 2001
 From: yekai pan <pyk@seas.upenn.edu>
 Date: Tue, 17 Nov 2026 23:31:18 -0500
-Subject: [PATCH 13/17] [trmc] keep a self call in place across a release with
+Subject: [PATCH 14/18] [trmc] keep a self call in place across a release with
  an observable cleanup
 
 TRMC re-creates a linearized self call at its leaf and so moves it past
@@ -24,12 +24,12 @@ On the benchmark suite, core and std (33 units, -Oaggressive
 are kept and the lowered MLIR is byte-identical.
 ---
  include/Reussir/Transformation/Passes.td      |  6 +-
- .../TRMCRecursionAnalysis.cpp                 | 90 ++++++++++++++++---
+ .../TRMCRecursionAnalysis.cpp                 | 89 ++++++++++++++++---
  .../conversion/trmc_reordering.mlir           | 70 +++++++++++++++
  .../conversion/trmc_reordering_rcgmp.mlir     | 52 +++++++++++
  .../integration/frontend/trmc_cleanup_order.c | 12 +++
  .../frontend/trmc_cleanup_order.rr            | 66 ++++++++++++++
- 6 files changed, 283 insertions(+), 13 deletions(-)
+ 6 files changed, 282 insertions(+), 13 deletions(-)
  create mode 100644 tests/integration/conversion/trmc_reordering_rcgmp.mlir
  create mode 100644 tests/integration/frontend/trmc_cleanup_order.c
  create mode 100644 tests/integration/frontend/trmc_cleanup_order.rr
@@ -52,10 +52,10 @@ index 1ccc0530..1367dfd8 100644
      some arms pass the recursive result through another call first — keep
      full coverage of their constructor arms.
 diff --git a/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp b/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
-index aa920ebf..a6983803 100644
+index aa920ebf..19ce9360 100644
 --- a/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
 +++ b/lib/Transformation/TRMCRecursionAnalysis/TRMCRecursionAnalysis.cpp
-@@ -285,31 +285,99 @@ static bool lendsLocalValue(mlir::func::CallOp call) {
+@@ -285,31 +285,98 @@ static bool lendsLocalValue(mlir::func::CallOp call) {
    return false;
  }
  
@@ -101,13 +101,12 @@ index aa920ebf..a6983803 100644
 +
 +// Whether `op` only changes counts, tokens, or allocation.
 +static bool isCountBookkeeping(mlir::Operation *op) {
-+  return llvm::isa<ReussirRcIncOp, ReussirRcFetchOp, ReussirRcFetchSubOp,
-+                   ReussirRcSetOp, ReussirRcReinterpretOp, ReussirRcCreateOp,
-+                   ReussirRcCreateCompoundOp, ReussirRcCreateVariantOp,
-+                   ReussirRefAcquireOp, ReussirRefSpilledOp,
-+                   ReussirTokenAllocOp, ReussirTokenFreeOp,
-+                   ReussirTokenEnsureOp, ReussirTokenLaunderOp,
-+                   ReussirTokenReallocOp>(op);
++  return llvm::isa<
++      ReussirRcIncOp, ReussirRcFetchOp, ReussirRcFetchSubOp, ReussirRcSetOp,
++      ReussirRcReinterpretOp, ReussirRcCreateOp, ReussirRcCreateCompoundOp,
++      ReussirRcCreateVariantOp, ReussirRefAcquireOp, ReussirRefSpilledOp,
++      ReussirTokenAllocOp, ReussirTokenFreeOp, ReussirTokenEnsureOp,
++      ReussirTokenLaunderOp, ReussirTokenReallocOp>(op);
 +}
 +
 +// Whether `op`, or an op nested in it, may release a value with such a

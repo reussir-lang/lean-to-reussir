@@ -15,7 +15,8 @@
 # no repro: their patches carry their own tests; 13 needs a 32-bit target,
 # 14 MLIR written by hand, 15 is shown by lean2rr's runtime test
 # RtArenaPurge, and 21's patch has a lit test that shows it; 25 and 29 are
-# shown by lean2rr's driver and its tests. Entries 28 and 30 to 34 need the
+# shown by lean2rr's driver and its tests; 35 is a cost of rrc's own time
+# on a large program, with no small input that shows it. Entries 28 and 30 to 34 need the
 # checkout's reussir-opt (a build with the tests on, or its target
 # reussir-opt); without it, SKIPPED. Each repro prints one line:
 #
@@ -532,18 +533,20 @@ bug34() {
 bug33() {
     # A crash of reussir-opt, not of rrc: `reussir.rc.dec` of a shared box
     # is valid without its token result (the form the frontend emits), and
-    # the decrement expansion read that result's type without a test. rrc's
-    # pipeline makes the tokens first and never has this input.
+    # the decrement expansion read that result's type without a test. With
+    # patch 33-a the expansion leaves such a decrement as it is: the token
+    # pass runs first by design, and the expansion does not do its work.
+    # rrc's pipeline makes the tokens first and never has this input.
     local opt n
     opt=$(reussir_opt)
     [ -n "$opt" ] || { say_line SKIPPED 33 "no reussir-opt in $CK/build/bin or $CK/build-tests/bin (build its target reussir-opt)"; return; }
     { "$opt" "$HERE/bug33-tokenless-rc-dec.mlir" --reussir-rc-decrement-expansion \
         > "$WORK/out/33.mlir" 2> "$WORK/out/33.log"; } 2> /dev/null
     RC=$?
-    n=$(grep -c 'reussir.expanded_decrement' "$WORK/out/33.mlir")
+    n=$(grep -c 'reussir.rc.dec' "$WORK/out/33.mlir")
     if [ $RC -ge 128 ]; then say_line REPRODUCES 33 "the decrement expansion of a decrement without a token result: reussir-opt $(signame $RC)"
-    elif [ $RC = 0 ] && [ "$n" = 1 ] && ! grep -q 'reussir.rc.dec' "$WORK/out/33.mlir"; then say_line FIXED 33 "a decrement without a token result is expanded (its token made first)"
-    else say_line OTHER 33 "reussir-opt $(signame $RC), $n expanded decrements: $(grep -m1 -o "error.\{0,160\}" "$WORK/out/33.log")"; fi
+    elif [ $RC = 0 ] && [ "$n" = 1 ] && ! grep -q 'reussir.expanded_decrement' "$WORK/out/33.mlir"; then say_line FIXED 33 "a decrement without a token result is left unexpanded, with no crash"
+    else say_line OTHER 33 "reussir-opt $(signame $RC), $n decrements left: $(grep -m1 -o "error.\{0,160\}" "$WORK/out/33.log")"; fi
 }
 
 ALL="01 02 03 04 06 07 08 12 17 18 26 27 28 30 31 32 33 34"

@@ -10,6 +10,7 @@
 31-a-leaf-foreign-release.patch
 32-a-integer-members-pure-release.patch
 34-a-leaf-integer-foreign-release.patch
+35-a-worklist-glue-name-cache.patch
 26-a-trmc-observable-release.patch
 27-a-is-unique-tbi-immediate.patch
 28-a-sve-vector-storage-patterns.patch

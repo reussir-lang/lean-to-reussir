@@ -35,17 +35,19 @@ same standard output, standard error and exit code.
 
 ## Where it stands
 
-The last full gate that passed (2026-11-18): the translator of
-lean2rr `f20aed74` on the Reussir build of the series of 17 patches
-(`l2r-base13-r5`, tree `107c212b` = upstream `36a55a0f` + 17 patches),
+The last full gate that passed (gate 58, 2026-11-19): the translator of
+lean2rr `6fb19b4e` on the Reussir build of the series of 18 patches
+(`l2r-base13-r7`, tree `6dc99546` = upstream `36a55a0f` + 18 patches),
 lean-runtime 50840bb, aarch64. What it ran:
 
 - the runtime suite, 750 programs: 748 identical to native Lean 4.34.0,
   2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`), no
-  failure; 603 s. Against the gate before, 345 of the 742 executables
-  lose at least one worker function of a release from foreign code
-  (patch 34-a; mostly for records of the library), and the 397 others
-  have the same section sizes;
+  failure; 601 s. Every executable has the section sizes of the gate
+  before: the changes of this series (patch 35-a, the new form of
+  33-a, the formatted patches) change no generated code. (In the gate
+  before, 345 of the 742 executables lost at least one worker
+  function of a release from foreign code: patch 34-a, mostly for
+  records of the library.)
 - the 23 check scripts of `tests/runtime`: all exit 0. The allocation
   check (81 tests, 191 rows) passes; each row is equal to the gate
   before or within 4 allocations of it, which is the variation
@@ -56,9 +58,7 @@ lean-runtime 50840bb, aarch64. What it ran:
   (small, 18 rows);
 - the raytracer at its three settings: images identical to native;
 - the repros of `reussir-bugs/` on the series and on plain upstream:
-  every verdict as its entry expects. The repros that need Reussir's
-  pass tool ran on the series after the gate, on a build of that tool
-  for the same tree.
+  every verdict as its entry expects, each on the series' own build.
 
 Not part of that gate: `tests/env`, `tests/reussir-benchmark`, and any
 timing.
@@ -79,23 +79,36 @@ failing check script (an upstream bug on hosts with SVE, Reussir issue
 28). Two rules of the translator and one patch of the series answer
 them ([Reussir](#reussir)).
 
-Known open items on this base:
+Known costs and items on this base (each with its evidence; "open"
+is said where something is still to do):
 
 - Speed: two timed cases are slower than on the base before (timing
-  run 24, direct pairs on the series of 17 patches). Monadic-interp,
-  1.044: about half is located. Its array elements are pairs of
-  boxes, and each last release of one from the runtime enters a
-  destruction scope (476,166 entries at a small size, none on the
-  base before). The scope is needed there. One entry costs 149
-  instructions, 102 of them the scope's overhead; a fast path in
-  Reussir's runtime could save at most about 1.3% of the case
-  (arithmetic; not built). The other half is not located. Hashmap,
-  1.055: all 75,000 extra allocations come from one site in `main`,
-  where a uniqueness test at run time finds a cell shared, allocates
-  a 16-byte cell and frees it at once. Five variants leave it in
-  place (the other tag encoding, one upstream change reverted, forward
-  drop order, the borrow analysis off, the hoist rule off). Who holds
-  the second reference is not found. Closed: n_body (1.56 times its old time in run
+  run 24, direct pairs on the series of 17 patches): monadic-interp
+  1.044 and hashmap 1.055. Both are investigated and not fixed; the
+  remaining parts are each under 3% and are not pursued.
+  - Hashmap. All 554,565 destruction-scope entries (at a small size)
+    are final releases of the cells of bucket lists, when the runtime
+    frees a bucket array. A prototype in the runtime with one scope
+    around that loop removes them and gives 0.973 on the case, about
+    half of the difference; it makes monadic-interp slower (1.023)
+    and changes two expectations of the runtime's unit tests (the
+    documented order outside a free), so it is not taken. The 75,000
+    extra allocations of the case are not the cause: they are an
+    `Option` cell that is built and matched at once, which LLVM can
+    no longer delete because Reussir's tag test now reads the
+    pointer's top byte; a prototype in Reussir restores the old
+    allocation count exactly, and the time does not move (0.999).
+  - Monadic-interp. No extra allocations. Its array elements are
+    pairs of boxes, and each last release of one from the runtime
+    enters a destruction scope (476,166 entries at a small size, none
+    on the base before). The scope is needed there.
+  - For both: one scope entry costs about 4.2 ns. A cheaper path for
+    a single entry in Reussir's runtime would gain at most about 2.7%
+    on hashmap and 2.5% on monadic-interp; this is a hypothesis, not
+    built, and under the 3% bar for a Reussir change. The other half
+    of each difference is not located.
+
+  Closed: n_body (1.56 times its old time in run
   20) and seven cases that free large structures have their causes
   found and patched (Reussir issues 31 and 32); unionfind (1.077) has
   its cause found and patched (issue 34, patch 34-a: 0.937 on it in a
@@ -104,11 +117,13 @@ Known open items on this base:
 - Build time: `RtDepPolyRec` (a 6 MB `.rr`) is the one large
   single-program time. It is not a regression: the same `.rr` takes
   119.8 s on the base before and 113.2 s on this one (one run each).
-  One upstream cost was found in it and is not patched: Reussir's
-  drop glue computes a glue function's name at every request; a
-  prototype takes the build from 113.2 s to 81.8 s with a
-  byte-identical executable
-  ([build-time.md](implementation/reussir-workarounds/build-time.md)).
+  One upstream cost was found in it and has a patch (Reussir issue
+  35, patch 35-a): Reussir's drop glue computed a glue function's
+  name at every request. With the patch this build goes from 116.7 s
+  to 84.4 s (median of 3) with a byte-identical executable; six other
+  programs do not change measurably. In the last gate the test takes
+  105.4 s in rrc and the link (137.2 s in the gate before), and the
+  other tests together take the same time as before.
   On large programs rrc's MLIR pipeline uses more time than on the
   base before; for the other programs the cause is not attributed. Closed: `RtOutlineStates` took about 18
   minutes; with patch 30-a it takes 10.7 s, and the suite 652 s (671 s
@@ -136,7 +151,7 @@ Known open items on this base:
 | Check | Result |
 |---|---|
 | Classic benchmark corpus (18 programs × 3 input sizes, `tests/classic`) | all outputs identical to native (Lean 4.34.0's outputs are those recorded with 4.33) |
-| Runtime test suite (750 programs, `tests/runtime`) | at its last full run (the gate of 2026-11-18 on the series of 16 patches: lean2rr 51292d7a, Reussir `36a55a0f` + 16 patches, lean-runtime 50840bb), 748 of 750 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`); the classic corpus 36 of 36 with the passes on and with 26 passes off, 18 of 18 with `unread-fields`; the 23 check scripts; the raytracer 3 of 3 |
+| Runtime test suite (750 programs, `tests/runtime`) | at its last full run (the gate of 2026-11-19 on the series of 18 patches: lean2rr 6fb19b4e, Reussir `36a55a0f` + 18 patches, lean-runtime 50840bb), 748 of 750 identical to native Lean 4.34.0 and 2 expected failures (`RtLeanUnsupported`, `RtCastMixedRebox`); the classic corpus 36 of 36 with the passes on and with 26 passes off, 18 of 18 with `unread-fields`; the 23 check scripts; the raytracer 3 of 3 |
 | Reussir's own benchmark suite (18 Lean programs, used unchanged) | 18/18 identical to native |
 | Applications (`tests/apps`: lean4-raytracer, two modules, built with Lake) | the image file, stdout, stderr and exit code identical to native at all three settings (60×40 pixels on the main thread and in one task; 200×133 pixels, 4 samples per pixel, depth 30, on the main thread), dev e1e5dde, 2026-10-07 |
 | The corpus with every optional optimization turned off | 18/18 identical (the core translation is correct on its own) |
@@ -680,19 +695,22 @@ time).
 ## Reussir
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
-Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 17
-patches of the series (the Reussir branch `l2r-base13-r5`, tree
-`107c212b`, on which the last gate ran): 10-a, 07-a, five patches of step D
-(issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), four
+Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 18
+patches of the series (the Reussir branch `l2r-base13-r7`, tree
+`6dc99546`, on which the last gate ran): 10-a, 07-a, five patches of step D
+(issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), five
 patches for costs of upstream's own that lean2rr's programs showed
 (29-a: the store of rrc's texture cache is opened once for a module;
 31-a: a record of scalars that foreign code releases is freed
 directly; 32-a: records with integer members keep the fast paths of
 the drop glue; 34-a: 31-a's rule also for records of scalars and
-integers), the fixes of three upstream bugs that the port found
+integers; 35-a: the drop glue looks a glue function up by its
+signature before it computes the name), the fixes of three upstream bugs that the port found
 (26-a, 27-a, 28-a), the fix of a fourth upstream bug that lean2rr
 does not reach (33-a: a pass of `reussir-opt` crashed on a release
-without a token), and 30-a (the vector lowering without block
+without a token; the pass now leaves such a release as it is, the
+form that upstream's maintainer asked for; pull request reussir#1095
+is open, and reussir#1093 with the first form was closed), and 30-a (the vector lowering without block
 merging, a build-time patch that comes last because it follows
 28-a).
 The file
@@ -772,10 +790,11 @@ What the move to this base changed
   1.077: records of two `Nat`s in an array entered a destruction
   scope at each last release (issue 34); patch 34-a removes that, and
   run 24 timed it on the full set: unionfind 0.937, 1.010 of the base
-  before; the 53 cases 0.999, no other case outside 3%. Open, with
-  the facts under "Known open items": monadic-interp, 1.044 (about
-  half located: scope entries of releases where the scope is needed),
-  and hashmap, 1.055 (one allocation site found; its cause not). One
+  before; the 53 cases 0.999, no other case outside 3%. Investigated
+  and not fixed, with the facts under "Where it stands":
+  monadic-interp, 1.044, and hashmap, 1.055 (for each, about half is
+  the cost of destruction-scope entries, and the other half is not
+  located). One
   upstream change that makes code smaller (#968) is not a time cause
   for either: with it reverted, 9 cases are at 0.999.
 - The wins of run 20 that had no cause: binarytrees comes from
@@ -784,7 +803,15 @@ What the move to this base changed
   the same cause is a well-supported hypothesis, not a direct pair.
 - `RtDepPolyRec`'s build time (136 s in the last gate) is not a
   regression: 119.8 s on the base before, 113.2 s on this one, the
-  same `.rr`.
+  same `.rr`. The one slow pass in it is Reussir issue 35; patch 35-a
+  takes the build to 84.4 s.
+- Formatting of the patches: every patch of the series is clean on
+  its own changed lines under clang-format 23.1.0 (LLVM style) and
+  the pinned rustfmt (2026-11-19). Six patches had 4 to 27 lines
+  changed by the formatter, with no token changed; the objects of 8
+  programs are byte-identical. Upstream enforces no formatter in its
+  checks; what a pull request must pass is listed in
+  [`../reussir-bugs/README.md`](../reussir-bugs/README.md#applying-the-patches).
 
 The base before this one was upstream Reussir `95d9a1c8` (2026-10-26)
 plus 24 patches: the Reussir branch `l2r-base12` (head
@@ -847,7 +874,7 @@ lean2rr, since the old drop patches went; their numbers are retired, as
 is 22 (a local patch for retcon destructors, never published, superseded
 by issue 23). The series there,
 [`../reussir-bugs/patches/series`](../reussir-bugs/patches/series), has
-17 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
+18 patches on `36a55a0f`, in that order (24 on `95d9a1c8` before); each patch file is named after
 its issue, `NN-x-*.patch`, and explained in the file of that issue. They
 are local: lean2rr's work does not push them, and each is reviewed
 adversarially. Only the bugs are wrong: the other kinds have correct
