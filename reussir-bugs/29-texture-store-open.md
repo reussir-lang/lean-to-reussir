@@ -13,10 +13,11 @@ upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 4 files, +
 `scripts/l2r.py` does not check for the patch: without it builds are
 slower, with the same results.
 
-**Upstream (2026-11-18):** Open at `36a55a0f`: new with #852, which put
-the texture cache into a store of the compcache crate. Not reported:
-the maintainer takes changes from this directory. The patch applies to
-a clean `36a55a0f` alone.
+**Upstream (2026-11-20):** Fixed by reussir#1101 (`f5fd118d`), which is
+29-a's change. At lean2rr's base `36a55a0f` the cost is still there
+(new with #852, which put the texture cache into a store of the
+compcache crate), so 29-a stays in the series until the base moves
+past `f5fd118d`. The patch applies to a clean `36a55a0f` alone.
 
 ## Context
 

@@ -1950,6 +1950,13 @@ arguments, and only the block merging is off.
   dropped, with entry 30 and its repro, when lean2rr's base moves
   past `317d3260`, by the policy.
 
+**13. 29-a is upstream (2026-11-20).** The series and its patch files
+do not change in this step. reussir#1101 was merged as `f5fd118d`:
+29-a's change with the same content (rrc opens the texture store once
+for a module). 29-a stays in the series until lean2rr's base moves
+past that commit. Then the patch is dropped and entry 29 is deleted,
+by the policy. reussir#1102 (31-a) is open.
+
 ## History: the move to 95d9a1c8 (2026-10-26)
 
 Upstream Reussir merged our pull requests #824 (`8130286e`), #843
