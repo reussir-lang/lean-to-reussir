@@ -35,9 +35,9 @@ same standard output, standard error and exit code.
 
 ## Where it stands
 
-The last full gate that passed (gate 58, 2026-11-19): the translator of
-lean2rr `6fb19b4e` on the Reussir build of the series of 18 patches
-(`l2r-base13-r7`, tree `6dc99546` = upstream `36a55a0f` + 18 patches),
+The last full gate that passed (gate 59, 2026-11-19): the translator of
+lean2rr `12b7adcc` on the Reussir build of the series of 18 patches
+(`l2r-base13-r8`, tree `1083d1a0` = upstream `36a55a0f` + 18 patches),
 lean-runtime 50840bb, aarch64. What it ran:
 
 - the runtime suite, 750 programs: 748 identical to native Lean 4.34.0,
@@ -696,8 +696,8 @@ time).
 
 lean2rr needs Reussir built from source with lean2rr's local patches.
 Its base is upstream Reussir `36a55a0f` (2026-11-17) plus the 18
-patches of the series (the Reussir branch `l2r-base13-r7`, tree
-`6dc99546`, on which the last gate ran): 10-a, 07-a, five patches of step D
+patches of the series (the Reussir branch `l2r-base13-r8`, tree
+`1083d1a0`; gate 59 ran on it): 10-a, 07-a, five patches of step D
 (issue 20: 20-a, 20-g, 20-c, 20-d, 20-e), 21-a (issue 21), five
 patches for costs of upstream's own that lean2rr's programs showed
 (29-a: the store of rrc's texture cache is opened once for a module;
@@ -715,9 +715,10 @@ merging, a build-time patch that comes last because it follows
 Upstream status (2026-11-19): the four bug fixes are merged upstream
 (26-a as reussir#1097, 27-a as #1096, 28-a as #1099, 33-a as #1095),
 in commits after `36a55a0f`; the patches stay in the series until the
-base moves past them. The pull request for 30-a (#1100) is open, in a
-form that turns off the block merging only; the series takes the form
-that upstream accepts when it resolves.
+base moves past them. The pull request for 30-a (#1100) is merged too
+(`317d3260`), in a form that turns off the block merging only. The
+series' 30-a is the backport of that commit, and it stays in the series
+by the same rule.
 The file
 [`../reussir-bugs/patches/base`](../reussir-bugs/patches/base) names the
 upstream commit. Each patch has a measured claim
@@ -782,7 +783,7 @@ What the move to this base changed
   patch moves another case.
 - One runtime test took about 18 minutes to compile: an MLIR pass for
   vectors merged the blocks of a large function without vectors (issue
-  30). Patch 30-a removes the merging: the test builds in seconds, run
+  30). Patch 30-a (the backport of upstream's fix) removes the merging: the test builds in seconds, run
   time does not change (1.000 over the 53 cases), and the code is 2.0%
   larger (Cedar 9.3%). A small program takes about 9% more time to
   build with it (run 22); lean-zip and Cedar do not. The full series

@@ -1,44 +1,71 @@
-From 87288896d2925a0ca51d7e6243838c78d97ec6ac Mon Sep 17 00:00:00 2001
-From: yekai pan <pyk@seas.upenn.edu>
-Date: Wed, 18 Nov 2026 07:24:50 -0500
-Subject: [PATCH 18/18] [conversion] lower the vector dialect without region
- simplification
+From 0b90fceab098cdf942241ec7d8692d5e09c85192 Mon Sep 17 00:00:00 2001
+From: QueClr <51003352+QueClr@users.noreply.github.com>
+Date: Thu, 19 Nov 2026 20:03:23 -0500
+Subject: [PATCH 18/18] [conversion] lower the vector dialect without block
+ merging (#1100)
 
-The pipeline ran MLIR's `convert-vector-to-llvm` on every module. That
+The pipeline runs MLIR's `convert-vector-to-llvm` on every module. That
 pass applies its first pattern sets with the greedy driver's default
-configuration, whose region simplification merges the similar blocks
-of every function, also of one without any vector, and gives a merged
-block one argument per operand that differs. In a large function with
-many similar arms these arguments multiply from one merge to the next:
-the pass took minutes and left blocks with hundreds of thousands of
-arguments for LLVM. This is a cost of the MLIR pass, which has no
-option for the driver's configuration; no LLVM report has been filed.
+configuration, and the default level of the driver's region
+simplification is `Aggressive`.
+
+What region simplification is for: after the patterns of an iteration
+the driver keeps the control flow graph of each region up to date. At
+the `Normal` level it removes unreachable blocks and dead operations
+and block arguments. `Aggressive` adds block merging: blocks with the
+same successors and the same operations become one block, which gets
+an argument for each operand that differs, and arguments that every
+predecessor passes the same value for are dropped.
+
+Why MLIR's pass has it: it does not ask for it. The pass calls
+`applyPatternsGreedily` without a configuration; `Aggressive` is the
+driver's default, while MLIR's canonicalizer pass defaults to
+`Normal`. The vector patterns rewrite operations and
+create no blocks, so the merging does not serve the lowering: it
+rewrites the blocks of every function of the module, also of one
+without any vector. Nothing later in the pipeline needs it: the
+canonicalizer runs after it at `Normal`, the inliner's canonicalizer
+has region simplification disabled, and LLVM simplifies the control
+flow graph itself.
+
+Why this part is turned off: its cost has no bound. In a large
+function with many similar arms the arguments of a merged block
+multiply from one merge to the next. On one generated program (a state
+machine in one large function) the pass ran 497 s and left blocks
+with up to 234385 arguments, and LLVM needed another 7 minutes
+for them: 924 s to the executable. With this change the pass runs
+0.2 s and the build 9 s; the program's output is the same.
 
 `reussir-convert-vector-to-llvm` applies the same pattern sets in the
 same order, with that pass's default options and the same conversion
-to the LLVM dialect, and with region simplification off. Folding stays
-on, since the lowering patterns build on it. The pipeline and the JIT
-bridge use it.
+to the LLVM dialect. The one difference is the level `Normal`:
+folding, constant CSE, and the removal of unreachable blocks and dead
+operations and arguments stay. The pipeline and the JIT bridge use it.
 
-On the program that showed the cost, the lowering pipeline takes 2.7 s
-where it took 536 s, and the build to the executable 8 s where it took
-978 s. The merging also made code smaller. Without it the code of 53
-programs of a compiler that targets Reussir is 2.0% larger in the
-geometric mean (the largest 9.3%), with no measurable effect on run
-time (geometric mean 1.000, 52 of 53 within 3%); the benchmark suite,
-core and std do not change.
+What the merging gave, measured: it is a code size optimization that
+was never chosen. Without it the lowered MLIR of 30 of the 33 units of
+the benchmark suite, core and std has more blocks; their code is 0.7%
+larger in the geometric mean (2.1% in total; from 23% smaller to 11%
+larger). The code of 53 programs of a compiler that targets Reussir is
+2.0% larger in the geometric mean (the largest 9.3%), with no
+measurable effect on run time (geometric mean 1.000, 52 of 53 within
+3%). The 13 SIMD tests give the same LLVM IR at `-O aggressive`; at
+`-O none` two of them keep blocks that the merging joined.
+
+Backport of upstream 317d326040310e072814231f0171392c5fddd788 (#1100) onto
+the series; the content is upstream's, unchanged.
 ---
  crates/reussir-backend-sys/build.rs           |   1 +
- include/Reussir/Conversion/Passes.td          |  21 ++++
+ include/Reussir/Conversion/Passes.td          |  23 ++++
  lib/Bridge/Bridge.cppm                        |   4 +-
  lib/CAPI/CMakeLists.txt                       |   1 +
  lib/CAPI/Passes.cpp                           |   4 +-
  lib/Conversion/CMakeLists.txt                 |   2 +
  .../ConvertVectorToLLVM/CMakeLists.txt        |  16 +++
- .../ConvertVectorToLLVM.cpp                   | 108 ++++++++++++++++++
- .../conversion/convert_vector_to_llvm.mlir    |  54 +++++++++
+ .../ConvertVectorToLLVM.cpp                   | 110 ++++++++++++++++++
+ .../conversion/convert_vector_to_llvm.mlir    |  55 +++++++++
  tool/reussir-opt/main.cpp                     |   3 +
- 10 files changed, 210 insertions(+), 4 deletions(-)
+ 10 files changed, 215 insertions(+), 4 deletions(-)
  create mode 100644 lib/Conversion/ConvertVectorToLLVM/CMakeLists.txt
  create mode 100644 lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
  create mode 100644 tests/integration/conversion/convert_vector_to_llvm.mlir
@@ -56,10 +83,10 @@ index 04cf84c8..371f6aa6 100644
      "MLIRReussirInstrumentNonlinearFFI",
      "MLIRReussirAttachNativeTarget",
 diff --git a/include/Reussir/Conversion/Passes.td b/include/Reussir/Conversion/Passes.td
-index 47b23711..2769364c 100644
+index 47b23711..19c0ea80 100644
 --- a/include/Reussir/Conversion/Passes.td
 +++ b/include/Reussir/Conversion/Passes.td
-@@ -374,6 +374,27 @@ def ReussirConvertToLLVMPass
+@@ -374,6 +374,29 @@ def ReussirConvertToLLVMPass
    let dependentDialects = ["::mlir::LLVM::LLVMDialect"];
  }
  
@@ -74,11 +101,13 @@ index 47b23711..2769364c 100644
 +    `convert-vector-to-llvm`, with that pass's default options, and the same
 +    conversion to the LLVM dialect. MLIR's pass applies the first sets with
 +    the greedy driver's default configuration, whose region simplification
-+    merges the similar blocks of every function, also of one without any
-+    vector, and gives a merged block one argument per operand that differs.
-+    In a large function with many similar arms these arguments multiply from
-+    one merge to the next. Here the driver does not simplify
-+    regions.
++    level is `Aggressive`: after the patterns it removes unreachable blocks
++    and dead operations and arguments, and it merges the similar blocks of
++    every function, also of one without any vector. A merged block gets one
++    argument per operand that differs, and in a large function with many
++    similar arms these arguments multiply from one merge to the next. Here
++    the level is `Normal`, as in MLIR's canonicalizer: everything but the
++    block merging.
 +  }];
 +  let options = [Option<"armSVE", "enable-arm-sve", "bool", /*default=*/"false",
 +                        "Use the ArmSVE dialect in the lowering">];
@@ -175,10 +204,10 @@ index 00000000..0b2c633e
 +)
 diff --git a/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
 new file mode 100644
-index 00000000..dc54ce14
+index 00000000..9be37608
 --- /dev/null
 +++ b/lib/Conversion/ConvertVectorToLLVM/ConvertVectorToLLVM.cpp
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,110 @@
 +//===----------------------------------------------------------------------===//
 +//
 +// Part of the Reussir Project, dual licensed under the Apache License v2.0 or
@@ -257,11 +286,13 @@ index 00000000..dc54ce14
 +      vector::populateVectorGatherLoweringPatterns(patterns);
 +      vector::populateVectorFromElementsUnrollPatterns(patterns);
 +      vector::populateVectorToElementsUnrollPatterns(patterns);
-+      // Folding stays, since the lowering patterns build on it. Region
-+      // simplification is not part of the lowering: it merges the similar
-+      // blocks of code without any vector.
++      // MLIR's pass uses the driver's default configuration. All of it stays
++      // but the block merging of the `Aggressive` region simplification,
++      // which rewrites the blocks of code without any vector at a cost that
++      // has no bound. `Normal`, the level of MLIR's canonicalizer, still
++      // removes unreachable blocks and dead operations and arguments.
 +      GreedyRewriteConfig config;
-+      config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
++      config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Normal);
 +      (void)applyPatternsGreedily(getOperation(), std::move(patterns), config);
 +    }
 +
@@ -289,17 +320,18 @@ index 00000000..dc54ce14
 +} // namespace reussir
 diff --git a/tests/integration/conversion/convert_vector_to_llvm.mlir b/tests/integration/conversion/convert_vector_to_llvm.mlir
 new file mode 100644
-index 00000000..3c8d153e
+index 00000000..cbfe0b9c
 --- /dev/null
 +++ b/tests/integration/conversion/convert_vector_to_llvm.mlir
-@@ -0,0 +1,54 @@
+@@ -0,0 +1,55 @@
 +// RUN: %reussir-opt %s --reussir-convert-vector-to-llvm | %FileCheck %s
 +// RUN: %reussir-opt %s --reussir-convert-vector-to-llvm | %FileCheck %s --check-prefix=ARGS
 +// RUN: %reussir-opt %S/vector_lowering.mlir --pass-pipeline='builtin.module(reussir-attach-native-target,reussir-convert-vector-to-llvm,reussir-convert-to-llvm,reconcile-unrealized-casts)' | %reussir-translate --mlir-to-llvmir | %FileCheck %S/vector_lowering.mlir
 +
 +// Two pairs of arms without any vector that release different values in the
-+// same way. The region simplification of MLIR's `convert-vector-to-llvm`
-+// merges each pair into one block that takes the values as arguments; in a
++// same way. The block merging of MLIR's `convert-vector-to-llvm` (the
++// `Aggressive` level of the greedy driver's region simplification) turns
++// each pair into one block that takes the values as arguments; in a
 +// large function with many such arms the arguments multiply from one merge
 +// to the next. The lowering leaves the blocks as they are, and no block
 +// gets an argument.

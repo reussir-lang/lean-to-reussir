@@ -8,7 +8,7 @@ builds infeasible. Upstream Reussir `7954a367` fixes all of them (and the
 costs 11 and 23, which had no workaround), so their files in
 `reussir-bugs/` are gone; the headings give the old entry numbers.
 lean2rr's builds use a later base, upstream `36a55a0f` with the series
-(18 patches, the Reussir branch `l2r-base13-r7`, tree `6dc99546`); the workarounds
+(18 patches, the Reussir branch `l2r-base13-r8`, tree `1083d1a0`); the workarounds
 stay until each is removed (the removed ones are
 [at the end](#removed-workarounds)). The measurements in this file were
 made on the earlier bases (`7954a367` to `95d9a1c8`). Upstream changed
@@ -29,7 +29,10 @@ the series). Build-time items on this base:
   which merged the blocks of a large function without vectors
   ([issue 30](../../../reussir-bugs/30-vector-to-llvm-block-merging.md)).
   With patch 30-a it takes 10.7 s. The patch costs code size: the
-  executables are 2.0% larger (Cedar 9.3%).
+  executables are 2.0% larger (Cedar 9.3%). Since 2026-11-19 the patch
+  is the backport of upstream's fix (reussir#1100), which turns off
+  the block merging only. It gives the same code as the earlier form
+  (27 programs, byte-identical) and builds within 1% of it.
 - The gate's runtime suite on the series of 15 patches took 652 s
   (750 tests, 8 shards, a cold texture store on a memory file system,
   a quiet machine); on the base before 671 s (747 tests, a warm store

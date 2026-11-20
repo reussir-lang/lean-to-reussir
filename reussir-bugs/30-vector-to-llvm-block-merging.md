@@ -7,29 +7,37 @@ every function. In one large function of lean2rr's tests the merged
 blocks got up to 234,385 arguments, and the build took 16 to 18
 minutes. Patch 30-a lowers the vector dialect without that merging. It
 is an optimization of build time, and it has a cost: the code of
-lean2rr's programs is 2.0% larger.
+lean2rr's programs is 2.0% larger. Upstream has the fix since
+reussir#1100 (`317d3260`); 30-a is the backport of that commit.
 
 ## Summary
 
 **Kind:** cost. **Status:** patched (30-a), the last patch of the series
-on upstream `36a55a0f` (Reussir branch `l2r-base13-r7`, tree `6dc99546`; 10 files, +210/-4). A form of the patch that applies to
+on upstream `36a55a0f` (Reussir branch `l2r-base13-r8`, tree `1083d1a0`; 10 files, +215/-4). **Fixed upstream** (reussir#1100); the patch is
+the backport of upstream's commit, and it is dropped when lean2rr's
+base moves past that commit. A form of the patch that applies to
 plain upstream is in
 [`patches/standalone/`](patches/standalone/).
 `scripts/l2r.py` does not check for the patch: without it the programs
 are the same, and one known program builds in minutes.
 
-**Upstream (2026-11-19):** Open at `36a55a0f` and on upstream's main
-(`c2861a55`): new with upstream's vector work (#994). `l2r-base12`
-does not have the pass. The behaviour is MLIR's (LLVM 23.1.2), and the
-pass has no option for it. Pull request reussir#1100 is open. Its
-first form was the series' 30-a (region simplification `Disabled`).
-The maintainer asked for a justification of turning the whole step
-off, and the form now in review sets the level `Normal`: only the
-block merging is off
-([the levels](#region-simplification-and-its-levels)). **The series
-keeps `Disabled` for now; it is to be switched to the form that
-upstream accepts when reussir#1100 resolves.** Not reported to LLVM. The file in `patches/` is the form that
-applies after 28-a; the form for plain upstream is
+**Upstream (2026-11-19):** fixed. Pull request reussir#1100 was merged
+on 2026-11-19 as `317d3260`, `[conversion] lower the vector dialect
+without block merging`. The problem came with upstream's vector work
+(#994); `l2r-base12` does not have the pass. The behaviour is MLIR's
+(LLVM 23.1.2), and MLIR's pass has no option for it. The first form of
+the pull request was the series' earlier 30-a: region simplification
+`Disabled`. The maintainer asked for a justification of turning the
+whole step off. The merged form sets the level `Normal`: only the block
+merging is off ([the levels](#region-simplification-and-its-levels)).
+**The series carries the merged form since 2026-11-19**: 30-a is
+upstream's commit, backported onto the series with no change of its
+content (its author is upstream's; its message ends with the backport
+note). lean2rr's base `36a55a0f` is before `317d3260`, so the patch
+stays in the series until the base moves past it; then this entry is
+deleted with its patch and repro, by the policy of the
+[README](README.md). Not reported to LLVM. The file in `patches/` is
+the form that applies after 28-a; the form for plain `36a55a0f` is
 `patches/standalone/30-a-vector-to-llvm-patterns.patch`.
 
 ## Context
@@ -130,16 +138,15 @@ new block argument. There is no finer switch than the three levels.
 - **The vector patterns do not need the cleanup.** The patterns that
   were read create no block and no branch (one creates a structured
   `scf.if`). Measured: `Normal` and `Disabled` give byte-identical
-  output on every input that was tried (85 files of upstream; objects
-  of 6 lean2rr programs).
+  output on every input that was tried (85 files of upstream; lowered
+  MLIR, objects and executables of 27 lean2rr programs).
 
-**The two forms of the patch.** The series' 30-a sets `Disabled`. The
-form in upstream's review (reussir#1100) sets `Normal`. They differ
-only in the cleanup of unreachable blocks and dead operations, which
-finds nothing after these patterns. `RtOutlineStates` to the
-executable: 924 s with MLIR's pass (one run), 8.67 s with `Disabled`,
-8.83 s with `Normal` (medians of 3); the executable's output is the
-same in all three.
+**The two forms of the patch.** The series' 30-a set `Disabled` until
+2026-11-19. Upstream's commit, which the series carries now, sets
+`Normal`. The two differ only in the cleanup of unreachable blocks,
+dead operations and dead block arguments, which finds nothing after
+these patterns. [The two forms compared](#the-normal-form-against-the-disabled-form)
+gives the measurement.
 
 ## lean2rr
 
@@ -151,7 +158,8 @@ the pass, and cutting the function further only moves the cliff.
 ## Patch
 
 [`patches/30-a-vector-to-llvm-patterns.patch`](patches/30-a-vector-to-llvm-patterns.patch),
-`[conversion] lower the vector dialect without region simplification`.
+`[conversion] lower the vector dialect without block merging (#1100)`:
+upstream's commit `317d3260`, backported.
 
 - A new pass, `reussir-convert-vector-to-llvm`
   (`lib/Conversion/ConvertVectorToLLVM/`), does what MLIR 23.1.2's pass
@@ -159,9 +167,11 @@ the pass, and cutting the function further only moves the cliff.
   Reussir uses (it sets only the SVE switch): the same 15 sets of
   patterns in the same order, applied greedily with the result ignored
   as MLIR does, then the same conversion to the LLVM dialect.
-- The one difference: region simplification is off in the first step.
-  Folding and constant CSE stay on (the lowering patterns build on
-  folds). MLIR's branches for Neon, x86 and two more extensions are
+- The one difference: the level of region simplification in the first
+  step is `Normal`, not the driver's default `Aggressive`. So the block
+  merging is off. Folding, constant CSE and the removal of unreachable
+  blocks, dead operations and dead block arguments stay on (the
+  lowering patterns build on folds). MLIR's branches for Neon, x86 and two more extensions are
   left out: Reussir never turns them on.
 - The C API's constructor, the JIT bridge and `reussir-opt` use the new
   pass.
@@ -180,7 +190,7 @@ smaller. Nobody had planned or measured that. 30-a takes it away. The
 whole trade, as measured:
 
 - **One program builds:** `RtOutlineStates` goes from about 16 minutes
-  to 11 s.
+  to 11 s in the gate (8.1 s alone on the machine).
 - **Small programs are about 9% slower to build:** +0.15 s of rrc and
   the link for each small test (1.68 s to 1.83 s), slower in 20 of 20
   tests. The cost is 30-a's alone (below).
@@ -219,6 +229,13 @@ done.
 
 ## Review
 
+The `Normal` form is the one that upstream's maintainer reviewed and
+merged (reussir#1100). The review below was of the `Disabled` form.
+Between the two forms only one field of the driver's configuration,
+comments and the commit message differ, so its items hold for the
+`Normal` form, with one difference: the 46 pairs were not run again
+with `Normal`.
+
 One round by an independent reviewer (local notes
 `port13/reviews/RV4`, round 4): approved with one change, which is in
 the patch (the commit message states the code-size effect; "many
@@ -247,6 +264,74 @@ similar arms" in the place of "many equal release sequences").
   and changed no token. clang-tidy was not run.
 
 ## Measured claim
+
+### The `Normal` form against the `Disabled` form
+
+Measured on 2026-11-19, when the series took upstream's commit. The
+two compilers: the series with 30-a in the `Disabled` form (Reussir
+branch `l2r-base13-r7`, tree `6dc99546`) and the series with the
+backport of `317d3260` (branch `l2r-base13-r8`, tree `1083d1a0`). The
+other 17 patches are the same bytes. The inputs are the same `.rr`
+files on both sides, through the driver's own rrc command.
+
+**Code: identical.** The sample is 27 programs: the 18 classic
+programs, the raytracer, and 8 runtime tests (`RtArray`,
+`RtBoxNoCast`, `RtCseFnField`, `RtDepPolyRec`, `RtFloatLibm`,
+`RtFnValues`, `RtSyncSelect`, `RtTArrKinds`).
+
+| Compared | Result |
+|---|---|
+| lowered MLIR (`--emit mlir-llvm`), each side with its own runtime build and its own warm texture store | 27 of 27 byte-identical |
+| `.text` of the object, the same two sides | 27 of 27 byte-identical (11,357,424 bytes in sum) |
+| `.text` size of the executable, the same two sides | 27 of 27 equal (34,276,964 bytes in sum) |
+| lowered MLIR, object file and executable, with one runtime build and one warm texture store, and only the rrc binary changed | 27 of 27 byte-identical, each of the three |
+
+With a texture store for each side, the whole object files differ in
+the random names of the Rust modules of the textures, and in nothing
+else that was found (one object was compared by symbol: only these
+names differ). So the last row uses one store: the patch changes no
+runtime source, and then the files are the same bytes. Because the
+code is identical, no run-time benchmark was made, and the run-time
+and code-size numbers of the `Disabled` form
+([below](#the-patch-against-mlirs-pass)) hold for the `Normal` form.
+
+**Build time** (wall time of rrc and the link, from the `.rr` to the
+executable; warm texture stores; a timing session on idle cores; the
+two compilers in turn; median of 5, with the fastest and the slowest
+run):
+
+| Program | `Disabled` | `Normal` | Difference |
+|---|---:|---:|---:|
+| `RtOutlineStates` (the cliff) | 8.041 s (7.998 to 8.084) | 8.113 s (8.082 to 8.138) | +0.072 s (+0.9%) |
+| `RtArray` | 3.367 s (3.358 to 3.380) | 3.399 s (3.367 to 3.440) | +0.032 s (+0.9%) |
+| `RtBoxNoCast` | 3.464 s (3.430 to 3.502) | 3.460 s (3.375 to 3.518) | -0.004 s (-0.1%) |
+| `RtCseFnField` | 1.316 s (1.303 to 1.325) | 1.327 s (1.321 to 1.343) | +0.011 s (+0.8%) |
+
+- The cliff stays fixed: `RtOutlineStates` builds in 8.1 s (924 s with
+  MLIR's pass). Its executable has the same `.text` size on both sides
+  (1,127,836 bytes) and prints the same output.
+- `Normal` costs at most 1% of a build against `Disabled`: 0.00 s to
+  0.03 s for a small program, 0.07 s for the largest function of the
+  suite. The ranges of the two sides overlap for the three small
+  programs; for `RtOutlineStates` they do not. A hypothesis for the
+  difference, not isolated by a stage measurement: the time of the
+  cleanup that `Normal` keeps (the search for unreachable blocks and
+  dead operations, which finds nothing).
+- The cost of 30-a against no patch (+0.15 s, +9% for a small
+  program, measured with the `Disabled` form) was not measured again
+  with `Normal`. That cost is LLVM's work on a module with more
+  blocks, and the module that goes to LLVM is the same bytes in both
+  forms. So the cost of the `Normal` form is that +9%, plus the 0% to
+  1% above.
+- `repros/run.sh` for entry 30 on the new build: FIXED. The first two
+  RUN lines of the patch's lit test pass by hand (the third needs
+  `reussir-translate`, which was not built).
+
+### The patch against MLIR's pass
+
+The numbers of this part were measured with the `Disabled` form of
+30-a (2026-11-18 and 19). The `Normal` form gives the same code (the
+part above), so they hold for it.
 
 **Build time** (the author's pair: the series before 30-a against the
 same with the patch; the same driver command, one warm texture store on
@@ -363,12 +448,11 @@ step against native, 53 cases): 0.569, where the series without it had
 reduced); a run of the JIT bridge; the build-time mechanism beyond the
 stage times above.
 
-**Repro.** [`repros/bug30-vector-lowering-merge.mlir`](repros/bug30-vector-lowering-merge.mlir) shows the mechanism through `reussir-opt`: MLIR's pass merges the arms of a function without a vector into blocks with arguments, and the pipeline's own pass leaves them (`run.sh` prints REPRODUCES or FIXED). It does not show the multiplication. In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series.
+**Repro.** [`repros/bug30-vector-lowering-merge.mlir`](repros/bug30-vector-lowering-merge.mlir) shows the mechanism through `reussir-opt`: MLIR's pass merges the arms of a function without a vector into blocks with arguments, and the pipeline's own pass leaves them (`run.sh` prints REPRODUCES or FIXED). It does not show the multiplication. In the gate on the series of 16 patches (2026-11-18): REPRODUCES on pristine `36a55a0f`, FIXED on the series. On the series with the backport of `317d3260` (2026-11-19): FIXED.
 
 ## Upstream note
 
-Pull request reussir#1100 is open (2026-11-19), in the `Normal` form
-after the maintainer's review. The report gives the phase table and
-the block-argument counts of the three variants. The MLIR behaviour (a
-lowering pass for one dialect that simplifies the regions of all code)
-is worth an LLVM report of its own, together with entry 28's.
+Merged: reussir#1100, `317d3260` (2026-11-19), in the `Normal` form
+after the maintainer's review. The MLIR behaviour (a lowering pass for
+one dialect that simplifies the regions of all code) is worth an LLVM
+report of its own, together with entry 28's.

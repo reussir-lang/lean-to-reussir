@@ -42,7 +42,7 @@ patch, and it refuses an older base. See the table below.
 ## Summary
 
 lean2rr's builds use upstream Reussir `36a55a0f` (2026-11-17) plus the
-18 patches of the series (the Reussir branch `l2r-base13-r7`, tree `6dc99546`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
+18 patches of the series (the Reussir branch `l2r-base13-r8`, tree `1083d1a0`; [`reussir-bugs/patches/base`](../../../reussir-bugs/patches/base)
 holds the upstream commit): 10-a (tagged opaque handles,
 [issue 10](../../../reussir-bugs/10-tagged-ffi-objects.md)), 07-a,
 20-a, 20-g, 20-c, 20-d and 20-e (the interface for `Nat` and `Int` on
@@ -106,7 +106,8 @@ corpus in its three modes, the raytracer
 ([`reussir-bugs/README.md`](../../../reussir-bugs/README.md) has the
 results). Not verified there: every "kept: measured ..." line of this
 directory (the measurements are of the earlier bases). The series of
-18 patches has its own gate, the last one that passed (gate 58): the
+18 patches has its own gate, the last one that passed (gate 59, with
+30-a in upstream's form): the
 runtime suite (748 of 750, 2 expected failures), 23 of 23 check
 scripts, the corpus, the raytracer and the repros.
 Wall time on this base (the shared benchmark set, 53 cases): timing

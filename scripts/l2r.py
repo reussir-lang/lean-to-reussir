@@ -549,12 +549,13 @@ REQUIRED_REUSSIR_PATCHES = [
 #   signature before it makes a name for it (`struct DropGlueSymbols` in
 #   include/Reussir/Conversion/AcquireDropExpansion.h). The object code
 #   is the same; rrc's time for a large program is shorter;
-# - 30-a: on an aarch64 host with SVE, rrc lowers the vector dialect with
-#   its patterns alone (`createReussirConvertVectorToLLVMPass` in
-#   lib/CAPI/Passes.cpp). Without it the results are the same and rrc's
-#   time grows steeply with the size of a function: one known program
-#   takes about 16 minutes to compile. A slow build is not an error, so it
-#   is not checked;
+# - 30-a: rrc lowers the vector dialect, on every module, with a pass of
+#   its own that does not merge blocks (`createReussirConvertVectorToLLVMPass`
+#   in lib/CAPI/Passes.cpp; the backport of upstream's #1100, region
+#   simplification at the level `Normal`). Without it the results are the
+#   same and rrc's time grows steeply with the size of a function: one
+#   known program takes about 16 minutes to compile. A slow build is not
+#   an error, so it is not checked;
 # - 33-a: the decrement expansion no longer crashes on a shared box's
 #   decrement without a token result: it leaves the decrement as it is
 #   (the match failure `"requires token instantiation"` in
